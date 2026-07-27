@@ -48,10 +48,15 @@ def _get_contract_info(session, ctx, address: str | None = None, chain: str | No
     return contract_brief(session, addr, chn)
 
 
-def _source_row_content(row) -> str:
-    """Resolve a SourceFile row to its raw content body. Inline content
-    wins; ``storage_key`` falls back to object storage. Empty string on
-    any failure (caller decides what to do)."""
+def _source_row_content(row) -> str | None:
+    """Resolve a SourceFile row to its raw content body.
+
+    Returns the body, or ``None`` when it could not be read — a genuinely
+    empty file is ``""`` and must stay distinguishable from an unreadable
+    one. Collapsing both into ``""`` is what let ``search_source`` report
+    ``total_matches: 0`` across 167 contracts while 2,261/2,261 bodies were
+    unreachable.
+    """
     from db.storage import get_storage_client
 
     if row.content:
@@ -60,12 +65,20 @@ def _source_row_content(row) -> str:
         try:
             client = get_storage_client()
             if client is None:
-                return ""
+                logger.error(
+                    "source file %s has storage_key %s but object storage is not configured",
+                    row.path,
+                    row.storage_key,
+                )
+                return None
             body = client.get(row.storage_key)
             return body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
         except Exception as exc:
-            logger.warning("storage fetch failed for %s: %s", row.storage_key, exc)
-    return ""
+            logger.error("storage fetch failed for %s: %s", row.storage_key, exc)
+            return None
+    if row.content is None:
+        return None
+    return row.content
 
 
 def _etherscan_sources(address: str, chain: str | None) -> dict[str, str]:
@@ -125,28 +138,60 @@ def _get_contract_source(
 
     # Materialize (path, content) pairs from DB. If every body resolves
     # empty, fall through to Etherscan.
-    db_files: list[tuple[str, str]] = [(r.path, _source_row_content(r)) for r in rows]
-    if not db_files or not any(body for _, body in db_files):
+    resolved = [(r.path, _source_row_content(r)) for r in rows]
+    unreadable = sum(1 for _, body in resolved if body is None)
+    db_files: list[tuple[str, str]] = [(p, b) for p, b in resolved if b is not None]
+    from_db = bool(db_files) and any(body for _, body in db_files)
+    if from_db:
+        files = db_files
+    else:
         es_files = _etherscan_sources(addr, chn or (contract.chain if contract is not None else None))
         files = list(es_files.items())
-    else:
-        files = db_files
 
     if not files:
+        if unreadable:
+            # The rows exist; their bodies could not be fetched. Saying "no
+            # verified source available" would report an infrastructure failure
+            # as a fact about the contract.
+            return {
+                "error": (
+                    f"{unreadable}/{len(rows)} indexed source files for {addr} could not be read from "
+                    "object storage, and the Etherscan fallback returned nothing — source availability "
+                    "is undetermined, not absent"
+                ),
+                "unreadable_source_files": unreadable,
+                "indexed_source_files": len(rows),
+            }
         return {"error": f"no verified source available for {addr}"}
 
     file_list = [{"name": p, "size": len(b) if b else None} for p, b in files]
 
+    # A partial read publishes a subset of the contract as if it were the whole
+    # contract, and the model has no way to notice. Carried on every successful
+    # return, not only the nothing-loaded dead end: ``files`` is what the model
+    # will reason over, so the shortfall has to travel with it. When the bodies
+    # came from Etherscan the set is complete from that source, but the count is
+    # still reported — the DB rows remain unreadable and a later call may see it.
+    provenance: dict[str, Any] = {"source_origin": "indexed" if from_db else "etherscan"}
+    if unreadable:
+        provenance["unreadable_source_files"] = unreadable
+        provenance["indexed_source_files"] = len(rows)
+        if from_db:
+            provenance["source_completeness"] = (
+                f"not determined — {unreadable} of {len(rows)} indexed files could not be read "
+                "from object storage, so this listing is a lower bound on the contract's source"
+            )
+
     if file:
         target = next(((p, b) for p, b in files if p == file), None)
         if target is None:
-            return {"files": file_list, "error": f"file {file!r} not found"}
-        return {"files": file_list, "requested": target[0], "source": _truncate(target[1])}
+            return {"files": file_list, "error": f"file {file!r} not found", **provenance}
+        return {"files": file_list, "requested": target[0], "source": _truncate(target[1]), **provenance}
 
     # Default: largest file (typically the top-level contract).
     files_sorted = sorted(files, key=lambda kv: -len(kv[1] or ""))
     main_path, main_body = files_sorted[0]
-    return {"files": file_list, "requested": main_path, "source": _truncate(main_body)}
+    return {"files": file_list, "requested": main_path, "source": _truncate(main_body), **provenance}
 
 
 def _truncate(s: str | None) -> str:
@@ -208,6 +253,8 @@ def _search_source(
     summary: list[dict[str, Any]] = []
     total_matches = 0
     contracts_with_no_source = 0
+    files_searched = 0
+    unreadable_source_files = 0
 
     for contract in contracts:
         if contract.job_id is None:
@@ -218,6 +265,10 @@ def _search_source(
             continue
         for row in rows:
             content = _source_row_content(row)
+            if content is None:
+                unreadable_source_files += 1
+                continue
+            files_searched += 1
             if not content:
                 continue
             haystack = content if case_sensitive else content.lower()
@@ -249,16 +300,26 @@ def _search_source(
                     }
                 )
 
-    return {
+    out: dict[str, Any] = {
         "pattern": pattern,
         "case_sensitive": case_sensitive,
         "scope_contracts": len(contracts),
         "contracts_with_no_source": contracts_with_no_source,
+        "files_searched": files_searched,
+        "unreadable_source_files": unreadable_source_files,
         "total_matches": total_matches,
         "summary": summary,
         "matches": matches,
         "truncated": len(matches) >= max_results and total_matches > max_results,
     }
+    if unreadable_source_files and files_searched == 0:
+        # Nothing was actually searched. Reporting total_matches: 0 alone
+        # states "the pattern does not occur", which is not what was proven.
+        out["error"] = (
+            f"no source file body could be read ({unreadable_source_files} unreadable); "
+            "total_matches reflects nothing searched, not an absent pattern"
+        )
+    return out
 
 
 def _get_contract_overview(session, ctx, address: str | None = None, chain: str | None = None, **_kw) -> dict[str, Any]:

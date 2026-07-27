@@ -42,6 +42,18 @@
   text-transform: uppercase;
   color: #cbd5e1;
 }
+/* Shown only when the API answered "not determined" (503) for upgrade_history:
+   the timeline below it would otherwise read as a proven-empty history. */
+.ps-activity-unknown {
+  margin: 6px 0 2px;
+  padding: 6px 8px;
+  border-left: 2px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #fcd34d;
+}
 .ps-activity-row-between {
   display: flex;
   align-items: center;

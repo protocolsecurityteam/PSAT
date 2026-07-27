@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -31,7 +32,150 @@ class StorageUnavailable(StorageError):
 
 
 class StorageKeyMissing(StorageError):
-    """The requested key does not exist in the bucket."""
+    """A key was requested and the bucket holds no object at it.
+
+    This is *proven-absent for that key*, never "we had no key to try" —
+    ``StorageKeyAbsent`` carries that second, different fact. ``tried`` lists
+    every candidate key actually requested (see ``storage_key_candidates``) so
+    a reader can tell a one-shot miss from an exhausted fallback.
+    """
+
+    def __init__(self, key: str, tried: list[str] | None = None) -> None:
+        self.key = key
+        self.tried = list(tried) if tried else [key]
+        super().__init__(f"no object at key {key!r} (tried: {', '.join(self.tried)})")
+
+
+class StorageKeyAbsent(StorageError):
+    """The row records no storage key at all — nothing was ever requested.
+
+    Distinct from ``StorageKeyMissing``: that one means the bucket was asked
+    and answered "not here"; this one means we never had an address to ask
+    about, so the content's existence is *not determined*. Collapsing the two
+    is what let 8,256 unreadable rows read as empty.
+    """
+
+
+class StorageContentIncomplete(StorageError):
+    """A collection read could not return a body for every row it was asked about.
+
+    Raised instead of returning a short collection, because a short collection
+    is byte-identical to "those rows do not exist" — the exact substitution this
+    whole item exists to remove. ``values`` carries what *did* read so a caller
+    that can legitimately degrade (an API handler rendering a partial page) can
+    do so explicitly and publish the shortfall beside it; a caller that cannot
+    (a pipeline stage seeding a witness) simply lets it propagate.
+
+    The shortfall is carried in **two** maps, never one, because the reason a
+    body is missing decides what may be done about it:
+
+      * ``proven_absent`` — the bucket was asked about every candidate key and
+        holds none of them. Determined; a retry re-asks an answered question.
+      * ``not_determined`` — the bucket could not be asked, or could not be
+        understood. A retry is the only thing that can turn it into a fact.
+
+    Both map the row's identity (artifact name, source path, materialization
+    column) to the detail. The *type* of the exception carries the same split
+    for consumers that only get to see the type — see the two subclasses; a
+    single class with the cause buried in prose is what let a lost object and an
+    unreachable bucket share one retry verdict.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        values: Any = None,
+        proven_absent: dict[str, str] | None = None,
+        not_determined: dict[str, str] | None = None,
+    ) -> None:
+        self.values = values
+        self.proven_absent = dict(proven_absent or {})
+        self.not_determined = dict(not_determined or {})
+        super().__init__(message)
+
+
+class StorageContentAbsent(StorageContentIncomplete):
+    """Every body this read fell short on was proven absent at every candidate.
+
+    The bucket answered. It is a real inconsistency — a row asserts a key the
+    bucket does not honour — but it is *determined*, so it is terminal for
+    ``workers.retry_policy`` exactly as the single-key ``StorageKeyMissing`` is.
+    Not a subclass of ``StorageContentNotDetermined``: a consumer that catches
+    "we could not find out" must not silently absorb "we found out, and it is
+    gone".
+    """
+
+
+class StorageContentNotDetermined(StorageContentIncomplete):
+    """At least one body's existence could not be established.
+
+    The bucket was unreachable, unconfigured, or answered something we could not
+    parse. Transient for ``workers.retry_policy``: a stage that re-runs is the
+    only thing that can turn this into a fact.
+    """
+
+
+def content_shortfall(
+    message: str,
+    *,
+    values: Any = None,
+    proven_absent: dict[str, str] | None = None,
+    not_determined: dict[str, str] | None = None,
+) -> StorageContentIncomplete:
+    """Build the shortfall exception whose *type* matches the shortfall's cause.
+
+    One unanswered question outranks any number of answered ones: if anything is
+    not-determined the whole read is not-determined, because a retry might still
+    complete it. Only when every shortfall is a proven absence is the read as
+    determined as it will ever get.
+    """
+    if not_determined:
+        return StorageContentNotDetermined(
+            message, values=values, proven_absent=proven_absent, not_determined=not_determined
+        )
+    return StorageContentAbsent(message, values=values, proven_absent=proven_absent, not_determined=None)
+
+
+@dataclass(frozen=True)
+class BlobRead:
+    """One key's outcome in a batch fetch, with the three states kept apart.
+
+    ``body`` set — read. ``error`` a ``StorageKeyMissing`` — the bucket was
+    asked about every candidate key and holds none of them (proven-absent).
+    ``error`` anything else — the bucket could not be asked, so the content is
+    *not determined* and must never be rendered as absence.
+    """
+
+    body: bytes | None = None
+    error: StorageError | None = None
+
+    @property
+    def read(self) -> bool:
+        return self.body is not None
+
+    @property
+    def proven_absent(self) -> bool:
+        return isinstance(self.error, StorageKeyMissing)
+
+    @property
+    def not_determined(self) -> bool:
+        return self.error is not None and not isinstance(self.error, StorageKeyMissing)
+
+
+_KEY_ROOTS = frozenset(
+    {
+        "artifacts",  # artifact_key()
+        "source_files",  # source_file_key()
+        "contract_materializations",  # services/static materialization blobs
+        "audits",  # services/audits/** (never prefixed — the control)
+        "exa-cache",  # utils/exa._CACHE_KEY_PREFIX
+        "tavily-cache",  # utils/tavily._CACHE_KEY_PREFIX
+    }
+)
+
+# A preview environment scopes the shared bucket with ``pr-<n>/`` (_key_prefix).
+_PREVIEW_PREFIX_RE = re.compile(r"^pr-\d+$")
 
 
 def _safe_name(name: str) -> str:
@@ -49,6 +193,36 @@ def _key_prefix() -> str:
     """
     prefix = os.environ.get("ARTIFACT_STORAGE_PREFIX", "").strip().strip("/")
     return f"{prefix}/" if prefix else ""
+
+
+def storage_key_candidates(key: str) -> list[str]:
+    """Every bucket key a DB-recorded ``key`` may legitimately resolve to.
+
+    Keys are recorded in Postgres verbatim, including the writing environment's
+    ``ARTIFACT_STORAGE_PREFIX``. Reading those rows from an environment with a
+    different prefix (a preview DB restored locally, prod reading a preview
+    row) addresses an object that was never written there. The bytes are at the
+    same path with the foreign scope removed, so the read path tries that too.
+
+    Stripping is deliberately narrow: only a leading segment that is *not*
+    itself one of this codebase's bucket namespaces and that looks like an
+    environment scope is removable. ``audits/text/183.txt`` therefore yields
+    exactly one candidate — an absent audit object stays absent instead of
+    being explained away by a fallback.
+
+    This is a read-path normalisation. DB values are never rewritten.
+    """
+    if not key:
+        return []
+    head, sep, tail = key.partition("/")
+    if not sep or head in _KEY_ROOTS or not tail:
+        return [key]
+    env_prefix = _key_prefix().rstrip("/")
+    if not (_PREVIEW_PREFIX_RE.match(head) or (env_prefix and head == env_prefix)):
+        return [key]
+    if tail.partition("/")[0] not in _KEY_ROOTS:
+        return [key]
+    return [key, tail]
 
 
 def artifact_key(job_id: UUID | str, name: str) -> str:
@@ -151,7 +325,7 @@ class StorageClient:
         except (BotoCoreError, ClientError) as exc:
             raise StorageUnavailable(f"put_object failed for {key}: {exc}") from exc
 
-    def get(self, key: str) -> bytes:
+    def _get_one(self, key: str) -> bytes:
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
@@ -165,13 +339,32 @@ class StorageClient:
             raise StorageUnavailable(f"get_object transport error for {key}: {exc}") from exc
         return response["Body"].read()
 
-    def get_many(self, keys: list[str]) -> dict[str, bytes | None]:
-        """Fetch multiple keys concurrently. Returns a dict keyed by every
-        unique input key. The value is the bytes if the GET succeeded, or
-        ``None`` if the object was missing (NoSuchKey/404) **or** the
-        transport failed for that key. Per-key transport errors are logged
-        and surfaced as ``None`` so a flaky bucket can't take down a whole
-        API response — callers iterate and treat ``None`` as "skip".
+    def get(self, key: str) -> bytes:
+        """Fetch a key, trying every candidate from ``storage_key_candidates``.
+
+        A transport failure on any candidate propagates immediately — only a
+        genuine 404 advances to the next one, so an unreachable bucket can
+        never be reported as an absent object.
+        """
+        if not key:
+            raise StorageKeyAbsent("storage read requested with no key")
+        candidates = storage_key_candidates(key)
+        for candidate in candidates:
+            try:
+                return self._get_one(candidate)
+            except StorageKeyMissing:
+                continue
+        raise StorageKeyMissing(key, candidates)
+
+    def get_many_results(self, keys: list[str]) -> dict[str, BlobRead]:
+        """Fetch multiple keys concurrently, keeping each key's outcome apart.
+
+        Every unique input key maps to a ``BlobRead`` that answers *which* of
+        the three states this key is in — read, proven-absent at every
+        candidate, or not determined because the transport failed. ``get_many``
+        below flattens all three to ``bytes | None`` for callers whose degrade
+        is genuinely cause-independent; anything that publishes the result as
+        evidence must use this one.
 
         The boto3 S3 client is documented as thread-safe, so a small fixed
         pool gives effectively-parallel HTTP round-trips.
@@ -180,36 +373,64 @@ class StorageClient:
             return {}
         unique = list(dict.fromkeys(keys))
 
-        def _fetch(k: str) -> tuple[str, bytes | None]:
+        def _fetch(k: str) -> tuple[str, BlobRead]:
             try:
-                return k, self.get(k)
-            except StorageKeyMissing:
-                return k, None
+                return k, BlobRead(body=self.get(k))
+            except StorageKeyMissing as exc:
+                # A missing object is a real inconsistency: the DB row asserts a
+                # key the bucket does not honour. Never silent — 8,256 rows read
+                # as empty for months behind this.
+                logger.error("get_many: %s", exc)
+                return k, BlobRead(error=exc)
             except StorageError as exc:
                 logger.warning("get_many: transport error fetching %s: %s", k, exc)
-                return k, None
+                return k, BlobRead(error=exc)
 
         # Per-key context copy keeps trace_id/job_id bindings from the
         # caller (e.g. the API handler or worker) visible to each
         # concurrent boto call's log lines.
-        def _fetch_with_ctx(k: str) -> tuple[str, bytes | None]:
+        def _fetch_with_ctx(k: str) -> tuple[str, BlobRead]:
             ctx = contextvars.copy_context()
             return ctx.run(_fetch, k)
 
         with ThreadPoolExecutor(max_workers=16) as ex:
             return dict(ex.map(_fetch_with_ctx, unique))
 
+    def get_many(self, keys: list[str]) -> dict[str, bytes | None]:
+        """``get_many_results`` with the cause discarded: bytes, or ``None`` for
+        both "no object" and "could not ask".
+
+        Only for callers whose degrade does not depend on the cause and does not
+        publish absence — ``/stage_timings`` (telemetry) and effects selection
+        (a ``None`` there means "re-sweep this contract", the conservative
+        direction). Anything that renders or persists the result as a statement
+        about the subject must call ``get_many_results``.
+        """
+        return {k: r.body for k, r in self.get_many_results(keys).items()}
+
     def presign(self, key: str, expires_in: int = DEFAULT_PRESIGN_TTL) -> str:
         from botocore.exceptions import BotoCoreError, ClientError
 
+        candidates = storage_key_candidates(key)
+        target = candidates[0] if candidates else key
+        if len(candidates) > 1:
+            # A presigned URL for a key with no object is a 404 the caller only
+            # discovers after handing it out. Resolve here instead.
+            for candidate in candidates:
+                try:
+                    self._client.head_object(Bucket=self.bucket, Key=candidate)
+                    target = candidate
+                    break
+                except ClientError:
+                    continue
         try:
             return self._client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": self.bucket, "Key": key},
+                Params={"Bucket": self.bucket, "Key": target},
                 ExpiresIn=expires_in,
             )
         except (BotoCoreError, ClientError) as exc:
-            raise StorageUnavailable(f"presign failed for {key}: {exc}") from exc
+            raise StorageUnavailable(f"presign failed for {target}: {exc}") from exc
 
     def delete(self, key: str) -> None:
         from botocore.exceptions import BotoCoreError, ClientError
@@ -223,14 +444,25 @@ class StorageClient:
         """Server-side copy within the same bucket (no egress)."""
         from botocore.exceptions import BotoCoreError, ClientError
 
-        try:
-            self._client.copy_object(
-                Bucket=self.bucket,
-                Key=dst_key,
-                CopySource={"Bucket": self.bucket, "Key": src_key},
-            )
-        except (BotoCoreError, ClientError) as exc:
-            raise StorageUnavailable(f"copy {src_key} -> {dst_key} failed: {exc}") from exc
+        candidates = storage_key_candidates(src_key)
+        last: Exception | None = None
+        for candidate in candidates:
+            try:
+                self._client.copy_object(
+                    Bucket=self.bucket,
+                    Key=dst_key,
+                    CopySource={"Bucket": self.bucket, "Key": candidate},
+                )
+                return
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in {"NoSuchKey", "404"}:
+                    last = exc
+                    continue
+                raise StorageUnavailable(f"copy {candidate} -> {dst_key} failed: {exc}") from exc
+            except BotoCoreError as exc:
+                raise StorageUnavailable(f"copy {candidate} -> {dst_key} failed: {exc}") from exc
+        raise StorageKeyMissing(src_key, candidates) from last
 
     def ensure_bucket(self) -> None:
         """Create the bucket if it does not exist. Used by the test harness."""

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -1027,4 +1028,209 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     assert "materialize_error" in by_addr[bad_addr]["details"]
     assert by_addr[good_addr]["analyzed"] is True
     assert good_addr in nested
+    assert bad_addr not in nested
+
+
+def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatch):
+    """W0-1 / R1, at ``_materialize_with_cross_process_cache``.
+
+    ``hydrate_*`` returning ``None`` for an unreadable blob met ``or {}``
+    here, so a bucket outage produced a contract with no functions, no plan and
+    no predicate trees — and that state is what the effects probe is seeded
+    from and what gets cached under the witness schema version.
+
+    This pins only the raise. Whether it survives the BFS above is a separate
+    question with its own test below; asserting only here is how the previous
+    attempt shipped a safety property that did not exist in the running system.
+    """
+    from db import contract_materializations as cm
+    from db.storage import StorageContentNotDetermined
+
+    monkeypatch.setattr(cm, "is_enabled", lambda: True)
+    monkeypatch.setattr(cm, "materialize_or_wait", lambda **_kw: SimpleNamespace(contract_name="C"))
+    monkeypatch.setattr(
+        cm,
+        "hydrate_analysis",
+        lambda _row: (_ for _ in ()).throw(StorageContentNotDetermined("bucket unreachable")),
+    )
+
+    with pytest.raises(StorageContentNotDetermined):
+        recursive._materialize_with_cross_process_cache(
+            effective_address="0x" + "44" * 20,
+            bytecode_keccak="0x" + "aa" * 32,
+            workspace_prefix="t",
+            chain="ethereum",
+        )
+
+
+def _two_child_root_bundle(root_address, first_addr, second_addr):
+    """Root snapshot pointing at two nested contracts, for the BFS tests."""
+    return _bundle(
+        root_address,
+        "Root",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Root",
+            "block_number": 1,
+            "controller_values": {
+                f"external_contract:{name}": {
+                    "source": name,
+                    "value": addr,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "contract",
+                    "details": {"address": addr},
+                }
+                for name, addr in (("first", first_addr), ("second", second_addr))
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("fanout", ["1", "8"])
+def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanout):
+    """W0-1 / R2, at the altitude where the BFS actually handles it.
+
+    ``_materialize_for_pending`` wraps every failure into ``(None, exc)``, and
+    the caller turns that into a node stamped ``analyzed=False`` and walks on —
+    so ``resolve_control_graph`` returned NORMALLY on an unreachable bucket and
+    no stage above it ever saw a failure to retry. A graph that returns
+    normally is a finished answer about the protocol's control chain, assembled
+    from contracts we could not read.
+
+    Parametrised over serial and fan-out because the two paths handle
+    exceptions differently inside ``parallel_map``.
+    """
+    from db.storage import StorageContentNotDetermined
+
+    monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
+    monkeypatch.setenv("PSAT_RESOLUTION_MATERIALIZE_FANOUT", fanout)
+    root_address = "0x1111111111111111111111111111111111111111"
+    good_addr = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    unread_addr = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    good_bundle = _bundle(
+        good_addr,
+        "Good",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": good_addr,
+            "contract_name": "Good",
+            "block_number": 2,
+            "controller_values": {},
+        },
+    )
+
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
+        if address == unread_addr:
+            raise StorageContentNotDetermined(
+                "bucket unreachable",
+                not_determined={"analysis_blob_key": "connection refused"},
+            )
+        return good_bundle
+
+    monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+    )
+
+    with pytest.raises(StorageContentNotDetermined):
+        resolve_control_graph(
+            root_artifacts=cast(LoadedArtifacts, _two_child_root_bundle(root_address, good_addr, unread_addr)),
+            rpc_url="http://rpc.example",
+            chain_id=1,
+            max_depth=2,
+        )
+
+
+def test_storage_not_determined_from_resolution_is_retryable():
+    """W0-1 / R2, the other half. Escaping the BFS only helps if the worker
+    then re-runs the stage — ``classify`` fell through to ``terminal``, so
+    ``BaseWorker`` computed ``will_retry=False`` and the job died on attempt
+    one with the same 'we could not read it' state it started with.
+
+    ``StorageKeyMissing`` / ``StorageKeyAbsent`` / ``StorageContentAbsent`` stay
+    terminal on purpose: those are determined facts (the bucket answered, or
+    there was no key to ask about), and retrying re-asks an answered question.
+    ``StorageContentAbsent`` is the collection-read form of the first, and it
+    exists because the collection reads used to raise the *transient* class for
+    a proven-absent object — the same key read directly classified terminal, so
+    the comment stating this invariant was false one layer up.
+    """
+    from db.storage import (
+        StorageContentAbsent,
+        StorageContentNotDetermined,
+        StorageKeyAbsent,
+        StorageKeyMissing,
+        StorageUnavailable,
+    )
+    from workers.retry_policy import classify
+
+    assert classify(StorageContentNotDetermined("bucket unreachable")) == "transient"
+    assert classify(StorageUnavailable("storage is not configured")) == "transient"
+    assert classify(StorageKeyMissing("artifacts/j/n")) == "terminal"
+    assert classify(StorageKeyAbsent("row records no key")) == "terminal"
+    assert classify(StorageContentAbsent("2/2 bodies proven absent")) == "terminal"
+    # The type hierarchy is the discriminator, so pin it: a consumer catching
+    # "we could not find out" must not silently absorb "we found out, it's gone".
+    assert not isinstance(StorageContentAbsent("x"), StorageContentNotDetermined)
+
+
+def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
+    """NEGATIVE CONTROL for the two tests above.
+
+    A compile/RPC/proxy failure is a fact about that one contract, and the walk
+    must still record it as an unanalyzed node and finish. If this went red,
+    the fix would have converted every per-contract hiccup into a whole-job
+    failure — the opposite over-correction.
+    """
+    monkeypatch.setenv("PSAT_RESOLUTION_MATERIALIZE_FANOUT", "2")
+    root_address = "0x1111111111111111111111111111111111111111"
+    good_addr = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    bad_addr = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    good_bundle = _bundle(
+        good_addr,
+        "Good",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": good_addr,
+            "contract_name": "Good",
+            "block_number": 2,
+            "controller_values": {},
+        },
+    )
+
+    def fake_materialize(address, rpc_url, *, workspace_prefix, chain=None, chain_id=None):
+        if address == bad_addr:
+            raise RuntimeError("forge build failed")
+        return good_bundle
+
+    monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+    )
+
+    graph, nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, _two_child_root_bundle(root_address, good_addr, bad_addr)),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=2,
+    )
+
+    by_addr = {(node.get("details") or {}).get("address"): node for node in graph["nodes"]}
+    assert by_addr[bad_addr]["analyzed"] is False
+    assert "forge build failed" in str(by_addr[bad_addr]["details"]["materialize_error"])
+    assert by_addr[good_addr]["analyzed"] is True
     assert bad_addr not in nested

@@ -281,3 +281,33 @@ describe("ActivityPanel — monitored principal (safe)", () => {
     expect(screen.queryByText(/monitoring is not enabled/i)).not.toBeInTheDocument();
   });
 });
+
+describe("ActivityPanel — upgrade history the server could not determine", () => {
+  // The timeline draws a proxy with no history as a proxy that has never been
+  // upgraded. When /artifact/upgrade_history answers 503 ("not determined")
+  // that render is a claim the server did not make, so the panel says so.
+  // A 404 is a real negative and stays silent — that pair is the whole test.
+  it("marks a 503 as unknown and leaves a 404 silent", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler(
+      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
+      () =>
+        new Response(JSON.stringify({ detail: "Artifact state not determined" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json", "X-PSAT-Artifact-State": "not_determined" },
+        }),
+    );
+    const { unmount } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    unmount();
+
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler(
+      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
+      () => new Response(JSON.stringify({ detail: "Artifact not found" }), { status: 404 }),
+    );
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText("Timeline")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+});

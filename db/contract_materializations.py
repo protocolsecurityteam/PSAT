@@ -40,7 +40,11 @@ which try the blob first and transparently fall back to inline JSONB.
 That fallback is what lets pre-migration rows keep working while the
 backfill (``scripts/backfill_contract_materializations_to_blob.py``)
 catches up — and what insulates the pipeline from a transient Tigris
-outage when the inline copy still exists.
+outage when the inline copy still exists. When it does not, the read
+raises ``StorageContentIncomplete``: "the bucket could not answer" and
+"this row stored nothing" are different facts, and the caller
+(``services/resolution/recursive``) turns the second into an empty
+analysis that the effects probe is then seeded from.
 """
 
 from __future__ import annotations
@@ -62,6 +66,7 @@ from db.storage import (
     StorageError,
     StorageKeyMissing,
     _key_prefix,
+    content_shortfall,
     get_storage_client,
 )
 from utils.chains import chain_cache_token
@@ -199,15 +204,27 @@ def find_by_address(
 def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: str) -> dict | None:
     """Generic blob-or-inline read for analysis / tracking_plan columns.
 
-    Resolution order:
-      1. If ``blob_key_attr`` is set and storage is configured, GET the
-         blob and parse JSON.
-      2. On a transient blob fetch error, fall through to inline JSONB
-         when present — better to serve possibly-stale data than to
-         crash the pipeline. ``StorageKeyMissing`` is treated the same
-         (the row says we have a key but the bucket disagrees, so we
-         either had a wipe or the write never landed).
-      3. If neither a blob nor inline JSONB is available, return None.
+    Three outcomes, and a caller can tell them apart — which is the whole point,
+    because this function's output *is* the analysis state the resolution stage
+    reasons over and the effects probe is seeded from:
+
+      * a ``dict`` — **proven present**: read from the blob, or from the inline
+        JSONB when the blob is unreadable but inline holds a (possibly stale)
+        copy. Serving stale beats crashing the pipeline, and it is still a real
+        payload rather than a claim about the subject.
+      * ``None`` — **proven absent**: the row records no blob key *and* no
+        inline payload, so nothing was ever stored for this column. On the
+        working DB this is exactly the 6 ``status='failed'`` rows, where no
+        analysis was ever produced.
+      * ``StorageContentIncomplete`` — the row records a blob key and we could
+        not obtain its content, with no inline fallback. Returning ``None`` here
+        is what let a bucket outage read as "this contract has no analysis, no
+        plan, no predicate trees" at ``services/resolution/recursive`` — and that
+        verdict then gets cached as a witness. Which subclass says why, and the
+        type is the only thing ``workers.retry_policy`` sees:
+        ``StorageContentAbsent`` when the bucket answered and holds no such
+        object (determined — a retry re-asks an answered question), else
+        ``StorageContentNotDetermined`` (unreachable, unconfigured, corrupt).
 
     Callers that need to mutate the returned dict should ``copy.deepcopy``
     it themselves — the inline JSONB read returns the ORM-cached dict
@@ -215,59 +232,80 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     """
     blob_key: str | None = getattr(row, blob_key_attr, None)
     inline: dict | None = getattr(row, inline_attr, None)
+    subject = f"{getattr(row, 'chain', '?')}/{getattr(row, 'address', '?')}"
 
-    if blob_key:
-        client = get_storage_client()
-        if client is not None:
-            try:
-                body = client.get(blob_key)
-                parsed = json.loads(body.decode("utf-8"))
-                if isinstance(parsed, dict):
-                    return parsed
-                # The serializer always emits JSON objects for these
-                # payloads; a non-dict is corruption, not a normal case.
-                logger.warning(
-                    "contract_materializations: blob %s decoded to %s, expected dict",
-                    blob_key,
-                    type(parsed).__name__,
-                )
-            except (StorageError, StorageKeyMissing, ValueError) as exc:
-                if inline is not None:
-                    logger.warning(
-                        "contract_materializations: blob fetch for %s failed (%s); using inline JSONB",
-                        blob_key,
-                        exc,
-                    )
-                else:
-                    logger.error(
-                        "contract_materializations: blob %s unreadable (%s) and no inline fallback",
-                        blob_key,
-                        exc,
-                    )
-                    return None
-        else:
-            # blob_key set but storage unconfigured (e.g. test env that
-            # turned ARTIFACT_STORAGE_* off after the row was written) —
-            # silently fall through to inline if present, else None.
-            if inline is None:
-                logger.warning(
-                    "contract_materializations: blob_key %s but storage unconfigured; no inline fallback",
-                    blob_key,
-                )
+    if not blob_key:
+        if inline is None:
+            logger.info(
+                "contract_materializations: %s records no %s and no inline %s — nothing was stored",
+                subject,
+                blob_key_attr,
+                inline_attr,
+            )
+        return inline
 
-    return inline
+    reason: str | None = None
+    object_proven_absent = False
+    client = get_storage_client()
+    if client is None:
+        # blob_key set but storage unconfigured (e.g. an env that turned
+        # ARTIFACT_STORAGE_* off after the row was written). We cannot ask.
+        reason = "storage is not configured"
+    else:
+        try:
+            body = client.get(blob_key)
+            parsed = json.loads(body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+            # The serializer always emits JSON objects for these
+            # payloads; a non-dict is corruption, not a normal case.
+            reason = f"blob decoded to {type(parsed).__name__}, expected dict"
+        except StorageKeyMissing as exc:
+            # The bucket was asked about every candidate and holds none of them.
+            object_proven_absent = True
+            reason = str(exc)
+        except (StorageError, ValueError) as exc:
+            reason = str(exc)
+
+    if inline is not None:
+        logger.warning(
+            "contract_materializations: blob fetch for %s failed (%s); using inline JSONB",
+            blob_key,
+            reason,
+        )
+        return inline
+
+    logger.error(
+        "contract_materializations: %s %s=%s unreadable (%s) and no inline fallback",
+        subject,
+        blob_key_attr,
+        blob_key,
+        reason,
+    )
+    detail = {blob_key_attr: reason or "unknown"}
+    raise content_shortfall(
+        f"contract_materializations {subject}: {blob_key_attr}={blob_key} unreadable ({reason}) "
+        "and no inline fallback — this contract's payload could not be produced",
+        values=None,
+        proven_absent=detail if object_proven_absent else None,
+        not_determined=None if object_proven_absent else detail,
+    )
 
 
 def hydrate_analysis(row: ContractMaterialization) -> dict | None:
     """Load the row's ``analysis`` payload, transparently picking the
     blob path when ``analysis_blob_key`` is set and falling back to the
     inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (a corner case for ``status != 'ready'`` rows)."""
+    has no analysis (nothing was ever stored — the ``status='failed'``
+    corner case). Raises ``StorageContentIncomplete`` when a blob key is
+    recorded but its content cannot be obtained: that is not the same fact and
+    must not reach a consumer as an empty analysis."""
     return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
 
 
 def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
-    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``."""
+    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``, including the
+    ``StorageContentIncomplete`` third state."""
     return _hydrate(row, blob_key_attr="tracking_plan_blob_key", inline_attr="tracking_plan")
 
 
@@ -276,7 +314,10 @@ def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     for revert/auth guards). Returns None if the cache row predates the
     predicate-pipeline migration (pre-c1d2e3f4a5b6) so callers can fall
     back to rebuilding the artifact from the analysis dict if they need
-    mapping-writer enumeration."""
+    mapping-writer enumeration. Raises ``StorageContentIncomplete`` when the
+    row records a blob key whose content cannot be obtained — "written before
+    the migration" and "the bucket is down" are different facts and the
+    fallback is only correct for the first."""
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
 
 

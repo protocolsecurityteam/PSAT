@@ -697,3 +697,107 @@ def test_get_api_key_raises_without_env(monkeypatch):
     monkeypatch.setattr(llm_mod, "load_dotenv", lambda *_a, **_kw: None)
     with pytest.raises(RuntimeError, match="not set"):
         llm_mod.openrouter._get_api_key()
+
+
+# ---------------------------------------------------------------------------
+# search_source must not report an unreadable corpus as an absent pattern (W0-1b)
+# ---------------------------------------------------------------------------
+
+
+def test_search_source_reports_unreadable_bodies_instead_of_zero_matches(db_session, seeded_protocol):
+    """Pre-fix, ``_source_row_content`` swallowed every storage failure into
+    ``""`` and the tool answered ``total_matches: 0`` — indistinguishable from
+    "the pattern does not occur". In the working database that was the answer
+    for all 167 contracts while 2,261/2,261 source bodies were unreachable.
+    """
+    from sqlalchemy import select
+
+    from db.models import SourceFile
+
+    for row in db_session.execute(select(SourceFile)).scalars().all():
+        row.content = None
+        row.storage_key = "pr-160/source_files/j/deadbeef"
+    db_session.commit()
+
+    ctx = _ctx()
+    res = chat_tools._search_source(db_session, ctx, pattern="onlyOwner")
+
+    assert res["total_matches"] == 0
+    assert res["files_searched"] == 0
+    assert res["unreadable_source_files"] >= 1
+    assert "error" in res
+    assert "undetermined" in res["error"] or "nothing searched" in res["error"]
+
+
+def test_search_source_zero_matches_stays_clean_when_bodies_are_readable(db_session, seeded_protocol):
+    """NEGATIVE CONTROL for the same change: a genuine miss over readable
+    source must not acquire an error field."""
+    ctx = _ctx()
+    res = chat_tools._search_source(db_session, ctx, pattern="zzz_no_such_token")
+
+    assert res["total_matches"] == 0
+    assert res["unreadable_source_files"] == 0
+    assert res["files_searched"] >= 1
+    assert "error" not in res
+
+
+def test_get_contract_source_distinguishes_unreadable_from_unavailable(db_session, seeded_protocol, monkeypatch):
+    """Same conflation on the sibling tool: "no verified source available for
+    0x…" stated a fact about the contract when the truth was a storage read
+    failure."""
+    from sqlalchemy import select
+
+    from db.models import SourceFile
+
+    for row in db_session.execute(select(SourceFile)).scalars().all():
+        row.content = None
+        row.storage_key = "pr-160/source_files/j/deadbeef"
+    db_session.commit()
+    monkeypatch.setattr(chat_tools, "_etherscan_sources", lambda *a, **kw: {})
+
+    res = chat_tools._get_contract_source(db_session, _ctx(), address=PLAIN_ADDR)
+    assert res["unreadable_source_files"] >= 1
+    assert "undetermined" in res["error"]
+
+
+def test_get_contract_source_marks_a_partial_read_as_incomplete(db_session, seeded_protocol, monkeypatch):
+    """The dead-end branch above was not the whole defect. On a *partial* read —
+    some bodies readable, some not — the unreadable count was discarded and the
+    response was ``{files, requested, source}``, publishing 1 of 2 indexed files
+    to the model as the contract's complete verified source.
+    """
+    from sqlalchemy import select
+
+    from db.models import SourceFile
+
+    rows = db_session.execute(select(SourceFile)).scalars().all()
+    db_session.add(
+        SourceFile(
+            job_id=rows[0].job_id,
+            path="src/Unreadable.sol",
+            content=None,
+            storage_key="pr-160/source_files/j/deadbeef",
+        )
+    )
+    db_session.commit()
+    monkeypatch.setattr(chat_tools, "_etherscan_sources", lambda *a, **kw: {})
+
+    res = chat_tools._get_contract_source(db_session, _ctx(), address=PLAIN_ADDR)
+
+    assert res["source"], "the readable body is still returned"
+    assert res["unreadable_source_files"] == 1
+    assert res["indexed_source_files"] == 2
+    assert "not determined" in res["source_completeness"]
+    assert res["source_origin"] == "indexed"
+
+
+def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, seeded_protocol, monkeypatch):
+    """NEGATIVE CONTROL: nothing unreadable, no shortfall keys, no hedge."""
+    monkeypatch.setattr(chat_tools, "_etherscan_sources", lambda *a, **kw: {})
+
+    res = chat_tools._get_contract_source(db_session, _ctx(), address=PLAIN_ADDR)
+
+    assert res["source"]
+    assert "unreadable_source_files" not in res
+    assert "source_completeness" not in res
+    assert res["source_origin"] == "indexed"

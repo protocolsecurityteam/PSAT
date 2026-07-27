@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 
 from db.models import Artifact, Contract, Job, JobStatus
+from db.storage import StorageContentAbsent, StorageKeyAbsent, StorageKeyMissing
 from services.aggregations import build_analysis_detail
 from services.aggregations.company_overview import _coalesce_chain, _job_chain_name
 from services.governance.proxies import _merge_proxy_impl_entries
@@ -172,6 +173,23 @@ def analysis_artifact(
     Only the consumer-safe artifacts are public; any other name requires a
     valid admin key, enforced before any lookup so an unauthorized name yields
     no existence signal and no storage I/O.
+
+    **Three answers, because this is the boundary the SPA reads.** This handler
+    is the artifact path for ``EntityActivity`` (upgrade_history) and the
+    dependency lane (dependency_graph_viz), and both render a body's absence as
+    a statement about the contract:
+
+      200  the body, proven present (including the upgrade_history synthesis
+           below, which is a real payload rebuilt from UpgradeEvent rows).
+      404  proven absent — no artifact row, the bucket answered "no object at
+           any candidate", or the row records no key at all.
+      503  not determined — storage was unreachable, unconfigured, or failed in
+           a way we cannot interpret. ``X-PSAT-Artifact-State: not_determined``
+           and a JSON body naming the artifact, so a caller need not parse prose.
+
+    Returning 404 for the third case is the defect this endpoint had: a bucket
+    outage and an artifact the job never produced were byte-identical answers,
+    and the consumer turned that into "no upgrades on this proxy".
     """
     # Strip .json/.txt extension for artifact lookup.
     lookup_name = artifact_name
@@ -213,15 +231,23 @@ def analysis_artifact(
             raise HTTPException(status_code=404, detail="Analysis not found")
 
         artifact: Any = None
+        not_determined: str | None = None
         try:
             artifact = deps.get_artifact(session, job.id, lookup_name)
             if artifact is None:
                 artifact = deps.get_artifact(session, job.id, artifact_name)
+        except (StorageKeyMissing, StorageKeyAbsent, StorageContentAbsent) as exc:
+            # The bucket was asked and answered, or there was never a key to ask
+            # about. Determined: this job has no body for that name.
+            logger.warning("artifact %s for job %s is absent: %s", lookup_name, job.id, exc)
         except Exception as exc:
-            # Storage backend can be transiently unreachable (MinIO/Tigris
-            # outage, expired credentials, missing object). Don't 500 — log
-            # and fall through to the per-artifact synthesis fallback.
-            logger.warning("artifact %s for job %s unreadable: %s", lookup_name, job.id, exc)
+            # Everything else — StorageUnavailable, StorageContentNotDetermined,
+            # a deserialize failure, an unconfigured backend — means we did not
+            # find out. Fall through to the synthesis fallback, which may still
+            # produce the body from a different source; if it does not, this is
+            # published as its own answer rather than as absence.
+            not_determined = f"{type(exc).__name__}: {exc}"
+            logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
 
         # upgrade_history is reproducible from UpgradeEvent rows. When the
         # stored artifact is gone or storage is down, regenerate from the
@@ -232,6 +258,22 @@ def analysis_artifact(
             contract = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
             if contract is not None:
                 artifact = synthesize_from_events(session, contract)
+
+        if artifact is None and not_determined is not None:
+            # 503, not 404: whether this job produced the artifact is unknown.
+            # The header lets a consumer branch without parsing the body, and the
+            # body names the artifact so the reason survives into a log or a UI
+            # string. Retry-After is the honest hint — this is the one state that
+            # can change on its own.
+            return JSONResponse(
+                status_code=503,
+                headers={"X-PSAT-Artifact-State": "not_determined", "Retry-After": "30"},
+                content={
+                    "detail": "Artifact state not determined",
+                    "artifact": lookup_name,
+                    "reason": not_determined,
+                },
+            )
 
         if artifact is None:
             raise HTTPException(status_code=404, detail="Artifact not found")

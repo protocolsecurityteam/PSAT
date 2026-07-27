@@ -34,8 +34,10 @@ from .models import (
 )
 from .storage import (
     StorageError,
+    StorageKeyAbsent,
     StorageKeyMissing,
     artifact_key,
+    content_shortfall,
     deserialize_artifact,
     get_storage_client,
     serialize_artifact,
@@ -1124,7 +1126,16 @@ def count_analysis_children(session: Session, root_job_id: str) -> int:
 
 
 def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
-    """Resolve an Artifact row to its decoded payload (handles inline + storage)."""
+    """Resolve an Artifact row to its decoded payload (handles inline + storage).
+
+    Three outcomes, deliberately distinguishable:
+      * a value — the body was read;
+      * ``StorageKeyMissing`` — the row names a key and no object exists at any
+        candidate for it (proven-absent);
+      * ``StorageKeyAbsent`` — the row names no key and holds no inline body, so
+        whether a body exists is not determined.
+    ``None`` is returned only when the row genuinely stores a null payload.
+    """
     if artifact.storage_key:
         client = get_storage_client()
         if client is None:
@@ -1135,7 +1146,9 @@ def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
         return deserialize_artifact(body, artifact.content_type)
     if artifact.data is not None:
         return artifact.data
-    return artifact.text_data
+    if artifact.text_data is not None:
+        return artifact.text_data
+    raise StorageKeyAbsent(f"Artifact {artifact.name} on job {artifact.job_id} has no storage_key and no inline body")
 
 
 def _mirror_contract_flags_to_job(session: Session, job_id: Any, name: str, data: Any) -> None:
@@ -1151,7 +1164,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
     """Upsert an artifact for a job (unique on job_id + name).
 
     When ``ARTIFACT_STORAGE_*`` env vars are set, the body is written to object
-    storage and only metadata (storage_key, size_bytes, content_type) is stored
+    storage and only metadata (storage_key, stored_object_size_bytes, content_type) is stored
     in Postgres. Otherwise, the body lives inline in ``data`` / ``text_data``.
 
     If the storage put succeeds but the DB write fails, the storage object is
@@ -1174,7 +1187,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
             data=None,
             text_data=None,
             storage_key=key,
-            size_bytes=len(body),
+            stored_object_size_bytes=len(body),
             content_type=content_type,
         )
         stmt = stmt.on_conflict_do_update(
@@ -1183,7 +1196,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
                 "data": None,
                 "text_data": None,
                 "storage_key": stmt.excluded.storage_key,
-                "size_bytes": stmt.excluded.size_bytes,
+                "stored_object_size_bytes": stmt.excluded.stored_object_size_bytes,
                 "content_type": stmt.excluded.content_type,
             },
         )
@@ -1213,7 +1226,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
             "data": stmt.excluded.data,
             "text_data": stmt.excluded.text_data,
             "storage_key": None,
-            "size_bytes": None,
+            "stored_object_size_bytes": None,
             "content_type": None,
         },
     )
@@ -1262,10 +1275,23 @@ def backfill_job_is_proxy_from_storage(session: Session) -> int:
 def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     """Read all artifacts for a job. Returns {name: data_or_text}.
 
-    Storage-backed bodies are fetched in parallel via ``StorageClient.get_many``
-    so a job with N storage artifacts pays one HTTP round-trip's worth of
-    latency instead of N. Missing keys are skipped (mirrors the prior
-    ``StorageKeyMissing`` behavior).
+    Storage-backed bodies are fetched in parallel via
+    ``StorageClient.get_many_results`` so a job with N storage artifacts pays
+    one HTTP round-trip's worth of latency instead of N.
+
+    **Fails closed.** If any row's body could not be read this raises rather
+    than returning a short dict. A short dict is byte-identical to "this job
+    produced fewer artifacts", so a bucket outage rendered as *"this analysis
+    has no effective_permissions"* — the substitution of an unanswered question
+    for a proven negative.
+
+    Which exception says *why*, and the type is load-bearing because it is all
+    ``workers.retry_policy`` gets to see: ``StorageContentAbsent`` (every
+    shortfall proven absent at every candidate — determined, terminal) or
+    ``StorageContentNotDetermined`` (at least one body we could not ask about —
+    transient). Both carry ``values`` (what did read) plus the two shortfall
+    maps, so a caller that may legitimately degrade opts in explicitly and
+    publishes them beside it; see ``services/aggregations/analysis_detail``.
     """
     stmt = select(Artifact).where(Artifact.job_id == job_id)
     artifacts = session.execute(stmt).scalars().all()
@@ -1283,14 +1309,44 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
         client = get_storage_client()
         if client is None:
             raise RuntimeError(f"job {job_id} has artifacts with storage_key but storage is not configured")
-        bodies = client.get_many([key for key, _ in storage_lookups.values()])
+        reads = client.get_many_results([key for key, _ in storage_lookups.values()])
+        proven_absent: dict[str, str] = {}
+        not_determined: dict[str, str] = {}
         for name, (key, content_type) in storage_lookups.items():
-            body = bodies.get(key)
-            if body is None:
+            read = reads.get(key)
+            if read is None or not read.read:
+                # ``BlobRead`` already separated "the bucket answered, and holds
+                # no such object" from "the bucket could not be asked". Keep them
+                # in separate maps: which one it is decides both what the API may
+                # publish and whether the job is worth retrying.
+                if read is not None and read.proven_absent:
+                    proven_absent[name] = f"no object at any candidate for {key}"
+                else:
+                    not_determined[name] = f"could not read {key}: {read.error if read is not None else 'not fetched'}"
                 continue
-            value = deserialize_artifact(body, content_type)
+            assert read.body is not None
+            value = deserialize_artifact(read.body, content_type)
             if value is not None:
                 result[name] = value
+        short = {**proven_absent, **not_determined}
+        if short:
+            logger.error(
+                "get_all_artifacts: job %s has %d/%d storage-backed artifact bodies unread "
+                "(%d proven absent, %d not determined): %s",
+                job_id,
+                len(short),
+                len(storage_lookups),
+                len(proven_absent),
+                len(not_determined),
+                ", ".join(sorted(short)),
+            )
+            raise content_shortfall(
+                f"job {job_id}: {len(short)}/{len(storage_lookups)} artifact bodies could not be read "
+                f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
+                values=result,
+                proven_absent=proven_absent,
+                not_determined=not_determined,
+            )
 
     return result
 
@@ -1370,7 +1426,20 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
 
 
 def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
-    """Returns {relative_path: file_content} for all source files of a job."""
+    """Returns {relative_path: file_content} for all source files of a job.
+
+    **Fails closed** on an unreadable body, raising ``StorageContentAbsent``
+    (every unread body proven absent at every candidate — determined, terminal)
+    or ``StorageContentNotDetermined`` (at least one we could not ask about —
+    transient), each carrying ``values`` (the files that did read) plus the
+    ``proven_absent`` / ``not_determined`` maps of path → why.
+
+    Silently returning the short dict made "this contract has no source" and
+    "every body failed to load" the same answer, and the consumers act on it:
+    ``workers.static_worker`` compiles whatever it is handed, so a partial read
+    became a static analysis over a partial contract with no record that
+    anything was missing.
+    """
     stmt = select(SourceFile).where(SourceFile.job_id == job_id)
     rows = session.execute(stmt).scalars().all()
     out: dict[str, str] = {}
@@ -1400,20 +1469,50 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     storage_client = client
     assert storage_client is not None
 
-    def _fetch(item: tuple[str, str]) -> tuple[str, str | None]:
+    def _fetch(item: tuple[str, str]) -> tuple[str, str | StorageError]:
+        # Returns the body, or the storage error itself — the caller sorts by
+        # error type. Flattening a lost object and an unreachable bucket into
+        # one "unreadable" here is what made the whole read report as transient
+        # while the same key read directly reported terminal.
         path, key = item
         try:
             return path, storage_client.get(key).decode("utf-8")
-        except StorageKeyMissing:
-            return path, None
+        except StorageError as exc:
+            logger.error("get_source_files: job %s path %s unreadable: %s", job_id, path, exc)
+            return path, exc
 
     fetch_results = parallel_map(_fetch, storage_rows)
-    for _item, outcome in fetch_results:
+    proven_absent: dict[str, str] = {}
+    not_determined: dict[str, str] = {}
+    for item, outcome in fetch_results:
         if isinstance(outcome, BaseException):
             raise outcome
         path, content = outcome  # type: ignore[misc]
-        if content is not None:
-            out[path] = content
+        if isinstance(content, StorageKeyMissing):
+            proven_absent[path] = f"no object at any candidate for {item[1]}"
+            continue
+        if isinstance(content, StorageError):
+            not_determined[path] = f"could not read {item[1]}: {content}"
+            continue
+        out[path] = content
+    short = {**proven_absent, **not_determined}
+    if short:
+        logger.error(
+            "get_source_files: job %s read %d/%d source files; %d bodies unread (%d proven absent, %d not determined)",
+            job_id,
+            len(out),
+            len(rows),
+            len(short),
+            len(proven_absent),
+            len(not_determined),
+        )
+        raise content_shortfall(
+            f"job {job_id}: {len(short)}/{len(storage_rows)} source bodies could not be read "
+            f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
+            values=out,
+            proven_absent=proven_absent,
+            not_determined=not_determined,
+        )
     return out
 
 
@@ -1831,7 +1930,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
                 data=None,
                 text_data=None,
                 storage_key=new_key,
-                size_bytes=art.size_bytes,
+                stored_object_size_bytes=art.stored_object_size_bytes,
                 content_type=art.content_type,
             )
             stmt = stmt.on_conflict_do_update(
@@ -1840,7 +1939,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
                     "data": None,
                     "text_data": None,
                     "storage_key": stmt.excluded.storage_key,
-                    "size_bytes": stmt.excluded.size_bytes,
+                    "stored_object_size_bytes": stmt.excluded.stored_object_size_bytes,
                     "content_type": stmt.excluded.content_type,
                 },
             )

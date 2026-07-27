@@ -22,6 +22,7 @@ from db.models import (
     MonitoringEnrollmentQueue,
     WatchedProxy,
 )
+from db.storage import StorageContentAbsent, StorageContentIncomplete
 from services.governance.control_graph_types import reconcile_control_graph_types
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
@@ -283,7 +284,7 @@ def enroll_protocol_contracts(
         # feeds the watcher's event dispatcher, and the raw plan feeds
         # ``build_polling_plan`` which projects pollable getters /
         # storage slots from the analyzer's tracked_controllers.
-        tracked_topics, tracking_plan = _load_tracking_plan_artifacts(session, contract)
+        tracked_topics, tracking_plan, plan_not_determined = _load_tracking_plan_artifacts(session, contract)
 
         polling_plan = build_polling_plan(
             contract_type=contract_type,
@@ -293,7 +294,9 @@ def enroll_protocol_contracts(
         )
 
         # Build monitoring config and initial state
-        monitoring_config = _build_monitoring_config(summary, cv_rows, contract_type, tracked_topics, polling_plan)
+        monitoring_config = _build_monitoring_config(
+            summary, cv_rows, contract_type, tracked_topics, polling_plan, plan_not_determined=plan_not_determined
+        )
         initial_state = _build_initial_state(contract, cv_rows, polling_plan)
         needs_poll = bool(polling_plan)
 
@@ -513,39 +516,92 @@ _EVENT_BASED_PROXY_TYPES = {"eip1967", "eip1167", "eip1822"}
 def _load_tracking_plan_artifacts(
     session: Session,
     contract: Contract,
-) -> tuple[list[dict], dict | None]:
+) -> tuple[list[dict], dict | None, str | None]:
     """Hydrate the analysis ``tracking_plan`` for *contract* once and
-    return both projections the enrollment path needs:
+    return the three things the enrollment path needs:
 
       * ``tracked_topics`` — per-contract event-topic specs the watcher
         dispatches on. Same shape as ``extract_governance_topics``.
       * the raw ``tracking_plan`` dict — the polling-plan builder walks
         ``tracked_controllers`` directly so it can read each entry's
         ``read_spec`` / ``polling_fallback`` without losing context.
+      * ``not_determined`` — ``None`` when we read the plan and can therefore
+        speak about it; otherwise a short token naming why we cannot.
 
-    Returns ``([], None)`` when the materialization row is missing /
-    the status isn't ready / a blob fetch fails. The watcher still has
-    the hand-rolled topic registry as a baseline for events and the
-    vendored proxy/safe/timelock templates as a baseline for polling.
+    Enrollment degrades to the hand-rolled topic registry and the vendored
+    proxy/safe/timelock templates in every case, but the reasons are not the
+    same fact. "The analysis read fine and derived no extra topics" is a
+    statement about the contract; "no analysis has been materialized for this
+    address" and "the blob was unreadable" are statements about our own
+    pipeline. Only the first may render as an empty ``tracked_topics``.
+
+    The empty return is reachable four ways and exactly one of them is a
+    finding about the contract:
+
+    ==============================  ====================  =========================
+    situation                       ``not_determined``    what it means
+    ==============================  ====================  =========================
+    plan read, no governance events ``None``              proven-absent (a finding)
+    no current materialization row  ``no_current_...``    never established
+    blob unreadable                 ``plan_not_readable`` storage could not answer
+    plan present but malformed      ``plan_load_error``   we failed to read it
+    ==============================  ====================  =========================
     """
     try:
         row = find_by_address(session, chain=contract.chain or "ethereum", address=contract.address)
-        if row is None:
-            return [], None
-        plan = hydrate_tracking_plan(row)
-        topics = extract_governance_topics(plan)
-        return topics, plan
     except Exception as exc:
-        # A blob-fetch hiccup or schema drift in tracking_plan shouldn't
-        # block enrollment — the hand-rolled registry still catches the
-        # OZ/Safe/Timelock baseline.
+        logger.warning(
+            "materialization lookup for %s failed: %s",
+            contract.address,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        return [], None, "materialization_lookup_failed"
+
+    if row is None:
+        # ``find_by_address`` collapses three distinct facts into ``None``: no
+        # materialization row exists, a row exists but is not status='ready',
+        # and a row exists at a superseded ``analysis_schema_version`` (its
+        # docstring: "reads as a miss so a bumped analyzer rebuilds rather
+        # than serving a stale bundle"). None of the three is "we found out
+        # what the plan says", so none of them may be persisted as an empty
+        # tracked_topics — that reads as a finding about the contract.
+        logger.info(
+            "no current tracking_plan materialization for %s; enrolling from the baseline registry only",
+            contract.address,
+        )
+        return [], None, "no_current_materialization"
+
+    try:
+        # ``hydrate_tracking_plan`` keeps the same three states: a dict is
+        # proven-present, ``None`` is proven-absent (the row stored no plan at
+        # all), and ``StorageContentIncomplete`` is the read falling short.
+        # Only the raise is a not-a-plan answer here.
+        plan = hydrate_tracking_plan(row)
+    except StorageContentIncomplete as exc:
+        # Two different remedies, so two different tokens: an object the bucket
+        # says it does not hold will read the same on every retry; a bucket that
+        # could not be asked may answer next time.
+        token = "plan_object_absent" if isinstance(exc, StorageContentAbsent) else "plan_not_readable"
+        logger.error(
+            "tracking_plan for %s is not determined (%s); enrolling from the baseline registry only",
+            contract.address,
+            exc,
+            extra={"exc_type": type(exc).__name__, "token": token},
+        )
+        return [], None, token
+    except Exception as exc:
+        # Schema drift in tracking_plan shouldn't block enrollment — the
+        # hand-rolled registry still catches the OZ/Safe/Timelock baseline.
         logger.warning(
             "Failed to load tracking_plan for %s: %s",
             contract.address,
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return [], None
+        return [], None, "plan_load_error"
+
+    return extract_governance_topics(plan), plan, None
 
 
 def _build_monitoring_config(
@@ -554,8 +610,16 @@ def _build_monitoring_config(
     contract_type: str,
     tracked_topics: list[dict] | None = None,
     polling_plan: list[dict] | None = None,
+    *,
+    plan_not_determined: str | None = None,
 ) -> dict[str, Any]:
-    """Build the monitoring_config JSONB based on detected capabilities."""
+    """Build the monitoring_config JSONB based on detected capabilities.
+
+    ``tracking_plan_not_determined`` carries the reason token from
+    ``_load_tracking_plan_artifacts`` whenever the plan was not read, so a
+    config with no ``tracked_topics`` is not later mistaken for a contract the
+    analysis found nothing to track on. Absent key = we read the plan; the
+    empty ``tracked_topics`` is then a finding and may be relied on."""
     config: dict[str, Any] = {
         "watch_upgrades": contract_type == "proxy",
         "watch_ownership": True,
@@ -582,6 +646,9 @@ def _build_monitoring_config(
 
     if polling_plan:
         config["polling_plan"] = polling_plan
+
+    if plan_not_determined:
+        config["tracking_plan_not_determined"] = plan_not_determined
 
     return config
 
@@ -843,7 +910,12 @@ def _enroll_controller_addresses(
                 tracking_plan=None,
                 tracked_topics=None,
             )
-            config = _build_monitoring_config(None, [], monitored_type, None, polling_plan)
+            # No analysis was ever run on this address, so nothing here has
+            # read a tracking plan for it. The empty tracked_topics is the
+            # absence of a question, not the absence of governance events.
+            config = _build_monitoring_config(
+                None, [], monitored_type, None, polling_plan, plan_not_determined="contract_not_analyzed"
+            )
             # Race-safe on uq_monitored_contract_address_chain — a concurrent
             # reconcile / re-enroll for the same controller must become a no-op
             # rather than poison the session.

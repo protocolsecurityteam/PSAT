@@ -71,7 +71,13 @@ logger = logging.getLogger(__name__)
 # token receiver to its real getter (was a Slither temporary that seeded the wrong
 # token or nothing), so a v4 row was reached from a different seeded fork state and
 # must not be served to the new probe.
-EFFECT_CACHE_SCHEMA_VERSION = 5
+# v6: the storage read path now resolves DB-recorded keys carrying a foreign
+# environment prefix. Before it, ``hydrate_predicate_trees`` returned None for
+# 75/75 materializations and ``get_source_files`` returned 0 files for every job
+# — so every v5 row was probed against an empty predicate-tree / empty-source
+# analysis state, i.e. a different seeded fork state than the same probe reaches
+# now. Serving those rows would keep the pre-fix verdict forever.
+EFFECT_CACHE_SCHEMA_VERSION = 6
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

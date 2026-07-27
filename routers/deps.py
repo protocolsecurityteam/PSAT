@@ -25,6 +25,9 @@ from db.queue import (
     get_artifact,
 )
 from db.storage import (
+    StorageContentAbsent,
+    StorageContentIncomplete,
+    StorageContentNotDetermined,
     StorageError,
     StorageUnavailable,
     deserialize_artifact,
@@ -115,6 +118,9 @@ __all__ = [
     "DEFAULT_RPC_URL",
     "MAX_TVL_HISTORY_DAYS",
     "SessionLocal",
+    "StorageContentAbsent",
+    "StorageContentIncomplete",
+    "StorageContentNotDetermined",
     "StorageError",
     "StorageUnavailable",
     "_ADDRESS_RE",

@@ -11,7 +11,10 @@ Reads always go through ``hydrate_analysis`` /
 inline JSONB on either a missing key or a transient blob fetch
 error. That fallback is what lets pre-migration rows keep working
 while the backfill catches up — and what insulates the pipeline
-from a transient Tigris outage.
+from a transient Tigris outage *when an inline copy exists*. When
+one does not, the read raises ``StorageContentNotDetermined``
+rather than returning the ``None`` that also means "this row stored
+nothing": the pipeline may serve stale, never invented, absence.
 
 These tests mock ``get_storage_client`` rather than spinning up a
 minio container so they stay in the offline tier. The minio-backed
@@ -126,19 +129,32 @@ def test_hydrate_falls_back_to_inline_on_blob_fetch_error():
     assert got == {"controllers": ["fallback"]}
 
 
-def test_hydrate_returns_none_on_blob_fetch_error_with_no_inline():
-    """A row whose JSONB has been cleared by --clear-jsonb cannot fall
-    back. Returning None so the caller surfaces a clean cache miss
-    instead of crashing."""
+def test_hydrate_raises_on_blob_fetch_error_with_no_inline():
+    """INVERTED (was ``test_hydrate_returns_none_on_blob_fetch_error_with_no_inline``,
+    which asserted ``got is None``).
+
+    That assertion pinned the defect. ``None`` here is the same value the
+    function returns for a row that genuinely stored nothing, and
+    ``services/resolution/recursive`` writes ``or {}`` over it — so an
+    unreadable blob rendered as "this contract has no analysis, no plan and no
+    predicate trees", and that state seeded the effects probe and was cached
+    under the witness schema version. A "clean cache miss" is a claim about the
+    contract; the bucket failing is not.
+    """
+    from db.storage import StorageContentNotDetermined
+
     storage = _StubStorage()
     key = "contract_materializations/ethereum/0xab/analysis.json"
     storage.fail_get.add(key)
 
     row = _row(analysis_blob_key=key, analysis=None)
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
-        got = cm.hydrate_analysis(row)
+        with pytest.raises(StorageContentNotDetermined) as excinfo:
+            cm.hydrate_analysis(row)
+    assert "analysis_blob_key" in excinfo.value.not_determined
 
-    assert got is None
+    # Control: nothing recorded at all is still a proven absence, not a raise.
+    assert cm.hydrate_analysis(_row(analysis_blob_key=None, analysis=None)) is None
 
 
 def test_hydrate_returns_inline_when_blob_key_set_but_storage_unconfigured():

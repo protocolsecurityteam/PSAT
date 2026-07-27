@@ -185,6 +185,7 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
 
   let result = null;
   let sawResponse = false; // at least one id returned a response (even an empty graph)
+  let sawUnknown = false; // at least one id answered 503 "not determined"
   let lastError = null;
   for (const id of ids) {
     try {
@@ -197,16 +198,25 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
       // A present-but-empty graph is a definitive "no dependencies" — keep
       // trying the other ids in case one carries the real graph.
     } catch (e) {
-      // 404 / not-this-job — try the next id.
+      // 404 is "not this job" — try the next id. 503 is the server saying it
+      // could not find out, which is not a fact about this contract's
+      // dependencies and must not be folded into a confirmed empty below.
+      if (e?.status === 503) sawUnknown = true;
       lastError = e;
     }
   }
   // Cache a positive graph or a confirmed empty; never cache a hard failure, so
   // a transient error retries on the next open instead of masquerading as
-  // "no dependencies" for the rest of the session.
-  if (result || sawResponse) {
+  // "no dependencies" for the rest of the session. An empty result is only
+  // "confirmed" if no id left the question open — otherwise the caller gets the
+  // error state ("couldn't load") rather than the absence state.
+  if (result) {
     _cache.set(cacheKey, result);
     return result;
+  }
+  if (sawResponse && !sawUnknown) {
+    _cache.set(cacheKey, null);
+    return null;
   }
   throw lastError || new Error("Dependency graph unavailable");
 }

@@ -462,13 +462,15 @@ def test_artifact_not_found(mock_session_cls, mock_get_artifact):
 
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
-def test_artifact_storage_error_returns_404_not_500(mock_session_cls, mock_get_artifact):
-    """Storage backend failures degrade to 404 instead of leaking a 500.
+def test_artifact_storage_error_returns_503_not_404(mock_session_cls, mock_get_artifact):
+    """INVERTED (was ``test_artifact_storage_error_returns_404_not_500``, which
+    asserted 404 and called it "degrading cleanly").
 
-    The artifact rows can outlive the underlying storage object (e.g. MinIO
-    volume wiped, Tigris credential rotation, transient network blip). The
-    route should answer cleanly so callers' .catch() paths fire — not raise
-    an opaque server error.
+    That assertion pinned the defect at the published boundary: an unconfigured
+    or unreachable backend answered with the same bytes as an artifact the job
+    never produced, and the SPA's ``.catch()`` path draws that as an absence.
+    Not-500 was the right instinct and still holds — it is now 503, which is a
+    third answer rather than the second one repeated.
     """
     client = _make_client()
     fake_job = _fake_job(name="test_job")
@@ -482,7 +484,35 @@ def test_artifact_storage_error_returns_404_not_500(mock_session_cls, mock_get_a
     mock_get_artifact.side_effect = RuntimeError("storage_key set but storage not configured")
 
     response = client.get("/api/analyses/test_job/artifact/dependencies")
+    assert response.status_code == 503
+    assert response.headers.get("X-PSAT-Artifact-State") == "not_determined"
+    assert response.json()["artifact"] == "dependencies"
+
+
+@patch("routers.deps.get_artifact")
+@patch("routers.deps.SessionLocal")
+def test_artifact_proven_absent_body_still_returns_404(mock_session_cls, mock_get_artifact):
+    """Negative control for the test above: the bucket answering "no object at
+    any candidate" is a determined negative and must stay a 404. A fix that
+    turned every storage exception into 503 would erase the distinction it was
+    written to make."""
+    from db.storage import StorageKeyMissing
+
+    client = _make_client()
+    fake_job = _fake_job(name="test_job")
+
+    mock_session = MagicMock()
+    _mock_session_ctx(mock_session_cls, mock_session)
+    mock_exec = MagicMock()
+    mock_exec.scalar_one_or_none.return_value = fake_job
+    mock_session.execute.return_value = mock_exec
+
+    mock_get_artifact.side_effect = StorageKeyMissing("artifacts/j/dependencies")
+
+    response = client.get("/api/analyses/test_job/artifact/dependencies")
     assert response.status_code == 404
+    assert response.json() == {"detail": "Artifact not found"}
+    assert "X-PSAT-Artifact-State" not in response.headers
 
 
 @patch("services.discovery.upgrade_history.synthesize_from_events")

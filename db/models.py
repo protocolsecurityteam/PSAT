@@ -328,7 +328,10 @@ class Artifact(Base):
     data: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     text_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Size of the object in the bucket, not of anything stored in this row.
+    # It is nonzero on all 5,770 rows while ``data``/``text_data`` are null on
+    # all of them; the old name ``size_bytes`` read as "this row holds N bytes".
+    stored_object_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     content_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

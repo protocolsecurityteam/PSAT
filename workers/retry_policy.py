@@ -22,6 +22,7 @@ from typing import Literal
 import requests
 import urllib3.exceptions
 
+from db.storage import StorageContentAbsent, StorageContentNotDetermined, StorageUnavailable
 from services.discovery.classifier import ClassificationIncompleteError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 
@@ -99,6 +100,24 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # degrade-and-advance, never failed_terminal.
     AnvilSpawnError,
     ForkRpcTimeoutError,
+    # Storage that could not answer. ``StorageUnavailable`` is the backend
+    # being unreachable or unconfigured; ``StorageContentNotDetermined`` is a
+    # read that could not establish content for at least one row it was asked
+    # about. Both mean "we did not find out", and a stage that re-runs is the
+    # only thing that can turn that into a fact.
+    #
+    # ``StorageKeyMissing``, ``StorageKeyAbsent`` and ``StorageContentAbsent``
+    # are deliberately NOT here: the first is the bucket answering "no object at
+    # this key", the second is the row recording no key to ask about, and the
+    # third is a collection read where every shortfall was one of those. All are
+    # determined, and re-asking a question already answered just burns the retry
+    # budget before the same terminal verdict. The collection reads
+    # (``get_all_artifacts`` / ``get_source_files`` / the ``hydrate_*`` family)
+    # therefore raise by cause, not one flattened type — a lost object and an
+    # unreachable bucket used to arrive here as the same class and this comment
+    # was false for the first of them.
+    StorageContentNotDetermined,
+    StorageUnavailable,
     *_PSYCOPG2_OPERATIONAL,
 )
 
@@ -111,6 +130,10 @@ _TERMINAL_TYPES: tuple[type[BaseException], ...] = (
     TypeError,
     KeyError,
     AssertionError,
+    # Named rather than left to the default: this is the branch that keeps the
+    # comment in _TRANSIENT_TYPES honest, and a reader checking it should find
+    # the entry rather than infer it from a fall-through.
+    StorageContentAbsent,
 )
 
 

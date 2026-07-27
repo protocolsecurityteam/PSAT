@@ -30,6 +30,38 @@ from routers import deps
 logger = logging.getLogger(__name__)
 
 
+def _artifacts_or_degrade(
+    session: Session,
+    job_id: Any,
+    not_determined: dict[str, str],
+    proven_absent: dict[str, str],
+) -> dict[str, Any]:
+    """``get_all_artifacts`` for a page that may render partially.
+
+    ``get_all_artifacts`` fails closed, because a short dict is
+    indistinguishable from "the job produced fewer artifacts". This page is
+    allowed to render what did load — but only by naming what did not, in the
+    two maps published as ``artifacts_not_determined`` (the bucket could not be
+    asked) and ``artifacts_body_absent`` (the bucket answered; the row asserts a
+    key nothing is stored under). Every artifact this payload carries is
+    consumed as evidence about the contract, and the two shortfalls are not the
+    same evidence — one may resolve itself, the other never will.
+    """
+    try:
+        return deps.get_all_artifacts(session, job_id)
+    except deps.StorageContentIncomplete as exc:
+        logger.error(
+            "analysis detail for job %s is missing %d artifact bodies (%d not determined, %d proven absent)",
+            job_id,
+            len(exc.not_determined) + len(exc.proven_absent),
+            len(exc.not_determined),
+            len(exc.proven_absent),
+        )
+        not_determined.update(exc.not_determined)
+        proven_absent.update(exc.proven_absent)
+        return dict(exc.values or {})
+
+
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
     # Try by name first, then by id, then by address
     stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
@@ -51,7 +83,9 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         return None
 
     # Load artifacts (for those still stored as artifacts)
-    all_artifacts = deps.get_all_artifacts(session, job.id)
+    not_determined: dict[str, str] = {}
+    body_absent: dict[str, str] = {}
+    all_artifacts = _artifacts_or_degrade(session, job.id, not_determined, body_absent)
 
     # Fall back to address lookup when copy_static_cache has reassigned
     # the Contract row to a newer job. Chain-scoped so we don't pick up
@@ -158,7 +192,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         proxy_stmt = select(Job).where(Job.address == proxy_address).order_by(Job.updated_at.desc()).limit(1)
         proxy_job = session.execute(proxy_stmt).scalar_one_or_none()
         if proxy_job:
-            proxy_artifacts = deps.get_all_artifacts(session, proxy_job.id)
+            proxy_artifacts = _artifacts_or_degrade(session, proxy_job.id, not_determined, body_absent)
             for fallback_name in ("upgrade_history", "dependency_graph_viz", "dependencies"):
                 if fallback_name in payload:
                     continue
@@ -174,7 +208,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         impl_stmt = select(Job).where(Job.address == impl_addr).order_by(Job.updated_at.desc()).limit(1)
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
-            _inherit_from_impl(session, payload, job, impl_job, impl_addr)
+            _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
 
     # Add subject info from contract_analysis if available
     if isinstance(all_artifacts.get("contract_analysis"), dict):
@@ -194,6 +228,17 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         synthesized = synthesize_from_events(session, contract_row)
         if synthesized:
             payload["upgrade_history"] = synthesized
+
+    if not_determined:
+        # Names whose row exists but whose body the bucket could not be asked
+        # about. Without this the SPA reads their absence from ``payload`` as
+        # proof the analysis never produced them.
+        payload["artifacts_not_determined"] = dict(sorted(not_determined.items()))
+    if body_absent:
+        # Names whose row exists and whose object the bucket says it does not
+        # hold. Also not "the analysis never produced them" — but unlike the map
+        # above, re-asking will not change the answer.
+        payload["artifacts_body_absent"] = dict(sorted(body_absent.items()))
 
     return payload
 
@@ -363,8 +408,21 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
     }
 
 
-def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl_job: Job, impl_addr: str) -> None:
-    impl_artifacts = deps.get_all_artifacts(session, impl_job.id)
+def _inherit_from_impl(
+    session: Session,
+    payload: dict[str, Any],
+    job: Job,
+    impl_job: Job,
+    impl_addr: str,
+    not_determined: dict[str, str] | None = None,
+    body_absent: dict[str, str] | None = None,
+) -> None:
+    impl_artifacts = _artifacts_or_degrade(
+        session,
+        impl_job.id,
+        not_determined if not_determined is not None else {},
+        body_absent if body_absent is not None else {},
+    )
     for fallback_name in (
         "contract_analysis",
         "control_snapshot",

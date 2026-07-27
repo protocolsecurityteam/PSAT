@@ -51,7 +51,13 @@ export async function api(path, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(await response.text());
+    // Carry the status on the error. Callers that render an absence need to
+    // tell "the server says this does not exist" (404) from "the server could
+    // not find out" (503) — collapsing them into a message string is how a
+    // storage outage got drawn as an empty timeline.
+    const err = new Error(await response.text());
+    err.status = response.status;
+    throw err;
   }
   const type = response.headers.get("content-type") || "";
   if (type.includes("application/json")) {

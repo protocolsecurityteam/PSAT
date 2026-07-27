@@ -25,6 +25,9 @@ export function EntityActivity({
 }) {
   const [events, setEvents] = useState([]);
   const [history, setHistory] = useState(null);
+  // Three states for the upgrade history, not two: loaded, proven-absent, and
+  // "the server could not determine it". Only the third gets a marker.
+  const [historyUnknown, setHistoryUnknown] = useState(false);
 
   const address = machine?.address;
   const chain = machine?.chain || contract?.chain || "ethereum";
@@ -56,6 +59,7 @@ export function EntityActivity({
     const cached = cache && cache[machine.job_id];
     if (cached?.history) { setHistory(cached.history); return undefined; }
     let cancelled = false;
+    setHistoryUnknown(false);
     const jid = encodeURIComponent(machine.job_id);
     api(`/api/analyses/${jid}/artifact/upgrade_history`)
       .then((body) => {
@@ -64,7 +68,16 @@ export function EntityActivity({
         setHistory(h);
         if (onCache) onCache(machine.job_id, h, {});
       })
-      .catch(() => { if (!cancelled) setHistory(null); });
+      .catch((e) => {
+        if (cancelled) return;
+        setHistory(null);
+        // 503 is the API's "we could not find out" (storage unreachable). The
+        // timeline below draws a proxy with no history as a proxy that has
+        // never been upgraded, so this state has to be said out loud rather
+        // than rendered as the same empty rail. A 404 is a real negative and
+        // stays silent. Never cached — the answer can change without us.
+        setHistoryUnknown(e?.status === 503);
+      });
     return () => { cancelled = true; };
     // cache/onCache omitted deliberately: read once per selection so this
     // fetch's own cache write doesn't retrigger the effect.
@@ -107,6 +120,12 @@ export function EntityActivity({
       ) : null}
 
       <div className="ps-activity-sect-title" style={{ marginTop: 2 }}>Timeline</div>
+      {historyUnknown ? (
+        <div className="ps-activity-unknown" role="status">
+          Upgrade history could not be read — this proxy's pre-enrollment
+          upgrades are unknown, not absent.
+        </div>
+      ) : null}
       <Timeline
         above={timeline.above}
         below={timeline.below}

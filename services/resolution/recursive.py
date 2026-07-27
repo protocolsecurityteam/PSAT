@@ -15,6 +15,7 @@ from typing import Any, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
@@ -319,6 +320,19 @@ def _materialize_with_cross_process_cache(
     # fresh dict per call, but the inline path returns the SQLAlchemy
     # JSONB-cached dict, so the deepcopy is still required to avoid
     # downstream mutations leaking back into the ORM identity map.
+    #
+    # ``StorageContentIncomplete`` propagates deliberately, all the way out of
+    # ``resolve_control_graph`` (``_materialize_for_pending`` re-raises it rather
+    # than degrading the contract; the worker's classifier calls the
+    # not-determined subclass transient so the stage re-runs, and the
+    # proven-absent one terminal so it does not re-ask an answered question).
+    # ``or {}`` below is therefore only ever
+    # applied to a *proven* absence — a row that stored nothing. If the payload
+    # merely could not be read, an empty analysis here means "this contract has
+    # no functions, no plan and no predicate trees", and that verdict is what
+    # the effects probe is seeded from and what gets cached under the witness
+    # schema version. A retried stage can still become right; a witness built
+    # on {} is already wrong and cached.
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
     # ``predicate_trees`` is absent on rows written before the
@@ -993,7 +1007,19 @@ def resolve_control_graph(
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
         """Materialize one pending contract's artifacts. Returns
         ``(artifacts, error)`` so the caller wires the success and error
-        branches deterministically on the main thread."""
+        branches deterministically on the main thread.
+
+        Storage failing to answer is the one case that does NOT come back as an
+        error tuple. Every other materialize failure is a fact about the
+        contract or its compile, and the caller degrades that contract to
+        ``analyzed=False`` and walks on. An unreadable bucket is a fact about
+        us: the analysis may exist and simply be out of reach, the same outage
+        hits every sibling in the level, and degrading would let the whole walk
+        return normally so nothing above ever re-runs. Propagating is what makes
+        the stage retryable (``workers/retry_policy`` classifies both storage
+        types below as transient), and a retry is the only thing that can turn
+        not-determined into a fact.
+        """
         address = pending["address"]
         preloaded = pending.get("artifacts")
         if preloaded is not None:
@@ -1009,6 +1035,8 @@ def resolve_control_graph(
                 chain_id=chain_id,
             )
             return artifacts, None
+        except (StorageContentIncomplete, StorageUnavailable):
+            raise
         except Exception as exc:
             return None, exc
 
@@ -1057,9 +1085,12 @@ def resolve_control_graph(
 
         for pending, (_pending, outcome) in zip(level_pending, materialized):
             if isinstance(outcome, BaseException):
-                # ``_materialize_for_pending`` already converts every internal
-                # failure to ``(None, exc)`` — anything reaching here is a
-                # genuine bug, surface it.
+                # ``_materialize_for_pending`` converts every failure it is
+                # entitled to answer for into ``(None, exc)``. What arrives
+                # here is either a genuine bug or storage declining to answer,
+                # which it re-raises on purpose. Both must leave this function:
+                # the walk cannot describe a graph it could not read, and the
+                # stage above is what retries.
                 raise outcome
             artifacts, mat_exc = outcome
             address = pending["address"]
