@@ -347,7 +347,11 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
             # the resolver's own 'not_determined'.
             "authority_openness": getattr(ef, "authority_openness", None),
             "controllers": [{"principals": controller_principals}] if controller_principals else [],
-            "authority_roles": ef.authority_roles or [],
+            # Three states preserved: a non-empty list is witnessed, ``None``
+            # is role-gated with the role not determined (the enumerable
+            # role-store dissolves role identity by design), ``[]`` is proven
+            # not role-gated. ``or []`` folded the middle into the last.
+            "authority_roles": ef.authority_roles,
             "direct_owner": direct_owner,
             "signature_witnesses": signature_witnesses,
         }

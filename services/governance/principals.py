@@ -295,6 +295,36 @@ def _role_value_from_origin(origin: str | None) -> int | str:
     return origin
 
 
+def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mapping[str, Mapping[str, Any]]) -> dict:
+    """One ``authority_roles`` grant from the COLUMN, with each principal filled
+    in from this row's own classified ``FunctionPrincipal`` payload.
+
+    The column's grants carry the role plus bare member ADDRESSES — the capability
+    surface knows who holds the role, not what those addresses are (Safe / EOA /
+    timelock). The same addresses are published under ``controllers`` fully
+    classified, and every consumer that merges the two dedups by address keeping
+    the FIRST record it sees (``protocolScore.collectPrincipals`` reads role
+    grants before controllers). Publishing the bare record first would therefore
+    make a role-granted principal read LESS resolved than the identical address
+    under ``controllers`` — an unresolved-controller reading of an address whose
+    type is known. Classified fields win; the grant's own non-null fields
+    override.
+    """
+    principals: list[Any] = []
+    for principal in grant.get("principals") or []:
+        if not isinstance(principal, dict):
+            principals.append(principal)
+            continue
+        classified = classified_by_address.get(str(principal.get("address", "")).lower())
+        if not classified:
+            principals.append(dict(principal))
+            continue
+        merged = dict(classified)
+        merged.update({key: value for key, value in principal.items() if value is not None})
+        principals.append(merged)
+    return {**dict(grant), "principals": principals}
+
+
 def _build_company_function_entry(
     ef: EffectiveFunction,
     principals: list[FunctionPrincipal],
@@ -343,7 +373,17 @@ def _build_company_function_entry(
 
     authority_roles = list(authority_roles_by_key.values())
     if not authority_roles and ef.authority_roles:
-        authority_roles = list(ef.authority_roles)
+        classified_by_address: dict[str, dict[str, Any]] = {}
+        for controller_entry in controllers_by_label.values():
+            for principal in controller_entry.get("principals", []):
+                address = str((principal or {}).get("address", "")).lower()
+                if address:
+                    classified_by_address.setdefault(address, principal)
+        authority_roles = [
+            _enriched_role_grant(grant, classified_by_address)
+            for grant in ef.authority_roles
+            if isinstance(grant, dict)
+        ]
 
     controllers = list(controllers_by_label.values())
     has_more_specific_controller = any(

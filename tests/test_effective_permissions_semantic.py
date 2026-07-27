@@ -877,3 +877,64 @@ def test_openness_null_when_no_producer_said(db_session) -> None:
         capability_by_function=None,
     )
     assert _ef_row(db_session).authority_openness is None
+
+
+def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
+    """W2-B item 8: the column stops being the literal [] — a single-role
+    Solmate capability persists a real (role, principals) grant."""
+    cap = {
+        "kind": "finite_set",
+        "members": ["0x" + "a" * 40],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+        "trace": [{"step": "solmate_roles_authority", "roles": [8], "authority": "0x" + "1" * 40}],
+    }
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_roles is not None
+    assert [g["role"] for g in row.authority_roles] == [8]
+    assert [p["address"] for g in row.authority_roles for p in g["principals"]] == ["0x" + "a" * 40]
+
+
+def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
+    """Role-gated with the role NOT determined must persist NULL, not [] —
+    ``[]`` is the proven-absent answer and would erase the middle state."""
+    cap = {
+        "kind": "finite_set",
+        "members": ["0x" + "a" * 40],
+        "membership_quality": "exact",
+        "trace": [{"step": "enumerable_role_store", "authority": "0x" + "1" * 40}],
+    }
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    assert _ef_row(db_session).authority_roles is None
+
+
+def test_authority_roles_empty_when_proven_not_role_gated(db_session) -> None:
+    cap = CapabilityExpr.finite_set(["0x" + "a" * 40])
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    assert _ef_row(db_session).authority_roles == []
+
+
+def test_authority_roles_null_when_no_capability_resolved(db_session) -> None:
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function=None,
+    )
+    assert _ef_row(db_session).authority_roles is None

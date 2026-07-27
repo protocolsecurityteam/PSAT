@@ -61,7 +61,15 @@ class EffectiveFunctionPermission(TypedDict):
     # fourth state ("this producer could not say") and must not be folded into
     # ``not_determined``.
     authority_openness: NotRequired[str]
-    authority_roles: list[AuthorityRoleGrant]
+    # Three states, and a consumer must tell them apart (see
+    # ``capability_surface.capability_role_grants``): a non-empty list is a
+    # WITNESSED role requirement; ``None`` is role-gated with the role NOT
+    # determined (the enumerable role-store dissolves role identity by design,
+    # and a multi-role capability cannot say which role a member holds); ``[]``
+    # is proven not role-gated. It was the literal ``[]`` on every row before
+    # this split, so ``authority_roles or []`` at a consumer erases the middle
+    # state.
+    authority_roles: list[AuthorityRoleGrant] | None
     controllers: list[ResolvedControllerGrant]
     effect_targets: list[str]
     effect_labels: list[str]

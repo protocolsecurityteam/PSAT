@@ -40,6 +40,7 @@ from db.deployment import deployment_scope
 from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
 from services.effects import claims_bridge
 from services.policy.capability_surface import (
+    capability_role_grants,
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
@@ -118,6 +119,15 @@ def _column_values_for_capability(
         "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
+
+
+def _authority_roles_for(cap_dict: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """``capability_role_grants`` with the no-capability case spelled out: with
+    no resolved capability nothing was read, so the answer is not-determined
+    (``None``), never the proven-absent ``[]``."""
+    if cap_dict is None:
+        return None
+    return capability_role_grants(cap_dict)
 
 
 def _selector_key(selector: str | None) -> str:
@@ -310,7 +320,16 @@ def write_effective_function_rows(
             "effect_targets": fn.get("effect_targets", []),
             "action_summary": fn.get("action_summary"),
             "authority_public": cap_columns["authority_public"],
-            "authority_roles": fn.get("authority_roles"),
+            # The role half of inv 3's (capability, principal) unit. Three
+            # states: a non-empty list is witnessed, ``None`` is role-gated with
+            # the role not determined, ``[]`` is proven not role-gated. A record
+            # that already carries a NON-EMPTY list wins (an upstream caller
+            # resolved it); the historical literal ``[]`` every record ships is
+            # NOT treated as an answer — it is exactly the constant this item
+            # exists to remove, so the capability's own verdict replaces it.
+            "authority_roles": (
+                fn.get("authority_roles") if fn.get("authority_roles") else _authority_roles_for(cap_dict)
+            ),
         }
         # Optional columns may be absent in older test metadata.
         for col_name in ("capability_expr", "conditions", "status", "authority_openness"):

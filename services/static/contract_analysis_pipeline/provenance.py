@@ -129,6 +129,13 @@ class Source:
     # bounds the nesting at one level: ``arg_origins`` splices an argument's own
     # (already flattened) origins in rather than nesting them, so the projection
     # is transitively complete without making the dataclass recursive.
+    #
+    # Also populated on ``view_call`` / ``external_call`` Sources (A1 Part B):
+    # the call collapses its arguments into ``callee_args_digest`` — an opaque
+    # hash — so without this the fact that a gate's un-lowerable role read
+    # CONSUMED THE CALLER was unrepresentable by the time a leaf was built,
+    # and ``leaf_is_caller_tainted`` could not fire (RoleRegistry.upgradeTo
+    # published public over a caller gate). Same three states as above.
     derived_from: frozenset["Source"] | None = None
 
     def __post_init__(self) -> None:
@@ -582,6 +589,12 @@ class ProvenanceEngine:
                         kind="computed",
                         computed_kind=str(getattr(ir, "type", "unary")),
                         callee_args_digest=_digest(operand_sources),
+                        # The negated value's own origins (A1 Part B): a
+                        # ``!hasRole(msg.sender, …)`` gate renders as this
+                        # computed tag (it sorts first in the operand pick),
+                        # and without the readable origins the caller-taint
+                        # default cannot see the caller through the negation.
+                        derived_from=arg_origins(operand_sources),
                     )
                 }
             )
@@ -714,6 +727,10 @@ class ProvenanceEngine:
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
                     callee_selector=_selector_for_signature(callee_signature),
+                    # The caller-visible argument provenance (A1 Part B): the
+                    # digest above is an opaque hash, so this is the only
+                    # readable record that e.g. msg.sender was consumed.
+                    derived_from=arg_origins(args_union),
                 )
             }
         )
@@ -788,30 +805,22 @@ class ProvenanceEngine:
         # Slot a getter-less address accessor sload()s, so resolution can read
         # the live value even though the accessor has no public getter.
         accessor_slot = _constant_storage_slot_for_accessor(callee)
-        # Cycle / depth guard.
+        args_union = self._union_of_args(getattr(ir, "arguments", ()))
+        # Cycle / depth guard. ``derived_from`` carries the readable argument
+        # provenance next to the opaque digest (A1 Part B): the un-lowerable
+        # assembly-backed role read consumed the caller, and without this the
+        # fact was gone by the time a leaf was built.
         call_tag = Source(
             kind="view_call",
             callee=callee_name,
             callee_signature=callee_name,
             callee_selector=_selector_for_signature(callee_name),
-            callee_args_digest=_digest(self._union_of_args(getattr(ir, "arguments", ()))),
+            callee_args_digest=_digest(args_union),
             storage_slot=accessor_slot,
+            derived_from=arg_origins(args_union),
         )
         if callee is None or len(self._call_stack) >= self.internal_call_depth or callee_name in self._call_stack:
-            args_union = self._union_of_args(getattr(ir, "arguments", ()))
-            tag = frozenset(
-                {
-                    Source(
-                        kind="view_call",
-                        callee=callee_name,
-                        callee_args_digest=_digest(args_union),
-                        callee_signature=callee_name,
-                        callee_selector=_selector_for_signature(callee_name),
-                        storage_slot=accessor_slot,
-                    )
-                }
-            )
-            return self.provenance.set(self._var_name(ir.lvalue), tag)
+            return self.provenance.set(self._var_name(ir.lvalue), frozenset({call_tag}))
         # Recurse into callee's IR with bindings.
         bindings: dict[str, SourceSet] = {}
         for param, arg in zip(callee.parameters, getattr(ir, "arguments", ())):

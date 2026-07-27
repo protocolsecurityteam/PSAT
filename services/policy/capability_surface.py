@@ -70,6 +70,92 @@ def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySur
     return "not_determined"
 
 
+#: Adapter trace steps that resolve a ROLE-keyed authority. ``solmate_roles_authority``
+#: names the role ids that carry the capability, so a single-role read is a witnessed
+#: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
+#: (CONTROLLER_RESOLUTION_SPEC §3.2 — it probes the gate, never a role name), so a row
+#: resolved by it is role-gated with the role NOT determined.
+_ROLE_WITNESSING_TRACE_STEP = "solmate_roles_authority"
+_ROLE_DISSOLVING_TRACE_STEPS = frozenset({"enumerable_role_store"})
+
+
+def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Witnessed ``(role, principals)`` grants for one capability — the role half
+    of inv 3's ``(capability, principal)`` scoring unit, which did not exist in
+    the persisted plane (``effective_functions.authority_roles`` was the literal
+    ``[]`` on 1773/1773 rows).
+
+    Three states, and a consumer must tell them apart:
+
+    * **non-empty list** — proven present. Emitted only where an adapter trace
+      names exactly ONE role id for the enumerated set: every member of that set
+      then holds that role, because it is the only role carrying the capability.
+    * ``None`` — **not determined**. Either a role-keyed authority whose role
+      identity the adapter dissolves by design (``enumerable_role_store``), or a
+      multi-role capability (``roles: [1, 2]``) where WHICH role each member
+      holds is not recoverable — attributing every member to every role would be
+      the over-claim. The function IS role-gated; the role is unknown.
+    * ``[]`` — proven absent: no role-keyed authority was witnessed at all
+      (a plain owner equality, a public path, an unsupported gate).
+
+    Reads only the persisted capability shape — no wire, no DB.
+    """
+    grants: dict[int, list[str]] = {}
+    not_determined = False
+
+    def visit(node: Any) -> None:
+        nonlocal not_determined
+        if not isinstance(node, dict):
+            return
+        for step in node.get("trace") or []:
+            if not isinstance(step, dict):
+                continue
+            name = step.get("step")
+            if name in _ROLE_DISSOLVING_TRACE_STEPS:
+                not_determined = True
+                continue
+            if name != _ROLE_WITNESSING_TRACE_STEP:
+                continue
+            roles = [r for r in (step.get("roles") or []) if isinstance(r, int)]
+            if not roles:
+                # A public Solmate capability (no role carries it) is not a role
+                # gate — nothing witnessed, nothing undetermined.
+                continue
+            members = node.get("members")
+            if node.get("kind") != "finite_set" or not isinstance(members, list) or not members:
+                not_determined = True
+                continue
+            if len(roles) > 1:
+                not_determined = True
+                continue
+            grants.setdefault(roles[0], [])
+            for member in members:
+                if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
+                    lowered = member.lower()
+                    if lowered not in grants[roles[0]]:
+                        grants[roles[0]].append(lowered)
+        for child in _child_dicts(node):
+            visit(child)
+        signer = node.get("signer")
+        if isinstance(signer, dict):
+            visit(signer)
+
+    visit(cap_dict)
+    if not_determined:
+        return None
+    return [
+        {
+            "role": role,
+            "principals": [
+                {"address": address, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+                for address in members
+            ],
+        }
+        for role, members in sorted(grants.items())
+        if members
+    ]
+
+
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
     if surface.authority_public:
         return "public"

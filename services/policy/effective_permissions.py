@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import (
+    AuthorityRoleGrant,
     EffectiveFunctionPermission,
     EffectivePermissions,
     PrincipalResolution,
@@ -27,6 +28,7 @@ from schemas.effective_permissions import (
     ResolvedPrincipal,
 )
 from services.policy.capability_surface import (
+    capability_role_grants,
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
@@ -731,13 +733,24 @@ def build_effective_permissions(
             else function_record.get("action_summary", "Performs a contract action.")
         )
 
+        # Three-state role half (see ``capability_role_grants``): the
+        # capability's own verdict replaces the historical literal ``[]`` that
+        # every one of 1,773 persisted rows carried. ``None`` is "no capability
+        # was resolved for this function, so nothing was read" — not the
+        # proven-absent ``[]``.
+        resolved_capability = capability_dicts.get(fn_signature)
+        authority_roles_out = cast(
+            "list[AuthorityRoleGrant] | None",
+            capability_role_grants(resolved_capability) if resolved_capability is not None else None,
+        )
+
         function_permission: EffectiveFunctionPermission = {
             "function": fn_signature,
             "abi_signature": abi_signature,
             "selector": selector,
             "direct_owner": direct_owner,
             "authority_public": False,
-            "authority_roles": [],
+            "authority_roles": authority_roles_out,
             "controllers": controller_grants,
             "effect_targets": effect_targets_out,
             "effect_labels": effect_labels_out,

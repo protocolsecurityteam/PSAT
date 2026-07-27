@@ -100,6 +100,7 @@ from .provenance import (
     ProvenanceMap,
     Source,
     SourceSet,
+    arg_origins,
     is_top,
 )
 from .revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, Polarity, RevertDetector, RevertGate
@@ -522,6 +523,16 @@ def _build_subtree_from_value(
 
     leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
     if leaf is None:
+        # A1 Part A: before collapsing to the bare-bool fallback, check
+        # whether the gate lives in a probe-able single-address-param public
+        # view on the analyzed contract whose argument is the caller — the
+        # self-gate shape (RoleRegistry.onlyUpgradeTimelock). Emitting the
+        # external_set descriptor hands the un-lowerable gate to the same
+        # role-store adapter that already answers it correctly when the
+        # identical gate is an EXTERNAL call (weETH's modifier).
+        self_gate = _build_self_gate_leaf(prov, gate, function)
+        if self_gate is not None:
+            return make_leaf_node(self_gate)
         # Defining IR isn't one we have a typed builder for (Assignment,
         # TypeConversion, Phi, etc.). The condition still gates an
         # if-revert / require, so it MUST be bool-typed. Fall back to
@@ -572,6 +583,10 @@ def _build_leaf_from_gate(
 
     leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
     if leaf is None:
+        # A1 Part A — same self-gate attempt as _build_subtree_from_value.
+        self_gate = _build_self_gate_leaf(prov, gate, function)
+        if self_gate is not None:
+            return self_gate
         # Phi / Assignment defining IRs forward bare values; build a
         # truthy/falsy leaf from the original condition. This covers
         # ``require(!flag)`` where flag is a bool state var read
@@ -621,8 +636,70 @@ def _build_internal_call_leaf(
         return None
     callee, sub_prov, return_value, inner = resolved
     if inner is None:
-        return _build_truthy_leaf(return_value, sub_prov, gate)
+        # The callee's return is not lowerable to a typed leaf (a named return
+        # assigned inside ``assembly`` — Solady ``EnumerableRoles``). The leaf
+        # is built in the CALLEE's frame, where the caller the CALL SITE passed
+        # in is not represented at all: that is how A1's caller vanished.
+        # Re-attach the call-site argument origins (A1 Part B) so the
+        # caller-taint default can see them.
+        leaf = _build_truthy_leaf(return_value, sub_prov, gate)
+        return _attach_call_site_arg_origins(leaf, ir, prov)
     return _classify_leaf_from_ir(inner, sub_prov, gate, callee)
+
+
+def _call_site_arg_origins(ir: Any, caller_prov: ProvenanceMap) -> set[Source]:
+    """Flattened origins of an internal call's arguments, read in the CALLER's
+    frame. Members carry ``derived_from=None`` (``arg_origins`` strips them),
+    so nesting stays bounded at one level."""
+    origins: set[Source] = set()
+    for arg in getattr(ir, "arguments", ()) or ():
+        origins.update(arg_origins(_operand_value_provenance(arg, caller_prov)))
+    return origins
+
+
+def _attach_call_site_arg_origins_to_tree(tree: PredicateTree, ir: Any, caller_prov: ProvenanceMap) -> PredicateTree:
+    """``_attach_call_site_arg_origins`` over every leaf of a subtree built in
+    the callee's frame."""
+    if not isinstance(tree, dict):
+        return tree
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if isinstance(leaf, dict):
+            _attach_call_site_arg_origins(cast(LeafPredicate, leaf), ir, caller_prov)
+        return tree
+    for child in tree.get("children") or []:
+        _attach_call_site_arg_origins_to_tree(child, ir, caller_prov)
+    return tree
+
+
+def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: ProvenanceMap) -> LeafPredicate:
+    """Union the CALL-SITE argument origins into the leaf's operand
+    ``derived_from`` (A1 Part B).
+
+    Only touches operands that already publish ``derived_from`` (``computed`` /
+    ``view_call`` / ``external_call``), so it neither invents the field on an
+    operand where absence means "does not apply" nor changes an operand's
+    identity — a state-var attribution stays a state-var attribution. Sorted
+    by the published key for cross-process determinism (inv 11/12).
+
+    ``references_msg_sender`` is deliberately NOT set: the caller reached the
+    gate through a call argument, not as a direct operand, and the static flag
+    is read as the latter.
+    """
+    origins = _call_site_arg_origins(ir, caller_prov)
+    if not origins:
+        return leaf
+    for op in leaf.get("operands") or []:
+        if op.get("source") not in ("computed", "view_call", "external_call"):
+            continue
+        existing = op.get("derived_from") or []
+        merged = list(existing)
+        for origin in sorted(origins, key=_published_source_key):
+            rendered = _source_to_operand(origin, nested=True)
+            if rendered not in merged:
+                merged.append(rendered)
+        op["derived_from"] = merged
+    return leaf
 
 
 def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> PredicateTree | None:
@@ -733,6 +810,11 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
             return None
     if op_name is None or not children:
         return None
+    # Every child above was built in the CALLEE's frame, where the caller the
+    # call site passed in has no representation — A1's loss. Re-attach the
+    # call-site argument origins onto the children's collapsing operands
+    # (A1 Part B) so the caller-taint default can see them.
+    children = [_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children]
     # Polarity propagates the same way as the inline AND/OR case in
     # _build_subtree_from_value's main path.
     if gate.polarity == "allowed_when_true":
@@ -2038,6 +2120,77 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     return leaf
 
 
+def _build_self_gate_leaf(prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate | None:
+    """A1 Part A — the SELF-gate descriptor for an un-lowerable caller gate.
+
+    Emitted only when leaf lowering has already FAILED (the classify fallback)
+    and the gate lives in a function the resolver can probe directly:
+
+      * public/external ``view`` (an ``eth_call fn(candidate)`` reverts iff the
+        gate rejects the candidate — the probed unit is the whole function, so
+        ``operator`` is always ``truthy`` regardless of the inner polarity);
+      * exactly one ``address`` parameter;
+      * that parameter carries caller taint in this frame (the call chain
+        bound it to ``msg.sender`` / ``tx.origin``);
+      * declared on a contract, not a library (a library function has no
+        selector on the analyzed deployment).
+
+    The emitted leaf mirrors the external-call form of the identical gate
+    (weETH's ``roleRegistry.onlyUpgradeTimelock(msg.sender)``): kind
+    ``external_bool`` with an ``external_set`` descriptor, so the enumerable
+    role-store adapter — which already answers this gate correctly for every
+    OTHER contract — can fold + probe it. The authority is ``self_address``,
+    resolved to the analyzed deployment at evaluation time. When no adapter
+    recognizes the store, the resolver settles to a gated external check —
+    still strictly better evidence than the bare-bool business fallback this
+    replaces, which projected PUBLIC (RoleRegistry.upgradeTo)."""
+    fn = gate.containing_function or operating_fn
+    if fn is None:
+        return None
+    if getattr(fn, "visibility", None) not in ("public", "external"):
+        return None
+    if not getattr(fn, "view", False):
+        return None
+    declarer = getattr(fn, "contract_declarer", None) or getattr(fn, "contract", None)
+    if declarer is None or getattr(declarer, "is_library", False):
+        return None
+    params = list(getattr(fn, "parameters", []) or [])
+    if len(params) != 1 or str(getattr(params[0], "type", "")) != "address":
+        return None
+    caller_kinds = ("msg_sender", "tx_origin")
+    param_sources = _operand_value_provenance(params[0], prov)
+    if not any(getattr(s, "kind", None) in caller_kinds for s in param_sources):
+        return None
+    signature = getattr(fn, "full_name", None)
+    if not (isinstance(signature, str) and "(" in signature and signature.endswith(")")):
+        return None
+    selector = _selector_for_signature(signature)
+    caller_operand: Operand = {"source": "msg_sender"}
+    leaf = _make_leaf(
+        kind="external_bool",
+        operator="truthy",
+        operands=[caller_operand],
+        gate=gate,
+    )
+    leaf["authority_role"] = "delegated_authority"
+    leaf["callee_state_mutability"] = "view"
+    leaf["gate_kind"] = gate.kind
+    leaf["callee_signature"] = signature
+    leaf["set_descriptor"] = cast(
+        SetDescriptor,
+        {
+            "kind": "external_set",
+            "key_sources": [dict(caller_operand)],
+            "authority_contract": {"address_source": {"source": "self_address"}},
+            "callee_function": getattr(fn, "name", None),
+            "callee_signature": signature,
+            "callee_selector": selector,
+        },
+    )
+    leaf["expression"] = f"{getattr(fn, 'name', signature)}(msg.sender)"
+    return leaf
+
+
 def _callee_signature(ir: Any) -> str | None:
     """Best-effort canonical ABI signature for a HighLevelCall callee."""
     fn = getattr(ir, "function", None)
@@ -2286,9 +2439,12 @@ def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
         op["computed_kind"] = source.computed_kind
     if source.block_context_kind is not None:
         op["block_context_kind"] = source.block_context_kind
-    if source.kind == "computed" and not nested:
-        # Always emitted on a computed operand, and only there, so absence is
-        # "the question does not apply" rather than a silent third meaning.
+    if source.kind in ("computed", "view_call", "external_call") and not nested:
+        # Always emitted on a computed / view_call / external_call operand, and
+        # only there, so absence is "the question does not apply" rather than a
+        # silent third meaning. (view_call/external_call added by A1 Part B:
+        # the call's argument provenance — the caller, in the RoleRegistry
+        # shape — must survive onto the operand; the digest alone is opaque.)
         # ``null`` is not-determined; a list (possibly empty) is determined.
         # ``nested`` renders the members, whose own ``derived_from`` was
         # stripped by ``arg_origins`` after being spliced into this list —

@@ -571,6 +571,13 @@ def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str 
         value = (ctx.state_var_values or {}).get(name) if isinstance(name, str) else None
         if _is_nonzero_address(value):
             return value.lower()
+    if source.get("source") == "self_address":
+        # A1 Part A: a SELF-gate descriptor (the un-lowerable role gate lives
+        # on the analyzed contract itself — RoleRegistry.onlyUpgradeTimelock).
+        # Resolve to the analyzed deployment so the probe hits real storage.
+        value = ctx.contract_address
+        if _is_nonzero_address(value):
+            return value.lower()
     return None
 
 

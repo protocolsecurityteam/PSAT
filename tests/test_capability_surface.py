@@ -137,3 +137,103 @@ def test_openness_is_total_and_three_valued():
         "nd_lower_bound_empty": "not_determined",
         "nd_unknown_kind": "not_determined",
     }
+
+
+# ---------------------------------------------------------------------------
+# authority_roles — the role half of inv 3's (capability, principal) unit
+# (W2-B item 8). It was the literal [] on 1773/1773 persisted rows.
+# ---------------------------------------------------------------------------
+
+
+def _solmate_cap(roles, members):
+    return {
+        "kind": "finite_set",
+        "members": list(members),
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+        "trace": [
+            {
+                "step": "solmate_roles_authority",
+                "roles": list(roles),
+                "authority": "0x" + "1" * 40,
+                "target": "0x" + "2" * 40,
+                "selector": "0xdeadbeef",
+            }
+        ],
+    }
+
+
+def test_role_grants_witnessed_for_single_role_capability():
+    from services.policy.capability_surface import capability_role_grants
+
+    grants = capability_role_grants(_solmate_cap([2], [ADDR_A, ADDR_B]))
+    assert grants == [
+        {
+            "role": 2,
+            "principals": [
+                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}},
+                {"address": ADDR_B, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}},
+            ],
+        }
+    ]
+
+
+def test_role_grants_not_determined_for_multi_role_capability():
+    """Two roles carry the capability, so WHICH role each member holds is not
+    recoverable — attributing every member to every role is the over-claim."""
+    from services.policy.capability_surface import capability_role_grants
+
+    assert capability_role_grants(_solmate_cap([1, 2], [ADDR_A])) is None
+
+
+def test_role_grants_not_determined_when_role_identity_is_dissolved():
+    """The enumerable role-store probes the gate and never a role name
+    (CONTROLLER_RESOLUTION_SPEC §3.2): role-gated, role unknown."""
+    from services.policy.capability_surface import capability_role_grants
+
+    cap = {
+        "kind": "finite_set",
+        "members": [ADDR_A],
+        "membership_quality": "exact",
+        "trace": [{"step": "enumerable_role_store", "authority": "0x" + "3" * 40}],
+    }
+    assert capability_role_grants(cap) is None
+
+
+def test_role_grants_empty_when_no_role_authority_witnessed():
+    """Proven absent: a plain owner equality / public path is not role-gated —
+    this is the ONLY shape that may read as ``[]``."""
+    from services.policy.capability_surface import capability_role_grants
+
+    assert capability_role_grants({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}) == []
+    assert capability_role_grants({"kind": "conditional_universal", "conditions": []}) == []
+    assert capability_role_grants({"kind": "unsupported", "unsupported_reason": "x"}) == []
+
+
+def test_role_grants_public_solmate_capability_is_not_role_gated():
+    """``roles: []`` on the trace means no role carries the capability (it is
+    public) — nothing witnessed and nothing undetermined."""
+    from services.policy.capability_surface import capability_role_grants
+
+    assert capability_role_grants(_solmate_cap([], [])) == []
+
+
+def test_role_grants_walk_composites_and_fail_closed_on_roleless_node():
+    from services.policy.capability_surface import capability_role_grants
+
+    composite = {
+        "kind": "OR",
+        "children": [_solmate_cap([8], [ADDR_A]), {"kind": "conditional_universal", "conditions": []}],
+    }
+    assert capability_role_grants(composite) == [
+        {
+            "role": 8,
+            "principals": [
+                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+            ],
+        }
+    ]
+    # A role-naming trace on a node carrying NO member list cannot attribute the
+    # role to anyone — not-determined, never an empty grant.
+    orphan = {"kind": "external_check_only", "trace": _solmate_cap([8], [])["trace"]}
+    assert capability_role_grants(orphan) is None

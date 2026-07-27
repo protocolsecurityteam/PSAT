@@ -69,6 +69,13 @@ def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:
     caller), while the static flag is stamped pre-inlining and would
     over-taint bound frames.
     """
+    return _leaf_has_direct_caller_source(leaf) or leaf_caller_taint_is_collapsed(leaf)
+
+
+def _leaf_has_direct_caller_source(leaf: LeafPredicate) -> bool:
+    """Caller taint the leaf states DIRECTLY: a caller-sourced operand or
+    membership key. The shape of such a gate is readable, so
+    ``is_permissionless_caller_shape`` may classify it."""
     for op in leaf.get("operands") or []:
         if (op or {}).get("source") in _CALLER_TAINT_SOURCES:
             return True
@@ -79,11 +86,54 @@ def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:
     return False
 
 
+def leaf_caller_taint_is_collapsed(leaf: LeafPredicate) -> bool:
+    """True iff the ONLY evidence of caller-dependence is an origin recorded
+    under a collapsing operand's ``derived_from`` (A1 Part B).
+
+    A ``view_call`` / ``computed`` operand collapses its inputs;
+    ``derived_from`` is the readable record of what reached it (the digest
+    beside it is an opaque hash). A caller consumed as an ARGUMENT of the read
+    the gate tests is caller-dependence just as a direct operand is — this is
+    the taint an assembly-backed role read (Solady
+    ``hasRole(address,uint256)``) hashed away, letting the earned-public arm
+    publish ``RoleRegistry.upgradeTo`` as public over a real timelock gate.
+
+    ``None``/absent ``derived_from`` stays not-determined (no taint claim).
+    ``external_call`` operands are deliberately excluded: their mutability is
+    unknown at the operand level and the value-movement canary rule ("absent
+    mutability stays permissionless") already governs that shape, so a
+    ``require(target.pull(msg.sender, …))`` result must not become a
+    manufactured gate. An inlined bound frame yields ``subject="bound"``
+    downstream and never blocks a root public path, so this cannot over-gate
+    an intermediate's side condition.
+    """
+    if _leaf_has_direct_caller_source(leaf):
+        return False
+    for op in leaf.get("operands") or []:
+        if (op or {}).get("source") not in ("view_call", "computed"):
+            continue
+        for origin in (op or {}).get("derived_from") or []:
+            if (origin or {}).get("source") in _CALLER_TAINT_SOURCES:
+                return True
+    return False
+
+
 def is_permissionless_caller_shape(leaf: LeafPredicate) -> bool:
     """True iff a caller-tainted gate matches a known permissionless shape
     (so it may open to ``conditional_universal``). See the module docstring
     for the shape-by-shape rationale. Callers must already have established
-    caller-taint; this function only discriminates the shape."""
+    caller-taint; this function only discriminates the shape.
+
+    A leaf whose caller-dependence is visible ONLY through a collapsing
+    operand's ``derived_from`` is never classified permissionless: every arm
+    below is a positive judgement about a shape (which operator, against
+    what), and there the comparison the gate performs was never lowered — the
+    operand is the opaque result of a read the lifter could not model.
+    Claiming a permissionless shape over an unread comparison is the
+    absence-as-proof error itself, so it fails closed (A1 Part B).
+    """
+    if leaf_caller_taint_is_collapsed(leaf):
+        return False
     operator = leaf.get("operator")
     kind = leaf.get("kind")
 
