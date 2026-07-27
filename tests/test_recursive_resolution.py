@@ -25,6 +25,27 @@ pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_classifier_rpc
 
 
 @pytest.fixture(autouse=True)
+def _default_classify(monkeypatch):
+    """Default the address classifier to the generic answer.
+
+    An analysed contract's node now takes its ``resolved_type`` from the
+    classifier instead of a hardcoded ``"contract"``, so every walk classifies
+    at least its root. Tests that care about a specific classification override
+    this in-body (monkeypatch inside the test wins over an autouse fixture);
+    this keeps the rest off the wire — without it the offline guard reports
+    blocked ``rpc.example`` calls.
+    """
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_failed_node_name(monkeypatch):
     """The failed-node name lookup fetches verified source from Etherscan; default
     to None offline (tests that assert a specific name override this in-body)."""
@@ -330,11 +351,11 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("unknown", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("unknown", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}, True),
     )
 
     graph, _nested = resolve_control_graph(
@@ -831,7 +852,7 @@ def test_resolve_control_graph_skips_self_referential_role_principal_edges(monke
 
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     graph, _nested = resolve_control_graph(
@@ -1005,11 +1026,11 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     graph, nested = resolve_control_graph(
@@ -1133,11 +1154,11 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     with pytest.raises(StorageContentNotDetermined):
@@ -1222,11 +1243,11 @@ def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     graph, nested = resolve_control_graph(
@@ -1318,3 +1339,103 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     # The callee is still a NODE — it is a real contract the subject calls.
     # Demotion removes the control claim, not the address.
     assert any(node["address"] == callee_address for node in graph["nodes"])
+
+
+def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):
+    """An analysed contract must not be stamped with the generic type.
+
+    ``_ensure_node`` was called with a hardcoded ``resolved_type="contract"``
+    for every analysed node, so a timelock's OWN node came back typed
+    ``contract`` with its ``delay`` missing. Whether the type survived depended
+    on walk order — it did only when the node was later re-ensured as a
+    controller of another contract.
+
+    Positive control: the timelock root keeps ``timelock`` + ``delay``.
+    Negative control: a plain contract analysed the same way stays
+    ``contract`` — the fix must not invent a type the classifier did not give.
+    """
+    timelock_address = "0x1111111111111111111111111111111111111111"
+    plain_address = "0x2222222222222222222222222222222222222222"
+
+    plain_bundle = _bundle(
+        plain_address,
+        "PlainLogic",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": plain_address,
+            "contract_name": "PlainLogic",
+            "block_number": 2,
+            "controller_values": {},
+        },
+    )
+    root_bundle = _bundle(
+        timelock_address,
+        "EtherFiTimelock",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": timelock_address,
+            "contract_name": "EtherFiTimelock",
+            "block_number": 1,
+            "controller_values": {
+                "external_contract:logic": {
+                    "source": "logic",
+                    "value": plain_address,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "contract",
+                    "details": {"address": plain_address},
+                    "authority_provenance": "caller_gate",
+                }
+            },
+        },
+    )
+
+    def fake_classify(rpc_url, address, block_tag="latest", **_kw):
+        if address == timelock_address:
+            return "timelock", {"address": timelock_address, "delay": 259200, "owner": None}
+        return "contract", {"address": address}
+
+    monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", lambda *a, **k: plain_bundle)
+    monkeypatch.setattr("services.resolution.recursive.classify_resolved_address", fake_classify)
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=2,
+    )
+    nodes = {node["address"]: node for node in graph["nodes"]}
+
+    assert nodes[timelock_address]["analyzed"] is True
+    assert nodes[timelock_address]["resolved_type"] == "timelock"
+    assert nodes[timelock_address]["details"]["delay"] == 259200
+    assert nodes[plain_address]["resolved_type"] == "contract"
+
+
+def test_generic_type_never_overwrites_a_specific_one():
+    """The rank fold, directly: ``contract`` is the generic answer and must not
+    replace a classification that says more. Equal ranks keep last-write-wins."""
+    nodes: dict = {}
+    address = "0x1111111111111111111111111111111111111111"
+
+    recursive._ensure_node(nodes, address=address, resolved_type="timelock", label="TL", depth=1, node_type="contract")
+    recursive._ensure_node(
+        nodes, address=address, resolved_type="contract", label="TL", depth=0, node_type="contract", analyzed=True
+    )
+    node = nodes[f"address:{address}"]
+    assert node["resolved_type"] == "timelock"
+    assert node["analyzed"] is True
+
+    # unknown must not overwrite a real answer either, and a specific type may
+    # still replace the generic one (the direction that adds information).
+    recursive._ensure_node(nodes, address=address, resolved_type="unknown", label="TL", depth=1, node_type="contract")
+    assert nodes[f"address:{address}"]["resolved_type"] == "timelock"
+
+    other = "0x2222222222222222222222222222222222222222"
+    recursive._ensure_node(nodes, address=other, resolved_type="contract", label="C", depth=1, node_type="contract")
+    recursive._ensure_node(nodes, address=other, resolved_type="safe", label="C", depth=1, node_type="principal")
+    assert nodes[f"address:{other}"]["resolved_type"] == "safe"

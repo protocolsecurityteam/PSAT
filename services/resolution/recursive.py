@@ -465,6 +465,30 @@ def _materialize_contract_artifacts(
     }
 
 
+def _resolved_type_rank(resolved_type: str | None) -> int:
+    """How much a ``resolved_type`` claims. A more specific answer may replace a
+    vaguer one; the reverse is a loss of information.
+
+    ``"contract"`` is the GENERIC answer — "there is code here" — and every
+    analysed node was previously stamped with it unconditionally, so an address
+    already classified ``timelock`` (carrying its ``delay``) was overwritten the
+    moment the walk analysed it. Whether the type survived came down to walk
+    order: it did only when the node happened to be re-ensured as a controller
+    of a LATER-processed contract. 41 of the local corpus's 47 timelock nodes
+    survived that way; the rest read ``contract``.
+
+    Equal ranks keep last-write-wins, which is the pre-existing behaviour for
+    two specific classifications of the same address.
+    """
+    if not resolved_type:
+        return -1
+    if resolved_type == "unknown":
+        return 0
+    if resolved_type == "contract":
+        return 1
+    return 2
+
+
 def _ensure_node(
     nodes: dict[str, ResolvedGraphNode],
     *,
@@ -503,7 +527,7 @@ def _ensure_node(
     if analyzed:
         current["analyzed"] = True
         current["node_type"] = "contract"
-    if resolved_type != "unknown" or not current.get("resolved_type"):
+    if _resolved_type_rank(resolved_type) >= _resolved_type_rank(current.get("resolved_type")):
         current["resolved_type"] = resolved_type  # type: ignore[typeddict-item]
     if label:
         current["label"] = label
@@ -1134,11 +1158,26 @@ def resolve_control_graph(
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
             contract_name = str(subject.get("name", address))
+            # The classifier's answer, not a hardcoded "contract". A timelock
+            # that is itself analysed used to lose its type AND its ``delay``
+            # here: EtherFiTimelock's own node read ``resolved_type=contract``
+            # with no delay, and inv 9 makes that delay credit-bearing.
+            # ``_cached_classify`` is the same memo the controller/principal
+            # wiring already uses, so a nested contract reached as someone's
+            # controller is a cache hit; a root costs one classification.
+            analyzed_type, analyzed_details = _cached_classify(address)
             node_details: dict[str, object] = {"address": address}
+            if analyzed_type in {"", "unknown"}:
+                # Classification did not answer. "contract" is what we DO know
+                # (the artifacts materialized), and it is the generic rank, so
+                # it cannot overwrite a specific type set elsewhere.
+                analyzed_type = "contract"
+            else:
+                node_details.update(analyzed_details)
             contract_node_id = _ensure_node(
                 nodes,
                 address=address,
-                resolved_type="contract",
+                resolved_type=analyzed_type,
                 label=contract_name,
                 depth=depth,
                 node_type="contract",
