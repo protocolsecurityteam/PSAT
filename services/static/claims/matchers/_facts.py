@@ -196,6 +196,35 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 _MEMBERSHIP_SET_KINDS = frozenset({"mapping_membership", "array_contains", "external_set"})
 _EXTERNAL_GATE_KINDS = frozenset({"external_call_revert", "try_catch_revert"})
 
+# Whether each guard kind PINS the destination — the three-state answer a
+# ``constrained`` verdict carries as ``pins`` (R1: a consumer must be able to
+# tell proven-pins from proven-does-not-pin from not-determined, because only
+# the first may soften the caller-chosen / theft-shaped reading downstream):
+#
+#   True   the guard confines the parameter to a set the caller did not write
+#          (an allowlist, a hash/signature commitment, equality vs storage).
+#   False  the guard provably does NOT pin: a denylist excludes a set and
+#          leaves the rest of the address space freely chosen; an ordering
+#          bound never confines an identity.
+#   None   the guard is real but its set semantics are another contract's
+#          (``external_call_revert``): a ``nonBlacklisted(addr)`` blacklist and
+#          a ``deployedEtherFiNodes(addr)`` allowlist present the identical
+#          revert-surface shape here, so whether it pins is NOT determined —
+#          and on the local artifacts every ``constrained`` flow row (4/4,
+#          EtherFiRedemptionManager.redeem*) is this kind and is in fact a
+#          blacklist. Publishing those as if they pinned dropped the
+#          caller-chosen signal on all four (review round 2, violation R3).
+_GUARD_PINS: dict[str, bool | None] = {
+    "mapping_allowlist": True,
+    "hash_commitment": True,
+    "signature_witness": True,
+    "equality_vs_storage": True,
+    "equality_vs_caller": True,
+    "denylist": False,
+    "numeric_bound": False,
+    "external_call_revert": None,
+}
+
 # An ``unsupported`` leaf publishes ``operands: []`` and ``parameter_indices:
 # []`` unconditionally (``predicates._unsupported_leaf``), so its silence about
 # parameters is a construction artifact and it must normally block the
@@ -337,9 +366,9 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
 
     selector = ctx.canonical_selector(function)
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
-        return {"state": "constrained", "guard": "hash_commitment", "binding": "standard_gate"}
+        return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
     if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
-        return {"state": "constrained", "guard": "signature_witness", "binding": "standard_gate"}
+        return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     return None
 
 
@@ -635,6 +664,9 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
             verdict: dict[str, Any] = {
                 "state": "constrained",
                 "guard": guard,
+                # Three-state by construction: an unmapped guard kind must not
+                # read as pinning, so absence from the map is None, not False.
+                "pins": _GUARD_PINS.get(guard),
                 "binding": "derived_from" if index in derived and index not in direct else "operand",
                 "leaf_path": list(path),
             }

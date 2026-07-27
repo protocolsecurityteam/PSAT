@@ -384,7 +384,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     // proven, never that the destination is safe or fixed.
     const gated = flowOut(
       { kind: "param", tier: "dispositive_ast" },
-      { constraint: { state: "constrained", guard: "mapping_allowlist" } },
+      { constraint: { state: "constrained", guard: "mapping_allowlist", pins: true } },
     );
     expect(qualifierForClaims({ claims: [gated] })).toBe("(destination gated by a guard)");
   });
@@ -416,7 +416,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("never reads a gated or undetermined param path as (fixed destination)", () => {
-    for (const constraint of [{ state: "constrained", guard: "hash_commitment" }, { state: "not_determined" }]) {
+    for (const constraint of [{ state: "constrained", guard: "hash_commitment", pins: true }, { state: "not_determined" }]) {
       const fn = {
         claims: [{
           claim_id: "flow.out",
@@ -440,7 +440,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     const base = CLAIM_VOCAB["flow.out"].tone;
     const gated = flowOut(
       { kind: "param", tier: "dispositive_ast" },
-      { constraint: { state: "constrained", guard: "equality_vs_storage" } },
+      { constraint: { state: "constrained", guard: "equality_vs_storage", pins: true } },
     );
     const open = flowOut({ kind: "param", tier: "dispositive_ast" }, { constraint: { state: "not_determined" } });
     expect(toneForClaims({ claims: [gated] })).toBe(base);
@@ -448,6 +448,41 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     // ...and the calm tint stays off too: neither is proven-fixed.
     expect(toneForClaims({ claims: [gated] })).not.toBe("#8f947a");
     expect(toneForClaims({ claims: [open] })).not.toBe("#8f947a");
+  });
+
+  it("keeps the caller-chosen wording AND the hazard tint for a proven non-pinning guard (denylist)", () => {
+    // R3, round 2. The producer proved a guard exists and proved it does NOT
+    // pin (pins: false): the destination is freely chosen outside an excluded
+    // set. That IS the theft-shaped fact — the chip and the tint must read
+    // exactly like the unguarded case, with the guard spelled out in the
+    // inspector row, not laundered into "(destination gated by a guard)".
+    const denied = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "denylist", pins: false, binding: "operand" } },
+    );
+    expect(qualifierForClaims({ claims: [denied] })).toBe("(caller-chosen destination)");
+    expect(toneForClaims({ claims: [denied] })).toBe("#a8746a");
+  });
+
+  it("keeps the hazard tint when the guard's pinning is NOT proven (the 4 real external_call_revert rows)", () => {
+    // EtherFiRedemptionManager.redeem*: receiver is gated by an external
+    // nonBlacklisted(address) view call — a blacklist, structurally identical
+    // here to an allowlist. pins is null: not proven either way. Absence of a
+    // pinning proof must not soften the reading (the governing rule), so the
+    // tint stays at the hazard end and the wording claims only what was proven.
+    const checked = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "external_call_revert", pins: null, binding: "operand", leaf_path: [28] } },
+    );
+    expect(qualifierForClaims({ claims: [checked] })).toBe("(destination checked; pinning not proven)");
+    expect(toneForClaims({ claims: [checked] })).toBe("#a8746a");
+    // A legacy constrained verdict with NO pins key reads the same way.
+    const legacy = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "external_call_revert", binding: "operand" } },
+    );
+    expect(qualifierForClaims({ claims: [legacy] })).toBe("(destination checked; pinning not proven)");
+    expect(toneForClaims({ claims: [legacy] })).toBe("#a8746a");
   });
 
   it("does not let a several fold promote a GATED param member to caller-chosen", () => {
@@ -462,7 +497,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
           { kind: "param", tier: "dispositive_ast" },
           { kind: "storage_setter", tier: "dispositive_ast" },
         ],
-        constraint: { state: "constrained", guard: "mapping_allowlist" },
+        constraint: { state: "constrained", guard: "mapping_allowlist", pins: true },
       },
     );
     expect(qualifierForClaims({ claims: [oneOf] })).toBe("(admin-settable destination)");
@@ -1176,8 +1211,26 @@ describe("qualifierForClaims — exec.arbitrary target constraint (A3)", () => {
     // (msg.sender, selector, target). The claim still fires — a forwarded call
     // IS happening — but "arbitrary" overstates it, and this is where the
     // qualification is visible.
-    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "mapping_allowlist" })] }))
+    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "mapping_allowlist", pins: true })] }))
       .toBe("(target gated by mapping_allowlist)");
+  });
+
+  it("leaves the arbitrary sentence standing for a proven non-pinning target guard", () => {
+    // pins: false (a denylist) proves the target is freely chosen outside an
+    // excluded set — the claim's own sentence is accurate as written, so no
+    // softening qualifier appears; the inspector row carries the guard.
+    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "denylist", pins: false })] }))
+      .toBeNull();
+  });
+
+  it("never reads an unproven-pinning target guard as gated", () => {
+    // external_call_revert with pins null/absent (forwardExternalCall's
+    // deployedEtherFiNodes check has this shape): a real guard, set semantics
+    // unknown. "gated by" is reserved for a proven pin.
+    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "external_call_revert", pins: null })] }))
+      .toBe("(target checked; pinning not proven)");
+    expect(qualifierForClaims({ claims: [execArb({ state: "constrained", guard: "external_call_revert" })] }))
+      .toBe("(target checked; pinning not proven)");
   });
 
   it("says not-determined for an open question and for an absent verdict", () => {
@@ -1200,7 +1253,7 @@ describe("claimWitnessFacts — destination constraint row", () => {
           flows: [{
             kind: "callee_erc20_selector",
             target_kind: { kind: "param", tier: "dispositive_ast" },
-            target_constraint: { state: "constrained", guard: "hash_commitment", binding: "derived_from" },
+            target_constraint: { state: "constrained", guard: "hash_commitment", pins: true, binding: "derived_from" },
           }],
           sink_ids: [],
         },
@@ -1222,14 +1275,41 @@ describe("claimWitnessFacts — destination constraint row", () => {
           flows: [{
             kind: "x",
             target_kind: { kind: "param", tier: "dispositive_ast" },
-            target_constraint: { state: "constrained", guard: "denylist", binding: "operand" },
+            target_constraint: { state: "constrained", guard: "denylist", pins: false, binding: "operand" },
           }],
           sink_ids: [],
         },
       }],
     };
     const row = claimWitnessFacts(fn).find((f) => f.label === "Destination constraint");
+    expect(row.value).toContain("checked by a denylist");
     expect(row.value).toContain("does NOT pin the destination");
+  });
+
+  it("never renders 'gated by' for a constrained verdict whose pins is absent", () => {
+    // A payload minted before `pins` existed carries a real guard whose set
+    // semantics are unknown here. Absence of the pinning proof must not become
+    // the proof (round-2 R3): the row reads "checked by", with the caveat.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: {
+          kind: "value_flow",
+          direction: "out",
+          flows: [{
+            kind: "x",
+            target_kind: { kind: "param", tier: "dispositive_ast" },
+            target_constraint: { state: "constrained", guard: "external_call_revert", binding: "operand" },
+          }],
+          sink_ids: [],
+        },
+      }],
+    };
+    const row = claimWitnessFacts(fn).find((f) => f.label === "Destination constraint");
+    expect(row.value).toContain("checked by another contract's revert surface");
+    expect(row.value).toContain("whether it pins the destination is not proven");
+    expect(row.value).not.toContain("gated by");
   });
 
   it("emits NO row when the verdict is absent (says nothing rather than implying a proof)", () => {

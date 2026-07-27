@@ -2848,6 +2848,7 @@
                       "leaf_path": [
                         0
                       ],
+                      "pins": true,
                       "state": "constrained"
                     },
                     "target_kind": {
@@ -3019,6 +3020,7 @@
                       "leaf_path": [
                         0
                       ],
+                      "pins": true,
                       "state": "constrained"
                     },
                     "target_kind": {
@@ -3107,6 +3109,7 @@
                       "leaf_path": [
                         0
                       ],
+                      "pins": true,
                       "state": "constrained"
                     },
                     "target_kind": {

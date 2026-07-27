@@ -154,7 +154,17 @@ logger = logging.getLogger(__name__)
 # a merkle-drop ``account`` the ``verify`` leaf touches, a Teller ``to`` gated
 # by ``beforeTransferData[to].denyTo``) — and the probe shapes its call from
 # that verdict, so those rows must not be served to the new probe.
-EFFECT_CACHE_SCHEMA_VERSION = 14
+# v15: every ``constrained`` destination verdict now carries ``pins`` — the
+# three-state answer to whether the guard PINS the parameter (True allowlist /
+# commitment, False denylist / ordering bound, None external revert surface
+# whose set semantics are another contract's). A v14 row's ``constrained`` was
+# one undifferentiated state that consumers rendered as "gated", which on the
+# local artifacts silently promoted 4/4 blacklist-checked flow destinations
+# (EtherFiRedemptionManager.redeem*) into pinned ones; the probe reads the
+# verdict to decide whether a synthesized destination can be reached at all,
+# so a row minted without the discriminator must not be served to the probe
+# that now expects it.
+EFFECT_CACHE_SCHEMA_VERSION = 15
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

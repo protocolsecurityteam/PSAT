@@ -87,6 +87,7 @@ def test_equality_against_storage_is_constrained_and_names_the_guard():
     verdict = _facts.param_constraint(ctx, "f(address,uint256)", 0)
     assert verdict["state"] == "constrained"
     assert verdict["guard"] == "equality_vs_storage"
+    assert verdict["pins"] is True
     assert verdict["binding"] == "operand"
     assert verdict["leaf_path"] == []
 
@@ -120,6 +121,8 @@ def test_a_denylist_membership_is_recorded_as_a_guard_that_pins_nothing():
     verdict = _facts.param_constraint(ctx, "f(address,uint256)", 0)
     assert verdict["state"] == "constrained"
     assert verdict["guard"] == "denylist"
+    # Proven NON-pinning: the consumer keeps the caller-chosen reading.
+    assert verdict["pins"] is False
 
 
 def test_an_allowlist_upgrades_a_denylist_verdict_on_the_same_parameter():
@@ -204,6 +207,29 @@ def test_the_value_calls_own_revert_surface_does_not_constrain_its_destination()
         flows=[VALUE_FLOW],
     )
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+
+
+def test_an_external_revert_surface_guard_never_claims_to_pin():
+    """``external_call_revert`` is another contract's answer: a blacklist
+    (``nonBlacklisted``) and an allowlist (``deployedEtherFiNodes``) present the
+    identical shape here, so ``pins`` is None — not determined — and a consumer
+    must not soften the caller-chosen reading on it (round-2 R3: all four real
+    ``constrained`` flow rows are this kind and are in fact blacklists)."""
+    ctx = _ctx(
+        _leaf(
+            kind="external_bool",
+            operator="truthy",
+            gate_kind="external_call_revert",
+            callee_state_mutability="view",
+            callee_signature="nonBlacklisted(address)",
+            operands=[_param(0)],
+            parameter_indices=[0],
+        )
+    )
+    verdict = _facts.param_constraint(ctx, "f(address,uint256)", 0)
+    assert verdict["state"] == "constrained"
+    assert verdict["guard"] == "external_call_revert"
+    assert verdict["pins"] is None
 
 
 def test_a_view_callee_gate_is_a_genuine_constraint_not_a_blanket_exclusion():
@@ -689,6 +715,7 @@ def test_the_timelock_standard_gate_commits_every_parameter_of_execute():
         verdict = _facts.param_constraint(ctx, execute, index)
         assert verdict["state"] == "constrained"
         assert verdict["guard"] == "hash_commitment"
+        assert verdict["pins"] is True
         assert verdict["binding"] == "standard_gate"
     # An unresolved index is still not a proof of anything.
     assert _facts.param_constraint(ctx, execute, None) == {"state": "not_determined"}
