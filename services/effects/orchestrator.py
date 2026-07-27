@@ -320,6 +320,7 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             sentinel_calldata=spec.sentinel_calldata,
             value_holders=spec.value_holders,
             acting_balance_usd=spec.acting_balance_usd,
+            protocol_tvl_usd=spec.protocol_tvl_usd,
             gate_ref=spec.gate_ref,
             seeder=ctx.effective_seeder(),
             input_token_hints=spec.input_token_hints,

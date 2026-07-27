@@ -112,7 +112,7 @@ HOLDER = "0x" + "44" * 20
 TOKEN = "0x" + "7a" * 20
 
 
-def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=100.0):
+def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=100.0, tvl=None):
     remaining = list(blocks)
 
     def simulate(calls, block_tag=None, overrides=None):
@@ -128,6 +128,7 @@ def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 1
         simulate_supported=True,
         value_holders=holders,
         acting_balance_usd=floor,
+        protocol_tvl_usd=tvl,
         seeder=(lambda _req: seeding),
         seeded_calldata={18: "0x" + "de" * 4},
         target_payable=True,
@@ -344,3 +345,64 @@ def test_two_holders_moving_two_assets_sum_only_those_two_holdings():
     assert eff.concrete["reach_determined"] is True
     assert eff.concrete["observed_reach_value_usd"] == 125.0
     assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT, other])
+
+
+# ---------------------------------------------------------------------------
+# 4. the corroborating ceiling: reach can never exceed the protocol's own TVL
+# ---------------------------------------------------------------------------
+
+
+def test_a_reach_above_protocol_tvl_is_refused_not_published():
+    """The bad row published $3.489B against a protocol TVL of $3.297B and nothing
+    checked. A sum above the ceiling is not clamped — a clamp invents a number nothing
+    measured — it is REFUSED, with both figures recorded so the contradiction is
+    inspectable."""
+    holdings = (AssetHolding(CONTRACT, TOKEN, 3_488_955_156.06),)
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=3_297_344_734.00)
+
+    assert eff.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
+    assert eff.concrete["reach_determined"] is False
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_rejected_usd"] == 3_488_955_156.06
+    assert eff.concrete["protocol_tvl_usd"] == 3_297_344_734.00
+
+
+def test_a_reach_within_protocol_tvl_passes_and_says_it_was_checked():
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=1_000.0)
+
+    assert eff.concrete["reach_tvl_check"] == "within_protocol_tvl"
+    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["observed_reach_value_usd"] == 100.0
+
+
+def test_no_tvl_snapshot_skips_the_ceiling_out_loud():
+    """R2: the skip is a PUBLISHED state. An absent ceiling that looked like a passed
+    one would be a mitigation that never fires and cannot be told from one that does —
+    the shape this whole effort exists to remove."""
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=None)
+
+    assert eff.concrete["reach_tvl_check"] == "skipped_no_tvl"
+    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["observed_reach_value_usd"] == 100.0
+
+
+def test_a_truncated_holdings_list_names_truncation_as_the_reason():
+    """G6-11 consumer rule: a truncated fetch must LOWER CONFIDENCE, never produce a
+    confident low value. 7 local contracts sit exactly at the fetcher's one-page cap,
+    one of them holding $8.6B, and an asset absent from a capped list may simply never
+    have been fetched."""
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0, holdings_complete=False),)
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(EETH, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=holdings, floor=1.0)
+
+    assert eff.concrete["reach_determined"] is False
+    assert eff.concrete["observed_reach_unvalued_reasons"] == ["holdings_possibly_truncated"]
+    # The COMPLETE control: the same unrecorded asset, from a holder whose list is
+    # whole, is a genuine absence and says so instead.
+    eff2 = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=1.0)
+    assert eff2.concrete["observed_reach_unvalued_reasons"] == ["unrecorded_asset"]

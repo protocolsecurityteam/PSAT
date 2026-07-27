@@ -559,6 +559,7 @@ def value_out(
     static_destination: str | None = None,
     value_holders: Sequence[AssetHolding] = (),
     acting_balance_usd: float = 0.0,
+    protocol_tvl_usd: float | None = None,
     gate_ref: str = "",
     seeder: Seeder | None = None,
     input_token_hints: Sequence[str] = (),
@@ -731,7 +732,7 @@ def value_out(
     # Measured on ``observed``, the execution the VERDICT came from: on a seeded
     # retry the unseeded call reverted and carries no logs at all, so reading
     # reach off it made every seeded verdict indeterminate by construction.
-    _add_reach(concrete, observed, value_holders, acting_balance_usd)
+    _add_reach(concrete, observed, value_holders, acting_balance_usd, protocol_tvl_usd)
     if budget is not None and used is not None:
         budget.record_proven()
     eff = proven(
@@ -1521,6 +1522,7 @@ def _add_reach(
     base_call: SimCallResult,
     value_holders: Sequence[AssetHolding],
     acting_balance_usd: float,
+    protocol_tvl_usd: float | None = None,
 ) -> None:
     """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
     from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
@@ -1593,6 +1595,10 @@ def _add_reach(
     known: dict[tuple[str, str], float | None] = {
         (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
     }
+    # Uniform per holder (see ``AssetHolding.holdings_complete``): whether an asset
+    # ABSENT from ``known`` for that holder is a real absence or an unfetched one.
+    complete: dict[str, bool] = {h.holder.lower(): h.holdings_complete for h in value_holders}
+    unvalued_reasons: set[str] = set()
     for holder in sorted({h.holder.lower() for h in value_holders}):
         for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
             reach_holders.add(holder)
@@ -1600,12 +1606,17 @@ def _add_reach(
             if (holder, asset) not in known:
                 # No balance row at all for this (holder, asset): value left in an
                 # asset we never recorded. G6-11 — absence there conflates "holds
-                # nothing", "not fetched" and "fetch failed", so it is not a zero.
+                # nothing", "not fetched" and "fetch failed", so it is not a zero, and
+                # a holder at the fetcher's page cap gets the more specific reason.
                 unvalued_assets.add(asset)
+                unvalued_reasons.add(
+                    "unrecorded_asset" if complete.get(holder, True) else "holdings_possibly_truncated"
+                )
                 continue
             usd = known[(holder, asset)]
             if usd is None:
                 unvalued_assets.add(asset)  # held, but unpriced
+                unvalued_reasons.add("unpriced_holding")
             else:
                 priced_usd += usd
                 priced_any = True
@@ -1620,11 +1631,56 @@ def _add_reach(
         # Witnessed, and NOT valued. The priced part is a floor, never the answer.
         concrete["reach_determined"] = False
         concrete["observed_reach_unvalued_assets"] = sorted(unvalued_assets)
+        concrete["observed_reach_unvalued_reasons"] = sorted(unvalued_reasons)
         if priced_any:
             concrete["observed_reach_priced_usd"] = priced_usd
         return
+    # CORROBORATING CEILING: no exercise of one function can reach more value than the
+    # protocol holds. The worst published row asserted $3.489B against a protocol TVL
+    # of $3.297B, and nothing checked. A sum above the ceiling is not clamped (a clamp
+    # would invent a number nothing measured) — it is refused, with both figures
+    # recorded so the contradiction is inspectable.
+    tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
+    concrete["reach_tvl_check"] = tvl_state
+    if tvl_state == REACH_TVL_EXCEEDED:
+        logger.warning(
+            "§5b reach %.2f exceeds protocol TVL %.2f — refusing the figure; holders=%s assets=%s",
+            priced_usd,
+            protocol_tvl_usd or 0.0,
+            sorted(reach_holders),
+            sorted(reach_assets),
+        )
+        concrete["reach_determined"] = False
+        concrete["observed_reach_rejected_usd"] = priced_usd
+        concrete["protocol_tvl_usd"] = protocol_tvl_usd
+        return
+    if tvl_note is not None:
+        logger.warning("§5b reach TVL ceiling not applied: %s", tvl_note)
     concrete["reach_determined"] = True
     concrete["observed_reach_value_usd"] = priced_usd
+
+
+# The three answers of the reach-vs-TVL ceiling. ``skipped_no_tvl`` is published, not
+# implied: an absent ceiling must be visible as "not checked" rather than looking like
+# a check that passed (R2 — a gate that silently never fires is not a mitigation).
+REACH_TVL_WITHIN = "within_protocol_tvl"
+REACH_TVL_EXCEEDED = "exceeds_protocol_tvl"
+REACH_TVL_SKIPPED = "skipped_no_tvl"
+
+
+def _reach_tvl_state(reached_usd: float, protocol_tvl_usd: float | None) -> tuple[str, str | None]:
+    """``(state, log_note)`` for the reach-vs-TVL ceiling.
+
+    Reads ONLY a caller-supplied ``defillama_tvl`` figure (see
+    ``selection._protocol_tvl_usd``): ``tvl_snapshots.total_usd`` and
+    ``contract_breakdown`` are NULL on every local row, so a ceiling written against
+    them could never fire.
+    """
+    if protocol_tvl_usd is None or protocol_tvl_usd <= 0:
+        return REACH_TVL_SKIPPED, "no defillama_tvl snapshot for this protocol"
+    if reached_usd > protocol_tvl_usd:
+        return REACH_TVL_EXCEEDED, None
+    return REACH_TVL_WITHIN, None
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

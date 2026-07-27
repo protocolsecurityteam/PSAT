@@ -347,7 +347,13 @@ logger = logging.getLogger(__name__)
 # balance sheet. A pre-v26 row's reach was computed asset-blind: the weETH proxy's
 # $3.489B sheet (99.99% eETH) was attributed to a synthetic native-ETH move, and two
 # rows of that shape carried 64.96% of ALL published reach USD in the DB.
-EFFECT_CACHE_SCHEMA_VERSION = 26
+# v27 (Wave 2 Leg D, A2's envelope): the reach figure now carries the outcome of a
+# corroborating CEILING (``reach_tvl_check`` against ``tvl_snapshots.defillama_tvl`` —
+# never ``total_usd``, which is NULL on every row) and the REASON an asset could not be
+# valued, including a holdings list at the fetcher's one-page cap. A pre-v27 row's
+# reach was never checked against the protocol's own TVL: the worst published row
+# asserted $3.489B against a TVL of $3.297B.
+EFFECT_CACHE_SCHEMA_VERSION = 27
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

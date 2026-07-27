@@ -390,6 +390,9 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
         # about the code.
         "reach_determined": True,
         "observed_reach_assets": [TOKEN.lower()],
+        # The TVL ceiling's outcome travels with the figure it qualifies; this stub
+        # protocol has no snapshot, so the honest answer is "not checked".
+        "reach_tvl_check": "skipped_no_tvl",
     }
 
 

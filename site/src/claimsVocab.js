@@ -1171,6 +1171,7 @@ export function claimWitnessFacts(fn) {
   let reachFloor = null;
   let reachUnvalued = 0;
   let reachPriced = null;
+  let reachRejected = false;
   for (const c of claims) {
     if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
     const w = c.witness;
@@ -1215,6 +1216,9 @@ export function claimWitnessFacts(fn) {
         reachUnvalued = observed.observed_reach_unvalued_assets.length;
       if (typeof observed.observed_reach_priced_usd === "number")
         reachPriced = observed.observed_reach_priced_usd;
+      // The corroborating ceiling refused this figure: it exceeded the protocol's own
+      // measured TVL. Shown as the contradiction it is, never as the number.
+      if (observed.reach_tvl_check === "exceeds_protocol_tvl") reachRejected = true;
     }
   }
   if (destKinds.length)
@@ -1224,7 +1228,12 @@ export function claimWitnessFacts(fn) {
     facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
-  if (reachUnvalued > 0) {
+  if (reachRejected) {
+    facts.push({
+      label: "Reach",
+      value: "not determined (measured figure exceeded protocol TVL and was refused)",
+    });
+  } else if (reachUnvalued > 0) {
     // Witnessed, not valued. Naming the count keeps this apart from both the
     // measured row (a number) and the not-witnessed row (a floor on own balance).
     const priced = formatUsdUpperBound(reachPriced);

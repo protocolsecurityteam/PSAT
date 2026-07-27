@@ -959,6 +959,31 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     });
   });
 
+  it("shows a TVL-refused reach as refused, never as the number", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            reach_tvl_check: "exceeds_protocol_tvl",
+            observed_reach_rejected_usd: 3_488_955_156.06,
+            protocol_tvl_usd: 3_297_344_734,
+          },
+        },
+      }],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Reach",
+      value: "not determined (measured figure exceeded protocol TVL and was refused)",
+    });
+    // The rejected figure must not also render as a reach.
+    expect(JSON.stringify(facts)).not.toContain("3.5B");
+  });
+
   it("names a witnessed-but-unvalued reach as its own state (A2)", () => {
     // Value WAS observed leaving a holder, in an asset whose USD we do not have —
     // the weETH recoverETH shape (a synthetic native move out of a deployment with

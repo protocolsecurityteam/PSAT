@@ -481,6 +481,64 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
 
 
 @requires_postgres
+def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
+    """The reach ceiling's input. ``tvl_snapshots.total_usd`` and ``contract_breakdown``
+    are NULL on EVERY row of this table locally, so a ceiling written against them
+    could never fire — R2's dead-sentinel shape. Reading ``defillama_tvl`` is the whole
+    point, and a row that has only ``total_usd`` must read as NO ceiling (skipped),
+    not as a ceiling of zero or of that number."""
+    from datetime import datetime, timedelta, timezone
+
+    from db.models import TvlSnapshot
+
+    p = _protocol(db_session, "tvl-ceiling")
+    c = _contract(db_session, p.id, ADDR(0x9500))
+    f = _fn(db_session, c.id, name="withdraw", selector="0x95000001", effect_targets=["S"])
+    _principal(db_session, f.id, ADDR(0x9501))
+    now = datetime.now(timezone.utc)
+    # Only total_usd: the column the old proposal would have read.
+    db_session.add(TvlSnapshot(protocol_id=p.id, timestamp=now - timedelta(hours=2), total_usd=999.0, source="x"))
+    db_session.commit()
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert cand.protocol_tvl_usd is None  # skipped, loudly — never 999.0 and never 0
+
+    # ...and the newest defillama figure wins once one exists.
+    db_session.add(
+        TvlSnapshot(protocol_id=p.id, timestamp=now - timedelta(hours=1), defillama_tvl=100.0, source="defillama")
+    )
+    db_session.add(TvlSnapshot(protocol_id=p.id, timestamp=now, defillama_tvl=3_297_344_734.00, source="defillama"))
+    db_session.commit()
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert cand.protocol_tvl_usd == 3_297_344_734.00
+
+
+@requires_postgres
+def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
+    """G6-11: the holdings fetch takes ONE page and 7 local contracts sit exactly at
+    the cap (one holding $8.6B). Exactly-at-the-cap cannot be told from truncated, so
+    the honest mark is "not complete" — and the reach probe then names truncation as
+    the reason an asset could not be valued instead of quietly skipping it."""
+    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+
+    p = _protocol(db_session, "holdings-cap")
+    capped = _contract(db_session, p.id, ADDR(0x9600))
+    whole = _contract(db_session, p.id, ADDR(0x9601))
+    _fn(db_session, capped.id, name="a", selector="0x96000001", effect_targets=["S"])
+    _fn(db_session, whole.id, name="b", selector="0x96000002", effect_targets=["S"])
+    for n in range(TOKEN_BALANCE_PAGE_SIZE):
+        _token_balance(db_session, capped.id, ADDR(0x970000 + n), 1.0)
+    _token_balance(db_session, whole.id, ADDR(0x98A1), 1.0)
+    db_session.commit()
+
+    by_holder = {}
+    for cand in select_candidates(db_session, p.id):
+        for holding in cand.value_holders:
+            by_holder.setdefault(holding.holder, set()).add(holding.holdings_complete)
+    assert by_holder[capped.address.lower()] == {False}
+    assert by_holder[whole.address.lower()] == {True}
+
+
+@requires_postgres
 def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_session):
     """A2's input fix. The reach probe used to receive ONE summed figure per holder and
     match any ``Transfer`` out of it against the whole sum — so a synthetic native move

@@ -43,9 +43,11 @@ from db.models import (
     Job,
     JobStage,
     JobStatus,
+    TvlSnapshot,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+from utils.etherscan import token_balances_may_be_truncated
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -178,6 +180,12 @@ class Candidate:
     # Decimal must give the jsonb path an encoder first.
     value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
+    # The protocol's independently-measured TVL (``tvl_snapshots.defillama_tvl``), or
+    # ``None`` when there is no snapshot. A corroborating CEILING for the reach figure:
+    # no exercise of one function can reach more value than the protocol holds, and the
+    # worst published row asserted $3.489B against a protocol TVL of $3.297B. ``None``
+    # means the check is skipped, and the recipe records that it was.
+    protocol_tvl_usd: float | None = None
     # Assets the acting deployment PROVABLY holds, richest first — the only honest
     # identity for a caller-supplied token PARAMETER, which has no getter behind it
     # to resolve. Priced entries only (see :func:`_token_holdings_by_contract`).
@@ -365,6 +373,13 @@ class AssetHolding(NamedTuple):
     holder: str
     asset: str
     usd_value: float | None
+    # Whether this holder's holdings list is COMPLETE (G6-11). ``False`` means the
+    # stored rows sit at Etherscan's one-page cap, so an asset absent from them may
+    # simply not have been fetched — a reach total that skips it is a lower bound and
+    # the row must say so instead of quietly valuing what it happens to know. Uniform
+    # across every holding of one holder; carried per row so the reach probe needs no
+    # second input to thread.
+    holdings_complete: bool = True
 
 
 def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
@@ -413,10 +428,43 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
             best[key] = value
         elif value is not None:
             best[key] = max(current, value)
+    # Per-holder completeness, from the same rows: a holder whose TOKEN rows sit at
+    # the fetcher's page cap may be missing assets entirely (7 local contracts are at
+    # it, one holding $8.6B). The native row is excluded from the count because it is
+    # fetched separately and is not part of the paged list.
+    token_rows: dict[str, int] = {}
+    for (holder, asset), _usd_value in best.items():
+        if asset != NATIVE_ASSET_LOG_EMITTER:
+            token_rows[holder] = token_rows.get(holder, 0) + 1
     out: dict[str, list[AssetHolding]] = {}
     for (holder, asset), usd_value in sorted(best.items()):
-        out.setdefault(holder, []).append(AssetHolding(holder=holder, asset=asset, usd_value=usd_value))
+        out.setdefault(holder, []).append(
+            AssetHolding(
+                holder=holder,
+                asset=asset,
+                usd_value=usd_value,
+                holdings_complete=not token_balances_may_be_truncated(token_rows.get(holder, 0)),
+            )
+        )
     return {holder: tuple(items) for holder, items in out.items()}
+
+
+def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:
+    """The protocol's most recent independently-measured TVL, or ``None``.
+
+    Reads ``defillama_tvl`` and NOTHING else. ``total_usd`` and ``contract_breakdown``
+    are NULL on EVERY row of this table locally, so a gate written against them cannot
+    fire and would be a mitigation that never runs (R2) — the exact shape this effort
+    exists to remove. ``None`` here means the gate is SKIPPED, and the caller says so
+    out loud rather than passing a comparison that silently always succeeds.
+    """
+    value = session.execute(
+        select(TvlSnapshot.defillama_tvl)
+        .where(TvlSnapshot.protocol_id == protocol_id, TvlSnapshot.defillama_tvl.isnot(None))
+        .order_by(TvlSnapshot.timestamp.desc(), TvlSnapshot.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return None if value is None else float(value)
 
 
 def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
@@ -999,6 +1047,7 @@ def select_candidates(
         for holding in holdings_for_deployment
     )
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
+    protocol_tvl = _protocol_tvl_usd(session, protocol_id)
 
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, targets, deployment, claims, capability_expr in rows:
@@ -1026,6 +1075,7 @@ def select_candidates(
                 restrict_families=families,
                 value_holders=value_holders,
                 acting_balance_usd=float(graph.deployment_balance.get(acting, _ZERO_USD)),
+                protocol_tvl_usd=protocol_tvl,
                 input_token_addresses=holdings.get(contract_id, ()),
                 membership_exact=_membership_exact(capability_expr),
             )

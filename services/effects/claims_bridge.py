@@ -279,6 +279,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     is the priced part, a partial floor). A2: reach is measured PER ASSET, and
 #     1001 of 1376 local balance rows are unpriced, so this state is common and must
 #     lower confidence rather than produce a small number.
+#   * ``reach_tvl_check`` is the corroborating CEILING's outcome:
+#     ``within_protocol_tvl`` (the figure is at least possible),
+#     ``exceeds_protocol_tvl`` (REFUSED — ``observed_reach_rejected_usd`` and
+#     ``protocol_tvl_usd`` record the contradiction and there is no reach value), or
+#     ``skipped_no_tvl`` (no ``defillama_tvl`` snapshot — the ceiling did NOT run, and
+#     that is published rather than implied). The worst row in the DB asserted $3.489B
+#     against a protocol TVL of $3.297B with nothing checking.
 #   * ABSENCE of every key is NOT "no reach": this deployment has no fork
 #     observation of its own yet (its verdict came from a cache hit), so reach was
 #     never attempted here.
@@ -290,7 +297,11 @@ _REACH_KEYS = (
     "observed_reach_floor_usd",
     "observed_reach_assets",
     "observed_reach_unvalued_assets",
+    "observed_reach_unvalued_reasons",
     "observed_reach_priced_usd",
+    "reach_tvl_check",
+    "observed_reach_rejected_usd",
+    "protocol_tvl_usd",
 )
 
 

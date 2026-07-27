@@ -146,6 +146,7 @@ class ValueOutPlanInputs:
     # measures against, and the acting deployment's own balance floor.
     value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
+    protocol_tvl_usd: float | None = None
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
     input_token_hints: tuple[str, ...] = ()
@@ -1415,6 +1416,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
         acting_balance_usd=candidate.acting_balance_usd,
+        protocol_tvl_usd=candidate.protocol_tvl_usd,
         input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
         token_param_indexes=token_params,
         seeded_calldata=seeded,

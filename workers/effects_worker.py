@@ -225,7 +225,13 @@ _RESIDUE_JSON_KEYS = (
     # figures they qualify.
     "observed_reach_assets",
     "observed_reach_unvalued_assets",
+    "observed_reach_unvalued_reasons",
     "observed_reach_priced_usd",
+    # The reach-vs-TVL ceiling's OUTCOME, including "skipped_no_tvl". A check whose
+    # result is dropped before the consumer is indistinguishable from no check.
+    "reach_tvl_check",
+    "observed_reach_rejected_usd",
+    "protocol_tvl_usd",
     # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
     # code-plane witness and stay on ``details``; how many Transfer logs one
     # execution emitted is an observation of this deployment at this block and
