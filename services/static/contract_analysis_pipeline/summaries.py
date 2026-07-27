@@ -873,6 +873,34 @@ def _detect_upgradeability(
     }
 
 
+def _claims_plane_ran(effects: Mapping[str, Any] | None) -> bool:
+    """Did the Plane-1 claims matcher complete and write onto this artifact?
+
+    ``core`` runs the two planes under **separate** ``try``/``except`` blocks —
+    ``build_effects`` at ``core.py:225-235`` and
+    ``build_claims``/``attach_claims_to_effects``/``project_effect_labels`` at
+    ``core.py:243-250``, the latter with its own ``record_degraded(phase=
+    "claims")``. So a fully populated ``functions`` map proves the **effects**
+    plane ran and says nothing about the claims plane: when only the second
+    block raises, every record is present and every record is claim-free.
+
+    The discriminator is the ``claims`` KEY, not its contents.
+    ``attach_claims_to_effects`` sets ``record["claims"]`` on every function
+    record — to ``[]`` where the function earned no claim — and
+    ``build_effects`` never emits the key, so its presence is exactly "the
+    claims matcher completed". Its *absence* is why a detector that can only
+    see a latch/timelock through claims must answer not-determined rather than
+    ``false``.
+
+    An artifact with no externally-observable functions at all is likewise
+    not-determined: there is no record to carry the key, so nothing here can
+    tell a clean claims run from a missing one."""
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return False
+    return any(isinstance(record, Mapping) and "claims" in record for record in functions.values())
+
+
 _PAUSE_CLAIM_POLARITY = {"pause.set": "pause", "pause.unset": "unpause"}
 
 
@@ -940,11 +968,13 @@ def _detect_pausability(
     classification can't disambiguate, every toggle function is listed in
     both pause and unpause.
 
-    ``is_pausable`` is three-state. ``None`` is *not determined*: neither
-    detector ran, which is a different fact from both of them running and
-    finding no latch, and it is what the summary must say when the effects
-    artifact is degraded (the claims plane produced nothing to read) and the
-    predicate pass produced no ``PauseInfo`` either.
+    ``is_pausable`` is three-state. ``None`` is *not determined*: the structural
+    pass found nothing AND the claims matcher — the only detector that can see a
+    struct-member or namespaced latch — did not complete, which is a different
+    fact from both of them running and finding no latch. The test for that is
+    :func:`_claims_plane_ran`, i.e. whether claims were attached; a populated
+    ``functions`` map only proves the *effects* plane ran, and ``core``
+    degrades the two independently (``core.py:225-235`` vs ``:243-250``).
     """
     info = pause_info or {}
     pause_state_vars: list[str] = list(info.get("pause_state_vars") or [])
@@ -994,18 +1024,18 @@ def _detect_pausability(
                 gating_modifiers.append(modifier.name)
                 evidence.append(_source_evidence(modifier, project_dir))
 
-    functions = (effects or {}).get("functions")
-    claims_plane_ran = isinstance(functions, Mapping) and bool(functions)
     if pause_functions or unpause_functions or gating_modifiers or pause_state_vars:
         is_pausable: bool | None = True
-    elif claims_plane_ran:
+    elif _claims_plane_ran(effects):
         is_pausable = False
     else:
         # The claims matcher is the only detector that can see a struct-member
         # or namespaced latch, and it is the one that did not run. Publishing
         # ``false`` off the structural pass alone asserts the absence of a
         # latch that pass could not have found: it answers ``false`` on 22 of
-        # the 33 local contracts that demonstrably do have one.
+        # the 33 local contracts that demonstrably do have one. A populated
+        # ``functions`` map is NOT the test — that is the effects plane, which
+        # ``core`` degrades independently of the claims plane.
         is_pausable = None
 
     return {

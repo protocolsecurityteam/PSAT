@@ -502,53 +502,68 @@ def test_detect_pausability_renamed_pause_modifier(tmp_path):
     assert "gate" in pausability["gating_modifiers"]
 
 
-def test_detect_pausability_empty_when_no_pause(tmp_path):
-    """No pause shape → not pausable.
+_NO_PAUSE = """
+    pragma solidity ^0.8.19;
+    contract C {
+        uint256 public x;
+        function f() external { x = 1; }
+    }
+"""
 
-    The effects artifact is passed because ``false`` here is a PROVEN absence
-    and only the claims plane can prove it: without that input the honest
-    answer is ``None`` (see the sibling below)."""
+
+def _pause_inputs(tmp_path: Path, source: str):
+    """``(contract, pause_info, effects_with_claims, effects_without_claims)``.
+
+    The two artifacts are the two things ``core`` can hand ``_detect_pausability``
+    when nothing raises vs when only the claims block raises: identical
+    ``functions`` maps, one carrying the ``claims`` key and one not."""
+    from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
     from services.static.contract_analysis_pipeline.effects import build_effects
+    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+        build_predicate_artifacts_with_pause_info,
+    )
+
+    contract = _compile(tmp_path, source).contracts[0]
+    trees_artifact, pause_info = build_predicate_artifacts_with_pause_info(contract)
+    with_claims = build_effects(contract)
+    attach_claims_to_effects(with_claims, build_claims(contract, with_claims, trees_artifact))
+    project_effect_labels(with_claims)
+    return contract, pause_info, with_claims, build_effects(contract)
+
+
+def test_detect_pausability_empty_when_no_pause(tmp_path):
+    """R4 positive arm for the un-hedged ``False``: no pause shape and BOTH
+    detectors ran → proven absence.
+
+    The effects artifact is passed **with claims attached**, because the claims
+    matcher is the thing that proves it; passing a claim-free artifact would
+    pin ``False`` on an input where the discriminating evidence was never
+    computed (and, since the fix, would answer ``None``)."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function f() external { x = 1; }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_trees(contract)
-    pause_info = apply_reentrancy_pause_pass(contract, trees)
-    pausability = _detect_pausability(contract, tmp_path, pause_info, build_effects(contract))
+    contract, pause_info, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims)
     assert pausability["is_pausable"] is False
     assert pausability["pause_variables"] == []
 
 
 def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path):
-    """R1/R2: the effects artifact is degraded (``core`` substitutes
-    ``{"schema_version": ..., "error": ...}`` when ``build_effects`` raises),
-    so the only detector that can see a struct-member or namespaced latch did
-    not run. ``false`` would assert an absence nothing looked for."""
+    """R1/R2: three ways ``core`` reaches ``_detect_pausability`` without the
+    claims matcher having run, all of which must answer not-determined.
+
+    The third is the one a populated-``functions`` test cannot see: ``core``
+    runs ``build_effects`` (``core.py:225-235``) and the claims block
+    (``:243-250``) under separate ``try``/``except``. When only the claims
+    block raises, every function record is present and every record is
+    claim-free — so "the effects map is non-empty" is not evidence that the
+    only detector able to see a struct-member latch ever looked."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function f() external { x = 1; }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_trees(contract)
-    pause_info = apply_reentrancy_pause_pass(contract, trees)
+    contract, pause_info, _, claim_free = _pause_inputs(tmp_path, _NO_PAUSE)
     degraded = {"schema_version": "semantic", "error": "boom"}
     assert _detect_pausability(contract, tmp_path, pause_info, degraded)["is_pausable"] is None
     assert _detect_pausability(contract, tmp_path, pause_info, None)["is_pausable"] is None
+    # The claims stage raised; the effects map is fully populated.
+    assert claim_free["functions"], "guard: this arm is only meaningful on a populated map"
+    assert all("claims" not in record for record in claim_free["functions"].values())
+    assert _detect_pausability(contract, tmp_path, pause_info, claim_free)["is_pausable"] is None
