@@ -749,3 +749,72 @@ def test_a_cached_reason_is_served_to_the_twin_that_hits_it(clean_effects, monke
     assert session.query(EffectBehaviorCache).one().details["reason"] == "no_supply_delta"
     witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
     assert witnesses[fns[CONTRACT_C]]["reason"] == "no_supply_delta"
+
+
+def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monkeypatch):
+    """§7 AUDIT FLOOR (G6-C1). ``authority_change`` — 49 of 150 local cache rows — carries
+    no structural signature key at all, so the audit compared ``('unknown', None x5)``
+    with itself and passed unconditionally. A hit like that is no longer trusted on the
+    signature: the re-probe must agree on the row's actual assertion (verdict + reason).
+
+    B agrees, so the row is stamped audited and C free-hits it. The twin that DISAGREES
+    (below) publishes its own verdict instead of inheriting one.
+    """
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
+    hashes = {fns[a]: ("K0", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B, CONTRACT_C)}
+
+    def factory(c, ctx):
+        # No structural key — the shape of every authority_change row.
+        return unknown(
+            EFFECT_CLASS_SUPPLY,
+            reason="no_supply_delta",
+            details={"observation": "executed"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+
+    # A wrote it; B re-probed to corroborate it (the floor); C hit it for free once the
+    # corroboration stamped it.
+    assert fns[CONTRACT_A] in prober.runs and fns[CONTRACT_B] in prober.runs
+    assert fns[CONTRACT_C] not in prober.runs
+    row = session.query(EffectBehaviorCache).one()
+    assert row.audit_status == "passed"
+
+
+def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, monkeypatch):
+    """The discriminating half: with no structural key to compare, a DIFFERENT reason is
+    the only signal there is. The hitting deployment publishes what it re-simulated, and
+    the row is left UNAUDITED rather than AUDIT_FAILED — a reason legitimately varies
+    between two sightings of one behaviour, so poisoning the key would withhold from
+    every future sighting on the strength of a difference that proves nothing."""
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
+    hashes = {fns[a]: ("K1", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}
+    reasons = {fns[CONTRACT_A]: "no_supply_delta", fns[CONTRACT_B]: "no_value_observed"}
+
+    def factory(c, ctx):
+        return unknown(
+            EFFECT_CLASS_SUPPLY,
+            reason=reasons[c.function_id],
+            details={"observation": "executed"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+
+    row = session.query(EffectBehaviorCache).one()
+    assert row.audit_status is None  # not trusted, and not poisoned either
+    witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
+    # B published ITS OWN reason, not A's.
+    assert witnesses[fns[CONTRACT_B]]["reason"] == "no_value_observed"
+    assert witnesses[fns[CONTRACT_A]]["reason"] == "no_supply_delta"

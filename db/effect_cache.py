@@ -360,7 +360,19 @@ logger = logging.getLogger(__name__)
 # destination statement at all. The cache row already held both keys in ``details``;
 # the bump is because the claim projection a hit re-publishes now includes them, so a
 # pre-v28 row's ``details`` is served into a consumer contract that expects them.
-EFFECT_CACHE_SCHEMA_VERSION = 28
+# v29 (Wave 2 Leg D, G6-C1): ``details`` is split into planes. Every key in
+# ``DEPLOYMENT_PLANE_KEYS`` — ``observed_blast_radius``, ``pre_pause_succeeding``,
+# ``scored_denominator``, ``input_seeded``, ``contract_balance_seeded``, ``backing`` —
+# is an observation of ONE deployment's fork state and is now stripped at the write, so
+# a hit serves code-plane facts only and those keys are ABSENT on the hitting
+# deployment's witness (absent, not null and not false). A pre-v29 row CARRIES them: 74
+# of 150 local rows do, and serving one republishes another contract's blast radius,
+# seeding qualifiers and mint backing as this deployment's own witness. Same defect
+# class as the §5b reach leak that moved to ``observed_residue``, on five more fields.
+# The §7 audit also gained its floor in this commit: a signature with no structural key
+# is no longer trusted on agreement alone (49 of 150 rows compare ``unknown`` with
+# itself), so which verdict a hitting deployment publishes can differ from a pre-v29 run.
+EFFECT_CACHE_SCHEMA_VERSION = 29
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
@@ -531,6 +543,10 @@ def upsert_cached_verdict(
     surface = contract_surface_hash if scope != "kernel" else KERNEL_SURFACE_SENTINEL
     _advisory_lock(session, _lock_key(behavior_hash, effect_class, scope, surface, gate_ref))
     now = datetime.now(timezone.utc)
+    # inv. 3 at the WRITE, not by convention at the call sites: this row is served to
+    # every other deployment sharing the bytecode, so a per-deployment observation may
+    # not enter it (:data:`DEPLOYMENT_PLANE_KEYS`).
+    details = code_plane_details(details)
     stmt = pg_insert(EffectBehaviorCache).values(
         behavior_hash=behavior_hash,
         effect_class=effect_class,
@@ -620,12 +636,63 @@ _KERNEL_SIGNATURE_KEYS = (
     "destination_shape",
 )
 
+# State-plane keys that must NEVER be stored on a code-plane cache row (G6-C1 / inv. 3).
+# Every one is an observation of ONE deployment's fork state, and the cache re-publishes
+# whatever it stores to every OTHER deployment sharing the bytecode — so a hit used to
+# hand deployment B deployment A's blast radius, A's pre-pause succeeding set and A's
+# seeding qualifiers as B's own witness. Measured before this split: 74 of 150 cache
+# rows carried at least one of these (29 freeze_pause, 21 supply, 20 value_out, 4).
+#
+# Stripped on WRITE, so a hit cannot serve them and they are ABSENT on the hit
+# deployment's witness — absent, not ``null`` and not ``false`` (R1). The producing
+# deployment keeps the full payload on its own ``effect_verdicts.witness`` row, which is
+# where per-deployment observations belong. Consumers already have to treat absence as
+# "unproven lower bound" (``claims_bridge._observed_summary`` states it for
+# ``observed_blast_radius`` verbatim); the difference is that the absence is now HONEST
+# rather than replaced by another contract's number.
+DEPLOYMENT_PLANE_KEYS = (
+    "observed_blast_radius",
+    "pre_pause_succeeding",
+    "scored_denominator",
+    "input_seeded",
+    "contract_balance_seeded",
+    "backing",
+)
+
+
+def code_plane_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``details`` with every per-deployment observation removed."""
+    if not details:
+        return details
+    return {k: v for k, v in details.items() if k not in DEPLOYMENT_PLANE_KEYS}
+
 
 def kernel_signature(verdict: str, details: dict[str, Any] | None) -> tuple[Any, ...]:
     """The comparable kernel identity: the verdict plus its structural witness.
     Order-stable so two calls on equal inputs compare equal."""
     d = details or {}
     return (verdict, *(d.get(k) for k in _KERNEL_SIGNATURE_KEYS))
+
+
+def kernel_signature_is_comparable(details: dict[str, Any] | None) -> bool:
+    """Whether a signature carries ANY structural key — i.e. whether comparing it can
+    falsify anything.
+
+    THE FLOOR (§7 audit). ``authority_change`` — 49 of 150 cache rows — carries none of
+    :data:`_KERNEL_SIGNATURE_KEYS`, so with ``verdict='unknown'`` on all 49 the
+    signature is ``('unknown', None, None, None, None, None)`` on BOTH sides and the
+    audit passes unconditionally. That is not an audit; it is the string ``unknown``
+    compared with itself, and a hash collision between two different behaviors both
+    answering ``unknown`` is exactly what it would have to catch. Two of the five
+    allowlisted keys (``gate_mutation``, ``upgradeable``) appear in NO row at all.
+
+    A hit whose signature cannot be compared must not be TRUSTED. The caller re-probes
+    and publishes its own fresh result instead of the cached one (see
+    ``effects_worker._resolve_item``): the cheap free hit is what is refused, not the
+    verdict.
+    """
+    d = details or {}
+    return any(k in d for k in _KERNEL_SIGNATURE_KEYS)
 
 
 def kernel_verdicts_agree(
@@ -639,6 +706,11 @@ def kernel_verdicts_agree(
     The self-audit trusts a free cache hit only when this returns ``True``. A
     ``False`` is a caught hash collision: the caller withholds (writes
     ``unknown`` + files a discrepancy) instead of propagating the cached verdict.
+
+    Agreement is necessary and NOT sufficient: a signature with no structural key
+    agrees with itself trivially, so the caller must also check
+    :func:`kernel_signature_is_comparable`. Kept as two functions because they answer
+    two different questions — "do these disagree" and "could they have".
     """
     return kernel_signature(cached_verdict, cached_details) == kernel_signature(fresh_verdict, fresh_details)
 

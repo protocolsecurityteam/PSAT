@@ -49,6 +49,7 @@ from db.effect_cache import (
     find_cached_verdict,
     find_cached_verdicts_batch,
     find_verdict_residue_batch,
+    kernel_signature_is_comparable,
     kernel_verdicts_agree,
     mark_audited,
     record_effect_verdict,
@@ -1060,6 +1061,64 @@ class EffectsWorker(BaseWorker):
             if fresh is None:
                 # Could not re-simulate to audit → do not trust the unaudited hit.
                 return self._withhold_collision(session, cached, it, counters, reason="audit_probe_failed")
+            if not kernel_signature_is_comparable(cached.details) or not kernel_signature_is_comparable(
+                fresh.witness_payload
+            ):
+                # THE AUDIT FLOOR (§7). A signature with no structural key agrees with
+                # itself unconditionally — 49 of 150 cache rows are ``authority_change``
+                # with ``verdict='unknown'`` and none of the five allowlisted keys, so
+                # their "audit" is the string ``unknown`` compared with itself, and a
+                # collision between two behaviours that both answer ``unknown`` is
+                # exactly what it would have to catch. Such a hit is NOT trusted on the
+                # signature alone.
+                #
+                # What is compared instead is the only thing such a row asserts: its
+                # verdict and its ``reason`` — which IS a claim about the twin
+                # (``no_supply_delta`` says "the call ran and no supply moved"). On
+                # agreement the row is stamped audited, because the assertion has been
+                # corroborated against a fresh probe of THIS deployment — strictly more
+                # evidence than the structural-key path collects. On disagreement this
+                # deployment publishes the verdict it just re-simulated and the row is
+                # left UNAUDITED rather than AUDIT_FAILED: a reason legitimately varies
+                # between two sightings of one behaviour (a precondition revert here, a
+                # clean non-observation there), so poisoning the key would withhold from
+                # every future sighting on the strength of a difference that proves
+                # nothing.
+                cached_reason = (cached.details or {}).get("reason")
+                fresh_reason = (fresh.witness_payload or {}).get("reason")
+                if cached.verdict == fresh.verdict and cached_reason == fresh_reason:
+                    mark_audited(session, cached, passed=True, peer_hash=it.surface_hash or it.behavior_hash)
+                    bump_hit(session, cached)
+                    self._count_hit(it, counters)
+                    return (
+                        cached.verdict,
+                        cached.tier,
+                        cached.transcript_ptr,
+                        cached.details,
+                        _residue_only(fresh.concrete, it.effect_class),
+                        None,
+                    )
+                record_degraded(
+                    phase="effect_cache_audit_floor",
+                    exc=RuntimeError("zero-key kernel signature and the fresh probe disagrees; hit not trusted"),
+                    context={
+                        "behavior_hash": it.behavior_hash,
+                        "effect_class": it.effect_class,
+                        "cached_verdict": cached.verdict,
+                        "cached_reason": cached_reason,
+                        "fresh_verdict": fresh.verdict,
+                        "fresh_reason": fresh_reason,
+                    },
+                )
+                counters.cache_misses += 1
+                return (
+                    fresh.verdict,
+                    fresh.tier,
+                    fresh.transcript_ptr,
+                    fresh.witness_payload or None,
+                    fresh.concrete,
+                    fresh.discrepancy,
+                )
             agree = kernel_verdicts_agree(cached.verdict, cached.details, fresh.verdict, fresh.details)
             mark_audited(session, cached, passed=agree, peer_hash=it.surface_hash or it.behavior_hash)
             if not agree:
