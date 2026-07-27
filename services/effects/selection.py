@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, cast, func, literal, or_, select
@@ -77,6 +78,26 @@ _PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
 _MAX_TOKEN_ARG_CANDIDATES = 2
 
 
+_ZERO_USD = Decimal(0)
+
+
+def _usd(value: Any) -> Decimal:
+    """Exact USD from a ``contract_balances.usd_value`` cell.
+
+    The column is ``numeric(20,2)`` and the driver already hands it back as an
+    exact ``Decimal``; money stays in that type all the way through the closure
+    sum. Binary floats cannot represent a cent, so a float sum's low bits depend
+    on the ORDER the terms are added — and the terms arrive from a ``set``. See
+    ``predicates._source_sort_key`` for the same bug class fixed on the string
+    plane; this is its numeric twin, and the lesson had never crossed over.
+    """
+    if value is None:
+        return _ZERO_USD
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
 def _addr(value: str | None) -> str | None:
     """Normalize a node id / address to a bare lowercase 0x address."""
     if value is None:
@@ -103,8 +124,12 @@ class Candidate:
     effect_targets: tuple[str, ...]
     principal_addresses: tuple[str, ...]
     # Transitive USD an exercise of this function can reach through the control
-    # graph. Upper bound; orders only (inv. 4/5).
-    value_at_stake_usd: float = 0.0
+    # graph. Upper bound; orders only (inv. 4/5). ``Decimal`` because it is a SORT
+    # KEY over a set-derived sum: two candidates that reach the same money must
+    # compare EQUAL so the ``function_id`` tiebreak decides them. It is never
+    # published — nothing serializes a Candidate — so the exact type costs nothing
+    # downstream.
+    value_at_stake_usd: Decimal = _ZERO_USD
     # ``effective_functions.deployment_address`` — the address that actually holds
     # the state. Empty when the row predates it / is not proxy-backed.
     deployment_address: str = ""
@@ -121,6 +146,14 @@ class Candidate:
     # floor when downstream reach is fork-observed to be nothing. Shared by
     # reference across a protocol's candidates (small, immutable), so carrying it
     # per-candidate is cheap.
+    #
+    # These two stay ``float`` where ``value_at_stake_usd`` is ``Decimal``: unlike
+    # the sort key they are PUBLISHED — they reach ``observed_reach_value_usd`` in
+    # the verdict's jsonb, which ``json.dumps`` cannot encode from a Decimal. Each
+    # is a single exact-to-float conversion of one stored cell, never a sum over a
+    # set, so the conversion is the last step rather than the first and no
+    # order-dependence survives it. Whoever changes them to Decimal must give the
+    # jsonb path an encoder first.
     value_holders: tuple[tuple[str, float], ...] = ()
     acting_balance_usd: float = 0.0
     # Assets the acting deployment PROVABLY holds, richest first — the only honest
@@ -159,11 +192,15 @@ class AuthorityGraph:
     stored on the implementation's contract row, and a ``Transfer`` log names the
     proxy. Keying §5b value-reach on ``balance`` therefore matched no holder and
     floored every acting balance to zero.
+
+    Both balance maps carry ``Decimal``, not ``float``: the closure sum below is
+    taken over a ``set``, and only an exact type makes that sum independent of
+    the order the addends arrive in.
     """
 
     controls: dict[str, set[str]] = field(default_factory=dict)
-    balance: dict[str, float] = field(default_factory=dict)
-    deployment_balance: dict[str, float] = field(default_factory=dict)
+    balance: dict[str, Decimal] = field(default_factory=dict)
+    deployment_balance: dict[str, Decimal] = field(default_factory=dict)
 
     def _add_control(self, controller: str | None, controlled: str | None) -> None:
         c, t = _addr(controller), _addr(controlled)
@@ -171,8 +208,17 @@ class AuthorityGraph:
             return
         self.controls.setdefault(c, set()).add(t)
 
-    def reachable_value(self, seeds: set[str]) -> float:
-        """Sum balances over the transitive closure of ``seeds`` (seeds included)."""
+    def reachable_value(self, seeds: set[str]) -> Decimal:
+        """Sum balances over the transitive closure of ``seeds`` (seeds included).
+
+        The traversal walks ``set``s, so ``seen`` is populated in an order that
+        varies across processes; the sum is taken over ``sorted(seen)`` in an
+        exact type so the RESULT does not. Order-invariance is what makes the
+        ``function_id`` tiebreak at :func:`select_candidates` reachable: values
+        that are equal must compare equal, and a one-ulp float difference is
+        enough to route two equal-value candidates around it and reorder the
+        probe queue.
+        """
         stack = [s for s in (_addr(s) for s in seeds) if s]
         seen: set[str] = set()
         while stack:
@@ -181,7 +227,10 @@ class AuthorityGraph:
                 continue
             seen.add(node)
             stack.extend(self.controls.get(node, ()))
-        return sum(self.balance.get(a, 0.0) for a in seen)
+        total = _ZERO_USD
+        for a in sorted(seen):
+            total += self.balance.get(a, _ZERO_USD)
+        return total
 
 
 def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
@@ -211,12 +260,13 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
         a = _addr(address)
         if a is None:
             continue
-        graph.balance[a] = graph.balance.get(a, 0.0) + float(usd or 0.0)
+        exact = _usd(usd)
+        graph.balance[a] = graph.balance.get(a, _ZERO_USD) + exact
         holder = holders.get(contract_id) or a
         # MAX, not sum: two implementation rows fronted by one proxy each carry a
         # copy of that ONE deployment's holdings, and adding them would report the
         # money twice.
-        graph.deployment_balance[holder] = max(graph.deployment_balance.get(holder, 0.0), float(usd or 0.0))
+        graph.deployment_balance[holder] = max(graph.deployment_balance.get(holder, _ZERO_USD), exact)
 
     # control_graph_edges: reverse to controller → contract.
     edge_rows = session.execute(
@@ -283,7 +333,11 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
             ContractBalance.token_address.isnot(None),
             ContractBalance.usd_value > 0,
         )
-        .order_by(ContractBalance.usd_value.desc())
+        # `usd_value DESC` alone is a PARTIAL order and the tie population is not
+        # empty (two contracts here hold 2 and 3 tokens at an identical value), so
+        # which holdings survive the `limit` below would be left to the query
+        # plan. The trailing keys make the order total.
+        .order_by(ContractBalance.usd_value.desc(), ContractBalance.token_address.asc(), ContractBalance.id.asc())
     ).all()
     out: dict[int, list[str]] = {}
     for contract_id, token, _usd in rows:
@@ -803,7 +857,7 @@ def select_candidates(
     # and shared by reference across every candidate. Only positive balances — a
     # zero-balance holder can't be a value-reach target and only adds noise. Keyed
     # on the HOLDING address, which is the one a ``Transfer`` log can name.
-    value_holders = tuple(sorted((a, u) for a, u in graph.deployment_balance.items() if u > 0.0))
+    value_holders = tuple(sorted((a, float(u)) for a, u in graph.deployment_balance.items() if u > _ZERO_USD))
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
 
     candidates: list[Candidate] = []
@@ -831,13 +885,17 @@ def select_candidates(
                 deployment_address=deployment_addr,
                 restrict_families=families,
                 value_holders=value_holders,
-                acting_balance_usd=graph.deployment_balance.get(acting, 0.0),
+                acting_balance_usd=float(graph.deployment_balance.get(acting, _ZERO_USD)),
                 input_token_addresses=holdings.get(contract_id, ()),
                 membership_exact=_membership_exact(capability_expr),
             )
         )
 
-    # Highest value first; stable tiebreak on function_id for determinism.
+    # Highest value first; stable tiebreak on function_id for determinism. The
+    # tiebreak fires only on EXACT equality, which is why the value it breaks has
+    # to be exact: ties are the common case here (one 84-member cluster in the
+    # local corpus alone) and a float sum put a one-ulp gap between members that
+    # hold the same money, ordering them by rounding noise instead.
     candidates.sort(key=lambda c: (-c.value_at_stake_usd, c.function_id))
 
     if resource_cap is not None and len(candidates) > resource_cap:

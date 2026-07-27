@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -133,7 +134,7 @@ def _candidate(address: str, function_id: int, contract_id: int) -> Candidate:
         authority_public=False,
         effect_targets=("slot0",),
         principal_addresses=(PRINCIPAL,),
-        value_at_stake_usd=1.0,
+        value_at_stake_usd=Decimal("1"),
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -204,10 +205,12 @@ def test_inv5_transitive_reach_beats_direct_balance():
     vault = "0x" + "7a" * 20
     graph = AuthorityGraph()
     graph._add_control(safe, vault)  # the $33k Safe controls the $3.2B vault
-    graph.balance[safe] = 33_000.0
-    graph.balance[vault] = 3_200_000_000.0
+    graph.balance[safe] = Decimal("33000.00")
+    graph.balance[vault] = Decimal("3200000000.00")
     # Reach from the Safe includes the full downstream vault value (upper bound).
-    assert graph.reachable_value({safe}) == pytest.approx(3_200_033_000.0)
+    # Exact, not approx: `Decimal == pytest.approx(float)` cannot fail — it
+    # returns True on agreement and raises TypeError otherwise.
+    assert graph.reachable_value({safe}) == Decimal("3200033000.00")
     # Its transitive reach dwarfs its direct balance — the ordering signal.
     assert graph.reachable_value({safe}) > graph.balance[safe]
 

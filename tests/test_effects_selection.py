@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -32,7 +33,12 @@ from db.models import (
     Protocol,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
-from services.effects.selection import JobScope, build_authority_graph, select_candidates
+from services.effects.selection import (
+    JobScope,
+    _token_holdings_by_contract,
+    build_authority_graph,
+    select_candidates,
+)
 from tests.conftest import ADDR, requires_postgres
 
 pytestmark = requires_postgres
@@ -82,7 +88,7 @@ def _fn(
     return f
 
 
-def _balance(session: Session, contract_id: int, usd: float) -> None:
+def _balance(session: Session, contract_id: int, usd: float | Decimal | str) -> None:
     session.add(
         ContractBalance(
             contract_id=contract_id,
@@ -424,8 +430,11 @@ def test_transitive_value_beats_direct_balance(db_session):
     assert ids.index(small.id) < ids.index(big_direct.id)
 
     by_id = {c.function_id: c for c in ordered}
-    assert by_id[small.id].value_at_stake_usd >= 3_200_000_000.0
-    assert by_id[big_direct.id].value_at_stake_usd == pytest.approx(1_000_000_000.0)
+    # EXACT, not approx: value_at_stake_usd is a Decimal, and `Decimal ==
+    # pytest.approx(float)` is not an assertion — it returns True when the two
+    # agree and raises TypeError when they do not, so it can only ever pass.
+    assert by_id[small.id].value_at_stake_usd == Decimal("3200033000.00")
+    assert by_id[big_direct.id].value_at_stake_usd == Decimal("1000000000.00")
 
 
 def test_authority_graph_closure_is_transitive(db_session):
@@ -443,9 +452,9 @@ def test_authority_graph_closure_is_transitive(db_session):
     db_session.commit()
 
     graph = build_authority_graph(db_session, p.id)
-    assert graph.reachable_value({a.address}) == pytest.approx(111.0)
-    assert graph.reachable_value({b.address}) == pytest.approx(110.0)
-    assert graph.reachable_value({cc.address}) == pytest.approx(100.0)
+    assert graph.reachable_value({a.address}) == Decimal("111.00")
+    assert graph.reachable_value({b.address}) == Decimal("110.00")
+    assert graph.reachable_value({cc.address}) == Decimal("100.00")
 
 
 def test_authority_graph_handles_cycles(db_session):
@@ -460,7 +469,139 @@ def test_authority_graph_handles_cycles(db_session):
     db_session.commit()
 
     graph = build_authority_graph(db_session, p.id)
-    assert graph.reachable_value({a.address}) == pytest.approx(12.0)
+    assert graph.reachable_value({a.address}) == Decimal("12.00")
+
+
+# ---------------------------------------------------------------------------
+# Cross-process determinism of the ordering value (D6)
+#
+# The class: `reachable_value` folds balances over a `set`, and set iteration
+# order over strings varies with PYTHONHASHSEED. In binary float the fold is
+# therefore order-dependent in its low bits. A within-process test cannot see
+# this — one process has one seed — which is why the defect survived a suite
+# that ran these very functions. Every test below either runs REAL CHILD
+# PROCESSES under different seeds, or pins exactness against a fixture proven
+# to be order-sensitive in float.
+# ---------------------------------------------------------------------------
+
+# Three real balances from the local corpus: the weETH deployment's eETH, the
+# EtherFiRestaker's stETH, and the LiquidityPool. Their float sum depends on
+# addition order (see the assertion in the first test); their exact sum does not.
+_ORDER_SENSITIVE_USD = ("3488954369.29", "472190234.24", "57041255.72")
+_ORDER_SENSITIVE_EXACT = Decimal("4018185859.25")
+
+
+def test_order_sensitive_fixture_really_is_order_sensitive():
+    """Guard the guard: if float addition of these three terms ever became
+    order-invariant, the tests below would still pass while proving nothing.
+
+    This is the corpus rule applied to a unit fixture — a green result means
+    something only if the fixture contains a shape a wrong implementation
+    would get wrong."""
+    import itertools
+
+    sums = {sum(p) for p in itertools.permutations([float(x) for x in _ORDER_SENSITIVE_USD])}
+    assert len(sums) > 1, "fixture no longer discriminates: float addition is order-invariant here"
+    assert sum(Decimal(x) for x in _ORDER_SENSITIVE_USD) == _ORDER_SENSITIVE_EXACT
+
+
+def test_reachable_value_is_exact_over_an_order_sensitive_closure(db_session):
+    """The closure sum is the exact cent total, not one of the float roundings."""
+    p = _protocol(db_session, "exact-proto")
+    holders = [_contract(db_session, p.id, ADDR(0xD001 + i)) for i in range(3)]
+    for c, usd in zip(holders, _ORDER_SENSITIVE_USD):
+        _balance(db_session, c.id, usd)
+    root = _contract(db_session, p.id, ADDR(0xD0FF))
+    for c in holders:
+        _edge(db_session, c.id, controlled_contract=c.address, controller=root.address)
+    db_session.commit()
+
+    graph = build_authority_graph(db_session, p.id)
+    got = graph.reachable_value({root.address})
+    assert got == _ORDER_SENSITIVE_EXACT
+    # And it is exact, not merely close: no float rounding of these terms equals it.
+    assert isinstance(got, Decimal)
+
+
+def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
+    """The POSITIVE case for the `function_id` tiebreak, not just its presence.
+
+    Two functions that reach the SAME money must compare exactly equal, because
+    the tiebreak fires on equality alone — under a float fold, one ulp between
+    two candidates holding identical balances routes them around it and orders
+    the probe queue by rounding noise instead of by id."""
+    p = _protocol(db_session, "tiebreak-proto")
+    holders = [_contract(db_session, p.id, ADDR(0xE001 + i)) for i in range(3)]
+    for c, usd in zip(holders, _ORDER_SENSITIVE_USD):
+        _balance(db_session, c.id, usd)
+    # Two acting contracts, each controlling the same three holders by a
+    # different edge insertion order.
+    left = _contract(db_session, p.id, ADDR(0xE0FE))
+    right = _contract(db_session, p.id, ADDR(0xE0FF))
+    for c in holders:
+        _edge(db_session, c.id, controlled_contract=c.address, controller=left.address)
+    for c in reversed(holders):
+        _edge(db_session, c.id, controlled_contract=c.address, controller=right.address)
+    # `right` gets the LOWER function id, so ordering by id puts it first while
+    # ordering by insertion or by rounding would not.
+    f_right = _fn(db_session, right.id, name="rightFn", selector="0xeeee0001", effect_targets=["S"])
+    f_left = _fn(db_session, left.id, name="leftFn", selector="0xeeee0002", effect_targets=["S"])
+    db_session.commit()
+
+    by_id = {c.function_id: c for c in select_candidates(db_session, p.id)}
+    assert by_id[f_left.id].value_at_stake_usd == by_id[f_right.id].value_at_stake_usd
+    ordered = [c.function_id for c in select_candidates(db_session, p.id)]
+    assert ordered.index(f_right.id) < ordered.index(f_left.id)
+
+
+def test_reachable_value_is_identical_across_processes():
+    """The one shape a same-process test cannot express: DIFFERENT seeds.
+
+    Runs the real `AuthorityGraph` in child processes under four
+    PYTHONHASHSEED values and compares `repr()` of the result. Under the float
+    fold this returned up to three distinct values for one graph."""
+    import subprocess
+    import sys
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    prog = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from services.effects.selection import AuthorityGraph\n"
+        "from decimal import Decimal\n"
+        "usd = %r\n"
+        # Many nodes so the closure `set` is large enough for seed-dependent
+        # iteration order to be expressed.
+        "addrs = ['0x%%040x' %% (i + 1) for i in range(len(usd) * 40)]\n"
+        "g = AuthorityGraph()\n"
+        "g.balance = {a: Decimal(usd[i %% len(usd)]) for i, a in enumerate(addrs)}\n"
+        "g.controls = {'0x%%040x' %% 0xF00D: set(addrs)}\n"
+        "print(repr(g.reachable_value({'0x%%040x' %% 0xF00D})))\n"
+    ) % (repo, _ORDER_SENSITIVE_USD)
+
+    seen = set()
+    for seed in ("0", "1", "2", "3"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", prog], capture_output=True, text=True, env=env, timeout=120, check=True
+        )
+        seen.add(out.stdout.strip())
+    assert len(seen) == 1, f"reachable_value varies with PYTHONHASHSEED: {sorted(seen)}"
+
+
+def test_token_holdings_order_is_total_under_a_value_tie(db_session):
+    """`usd_value DESC` alone leaves tied holdings to the query plan, and which
+    ones survive the limit is then not a function of the data."""
+    p = _protocol(db_session, "token-tie-proto")
+    c = _contract(db_session, p.id, ADDR(0xB0B0))
+    tied = [ADDR(0x7003), ADDR(0x7001), ADDR(0x7002)]
+    for t in tied:
+        db_session.add(
+            ContractBalance(contract_id=c.id, token_address=t, raw_balance="1", decimals=18, usd_value=Decimal("41.00"))
+        )
+    db_session.commit()
+
+    got = _token_holdings_by_contract(db_session, p.id, 2)[c.id]
+    assert got == tuple(sorted(t.lower() for t in tied))[:2]
 
 
 # ---------------------------------------------------------------------------

@@ -77,7 +77,14 @@ logger = logging.getLogger(__name__)
 # — so every v5 row was probed against an empty predicate-tree / empty-source
 # analysis state, i.e. a different seeded fork state than the same probe reaches
 # now. Serving those rows would keep the pre-fix verdict forever.
-EFFECT_CACHE_SCHEMA_VERSION = 6
+# v7: §6 candidate ordering was a function of float rounding noise, not of the
+# data — 8 PYTHONHASHSEED values produced 8 different candidate orders and 129 of
+# 443 rows changed rank, because the value-at-stake sum ran over a ``set`` in
+# binary float and one ulp routed equal-value candidates around the ``function_id``
+# tiebreak. Order decides which candidates a ``resource_cap`` run reaches, so a v6
+# row records what a probe queue built from rounding noise happened to visit; it
+# is not the row the now-deterministic queue produces.
+EFFECT_CACHE_SCHEMA_VERSION = 7
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
