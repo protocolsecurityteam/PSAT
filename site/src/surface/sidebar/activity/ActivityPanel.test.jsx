@@ -312,30 +312,44 @@ describe("ActivityPanel — monitored principal (safe)", () => {
   });
 });
 
-describe("ActivityPanel — upgrade history the server could not determine", () => {
+describe("ActivityPanel — upgrade history the read could not answer", () => {
   // The timeline draws a proxy with no history as a proxy that has never been
-  // upgraded. When /artifact/upgrade_history answers 503 ("not determined")
-  // that render is a claim the server did not make, so the panel says so.
-  // A 404 is a real negative and stays silent — that pair is the whole test.
-  it("marks a 503 as unknown and leaves a 404 silent", async () => {
+  // upgraded. Whenever /artifact/upgrade_history fails to answer, that render is
+  // a claim the server did not make, so the panel says so. A 404 is the only
+  // real negative and stays silent.
+  //
+  // The cases are enumerated because the mapping used to be: only a 503 hedges.
+  // A 500, an edge 502/504 (the Fly web-machine autostop shape) and a network
+  // failure — which `api` rethrows with no `status` at all — each drew the
+  // proven-empty timeline over a history nobody had read. Anything that is not
+  // a 404 must reach the marker, including a shape not listed here.
+  const upgradeHistoryFails = (respond) => {
     mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
-    setFetchHandler(
-      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
-      () =>
-        new Response(JSON.stringify({ detail: "Artifact state not determined" }), {
-          status: 503,
-          headers: { "Content-Type": "application/json", "X-PSAT-Artifact-State": "not_determined" },
-        }),
-    );
-    const { unmount } = renderPanel({ selectedMachine: PROXY_MACHINE });
-    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
-    unmount();
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), respond);
+  };
+  const status = (code, detail) => () =>
+    new Response(JSON.stringify({ detail }), {
+      status: code,
+      headers: { "Content-Type": "application/json" },
+    });
 
-    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
-    setFetchHandler(
-      (url) => /\/artifact\/upgrade_history$/.test(url.pathname),
-      () => new Response(JSON.stringify({ detail: "Artifact not found" }), { status: 404 }),
-    );
+  it.each([
+    ["503 not determined", status(503, "Artifact state not determined")],
+    ["500 server error", status(500, "Internal Server Error")],
+    ["502 from the edge", status(502, "Bad Gateway")],
+    ["504 from the edge", status(504, "Gateway Timeout")],
+    ["a network failure with no status", () => { throw new TypeError("Failed to fetch"); }],
+  ])("marks %s as unknown, not absent", async (_label, respond) => {
+    upgradeHistoryFails(respond);
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+  });
+
+  it("leaves a 404 silent — the one proven negative", async () => {
+    // NEGATIVE CONTROL. Hedging every failure would put the marker on a proxy
+    // whose history the server positively reports it does not have, which is a
+    // real answer; the cases above cannot see that over-correction.
+    upgradeHistoryFails(status(404, "Artifact not found"));
     renderPanel({ selectedMachine: PROXY_MACHINE });
     expect(await screen.findByText("Timeline")).toBeInTheDocument();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();

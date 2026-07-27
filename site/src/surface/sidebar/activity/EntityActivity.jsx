@@ -26,13 +26,14 @@ export function EntityActivity({
   const [events, setEvents] = useState([]);
   const [history, setHistory] = useState(null);
   // Three states for the upgrade history, not two: loaded, proven-absent, and
-  // "the server could not determine it". Only the third gets a marker.
+  // "this read did not produce an answer". Only the third gets a marker.
   //
-  // Held as the job_id the 503 was about, never as a bare boolean: this
-  // component is reused across selections (ActivityPanel renders it with no
-  // key), so a boolean outlives the selection that earned it and hedges the
-  // *next* entity — a history that read fine, or an entity with no history at
-  // all. Tying the marker to the identity it describes makes that unrenderable.
+  // Held as the job_id whose history could not be read, never as a bare
+  // boolean: this component is reused across selections (ActivityPanel renders
+  // it with no key), so a boolean outlives the selection that earned it and
+  // hedges the *next* entity — a history that read fine, or an entity with no
+  // history at all. Tying the marker to the identity it describes makes that
+  // unrenderable.
   const [unknownForJob, setUnknownForJob] = useState(null);
 
   const address = machine?.address;
@@ -91,12 +92,17 @@ export function EntityActivity({
       .catch((e) => {
         if (cancelled) return;
         setHistory(null);
-        // 503 is the API's "we could not find out" (storage unreachable). The
-        // timeline below draws a proxy with no history as a proxy that has
-        // never been upgraded, so this state has to be said out loud rather
-        // than rendered as the same empty rail. A 404 is a real negative and
-        // stays silent. Never cached — the answer can change without us.
-        setUnknownForJob(e?.status === 503 ? machine.job_id : null);
+        // The timeline below draws a proxy with no history as a proxy that has
+        // never been upgraded, so anything short of an answer has to be said
+        // out loud rather than rendered as the same empty rail. Only a 404 is a
+        // proven negative — "this job has no upgrade_history" — and stays
+        // silent. Everything else keeps the question open: a 503 (storage
+        // unreachable), a 500, a 502/504 from the edge while the web machine is
+        // autostopping, and a network failure, which `api` rethrows with no
+        // `status` at all. The hedge is the default so that a non-answer nobody
+        // enumerated cannot be drawn as an absence. Never cached — the answer
+        // can change without us.
+        setUnknownForJob(e?.status === 404 ? null : machine.job_id);
       });
     return () => { cancelled = true; };
     // cache/onCache omitted deliberately: read once per selection so this
@@ -104,7 +110,7 @@ export function EntityActivity({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine?.job_id, isProxy]);
 
-  // Only ever true for the selection the 503 was actually about.
+  // Only ever true for the selection whose read actually failed.
   const historyUnknown = isProxy && Boolean(machine?.job_id) && unknownForJob === machine.job_id;
 
   const proxy = useMemo(() => {

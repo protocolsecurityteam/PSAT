@@ -42,8 +42,10 @@
   text-transform: uppercase;
   color: #cbd5e1;
 }
-/* Shown only when the API answered "not determined" (503) for upgrade_history:
-   the timeline below it would otherwise read as a proven-empty history. */
+/* Shown whenever the upgrade_history read did not produce an answer — 503 "not
+   determined", a 500, an edge 502/504, a network failure — and never when the
+   API answered 404. The timeline below it would otherwise read as a
+   proven-empty history. */
 .ps-activity-unknown {
   margin: 6px 0 2px;
   padding: 6px 8px;
