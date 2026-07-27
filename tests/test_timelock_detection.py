@@ -52,22 +52,55 @@ CUSTOM_TIMELOCK = """
         error NotAdmin();
         error NotQueued();
         error TooEarly();
+        error CallFailed();
         modifier onlyAdmin() { if (msg.sender != admin) revert NotAdmin(); _; }
         function queue(bytes32 id) external onlyAdmin {
             eta[id] = block.timestamp + delay;
         }
-        function run(bytes32 id) external onlyAdmin {
+        function run(address target, bytes calldata data, bytes32 id) external onlyAdmin {
             uint256 ready = eta[id];
             if (ready == 0) revert NotQueued();
             if (block.timestamp < ready) revert TooEarly();
             eta[id] = 0;
+            (bool ok, ) = target.call(data);
+            if (!ok) revert CallFailed();
         }
         function setDelay(uint256 d) external onlyAdmin { delay = d; }
     }
 """
 
-# The discriminating negative: an admin-gated executor with NO maturity gate.
-# Structurally it queues nothing and waits for nothing; it just executes.
+# THE discriminating negative, and the reason the arbitrary-execution
+# requirement exists: a Teller's per-user share lock. Structurally identical to
+# a timelock -- a clock-derived write and a revert-until-matured gate -- and it
+# is a cooldown on one hard-coded operation, not a queued arbitrary action.
+# Six corpus contracts (TellerWithMultiAssetSupport / LayerZeroTeller) have this
+# exact shape and the bare structural pair credited every one of them with a
+# governance timelock.
+SHARE_LOCK_COOLDOWN = """
+    pragma solidity ^0.8.19;
+    contract C {
+        address public admin;
+        uint256 public shareLockPeriod;
+        mapping(address => uint256) public shareUnlockTime;
+        mapping(address => uint256) public balanceOf;
+        error NotAdmin();
+        error SharesLocked();
+        modifier onlyAdmin() { if (msg.sender != admin) revert NotAdmin(); _; }
+        function deposit(uint256 amount) external {
+            balanceOf[msg.sender] += amount;
+            shareUnlockTime[msg.sender] = block.timestamp + shareLockPeriod;
+        }
+        function transfer(address to, uint256 amount) external {
+            if (block.timestamp < shareUnlockTime[msg.sender]) revert SharesLocked();
+            balanceOf[msg.sender] -= amount;
+            balanceOf[to] += amount;
+        }
+        function setShareLockPeriod(uint256 p) external onlyAdmin { shareLockPeriod = p; }
+    }
+"""
+
+# An admin-gated executor with NO maturity gate. Structurally it queues nothing
+# and waits for nothing; it just executes.
 IMMEDIATE_EXECUTOR = """
     pragma solidity ^0.8.19;
     contract C {
@@ -121,8 +154,22 @@ def test_custom_queue_execute_timelock_is_detected(tmp_path):
     assert result["has_timelock"] is True, result
     assert result["pattern"] == "custom"
     assert "queue(bytes32)" in result["queue_execute_functions"]
-    assert "run(bytes32)" in result["queue_execute_functions"]
+    assert "run(address,bytes,bytes32)" in result["queue_execute_functions"]
     assert "delay" in result["delay_variables"], result["delay_variables"]
+
+
+def test_share_lock_cooldown_is_not_a_timelock(tmp_path):
+    """THE discriminating negative. Clock-derived write plus a
+    revert-until-matured gate -- the bare structural pair -- and it is a
+    per-user cooldown on one hard-coded operation. Without the
+    arbitrary-execution requirement this fires, and it fired on 16 of the 19
+    local hits, including 6 Tellers, an EigenLayer withdrawal delay and a
+    blacklist expiry, each of which would have been published as
+    ``control_model: governance``."""
+    result = _timelock(tmp_path, SHARE_LOCK_COOLDOWN)
+    assert result["has_timelock"] is False, result
+    assert result["pattern"] == "none"
+    assert result["delay_variables"] == []
 
 
 def test_immediate_executor_is_not_a_timelock(tmp_path):
@@ -143,7 +190,7 @@ def test_timestamp_write_without_a_maturity_gate_is_not_a_timelock(tmp_path):
     assert result["pattern"] == "none"
 
 
-@pytest.mark.parametrize("source", [CUSTOM_TIMELOCK, IMMEDIATE_EXECUTOR, TIMESTAMP_LOG_ONLY])
+@pytest.mark.parametrize("source", [CUSTOM_TIMELOCK, SHARE_LOCK_COOLDOWN, IMMEDIATE_EXECUTOR, TIMESTAMP_LOG_ONLY])
 def test_delay_value_is_never_published_from_source(tmp_path, source):
     """The whole point of splitting the deliverable: the static half proves
     "this is a timelock" and says nothing about HOW LONG. A defaulted delay

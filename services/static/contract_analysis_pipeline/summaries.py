@@ -1095,6 +1095,24 @@ def _timelock_claim_functions(effects: Mapping[str, Any] | None) -> dict[str, se
     return out
 
 
+def _arbitrary_execution_functions(effects: Mapping[str, Any] | None) -> set[str]:
+    """Signatures carrying the ``exec.arbitrary`` claim -- a call whose target
+    AND calldata come from the caller. It is the discriminator between a
+    timelock (queue an arbitrary action, execute it once matured) and a
+    cooldown (one hard-coded operation, delayed)."""
+    out: set[str] = set()
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return out
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if isinstance(claim, Mapping) and str(claim.get("claim_id")) == "exec.arbitrary":
+                out.add(signature)
+    return out
+
+
 def _ir_reads(ir: Any) -> set[str]:
     return {str(value) for value in (getattr(ir, "read", []) or [])}
 
@@ -1313,9 +1331,22 @@ def _detect_timelock(
     live in internal helpers in every real implementation, so both walks are
     transitive.
 
+    **That pair alone is NOT sufficient, and asserting it was would be an
+    over-claim.** Measured on the 88 local contracts, the bare structural pair
+    fires on 19 and only 3 are timelocks: it also matches a Teller's per-user
+    ``shareLockPeriod`` transfer cooldown (6 contracts), a blacklist expiry, an
+    EigenLayer withdrawal/activation delay and several rate-limiter refill
+    windows. What separates a governance timelock from a cooldown is WHAT
+    matures: a timelock delays an action chosen by the caller AT QUEUE TIME,
+    a cooldown delays one specific hard-coded operation. So the structural half
+    additionally requires the maturity-gated function to carry an
+    ``exec.arbitrary`` claim -- caller-supplied target and calldata. With that
+    requirement the structural half fires on exactly the 3, and would have
+    credited 16 contracts with a protective delay they do not have without it.
+
     ``pattern`` is ``oz_timelock`` when the claims plane recognises the
-    published ``TimelockController`` ABI on top of that, ``custom`` when only
-    the structure is there.
+    published ``TimelockController`` ABI, ``custom`` when only the structure
+    (including the arbitrary-execution requirement) is there.
 
     **THE DELAY VALUE IS NOT READ HERE, AND MUST NOT BE DEFAULTED.** inv 9
     makes the delay the credit-bearing fact (EtherFiTimelock's is 10 days), and
@@ -1365,10 +1396,17 @@ def _detect_timelock(
             if target in proven_registries:
                 queue_functions.add(full_name)
                 break
+    # What matures has to be an action the CALLER chose, not a hard-coded one:
+    # otherwise every per-user cooldown, blacklist expiry and rate-limit refill
+    # window in the corpus reads as a governance timelock (measured: 19 hits,
+    # 3 real). ``exec.arbitrary`` is the claims plane's proof of a
+    # caller-supplied target + calldata.
+    arbitrary_executors = _arbitrary_execution_functions(effects)
+    structural = bool(proven_registries and queue_functions and (execute_functions & arbitrary_executors))
+
     queue_functions |= claims.get("timelock.schedule", set())
     execute_functions |= claims.get("timelock.execute", set())
 
-    structural = bool(proven_registries and queue_functions and execute_functions)
     standard = bool(claims.get("timelock.schedule") and claims.get("timelock.execute"))
     has_timelock = structural or standard
 

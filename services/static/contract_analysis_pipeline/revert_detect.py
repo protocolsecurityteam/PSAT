@@ -161,6 +161,17 @@ def _ir_is_assert(ir: Any) -> bool:
     return name == "assert(bool)"
 
 
+def _ir_is_revert(ir: Any) -> bool:
+    """Any ``revert`` form, including ``revert(string)``. Used only to decide
+    that a value is on the REVERT path (a message operand) rather than on the
+    guard path — see ``_lvalue_already_lifted``."""
+    if _ir_class(ir) != "SolidityCall":
+        return False
+    fn = getattr(ir, "function", None)
+    name = getattr(fn, "name", None) or str(fn or "")
+    return name.startswith("revert")
+
+
 # ---------------------------------------------------------------------------
 # Detector entry point
 # ---------------------------------------------------------------------------
@@ -270,21 +281,29 @@ class RevertDetector:
     # ------------------------------------------------------------------
 
     def _lvalue_already_lifted(self, lvalue: Any, container: Any) -> bool:
-        """Does a call's result reach a branch condition or a require/assert
-        argument in ``container``'s body?
+        """Does a call's result reach a branch condition, or any argument of a
+        require / assert / revert, in ``container``'s body?
 
-        Only such a result is lifted into a leaf by the predicate builder, so
-        only such a result may suppress the recursion into the callee. Being
-        read *at all* is a strictly weaker property and answering with it lost
-        every gate behind a ``return gatedCallee(...)`` forwarder: the RETURN
-        node reads the result, no condition ever does, and the callee's own
-        require was therefore never walked — the function resolved unguarded.
+        Only such a result is either lifted into a leaf by the predicate
+        builder or already on the revert path itself, so only such a result may
+        suppress the recursion into the callee. Being read *at all* is a
+        strictly weaker property and answering with it lost every gate behind a
+        ``return gatedCallee(...)`` forwarder: the RETURN node reads the result,
+        no condition ever does, and the callee's own require was therefore
+        never walked — the function resolved unguarded.
+
+        The revert family is in the seed set for the opposite reason. A
+        ``revert(string(abi.encodePacked(..., Strings.toHexString(...))))``
+        message builder is ON the revert path, not on the guard path, and its
+        own internal ``require`` is a bounds check inside a formatter. Recursing
+        into it lifts that check as a gate on the CALLER — OZ's ``_checkRole``
+        would acquire a "hex length insufficient" authority leaf. Seeding on the
+        whole IR's read set (condition AND message operands) keeps both out.
 
         The reachability is transitive (``bool ok = _check(); bool z = ok &&
-        other; require(z);``), so it is a backwards closure from the condition
-        operands over each IR's ``lvalue -> read`` edges. Names (not
-        identities) are compared because nodes mix ``irs_ssa`` and ``irs``
-        views."""
+        other; require(z);``), so it is a backwards closure from those operands
+        over each IR's ``lvalue -> read`` edges. Names (not identities) are
+        compared because nodes mix ``irs_ssa`` and ``irs`` views."""
         if container is None:
             return True  # no scope to prove otherwise — keep the legacy skip
         key = id(container)
@@ -300,7 +319,12 @@ class RevertDetector:
                     body_lvalue = getattr(body_ir, "lvalue", None)
                     if body_lvalue is not None and reads:
                         defs.setdefault(str(body_lvalue), set()).update(reads)
-                    if isinstance(body_ir, Condition) or _ir_is_require(body_ir) or _ir_is_assert(body_ir):
+                    if (
+                        isinstance(body_ir, Condition)
+                        or _ir_is_require(body_ir)
+                        or _ir_is_assert(body_ir)
+                        or _ir_is_revert(body_ir)
+                    ):
                         seeds |= reads
             feeding = set(seeds)
             work = list(seeds)
