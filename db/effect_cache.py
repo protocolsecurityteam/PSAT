@@ -118,7 +118,23 @@ logger = logging.getLogger(__name__)
 # Order there is Slither's ``list(set(vars_written))`` over identity-hashed
 # objects, so it tracks allocation addresses; the (kind, target, selector,
 # origin) multiset is identical.
-EFFECT_CACHE_SCHEMA_VERSION = 10
+# v11: the predicate trees the probe is seeded from now cover two shapes they
+# could not reach before (W1-A, G3 classes F and R). (a) The cross-function gate
+# recursion was suppressed whenever a call's result was read anywhere, not only
+# where it reaches a branch condition, so every `return gatedCallee(...)`
+# forwarder arrived at the probe with the callee's gate missing — 406 function
+# entries move across the 88 production compilation units, and on the corpus
+# `TreeAbsentPublics.withdrawAll` goes from no tree to a caller_authority leaf.
+# (b) `fallback` / `receive` had no tree BUILT at all, so a caller-gated fallback
+# was seeded as unguarded; on the corpus both `TreeAbsentPublics` entry points
+# gain a caller_authority leaf, and in the local corpus PriorityWithdrawalQueue
+# and WithdrawRequestNFT gate `receive()` on `msg.sender != liquidityPool`.
+# A v10 row therefore records a verdict reached from a strictly smaller gate set
+# than the same probe now sees. The same change also replaces the fabricated
+# `keccak("fallback()")[:4]` / `keccak("receive()")[:4]` selectors with the
+# empty-string sentinel this file already fixes, so v10 rows for those functions
+# are keyed on an identity no caller could ever produce.
+EFFECT_CACHE_SCHEMA_VERSION = 11
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
