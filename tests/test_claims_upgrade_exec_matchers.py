@@ -285,7 +285,11 @@ def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
 
 def test_the_state_var_destination_state_is_still_produced(tmp_path):
     """R2 for the suppression above: the branch it fires on is reachable, and it
-    is reached by real compiler output rather than by construction."""
+    is reached by real compiler output rather than by construction — on a
+    single-op body AND on a multi-op body whose every candidate op resolves to
+    storage. The fragment's ``state_var`` is a function-wide quantifier now, so
+    the multi-op arm is what proves the suppression still has something real to
+    fire on after the quantifier change."""
     from slither import Slither
 
     from services.static.claims.context import ClaimContext
@@ -298,10 +302,51 @@ def test_the_state_var_destination_state_is_still_produced(tmp_path):
     subject = _select_subject_contract(Slither(str(project_dir)), "ExecBinding")
     assert subject is not None
     ctx = ClaimContext(subject, build_effects(subject), {})
-    taint = arbitrary_exec_taint(ctx, "rebalance(address,address,bytes)")
-    assert taint is not None, "the taint fragment is what the suppression reads"
-    assert taint["destination_kind"] == "state_var"
-    assert taint["destination_param"] is None
+    for signature in ("rebalance(address,address,bytes)", "twoStateVarSinks(address,bytes)"):
+        taint = arbitrary_exec_taint(ctx, signature)
+        assert taint is not None, "the taint fragment is what the suppression reads"
+        assert taint["destination_kind"] == "state_var", signature
+        assert taint["destination_param"] is None, signature
+
+
+def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
+    """R4 — the un-hedged positive the suppression must not eat. The Safe/Zodiac
+    transaction-guard idiom calls a FIXED guard with ``(target, data)`` and then
+    calls the caller-supplied target with the caller-supplied data. The first op
+    resolves ``state_var``; the second IS the arbitrary call. A fragment that
+    answered with the first op suppressed the whole claim — silently, and only
+    in this statement order — so both orders are pinned to the same param
+    binding here."""
+    witnesses = _binding_witnesses(tmp_path)
+    fragment_fields = (
+        "destination_param",
+        "destination_kind",
+        "destination_basis",
+        "calldata_param",
+        "calldata_kind",
+        "calldata_basis",
+    )
+    for name in ("guardThenExec", "execThenGuard"):
+        witness = witnesses[name]
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param"), name
+        assert (witness["calldata_param"], witness["calldata_kind"]) == ("data", "param"), name
+    # Order-independence, field by field: swapping the two statements must not
+    # move a byte of the published binding.
+    assert {f: witnesses["guardThenExec"][f] for f in fragment_fields} == {
+        f: witnesses["execThenGuard"][f] for f in fragment_fields
+    }
+
+
+def test_the_suppression_requires_every_op_to_be_state_var(tmp_path):
+    """The suppression's quantifier: it may fire only where EVERY candidate op's
+    destination is proven storage-held (``twoStateVarSinks``), and an open
+    question on any op outranks a proven absence on another
+    (``stateVarThenBranched`` mints the hedge)."""
+    witnesses = _binding_witnesses(tmp_path)
+    assert "twoStateVarSinks" not in witnesses
+    hedged = witnesses["stateVarThenBranched"]
+    assert hedged["destination_kind"] == "not_determined"
+    assert hedged["destination_param"] is None
 
 
 def test_a_library_forwarder_binds_through_its_own_body(tmp_path):

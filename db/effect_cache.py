@@ -164,7 +164,17 @@ logger = logging.getLogger(__name__)
 # verdict to decide whether a synthesized destination can be reached at all,
 # so a row minted without the discriminator must not be served to the probe
 # that now expects it.
-EFFECT_CACHE_SCHEMA_VERSION = 15
+# v16: the ``exec.arbitrary`` taint fragment now answers over EVERY candidate
+# call op instead of the first one in body order, so the v12 suppression's
+# ``state_var`` is a function-wide proof rather than a first-op fact. Under v15
+# a body holding a storage-destination op ahead of a genuine
+# ``target.call(data)`` — the Safe/Zodiac transaction-guard idiom — published
+# NO claim and no ``arbitrary_external_call`` label, and its statement-swapped
+# twin published both; the probe's candidate selection and its synthesized call
+# read the claim set, so a v15 row on such a function was reached with the
+# function's highest-severity claim absent for a reason that was statement
+# order, not evidence.
+EFFECT_CACHE_SCHEMA_VERSION = 16
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

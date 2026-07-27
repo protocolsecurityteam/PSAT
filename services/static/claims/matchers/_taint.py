@@ -357,9 +357,16 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     destination and calldata on a body call op, else ``None``.
 
     Whether the fragment is returned at all is decided exactly as before — by
-    read-set membership. What changed is what the fragment SAYS: the two names
-    are read off the destination and payload operand positions, so a name is
-    published only where the IR puts that parameter in that position."""
+    read-set membership. What the fragment SAYS is answered over EVERY candidate
+    call op, never the first one: the two names are read off the destination and
+    payload operand positions of the op whose destination resolution is the most
+    adverse (``param`` over ``not_determined`` over ``state_var``). So a proven
+    absence (``state_var``) in the returned fragment is a statement about the
+    whole function — every candidate op's destination is storage-held — and a
+    consumer may suppress on it without re-quantifying. A first-op answer read
+    a per-op fact as that function-wide proof, and a Safe-guard body
+    (``guard.checkTransaction(target, data)`` followed by ``target.call(data)``)
+    lost its genuine arbitrary call to whichever statement came first."""
     function = _slither_function(ctx, signature)
     if function is None:
         return None
@@ -386,6 +393,7 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
     definitions = _definitions(function)
+    fragments: list[dict[str, Any]] = []
     for node in getattr(function, "nodes", None) or []:
         for ir in getattr(node, "irs", None) or []:
             if not isinstance(ir, (LowLevelCall, HighLevelCall, LibraryCall)):
@@ -412,12 +420,28 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
                 data_param, data_kind = None, ("call_argument" if carried else "not_determined")
             else:
                 data_param, data_kind = None, "not_determined"
-            return {
-                "destination_param": dest_param,
-                "destination_kind": dest_kind,
-                "destination_basis": basis if dest_kind == "param" else None,
-                "calldata_param": data_param,
-                "calldata_kind": data_kind,
-                "calldata_basis": basis if data_kind == "param" else None,
-            }
-    return None
+            fragments.append(
+                {
+                    "destination_param": dest_param,
+                    "destination_kind": dest_kind,
+                    "destination_basis": basis if dest_kind == "param" else None,
+                    "calldata_param": data_param,
+                    "calldata_kind": data_kind,
+                    "calldata_basis": basis if data_kind == "param" else None,
+                }
+            )
+    if not fragments:
+        return None
+    # The most adverse candidate op speaks for the function. ``param`` is the
+    # claim itself, ``not_determined`` is an open question that still mints, and
+    # ``state_var`` is a proven absence — so ``state_var`` survives to the
+    # returned fragment only when every candidate op resolved to it, which is
+    # the quantifier a downstream suppression needs. Ties rank the calldata slot
+    # the same way (a caller-chosen blob over an open question over a proven
+    # argument-only op), then fall to body order, which is deterministic.
+    dest_rank = {"param": 2, "not_determined": 1, "state_var": 0}
+    data_rank = {"param": 2, "not_determined": 1, "call_argument": 0}
+    return max(
+        fragments,
+        key=lambda f: (dest_rank.get(f["destination_kind"], 1), data_rank.get(f["calldata_kind"], 1)),
+    )

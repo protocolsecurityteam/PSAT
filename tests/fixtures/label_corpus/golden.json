@@ -3718,6 +3718,126 @@
           }
         },
         {
+          "full_name": "execThenGuard(address,bytes)",
+          "selector": "0xa8e33be9",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "call_destination",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "execThenGuard(address,bytes):sink0:external_call:target.call",
+                  "execThenGuard(address,bytes):sink1:external_call:fallbackRoute.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "target.call"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "guardThenExec(address,bytes)",
+          "selector": "0xd0e0a0e2",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "call_destination",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "guardThenExec(address,bytes):sink0:external_call:fallbackRoute.exec",
+                  "guardThenExec(address,bytes):sink1:external_call:target.call"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "target.call"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
           "full_name": "manageReversed(address,bytes)",
           "selector": "0x46b86bea",
           "effect_labels": [
@@ -4167,6 +4287,62 @@
           }
         },
         {
+          "full_name": "stateVarThenBranched(address,address,bytes,bool)",
+          "selector": "0xed258199",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "stateVarThenBranched(address,address,bytes,bool):sink0:external_call:fallbackRoute.exec",
+                  "stateVarThenBranched(address,address,bytes,bool):sink1:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
           "full_name": "stateWrittenAfterCall(address,bytes)",
           "selector": "0x0ebcd6cf",
           "effect_labels": [
@@ -4207,6 +4383,44 @@
             "present": true,
             "root_op": "LEAF",
             "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "twoStateVarSinks(address,bytes)",
+          "selector": "0x51248e39",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "swapper.swap",
+              "selector": "0x119943f7",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "swapper.swap"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
             "authority_roles": [
               "business"
             ],

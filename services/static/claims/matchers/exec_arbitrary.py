@@ -13,12 +13,17 @@ evidence paths, gate-open because they span unrelated contract shapes:
 A plain ``transfer(address,uint256)`` value send has an address-tainted
 destination but no arbitrary calldata, so no path fires.
 
-Neither does a call whose destination is PROVEN to be a state variable. The
-claim's sentence is *"forwards a caller-supplied target"*; a ``state_var``
-destination is the proof that the caller does not supply it, and minting the
-claim beside that proof asserts the negation of its own witness. The two
-remaining destination states still mint: ``param`` is the claim, and
-``not_determined`` is an open question a hedged claim is the right answer to.
+Neither does a function whose EVERY candidate call op has a destination PROVEN
+to be a state variable. The claim's sentence is *"forwards a caller-supplied
+target"*; a ``state_var`` destination is the proof that the caller does not
+supply it, and minting the claim beside that proof asserts the negation of its
+own witness. The quantifier is the taint helper's: its fragment answers over
+all candidate ops and lets ``state_var`` through only when no op resolved to
+anything else, so a Safe-guard body — ``guard.checkTransaction(target, data)``
+then ``target.call(data)`` — keeps its genuine arbitrary call regardless of
+statement order. The two remaining destination states still mint: ``param`` is
+the claim, and ``not_determined`` is an open question a hedged claim is the
+right answer to.
 """
 
 from __future__ import annotations
@@ -111,14 +116,17 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if taint is None:
         return None
     if taint["destination_kind"] == "state_var":
-        # A PROVEN-ABSENT caller-chosen destination. This is the
-        # ``LRTSquaredAdmin.rebalance`` shape and it is a pure false positive:
-        # the call goes to the storage-held ``swapper``, the two address
-        # parameters ride along as ARGUMENTS of a fixed-selector call, and the
-        # read-set test that mints the claim cannot tell an argument from a
-        # destination. ``not_determined`` deliberately still mints — an
-        # unanswered question is not a proof of absence — so this drops exactly
-        # the rows where the witness contradicts the sentence.
+        # A PROVEN-ABSENT caller-chosen destination, and the proof is
+        # function-wide: the taint fragment ranks every candidate call op and
+        # publishes ``state_var`` only when no op resolved to ``param`` or
+        # ``not_determined``. This is the ``LRTSquaredAdmin.rebalance`` shape
+        # and it is a pure false positive: the call goes to the storage-held
+        # ``swapper``, the two address parameters ride along as ARGUMENTS of a
+        # fixed-selector call, and the read-set test that mints the claim cannot
+        # tell an argument from a destination. ``not_determined`` deliberately
+        # still mints — an unanswered question is not a proof of absence — so
+        # this drops exactly the rows where the witness contradicts the
+        # sentence on every op it could describe.
         return None
     witness = {
         "kind": "param_taint",
