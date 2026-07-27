@@ -333,6 +333,7 @@ def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_
     ).read_text()
     project_dir = write_foundry_project(tmp_path, "GuardedTeller", source)
     _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    assert effects is not None, "fixture compiled but produced no effects artifact"
 
     def _routed_witness_flow(signature: str) -> dict:
         claims = effects["functions"][signature]["claims"]

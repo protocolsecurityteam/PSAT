@@ -293,6 +293,12 @@ logger = logging.getLogger(__name__)
 # 427, not re-measured here. The sentinel's firing proof is by construction:
 # test_gate_in_an_unlowered_function_is_not_published_as_a_callee removes a
 # lowered tree, the exact shape a degraded tree stage persists.)
+# (Wave 1 exit verification: the mutual-edge regression metric quoted in the
+# leg's commit messages exists in three stale versions (66->28, 66->44); the
+# number that reproduces from the production build_controller_tracking path at
+# the MERGED head is 66 -> 32 mutual directed edges (372 -> 306 distinct
+# directed pairs). Treat 66->32 as canonical; the commit-message figures were
+# measured pre-merge on the un-merged leg.)
 EFFECT_CACHE_SCHEMA_VERSION = 21
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
