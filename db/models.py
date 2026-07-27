@@ -777,6 +777,13 @@ class ControlGraphEdge(Base):
     __table_args__ = (Index("ix_control_graph_edges_contract_id", "contract_id"),)
 
 
+# ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the
+# fourth state ("writer unknown") and belongs to rows written before the column.
+UPGRADE_SOURCE_BACKFILL = "backfill"
+UPGRADE_SOURCE_EVENT_SCAN = "event_scan"
+UPGRADE_SOURCE_POLL = "poll"
+
+
 class UpgradeEvent(Base):
     __tablename__ = "upgrade_events"
     __table_args__ = (Index("ix_upgrade_events_contract_id", "contract_id"),)
@@ -784,11 +791,27 @@ class UpgradeEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     proxy_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # NULL means "this writer does not record the predecessor", not "there was
+    # no predecessor". ``source`` is what tells the two apart: the backfiller
+    # projects an artifact that never carried old_impl, the watcher reads the
+    # slot's previous value. Without the discriminator both are NULL.
     old_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
     new_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # NULL = the block was not determined by the writer. Never 0: every
+    # consumer orders by this column with ``nullslast()``, and 0 sorts ahead
+    # of the genuine genesis deployment, which shifts every impl-era window.
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # For ``source='backfill'`` / ``'event_scan'`` this is the on-chain block
+    # timestamp. For ``source='poll'`` no block is known, so it carries the
+    # detection time — an upper bound within one poll interval of the change.
+    # ``source`` is the only thing that distinguishes the two readings.
     timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # Which writer produced this row: 'backfill' (upgrade-history artifact
+    # projection), 'event_scan' (log-derived), 'poll' (storage-slot poll).
+    # NULL = written before this column existed; the writer is unknown, which
+    # is a third state and not a synonym for either value.
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="upgrade_events")
 

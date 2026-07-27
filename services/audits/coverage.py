@@ -77,10 +77,36 @@ class ImplWindow:
 
     proxy_contract_id: int  # Contract.id of the proxy this window is on
     proxy_address: str
-    from_block: int
-    to_block: int | None  # None = still current on this proxy
+    # None on either bound = the writer of the underlying UpgradeEvent could
+    # not determine the block (the storage poller reads a slot, not a log).
+    # ``to_block=None`` alone does NOT mean "still current" — ``successor``
+    # is what says that.
+    from_block: int | None
+    to_block: int | None
     from_ts: datetime | None
     to_ts: datetime | None
+    # 'none'          — nothing replaced this impl; the window is open.
+    # 'known'         — replaced, and the replacing event carries a block.
+    # 'block_unknown' — replaced, but the replacing event has no block, so the
+    #                   window is closed with an unknown upper bound.
+    successor: str = "none"
+
+
+def _publishable_block_bounds(window: ImplWindow | None) -> tuple[int | None, int | None]:
+    """Block bounds for a coverage row, or ``(None, None)`` when they cannot
+    be stated honestly.
+
+    ``site/src/auditMatching.js`` treats a NULL ``covered_to_block`` beside a
+    non-NULL ``covered_from_block`` as +infinity, so publishing a half-known
+    window would spread the audit across every later impl era. When either
+    bound is unknown we publish neither and let the consumer fall back to the
+    temporal comparison, whose bounds are known on this path.
+    """
+    if window is None:
+        return None, None
+    if window.from_block is None or window.successor == "block_unknown":
+        return None, None
+    return window.from_block, window.to_block
 
 
 @dataclass(frozen=True)
@@ -259,14 +285,19 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
             for i, ev in enumerate(proxy_events):
                 if not ev.new_impl or ev.new_impl.lower() != addr_lower:
                     continue
-                from_block = ev.block_number or 0
+                # ``or 0`` here would undo the SQL ordering: NULLS LAST puts a
+                # block-less event at the end of the sequence, and folding its
+                # NULL to 0 sorts it back to the front two statements later.
+                from_block = ev.block_number
                 from_ts = ev.timestamp
                 to_block: int | None = None
                 to_ts: datetime | None = None
+                successor = "none"
                 if i + 1 < len(proxy_events):
                     nxt = proxy_events[i + 1]
                     to_block = nxt.block_number
                     to_ts = nxt.timestamp
+                    successor = "known" if nxt.block_number is not None else "block_unknown"
                 windows.append(
                     ImplWindow(
                         proxy_contract_id=pid,
@@ -275,10 +306,13 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
                         to_block=to_block,
                         from_ts=from_ts,
                         to_ts=to_ts,
+                        successor=successor,
                     )
                 )
-        # Deterministic order so callers (and tests) can rely on it.
-        windows.sort(key=lambda w: (w.from_block, w.proxy_contract_id))
+        # Deterministic order so callers (and tests) can rely on it. Windows
+        # with an unknown start sink to the end, matching the SQL ordering
+        # they were built from.
+        windows.sort(key=lambda w: (w.from_block is None, w.from_block or 0, w.proxy_contract_id))
         windows_by_addr[addr_lower] = windows
 
     for addr_lower, contract_ids in addr_to_ids.items():
@@ -321,7 +355,11 @@ def _confidence_for_impl_era(audit_ts: datetime | None, windows: list[ImplWindow
         # No audit date. Best effort: attach to the most recent (open-ended)
         # window if any — the naive assumption that absent-date audits are
         # modern. Low confidence; UI can filter these out.
-        open_windows = [w for w in windows if w.to_block is None]
+        # ``successor``, not ``to_block is None``: a window closed by a
+        # block-less upgrade (poll-detected) also has to_block=None, and
+        # calling it open would attach an undated audit to an impl that has
+        # already been replaced.
+        open_windows = [w for w in windows if w.successor == "none"]
         if open_windows:
             return "low", open_windows[0]
         return "low", windows[-1]
@@ -712,6 +750,7 @@ def match_contracts_for_audit(session: Session, audit_id: int) -> list[CoverageM
         windows = windows_by_id.get(c.id, [])
         if windows:
             confidence, window = _confidence_for_impl_era(audit_ts, windows)
+            cov_from, cov_to = _publishable_block_bounds(window)
             match = CoverageMatch(
                 audit_report_id=audit.id,
                 contract_id=c.id,
@@ -719,8 +758,8 @@ def match_contracts_for_audit(session: Session, audit_id: int) -> list[CoverageM
                 matched_name=matched_name,
                 match_type="impl_era",
                 match_confidence=confidence,
-                covered_from_block=window.from_block if window else None,
-                covered_to_block=window.to_block if window else None,
+                covered_from_block=cov_from,
+                covered_to_block=cov_to,
             )
         else:
             confidence = _confidence_for_direct(audit_ts, c)
@@ -871,6 +910,7 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
             continue
         if windows:
             confidence, window = _confidence_for_impl_era(audit_ts, windows)
+            cov_from, cov_to = _publishable_block_bounds(window)
             best_by_audit[audit.id] = CoverageMatch(
                 audit_report_id=audit.id,
                 contract_id=contract.id,
@@ -878,8 +918,8 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
                 matched_name=matched_name,
                 match_type="impl_era",
                 match_confidence=confidence,
-                covered_from_block=window.from_block if window else None,
-                covered_to_block=window.to_block if window else None,
+                covered_from_block=cov_from,
+                covered_to_block=cov_to,
             )
         else:
             confidence = _confidence_for_direct(audit_ts, contract)

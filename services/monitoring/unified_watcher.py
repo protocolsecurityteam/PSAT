@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import (
+    UPGRADE_SOURCE_EVENT_SCAN,
+    UPGRADE_SOURCE_POLL,
     Contract,
     ControllerValue,
     MonitoredContract,
@@ -1145,6 +1147,11 @@ def _sync_relational_tables(
                         new_impl=new_impl,
                         block_number=parsed.get("block_number"),
                         tx_hash=parsed.get("tx_hash"),
+                        # timestamp stays NULL: a log carries a block, not a
+                        # block time, and the scanner reads historical windows
+                        # so detection time is not a usable stand-in. NULL is
+                        # read as "not determined" by every consumer.
+                        source=UPGRADE_SOURCE_EVENT_SCAN,
                     )
                 )
                 # Coverage windows are derived from UpgradeEvent history, so a
@@ -1289,8 +1296,21 @@ def _sync_relational_from_poll(
                     proxy_address=mc.address,
                     old_impl=str(old_value) if old_value else None,
                     new_impl=str(new_value),
-                    block_number=0,
-                    tx_hash="",
+                    # A poll reads a slot, not a log: no block and no tx are
+                    # knowable here. NULL says that; 0 would claim the upgrade
+                    # happened before the genesis deployment, and since every
+                    # consumer orders by block_number NULLS LAST, this row
+                    # would sort to the front of the era sequence and shift
+                    # every impl window by one.
+                    block_number=None,
+                    tx_hash=None,
+                    # Detection time, not a block time — bounded above by one
+                    # poll interval. Only ``source`` distinguishes the two
+                    # readings of this column; leaving it NULL is what
+                    # collapsed every post-upgrade audit to low confidence
+                    # once before (upgrade_history.project_to_events).
+                    timestamp=datetime.now(timezone.utc),
+                    source=UPGRADE_SOURCE_POLL,
                 )
             )
             _refresh_coverage_after_upgrade(session, contract.protocol_id)
