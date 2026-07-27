@@ -195,9 +195,10 @@ class RevertDetector:
         # apart from one carrying an unmodeled require/assert (the fail-safe
         # against silent-public on a require form we don't structurally lift).
         self._scanned_nodes: list[Any] = []
-        # Per-container cache of every variable name read by any IR in its
-        # body, for the discarded-result test in ``_scan_node``.
-        self._container_reads: dict[int, set[str]] = {}
+        # Per-container cache of the value names that transitively reach a
+        # branch condition or a require/assert argument, for the
+        # already-lifted test in ``_scan_node``.
+        self._container_condition_reads: dict[int, set[str]] = {}
         # Memo for ``_callee_always_reverts``, keyed by (id(callee), depth).
         # Depth is part of the key because the ``CALLEE_REVERT_MAX_DEPTH`` cutoff
         # makes the answer depth-relative — a helper resolved at one depth may be
@@ -268,26 +269,49 @@ class RevertDetector:
     # Per-node classification
     # ------------------------------------------------------------------
 
-    def _lvalue_is_read(self, lvalue: Any, container: Any) -> bool:
-        """Is a call's result variable read anywhere in ``container``'s body?
-        A never-read result means the call is a statement-expression whose
-        gates must be found by recursion; a read result feeds a condition
-        the predicate builder lifts instead. Names (not identities) are
-        compared because nodes mix ``irs_ssa`` and ``irs`` views."""
+    def _lvalue_already_lifted(self, lvalue: Any, container: Any) -> bool:
+        """Does a call's result reach a branch condition or a require/assert
+        argument in ``container``'s body?
+
+        Only such a result is lifted into a leaf by the predicate builder, so
+        only such a result may suppress the recursion into the callee. Being
+        read *at all* is a strictly weaker property and answering with it lost
+        every gate behind a ``return gatedCallee(...)`` forwarder: the RETURN
+        node reads the result, no condition ever does, and the callee's own
+        require was therefore never walked — the function resolved unguarded.
+
+        The reachability is transitive (``bool ok = _check(); bool z = ok &&
+        other; require(z);``), so it is a backwards closure from the condition
+        operands over each IR's ``lvalue -> read`` edges. Names (not
+        identities) are compared because nodes mix ``irs_ssa`` and ``irs``
+        views."""
         if container is None:
-            return True  # no scope to prove discard — keep the legacy skip
+            return True  # no scope to prove otherwise — keep the legacy skip
         key = id(container)
-        reads = self._container_reads.get(key)
-        if reads is None:
-            reads = set()
+        feeding = self._container_condition_reads.get(key)
+        if feeding is None:
+            defs: dict[str, set[str]] = {}
+            seeds: set[str] = set()
             for body_node in getattr(container, "nodes", []) or []:
                 for body_ir in list(getattr(body_node, "irs_ssa", None) or []) + list(
                     getattr(body_node, "irs", []) or []
                 ):
-                    for read in getattr(body_ir, "read", []) or []:
-                        reads.add(str(read))
-            self._container_reads[key] = reads
-        return str(lvalue) in reads
+                    reads = {str(read) for read in (getattr(body_ir, "read", []) or [])}
+                    body_lvalue = getattr(body_ir, "lvalue", None)
+                    if body_lvalue is not None and reads:
+                        defs.setdefault(str(body_lvalue), set()).update(reads)
+                    if isinstance(body_ir, Condition) or _ir_is_require(body_ir) or _ir_is_assert(body_ir):
+                        seeds |= reads
+            feeding = set(seeds)
+            work = list(seeds)
+            while work:
+                name = work.pop()
+                for source in defs.get(name, ()):
+                    if source not in feeding:
+                        feeding.add(source)
+                        work.append(source)
+            self._container_condition_reads[key] = feeding
+        return str(lvalue) in feeding
 
     def _scan_node(self, node: Any, container: Any = None) -> None:
         self._scanned_nodes.append(node)
@@ -364,11 +388,14 @@ class RevertDetector:
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if isinstance(ir, (InternalCall, LibraryCall)):
                 lvalue = getattr(ir, "lvalue", None)
-                if lvalue is not None and self._lvalue_is_read(lvalue, container):
-                    # The result feeds a condition somewhere — the predicate
-                    # builder lifts that path. Recursing too would double-count.
+                if lvalue is not None and self._lvalue_already_lifted(lvalue, container):
+                    # The result reaches a branch condition / require argument
+                    # — the predicate builder lifts that path. Recursing too
+                    # would double-count.
                     continue
-                # No result, or a DISCARDED result: ``modifier hasRole(r) {
+                # No result, a DISCARDED result, or a result that only ever
+                # leaves the function (``return gatedCallee(...)``):
+                # ``modifier hasRole(r) {
                 # _hasRole(r, msg.sender); _; }`` calls a bool-returning guard
                 # helper and ignores the bool — the require lives in the
                 # callee. Skipping these silently dropped the whole gate
