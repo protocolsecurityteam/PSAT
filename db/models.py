@@ -809,9 +809,10 @@ class ControlGraphEdge(Base):
 # ``controller_value`` and the owner/principal relations are *control* claims:
 # reversed, they say the to-node has authority over the from-node.
 # ``external_call_target`` is not — it says the from-node calls the to-node,
-# which is a proven fact about the code and says nothing about who may call
-# whom. Until this split both were written as ``controller_value``, and 66
-# directed edge pairs asserted "A controls B" and "B controls A" at once.
+# which is a proven fact about the code but carries no authority: being called
+# by X confers nothing over X. Until this split both were written as
+# ``controller_value``, and 66 directed edge pairs asserted "A controls B" and
+# "B controls A" at once.
 EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
 EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
 

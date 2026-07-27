@@ -32,6 +32,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
+from db.jsonb import JSONB_UNSET, jsonb_state
 from db.models import (
     CONTROLLER_OBSERVED_VIA_EVENT_LOG,
     CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
@@ -152,12 +153,14 @@ def test_event_rotation_from_timelock_to_eoa_drops_the_stale_delay(db_session, s
     # re-classify, so NULL — not determined — is the only honest answer.
     assert row.resolved_type is None
     assert row.details is None
-    # And it is SQL NULL, not the jsonb scalar ``null``: an ``IS NULL`` test
-    # must be able to see it (db/jsonb.py, W0-5).
-    typed = db_session.execute(
-        select(ControllerValue.details.is_(None)).where(ControllerValue.id == row.id)
+    # And it is SQL NULL, not the jsonb scalar ``null``. psycopg2 decodes both
+    # to Python None, so the distinction is only visible from SQL — and it
+    # matters because a written ``null`` is "the writer recorded an absence",
+    # which is evidence, while unset is not (db/jsonb.py, W0-5).
+    state = db_session.execute(
+        select(jsonb_state(ControllerValue.details)).where(ControllerValue.id == row.id)
     ).scalar_one()
-    assert typed is True
+    assert state == JSONB_UNSET
     # The read that produced the new value is identified and dated.
     assert row.observed_via == CONTROLLER_OBSERVED_VIA_EVENT_LOG
     assert row.block_number == 25_619_159
