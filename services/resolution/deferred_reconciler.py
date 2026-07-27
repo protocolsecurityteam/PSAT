@@ -58,6 +58,7 @@ from typing import Any, Iterator
 from sqlalchemy import Text, cast, func, select
 from sqlalchemy.orm import Session
 
+from db.jsonb import jsonb_has_payload
 from db.models import Contract, EffectiveFunction, IndexedEventCursor, IndexedEventLog, Job, JobStage, JobStatus
 from services.resolution.role_store_standards import all_topic0s
 
@@ -152,6 +153,11 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     # tree mentions the marker. The JSONB→text cast LIKE catches the marker even
     # when the deferred leaf is nested inside an AND/OR; the precise per-leaf
     # walk happens in Python below.
+    #
+    # ``jsonb_has_payload``, not a SQL null test: a column written from a Python
+    # ``None`` holds the jsonb scalar null, which passes a null test and casts to
+    # the four-character text ``null`` — a row with no capability tree at all,
+    # carried into the Python walk below as a ``None`` to re-check.
     rows = session.execute(
         select(Job.id, Job.address, EffectiveFunction.capability_expr)
         .join(Contract, Contract.job_id == Job.id)
@@ -159,7 +165,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         .where(Job.status == JobStatus.completed)
         .where(Job.stage == JobStage.done)
         .where(Job.chain_id == chain_id)
-        .where(EffectiveFunction.capability_expr.isnot(None))
+        .where(jsonb_has_payload(EffectiveFunction.capability_expr))
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
 
@@ -279,7 +285,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         .where(Job.status == JobStatus.completed)
         .where(Job.stage == JobStage.done)
         .where(Job.chain_id == chain_id)
-        .where(EffectiveFunction.capability_expr.isnot(None))
+        .where(jsonb_has_payload(EffectiveFunction.capability_expr))
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{ROLE_STORE_TRACE_STEP}%"))
     ).all()
 

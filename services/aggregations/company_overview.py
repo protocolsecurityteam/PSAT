@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterator
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
+from db.jsonb import jsonb_has_payload
 from db.models import (
     Contract,
     ContractBalance,
@@ -481,6 +482,11 @@ def _prefetch_child_tables(
     # but reads as a footgun.
     cgn_principal_lookup = aliased(ControlGraphNode, name="cgn_principal_lookup")
     cge_target_cgn = aliased(ControlGraphNode, name="cge_target_cgn")
+    # ``jsonb_has_payload``, not a SQL null test, on both timelock-delay clauses
+    # here and in ``_node_keep_predicate``: a JSONB column written from a Python
+    # ``None`` holds the jsonb scalar null, which passes a null test. The
+    # ``has_key`` checks that follow are false on that value, so the pair reads
+    # as one contradictory row rather than a node with no resolved details.
     cgn_principal_addr_subq = (
         select(func.lower(cgn_principal_lookup.address))
         .where(
@@ -488,7 +494,7 @@ def _prefetch_child_tables(
             or_(
                 cgn_principal_lookup.resolved_type.in_(_PRINCIPAL_TYPES_SQL),
                 and_(
-                    cgn_principal_lookup.details.is_not(None),
+                    jsonb_has_payload(cgn_principal_lookup.details),
                     or_(
                         cgn_principal_lookup.details.has_key("delay"),
                         cgn_principal_lookup.details.has_key("delay_seconds"),
@@ -508,7 +514,7 @@ def _prefetch_child_tables(
             func.lower(node_ref.address).in_(cgn_principal_addr_subq),
             func.lower(node_ref.address).in_(edge_source_addr_subq),
             and_(
-                node_ref.details.is_not(None),
+                jsonb_has_payload(node_ref.details),
                 or_(
                     node_ref.details.has_key("delay"),
                     node_ref.details.has_key("delay_seconds"),

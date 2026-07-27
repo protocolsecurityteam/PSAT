@@ -50,6 +50,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.orm import Session
 
+from db.jsonb import jsonb_has_payload
 from db.models import (
     AuditContractCoverage,
     AuditReport,
@@ -794,8 +795,13 @@ def match_audits_for_contract(session: Session, contract_id: int) -> list[Covera
                 AuditReport.protocol_id == contract.protocol_id,
                 AuditReport.scope_extraction_status == "success",
                 or_(
+                    # ``scope_contracts`` is a text ARRAY — a SQL null test is
+                    # the right predicate for it. ``scope_entries`` is JSONB,
+                    # where a write of a Python ``None`` stores the jsonb scalar
+                    # null: it passes a null test while carrying no scope rows,
+                    # and would admit an audit with nothing to match against.
                     AuditReport.scope_contracts.isnot(None),
-                    AuditReport.scope_entries.isnot(None),
+                    jsonb_has_payload(AuditReport.scope_entries),
                 ),
             )
         )
