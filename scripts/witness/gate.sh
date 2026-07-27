@@ -134,9 +134,23 @@ fi
 # Pre-existing occurrences are the waves' work; these catch NEW ones.
 DIFF=$(git diff "$BASE"...HEAD -- '*.py' '*.js' '*.jsx' 2>/dev/null | grep '^+' | grep -v '^+++' || true)
 
-grep_new() { # name pattern human
-  if [ -z "$DIFF" ]; then record "$1" SKIP "empty diff vs $BASE"; return; fi
-  hits=$(printf '%s\n' "$DIFF" | grep -nE "$2" || true)
+# The W0-8 determinism probes reproduce the REMOVED idioms verbatim
+# (`next(iter(<set>))`, the binary-float fold) and publish them beside the real
+# answer as a control the gate requires to VARY. That is the instrument that
+# proves the gate can still see the defect it was built for, so the pattern
+# checks below must not fire on it — and the exclusion is by exact path, not by a
+# blanket loosening of the pattern, so a `next(iter(...))` reintroduced anywhere
+# else is still caught. The test file is listed because it names the idiom in
+# prose, and this grep cannot tell prose from code.
+DIFF_NO_INSTRUMENTS=$(git diff "$BASE"...HEAD -- '*.py' '*.js' '*.jsx' \
+  ':(exclude)scripts/witness/determinism_probe_taint.py' \
+  ':(exclude)scripts/witness/determinism_probe_selection.py' \
+  ':(exclude)tests/test_determinism_gate.py' 2>/dev/null | grep '^+' | grep -v '^+++' || true)
+
+grep_new() { # name pattern human [corpus]
+  local corpus="${4:-$DIFF}"
+  if [ -z "$corpus" ]; then record "$1" SKIP "empty diff vs $BASE"; return; fi
+  hits=$(printf '%s\n' "$corpus" | grep -nE "$2" || true)
   if [ -n "$hits" ]; then
     record "$1" FAIL "$(printf '%s' "$hits" | head -3 | tr '\n' ' ')"
   else
@@ -149,7 +163,7 @@ grep_new() { # name pattern human
 # SQL over ordinary columns and trains the agent to ignore the check.
 grep_new no-new-jsonb-isnull   '(claims|conditions|capability_expr|authority_roles|witness|details|observed_residue|predicate_trees|analysis|tracking_plan|data|findings|scope_entries|monitoring_config|last_known_state|chain_breakdown|contract_breakdown|graph_context)[^\n]{0,40}IS +(NOT +)?NULL' "jsonb IS NOT NULL"
 # Unordered picks: identity-hashed Slither vars are NOT pinned by PYTHONHASHSEED.
-grep_new no-new-set-pick       'next\(iter\('                       "next(iter(...))"
+grep_new no-new-set-pick       'next\(iter\('                       "next(iter(...))" "$DIFF_NO_INSTRUMENTS"
 # Defaults that collapse "no evidence" into a value. NARROW on purpose: bare
 # `or []` / `or 0` are ubiquitous legitimate idioms (label_corpus.py uses `or []`
 # four times), and a check that cries wolf gets ignored. Tier-2 review owns the
