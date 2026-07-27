@@ -272,7 +272,10 @@ def collect_contract_analysis_with_artifacts(
     with _phase("upgradeability", durations_ms):
         upgradeability = _detect_upgradeability(subject_contract, project_dir, effects_artifact)
     with _phase("pausability", durations_ms):
-        pausability = _detect_pausability(subject_contract, project_dir, pause_info)
+        # Post-``claims``: the Plane-1 ``pause.set`` / ``pause.unset`` claims
+        # ride on the effects artifact and are the only detector that resolves a
+        # struct-member or ERC-7201-namespaced latch.
+        pausability = _detect_pausability(subject_contract, project_dir, pause_info, effects_artifact)
     with _phase("timelock", durations_ms):
         timelock = _detect_timelock(subject_contract, project_dir, semantic_control["role_definitions"])
     with _phase("secondary_impl_pointers", durations_ms):

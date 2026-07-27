@@ -55,14 +55,19 @@ class AnalysisStatus(TypedDict):
 
 
 class Summary(TypedDict):
+    # Every evidence field here is nullable, and ``None`` always means the
+    # detector did not run — never "it ran and found nothing", which is
+    # ``False`` / ``[]``. ``contract_summaries`` has been nullable on all of
+    # them since the baseline migration; the producer is what emitted a
+    # proven-absence on 100% of rows regardless.
     control_model: ControlModel
     is_upgradeable: bool
-    is_pausable: bool
-    has_timelock: bool
-    static_risk_level: RiskLevel
-    standards: list[str]
-    is_factory: bool
-    is_nft: bool
+    is_pausable: bool | None
+    has_timelock: bool | None
+    static_risk_level: RiskLevel | None
+    standards: list[str] | None
+    is_factory: bool | None
+    is_nft: bool | None
 
 
 class ContractClassification(TypedDict):
@@ -124,7 +129,10 @@ class UpgradeabilityAnalysis(TypedDict):
 
 
 class PausabilityAnalysis(TypedDict):
-    is_pausable: bool
+    # ``None`` = not determined (the claims plane, the only detector that
+    # resolves a struct-member / namespaced latch, did not run). Distinct from
+    # ``False``, which is a proven absence.
+    is_pausable: bool | None
     pause_functions: list[str]
     unpause_functions: list[str]
     gating_modifiers: list[str]

@@ -503,7 +503,12 @@ def test_detect_pausability_renamed_pause_modifier(tmp_path):
 
 
 def test_detect_pausability_empty_when_no_pause(tmp_path):
-    """No pause shape → not pausable."""
+    """No pause shape → not pausable.
+
+    The effects artifact is passed because ``false`` here is a PROVEN absence
+    and only the claims plane can prove it: without that input the honest
+    answer is ``None`` (see the sibling below)."""
+    from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     sl = _compile(
@@ -519,6 +524,31 @@ def test_detect_pausability_empty_when_no_pause(tmp_path):
     contract = sl.contracts[0]
     trees = _build_trees(contract)
     pause_info = apply_reentrancy_pause_pass(contract, trees)
-    pausability = _detect_pausability(contract, tmp_path, pause_info)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, build_effects(contract))
     assert pausability["is_pausable"] is False
     assert pausability["pause_variables"] == []
+
+
+def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path):
+    """R1/R2: the effects artifact is degraded (``core`` substitutes
+    ``{"schema_version": ..., "error": ...}`` when ``build_effects`` raises),
+    so the only detector that can see a struct-member or namespaced latch did
+    not run. ``false`` would assert an absence nothing looked for."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public x;
+            function f() external { x = 1; }
+        }
+    """,
+    )
+    contract = sl.contracts[0]
+    trees = _build_trees(contract)
+    pause_info = apply_reentrancy_pause_pass(contract, trees)
+    degraded = {"schema_version": "semantic", "error": "boom"}
+    assert _detect_pausability(contract, tmp_path, pause_info, degraded)["is_pausable"] is None
+    assert _detect_pausability(contract, tmp_path, pause_info, None)["is_pausable"] is None

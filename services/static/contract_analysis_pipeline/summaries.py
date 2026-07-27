@@ -858,12 +858,62 @@ def _detect_upgradeability(
     }
 
 
+_PAUSE_CLAIM_POLARITY = {"pause.set": "pause", "pause.unset": "unpause"}
+
+
+def _pause_claims(effects: Mapping[str, Any] | None) -> tuple[set[str], set[str], set[str]]:
+    """``(pause_functions, unpause_functions, flag_paths)`` from the Plane-1
+    ``pause.set`` / ``pause.unset`` claims carried on the effects artifact.
+
+    ``PauseAnalyzer`` (Plane-0) only ever sees a flag that is a top-level
+    scalar state variable, which is why ``is_pausable`` was false on 33 of the
+    46 local contracts that publish ``pause*`` entry points: the Veda family
+    keeps its latch in a struct member (``accountantState.isPaused``) and the
+    EtherFi / OZ-v5 family keeps it behind an ERC-7201 namespaced slot, and
+    neither reaches ``contract.state_variables``. The claims matcher resolves
+    both through member-path facts and is strictly the better-evidenced
+    detector, so the summary reads it rather than re-deriving it.
+
+    It is also what keeps the EigenLayer bitmap family OUT: ``pause(uint256)``
+    assigns the new bitmap from a *parameter*, so the matcher's toggle polarity
+    is not a definite constant bool and it fails closed. Measured: 0 of the 8
+    bitmap contracts mint a ``pause.*`` claim."""
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return set(), set(), set()
+    pause_functions: set[str] = set()
+    unpause_functions: set[str] = set()
+    flags: set[str] = set()
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if not isinstance(claim, Mapping):
+                continue
+            polarity = _PAUSE_CLAIM_POLARITY.get(str(claim.get("claim_id")))
+            if polarity is None:
+                continue
+            (pause_functions if polarity == "pause" else unpause_functions).add(signature)
+            witness = claim.get("witness")
+            for flag in (witness or {}).get("flags") or [] if isinstance(witness, Mapping) else []:
+                if not isinstance(flag, Mapping):
+                    continue
+                variable = flag.get("var")
+                if not isinstance(variable, str) or not variable:
+                    continue
+                member = flag.get("member")
+                flags.add(f"{variable}.{member}" if isinstance(member, str) and member else variable)
+    return pause_functions, unpause_functions, flags
+
+
 def _detect_pausability(
     contract,
     project_dir: Path,
     pause_info: Mapping[str, Any] | None = None,
+    effects: Mapping[str, Any] | None = None,
 ) -> PausabilityAnalysis:
-    """Detect pausability structurally from the semantic ``PauseInfo`` export.
+    """Detect pausability from the semantic ``PauseInfo`` export **and** the
+    Plane-1 pause claims.
 
     ``pause_info`` (returned by ``apply_reentrancy_pause_pass``) carries
     the structural pause-state-var set and toggle-function list.
@@ -874,6 +924,12 @@ def _detect_pausability(
     function writes (true = pause, false = unpause); when the structural
     classification can't disambiguate, every toggle function is listed in
     both pause and unpause.
+
+    ``is_pausable`` is three-state. ``None`` is *not determined*: neither
+    detector ran, which is a different fact from both of them running and
+    finding no latch, and it is what the summary must say when the effects
+    artifact is degraded (the claims plane produced nothing to read) and the
+    predicate pass produced no ``PauseInfo`` either.
     """
     info = pause_info or {}
     pause_state_vars: list[str] = list(info.get("pause_state_vars") or [])
@@ -906,22 +962,45 @@ def _detect_pausability(
                 pause_functions.add(full_name)
                 unpause_functions.add(full_name)
 
+    claim_pause, claim_unpause, claim_flags = _pause_claims(effects)
+    pause_functions |= claim_pause
+    unpause_functions |= claim_unpause
+
     modifiers = _all_modifiers(contract)
     gating_modifiers: list[str] = []
     evidence = []
-    if pause_var_set:
+    # A claim flag may be a dotted path (``accountantState.isPaused``); a
+    # modifier reads the BASE variable, so match on that.
+    gate_var_set = pause_var_set | {path.split(".", 1)[0] for path in claim_flags}
+    if gate_var_set:
         for modifier in modifiers:
             read_names = {getattr(v, "name", "") for v in getattr(modifier, "state_variables_read", []) or []}
-            if read_names & pause_var_set:
+            if read_names & gate_var_set:
                 gating_modifiers.append(modifier.name)
                 evidence.append(_source_evidence(modifier, project_dir))
 
+    functions = (effects or {}).get("functions")
+    claims_plane_ran = isinstance(functions, Mapping) and bool(functions)
+    if pause_functions or unpause_functions or gating_modifiers or pause_state_vars:
+        is_pausable: bool | None = True
+    elif claims_plane_ran:
+        is_pausable = False
+    else:
+        # The claims matcher is the only detector that can see a struct-member
+        # or namespaced latch, and it is the one that did not run. Publishing
+        # ``false`` off the structural pass alone asserts the absence of a
+        # latch that pass could not have found: it answers ``false`` on 22 of
+        # the 33 local contracts that demonstrably do have one.
+        is_pausable = None
+
     return {
-        "is_pausable": bool(pause_functions or unpause_functions or gating_modifiers or pause_state_vars),
+        "is_pausable": is_pausable,
         "pause_functions": sorted(pause_functions),
         "unpause_functions": sorted(unpause_functions),
         "gating_modifiers": sorted(gating_modifiers),
-        "pause_variables": sorted(pause_state_vars),
+        # Structural flags stay as bare names; claim flags carry their member
+        # path, which is the only handle on WHICH struct member is the latch.
+        "pause_variables": sorted(set(pause_state_vars) | claim_flags),
         "authorized_roles": [],
         "evidence": evidence,
     }
