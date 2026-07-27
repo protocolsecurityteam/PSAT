@@ -505,6 +505,17 @@ def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, An
 
     Returns ``None`` when the entry-point surface itself could not be enumerated
     — the same not-determined answer, applied to every name.
+
+    R2 status of that ``None`` arm, stated rather than implied: it has **zero
+    realised rows** and is a lower bound, not a firing proof. Slither's
+    ``Contract.functions_entry_points`` is a property returning a list
+    comprehension, so it is never ``None`` for a real compiled contract; the arm
+    is reachable only by construction (any other object passed in this position
+    that cannot list its entry points) and is covered only by
+    ``test_unenumerable_entry_points_answer_not_determined``, which builds that
+    object by hand. It is kept because the alternative on an unreadable surface
+    is to mint ``call_target`` from a second failure to determine — the exact
+    defect this function exists to remove — not because it was observed firing.
     """
     entry_points = getattr(contract, "functions_entry_points", None)
     if entry_points is None:
