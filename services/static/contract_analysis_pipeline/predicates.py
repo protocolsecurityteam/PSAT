@@ -2160,6 +2160,48 @@ def _source_sort_key(source: Source) -> tuple[str, ...]:
         str(source.computed_kind),
         str(source.block_context_kind),
         str(source.storage_slot),
+        _derived_from_sort_key(source.derived_from),
+    )
+
+
+def _published_source_key(source: Source) -> tuple[str, ...]:
+    """Order over the fields a Source actually *publishes* to an operand.
+
+    ``callee_args_digest`` is deliberately excluded. It is a ``hash()`` of a
+    frozenset, so it differs between processes for the same code — ordering a
+    published list by it makes the artifact bytes vary run to run for no
+    semantic reason. It is also never emitted, so two Sources that differ only
+    in the digest render identically and their relative order cannot matter.
+    """
+    return (
+        str(source.kind),
+        str(source.parameter_index),
+        str(source.parameter_name),
+        str(source.state_variable_name),
+        str(source.member_path),
+        str(source.callee),
+        str(source.callee_signature),
+        str(source.callee_selector),
+        str(source.constant_value),
+        str(source.value_type),
+        str(source.computed_kind),
+        str(source.block_context_kind),
+        str(source.storage_slot),
+    )
+
+
+def _derived_from_sort_key(derived_from: frozenset[Source] | None) -> str:
+    """Canonical string for ``Source.derived_from`` inside ``_source_sort_key``.
+
+    ``str()`` of a frozenset is iteration-ordered, which is the exact
+    nondeterminism ``_source_sort_key`` exists to remove, so the members are
+    sorted by their published key first. Recursion terminates at one level:
+    every member is stored with ``derived_from=None``.
+    """
+    if derived_from is None:
+        return "None"
+    return "|".join(
+        "\x1f".join(_published_source_key(origin)) for origin in sorted(derived_from, key=_published_source_key)
     )
 
 
@@ -2218,7 +2260,7 @@ def _derived_view_call_source(sources: SourceSet) -> Source | None:
     return min((s for s in sources if s.kind == "view_call"), key=_source_sort_key, default=None)
 
 
-def _source_to_operand(source: Source) -> Operand:
+def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
     op: Operand = {"source": source.kind}  # type: ignore[typeddict-item]
     if source.parameter_index is not None:
         op["parameter_index"] = source.parameter_index
@@ -2244,6 +2286,21 @@ def _source_to_operand(source: Source) -> Operand:
         op["computed_kind"] = source.computed_kind
     if source.block_context_kind is not None:
         op["block_context_kind"] = source.block_context_kind
+    if source.kind == "computed" and not nested:
+        # Always emitted on a computed operand, and only there, so absence is
+        # "the question does not apply" rather than a silent third meaning.
+        # ``null`` is not-determined; a list (possibly empty) is determined.
+        # ``nested`` renders the members, whose own ``derived_from`` was
+        # stripped by ``arg_origins`` after being spliced into this list —
+        # emitting ``null`` there would read as an unknown that isn't one.
+        op["derived_from"] = (
+            None
+            if source.derived_from is None
+            else [
+                _source_to_operand(origin, nested=True)
+                for origin in sorted(source.derived_from, key=_published_source_key)
+            ]
+        )
     return op
 
 

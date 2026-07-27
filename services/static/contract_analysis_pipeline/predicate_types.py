@@ -65,6 +65,21 @@ class Operand(TypedDict):
     value_type: NotRequired[str | None]
     computed_kind: NotRequired[str | None]
     block_context_kind: NotRequired[str | None]
+    # Which origins reached this value through the arguments of the computation
+    # that produced it — the parameters a ``keccak256``/``abi.encode`` commitment
+    # binds, which the digest would otherwise have collapsed. Present on every
+    # ``source == "computed"`` operand and on no other, so absence means the
+    # question does not apply. Three states on a computed operand, and a consumer
+    # must distinguish all three:
+    #   key absent   — not a computed operand
+    #   ``None``     — computed, argument provenance NOT DETERMINED (nothing
+    #                  populated it; today that is every computed operand except
+    #                  the ones a Solidity built-in call produced)
+    #   ``[]``       — computed, determined: only constants reached it
+    #   non-empty    — computed, determined: exactly these origins reached it
+    # ``op.get("derived_from") or []`` therefore reads not-determined as
+    # proven-none and is wrong; test for ``None`` explicitly.
+    derived_from: NotRequired[list["Operand"] | None]
 
 
 # ---------------------------------------------------------------------------

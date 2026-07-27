@@ -118,6 +118,18 @@ class Source:
     # keccak256("LRTSquare.pending.governor")). Carried so resolution can read
     # the live value via ``eth_getStorageAt``; ``None`` for everything else.
     storage_slot: str | None = None
+    # Which origins reached a ``computed`` value through its *arguments*. A
+    # ``keccak256``/``abi.encode`` collapses its inputs into one opaque value;
+    # without this the parameter a hash-commitment guard commits is gone by the
+    # time a leaf is built. Three states, and consumers must tell them apart:
+    #   ``None``        — not determined; nothing populated it for this Source
+    #   ``frozenset()`` — determined: only constants reached the computation
+    #   non-empty       — determined: exactly these origins reached it
+    # Members are themselves ``Source`` records with ``derived_from=None``, which
+    # bounds the nesting at one level: ``arg_origins`` splices an argument's own
+    # (already flattened) origins in rather than nesting them, so the projection
+    # is transitively complete without making the dataclass recursive.
+    derived_from: frozenset["Source"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in SOURCE_KINDS:
@@ -142,6 +154,7 @@ class Source:
             or self.block_context_kind is not None
             or self.member_path
             or self.storage_slot is not None
+            or self.derived_from is not None
         ):
             raise ValueError("Source(kind='top') must be the bare sentinel — no metadata fields")
 
@@ -173,6 +186,30 @@ def union(a: SourceSet, b: SourceSet) -> SourceSet:
     if is_top(a) or is_top(b):
         return TOP
     return a | b
+
+
+def arg_origins(args_union: SourceSet) -> frozenset[Source]:
+    """The ``Source.derived_from`` projection of an argument source set.
+
+    Flat by construction: an argument that is itself a ``computed`` value with
+    its own ``derived_from`` contributes both itself (stripped, so the
+    derivation shape survives) and its already-flattened origins, so
+    ``keccak256(abi.encode(receiver))`` still names ``receiver``. Constants are
+    dropped — they carry no origin — which is what makes the empty set mean
+    "determined: only constants reached this".
+
+    Every member is stored with ``derived_from=None``. That is a *stripped*
+    marker, not a claim of "not determined" about the member: the member's own
+    origins have already been spliced into this same set.
+    """
+    origins: set[Source] = set()
+    for source in args_union:
+        if source.kind == "constant":
+            continue
+        if source.derived_from is not None:
+            origins.update(source.derived_from)
+        origins.add(replace(source, derived_from=None))
+    return frozenset(origins)
 
 
 def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
@@ -639,7 +676,12 @@ class ProvenanceEngine:
                 }
             )
             return self.provenance.set(self._var_name(ir.lvalue), result)
-        # Other Solidity built-ins: hash family → computed.
+        # Other Solidity built-ins: hash family → computed. The arguments'
+        # origins ride along on ``derived_from`` — a hash-commitment gate
+        # (``publicDepositHistory[nonce] != keccak256(abi.encode(receiver, …))``)
+        # otherwise reaches the leaf builder with every parameter it commits
+        # already collapsed into an opaque digest, so the leaf can be *captured*
+        # without ever being *bound* to what it constrains.
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         if is_top(args_union):
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
@@ -649,6 +691,7 @@ class ProvenanceEngine:
                     kind="computed",
                     computed_kind=callee_name or "solidity_call",
                     callee_args_digest=_digest(args_union),
+                    derived_from=arg_origins(args_union),
                 )
             }
         )

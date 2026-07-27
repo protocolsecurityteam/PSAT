@@ -104,7 +104,21 @@ logger = logging.getLogger(__name__)
 # Measured: every one of the 28 witnesses the production compilation units mint is
 # byte-identical across the change, so this bump covers the shapes the corpus
 # proves changed, not any row observed here.
-EFFECT_CACHE_SCHEMA_VERSION = 9
+# v10: a ``computed`` predicate-tree operand now carries ``derived_from`` — the
+# origins that reached it through the arguments of the computation that produced
+# it. A ``keccak256``/``abi.encode`` used to collapse them into a digest, so a
+# hash-commitment gate arrived at the leaf builder with every parameter it
+# commits already destroyed (Teller ``refundDeposit`` bound ``nonce`` and nothing
+# else; ``receiver`` and four more committed parameters were unrecoverable). The
+# probe reads the tree to decide what a gate constrains, so a v9 row records a
+# verdict reached from a strictly smaller constraint set than the same probe
+# now sees. Measured on the 88 production compilation units: the effect
+# artifacts are byte-identical on 87, and on ``EtherFiOracle.unpublishReport``
+# the sink *order* moved, which renumbers the ``sinkN`` ids a v9 row references.
+# Order there is Slither's ``list(set(vars_written))`` over identity-hashed
+# objects, so it tracks allocation addresses; the (kind, target, selector,
+# origin) multiset is identical.
+EFFECT_CACHE_SCHEMA_VERSION = 10
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

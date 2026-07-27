@@ -1417,3 +1417,93 @@ def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
     # Fail-closed: no lone cofinite opening survives.
     assert any(le["kind"] == "unsupported" for le in leaves), leaves
     _assert_no_lone_falsy(tree)
+
+
+def test_hash_commitment_leaf_keeps_its_computed_operand_and_names_what_it_commits(tmp_path):
+    """The Teller ``refundDeposit`` shape, reduced.
+
+    Two things must hold at once and they pull against each other:
+
+    1. The gate names the parameters the hash commits — without that a consumer
+       cannot tell which arguments the commitment pins, and the guard reads as a
+       constraint on ``nonce`` alone.
+    2. The ``computed`` operand SURVIVES. It is the only thing that says
+       *hash commitment* rather than *equality against storage*, and the
+       resolver routes on it: promoting a committed parameter into the operand
+       slot would turn a commitment gate into ``parameter``, i.e. "self-service,
+       anyone on their own argument" — an opening, from a fix.
+    """
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(uint256 => bytes32) history;
+            function refund(uint256 nonce, address receiver, uint256 amount) external {
+                require(history[nonce] == keccak256(abi.encode(receiver, amount)), "bad");
+                delete history[nonce];
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "refund")))
+    leaf = next(le for le in leaves if "keccak256" in str(le.get("operands")))
+    computed = next(o for o in leaf["operands"] if o["source"] == "computed")
+    assert computed["computed_kind"].startswith("keccak256")
+    assert leaf["kind"] == "equality"
+    # (1) the commitment is bound to what it commits
+    bound = {
+        (o.get("parameter_index"), o.get("parameter_name"))
+        for o in computed["derived_from"]
+        if o["source"] == "parameter"
+    }
+    assert bound == {(1, "receiver"), (2, "amount")}
+    # (2) and the committed parameters did NOT displace the operand or leak into
+    # the leaf's direct-operand parameter list.
+    assert [o["source"] for o in leaf["operands"]] == ["parameter", "computed"]
+    assert leaf["parameter_indices"] == [0]
+
+
+def test_computed_operand_without_argument_provenance_says_not_determined(tmp_path):
+    """``derived_from`` is ``None``, never omitted and never ``[]``, on a
+    computed operand nothing populated. ``op.get("derived_from") or []`` would
+    read this as "no parameter reaches it", which is a claim the pipeline has
+    not made."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public price;
+            function buy(uint256 qty) external payable {
+                require(msg.value == price * qty, "bad");
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "buy")))
+    computed = [o for le in leaves for o in le["operands"] if o["source"] == "computed"]
+    assert computed, leaves
+    assert all("derived_from" in o for o in computed)
+    assert all(o["derived_from"] is None for o in computed)
+
+
+def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
+    """Absence means "the question does not apply", so it must be reserved for
+    operands that are not computed at all."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f() external view {
+                require(msg.sender == owner, "no");
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "f")))
+    operands = [o for le in leaves for o in le["operands"]]
+    assert operands
+    assert all("derived_from" not in o for o in operands if o["source"] != "computed")

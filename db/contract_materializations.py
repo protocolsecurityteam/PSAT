@@ -85,7 +85,12 @@ logger = logging.getLogger(__name__)
 # selector for a UDT-param direct call — both change the persisted sink shape, so
 # an existing deployment must rebuild rather than serve materializations written
 # against the old heads.
-ANALYSIS_SCHEMA_VERSION = 2
+# v3: ``computed`` operands carry ``derived_from`` (the origins that reached the
+# value through the arguments of the computation that produced it), so the
+# predicate-tree output shape changed. Without this bump a materialized row keeps
+# serving trees in which a hash-commitment gate is unbound from the parameters it
+# commits, and the fix never reaches any deployment already in the cache.
+ANALYSIS_SCHEMA_VERSION = 3
 
 
 def _builder_staleness_s() -> float:
