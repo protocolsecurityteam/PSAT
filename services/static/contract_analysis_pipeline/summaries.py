@@ -879,7 +879,7 @@ def _claims_plane_ran(effects: Mapping[str, Any] | None) -> bool:
     ``core`` runs the two planes under **separate** ``try``/``except`` blocks —
     ``build_effects`` at ``core.py:225-235`` and
     ``build_claims``/``attach_claims_to_effects``/``project_effect_labels`` at
-    ``core.py:243-250``, the latter with its own ``record_degraded(phase=
+    ``core.py:243-253``, the latter with its own ``record_degraded(phase=
     "claims")``. So a fully populated ``functions`` map proves the **effects**
     plane ran and says nothing about the claims plane: when only the second
     block raises, every record is present and every record is claim-free.
@@ -894,11 +894,50 @@ def _claims_plane_ran(effects: Mapping[str, Any] | None) -> bool:
 
     An artifact with no externally-observable functions at all is likewise
     not-determined: there is no record to carry the key, so nothing here can
-    tell a clean claims run from a missing one."""
+    tell a clean claims run from a missing one.
+
+    **Scope of what this proves.** The key proves the matcher *completed*; it
+    does not prove the matcher could *see* anything, because its own inputs
+    come from a third plane ``core`` degrades separately
+    (:func:`_predicate_trees_plane_ran`). A detector whose evidence is only
+    reachable through the trees must test that plane too."""
     functions = (effects or {}).get("functions")
     if not isinstance(functions, Mapping):
         return False
     return any(isinstance(record, Mapping) and "claims" in record for record in functions.values())
+
+
+def _predicate_trees_plane_ran(predicate_trees: Mapping[str, Any] | None) -> bool:
+    """Did the Plane-0 predicate-tree stage complete?
+
+    ``core`` degrades **three** planes under separate ``try``/``except``, not
+    two: ``predicate_trees`` (``core.py:206-221``,
+    ``record_degraded(phase="predicate_trees_emit")``), ``effects``
+    (``:225-235``) and ``claims`` (``:243-253``). The first is an *input* to
+    ``build_claims``, and its degradation is invisible on the output side:
+    ``attach_claims_to_effects``
+    (``services/static/claims/builder.py:79-81``) writes ``record["claims"]``
+    on **every** record, so a matcher that ran blind on the degraded stub is
+    indistinguishable, by the ``claims`` key alone, from one that ran on real
+    trees. The same stage also owns ``apply_reentrancy_pause_pass``
+    (``predicate_artifacts.py:383``), so on that path the structural pause
+    detector and the claims pause detector go blind *together* and every
+    pausable contract reads ``is_pausable`` false.
+
+    Discriminator: the ``trees`` KEY. The real builder always emits it
+    (``predicate_artifacts.py:404-407``; ``{}`` for a contract with no guards
+    is a legitimate ran-and-found-nothing), and ``core``'s degraded stub —
+    ``{"schema_version": "semantic", "error": <str>}`` — never does. The
+    ``error`` key is rejected independently so a stub that later grows a
+    ``trees`` key still cannot pass as a completed run.
+
+    ``None`` (nobody threaded the artifact in) is not-determined, not ran: an
+    omitted argument must never be able to manufacture a proven absence."""
+    if not isinstance(predicate_trees, Mapping):
+        return False
+    if "error" in predicate_trees:
+        return False
+    return isinstance(predicate_trees.get("trees"), Mapping)
 
 
 _PAUSE_CLAIM_POLARITY = {"pause.set": "pause", "pause.unset": "unpause"}
@@ -954,6 +993,7 @@ def _detect_pausability(
     project_dir: Path,
     pause_info: Mapping[str, Any] | None = None,
     effects: Mapping[str, Any] | None = None,
+    predicate_trees: Mapping[str, Any] | None = None,
 ) -> PausabilityAnalysis:
     """Detect pausability from the semantic ``PauseInfo`` export **and** the
     Plane-1 pause claims.
@@ -968,13 +1008,23 @@ def _detect_pausability(
     classification can't disambiguate, every toggle function is listed in
     both pause and unpause.
 
-    ``is_pausable`` is three-state. ``None`` is *not determined*: the structural
-    pass found nothing AND the claims matcher — the only detector that can see a
-    struct-member or namespaced latch — did not complete, which is a different
-    fact from both of them running and finding no latch. The test for that is
-    :func:`_claims_plane_ran`, i.e. whether claims were attached; a populated
-    ``functions`` map only proves the *effects* plane ran, and ``core``
-    degrades the two independently (``core.py:225-235`` vs ``:243-250``).
+    ``is_pausable`` is three-state, and ``False`` is published only when the
+    structural pass found nothing *and* both planes that could have found a
+    latch demonstrably ran:
+
+    * :func:`_claims_plane_ran` — the claims matcher is the only detector that
+      resolves a struct-member or ERC-7201-namespaced latch, and ``core``
+      degrades it independently of the effects plane (``core.py:243-253`` vs
+      ``:225-235``), leaving a fully populated claim-free ``functions`` map.
+    * :func:`_predicate_trees_plane_ran` — the trees stage (``core.py:206-221``)
+      is the *input* to the claims matcher and also owns
+      ``apply_reentrancy_pause_pass``, so its degradation blinds BOTH detectors
+      at once while still producing a written ``claims`` key on every record.
+      Without this second test the verdict is ``false`` on 100% of pausable
+      contracts whenever that one stage raises.
+
+    Anything else is ``None`` — *not determined*, which is a different fact
+    from both detectors running and finding no latch.
     """
     info = pause_info or {}
     pause_state_vars: list[str] = list(info.get("pause_state_vars") or [])
@@ -1026,16 +1076,17 @@ def _detect_pausability(
 
     if pause_functions or unpause_functions or gating_modifiers or pause_state_vars:
         is_pausable: bool | None = True
-    elif _claims_plane_ran(effects):
+    elif _claims_plane_ran(effects) and _predicate_trees_plane_ran(predicate_trees):
         is_pausable = False
     else:
-        # The claims matcher is the only detector that can see a struct-member
-        # or namespaced latch, and it is the one that did not run. Publishing
-        # ``false`` off the structural pass alone asserts the absence of a
-        # latch that pass could not have found: it answers ``false`` on 22 of
-        # the 33 local contracts that demonstrably do have one. A populated
-        # ``functions`` map is NOT the test — that is the effects plane, which
-        # ``core`` degrades independently of the claims plane.
+        # Both tests are load-bearing and neither implies the other. Without
+        # the claims test, ``false`` asserts the absence of a struct-member or
+        # namespaced latch no surviving detector could have found — 22 of the
+        # 33 local contracts that demonstrably have one. Without the trees
+        # test, a single raise in ``core.py:206-221`` empties ``pause_info``
+        # AND feeds the claims matcher a stub, so ``false`` is published on
+        # every pausable contract while the ``claims`` key still says the
+        # matcher completed.
         is_pausable = None
 
     return {
@@ -1395,7 +1446,7 @@ def _detect_timelock(
     nothing to do with the contract. ``None`` therefore covers two cases —
     no IR to walk, and no claims plane (:func:`_claims_plane_ran`, which
     ``core`` can degrade independently of the effects plane; ``core.py:225-235``
-    vs ``:243-250``). Publishing ``False`` on either is asserting an absence
+    vs ``:243-253``). Publishing ``False`` on either is asserting an absence
     nothing looked for, and ``_determine_control_model`` would then drop
     ``governance`` off the back of it.
     """

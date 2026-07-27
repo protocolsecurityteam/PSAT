@@ -249,7 +249,7 @@ def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degra
     that exists.
 
     ``claims_stage_raised`` is the arm a no-IR test cannot reach: ``core`` runs
-    ``build_effects`` (``core.py:225-235``) and the claims block (``:243-250``)
+    ``build_effects`` (``core.py:225-235``) and the claims block (``:243-253``)
     under separate ``try``/``except``, so the effects map can be complete and
     claim-free. Downstream, ``_determine_control_model`` reads a ``False`` here
     as "not governance"."""

@@ -63,11 +63,15 @@ class AnalysisStatus(TypedDict):
 
 
 class Summary(TypedDict):
-    # Every evidence field here is nullable, and ``None`` always means the
-    # detector did not run — never "it ran and found nothing", which is
-    # ``False`` / ``[]``. ``contract_summaries`` has been nullable on all of
-    # them since the baseline migration; the producer is what emitted a
-    # proven-absence on 100% of rows regardless.
+    # Every evidence field here is nullable, and ``None`` means the detector
+    # did not run, or ran on inputs a degraded upstream stage had already
+    # emptied. ``False`` / ``[]`` is the positive claim "it ran and found
+    # nothing" — but only as strong as the producer's own ran-check: it is an
+    # absence proof exactly to the extent that the producer tests every plane
+    # its evidence travels through, which is per-field (see
+    # ``_detect_pausability``, which tests two). ``contract_summaries`` has
+    # been nullable on all of them since the baseline migration; the producer
+    # is what emitted a proven-absence on 100% of rows regardless.
     control_model: ControlModel
     is_upgradeable: bool
     is_pausable: bool | None

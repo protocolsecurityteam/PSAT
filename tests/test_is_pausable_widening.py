@@ -57,7 +57,7 @@ def _analyse(tmp_path: Path, source: str, name: str = "C"):
     effects = build_effects(contract)
     attach_claims_to_effects(effects, build_claims(contract, effects, trees))
     project_effect_labels(effects)
-    return _detect_pausability(contract, tmp_path, pause_info, effects), effects
+    return _detect_pausability(contract, tmp_path, pause_info, effects, trees), effects
 
 
 def _pausability(tmp_path: Path, source: str, name: str = "C"):
@@ -158,7 +158,7 @@ def test_struct_member_latch_is_not_determined_when_only_the_claims_stage_raised
     ``functions`` map cannot distinguish.
 
     ``core`` runs ``build_effects`` (``core.py:225-235``) and the claims block
-    (``:243-250``) under separate ``try``/``except``. When only the claims
+    (``:243-253``) under separate ``try``/``except``. When only the claims
     block raises, the effects map is complete and claim-free — and this
     contract, which demonstrably HAS a latch, is invisible to every other
     detector (``PauseInfo`` is empty on it by construction). ``False`` there is
@@ -180,3 +180,74 @@ def test_pauser_registry_shape_stays_clean(tmp_path):
     result = _pausability(tmp_path, NO_LATCH)
     assert result["is_pausable"] is False
     assert result["pause_variables"] == []
+
+
+CLASSIC_PAUSABLE = """
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.19;
+    contract C {
+        address public owner;
+        bool public paused;
+        uint256 public value;
+        error Paused();
+        modifier onlyOwner() { require(msg.sender == owner, "no"); _; }
+        modifier whenNotPaused() { if (paused) revert Paused(); _; }
+        function pause() external onlyOwner { paused = true; }
+        function unpause() external onlyOwner { paused = false; }
+        function poke(uint256 v) external whenNotPaused { value = v; }
+    }
+"""
+
+
+@pytest.mark.parametrize(
+    "label, source",
+    [
+        # The leg's own POSITIVE control: only the claims matcher can see it.
+        pytest.param("struct_member", STRUCT_MEMBER_LATCH, id="struct_member"),
+        # The *structural* family, which the claims matcher is not the only
+        # route to — it goes blind here anyway, because the pass that produces
+        # ``PauseInfo`` lives inside the same degraded stage.
+        pytest.param("classic", CLASSIC_PAUSABLE, id="classic"),
+    ],
+)
+def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, monkeypatch, label, source):
+    """R1 end-to-end on the THIRD independently degradable plane, through the
+    real ``core`` path rather than a hand-built input.
+
+    ``core.py:206-221`` catches the predicate-trees stage on its own,
+    substitutes ``{"schema_version": "semantic", "error": ...}`` and an empty
+    ``PauseInfo``, and carries on. Nothing downstream raises: ``build_claims``
+    runs on the stub, ``attach_claims_to_effects``
+    (``services/static/claims/builder.py:79-81``) writes ``claims`` onto every
+    record, and the claims-key discriminator answers True. Because
+    ``apply_reentrancy_pause_pass`` lives *inside* that same stage
+    (``predicate_artifacts.py:383``), the structural detector is blind too —
+    so on a trees degradation ``false`` was published on 100% of pausable
+    contracts, of both families.
+
+    The healthy arm runs first and must say ``True``, so a fixture that
+    silently stopped being pausable cannot make this test vacuous."""
+    from services.static.contract_analysis_pipeline import core
+    from tests.support.foundry_project import write_foundry_project
+
+    body = textwrap.dedent(source).strip() + "\n"
+
+    healthy_project = write_foundry_project(tmp_path / "healthy", "C", body)
+    healthy, _t, _e = core.collect_contract_analysis_with_artifacts(healthy_project)
+    assert healthy["pausability"]["is_pausable"] is True, f"{label}: fixture must be pausable when nothing raises"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("forced predicate_trees_emit failure")
+
+    monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", _boom)
+    degraded_project = write_foundry_project(tmp_path / "degraded", "C", body)
+    degraded, trees_artifact, effects_artifact = core.collect_contract_analysis_with_artifacts(degraded_project)
+
+    # The trap, asserted rather than assumed: the claims plane looks healthy.
+    assert isinstance(trees_artifact, dict) and isinstance(effects_artifact, dict)
+    assert "error" in trees_artifact, "guard: the trees stage must actually have degraded"
+    assert any("claims" in record for record in (effects_artifact.get("functions") or {}).values()), (
+        "guard: the claims key is written anyway — that is why it cannot be the only discriminator"
+    )
+
+    assert degraded["pausability"]["is_pausable"] is None, degraded["pausability"]

@@ -274,8 +274,13 @@ def collect_contract_analysis_with_artifacts(
     with _phase("pausability", durations_ms):
         # Post-``claims``: the Plane-1 ``pause.set`` / ``pause.unset`` claims
         # ride on the effects artifact and are the only detector that resolves a
-        # struct-member or ERC-7201-namespaced latch.
-        pausability = _detect_pausability(subject_contract, project_dir, pause_info, effects_artifact)
+        # struct-member or ERC-7201-namespaced latch. ``predicate_trees_artifact``
+        # goes in as well because it is that matcher's input AND the source of
+        # ``pause_info``: the block above can substitute a stub for it without
+        # the claims block raising, and only the artifact itself records that.
+        pausability = _detect_pausability(
+            subject_contract, project_dir, pause_info, effects_artifact, predicate_trees_artifact
+        )
     with _phase("timelock", durations_ms):
         timelock = _detect_timelock(
             subject_contract, project_dir, semantic_control["role_definitions"], effects_artifact

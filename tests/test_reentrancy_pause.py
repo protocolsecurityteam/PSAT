@@ -512,11 +512,12 @@ _NO_PAUSE = """
 
 
 def _pause_inputs(tmp_path: Path, source: str):
-    """``(contract, pause_info, effects_with_claims, effects_without_claims)``.
+    """``(contract, pause_info, trees_artifact, effects_with_claims, effects_without_claims)``.
 
-    The two artifacts are the two things ``core`` can hand ``_detect_pausability``
+    The two effects artifacts are what ``core`` can hand ``_detect_pausability``
     when nothing raises vs when only the claims block raises: identical
-    ``functions`` maps, one carrying the ``claims`` key and one not."""
+    ``functions`` maps, one carrying the ``claims`` key and one not.
+    ``trees_artifact`` is the third, independently degradable input."""
     from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
     from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
@@ -528,21 +529,22 @@ def _pause_inputs(tmp_path: Path, source: str):
     with_claims = build_effects(contract)
     attach_claims_to_effects(with_claims, build_claims(contract, with_claims, trees_artifact))
     project_effect_labels(with_claims)
-    return contract, pause_info, with_claims, build_effects(contract)
+    return contract, pause_info, trees_artifact, with_claims, build_effects(contract)
 
 
 def test_detect_pausability_empty_when_no_pause(tmp_path):
-    """R4 positive arm for the un-hedged ``False``: no pause shape and BOTH
-    detectors ran → proven absence.
+    """R4 positive arm for the un-hedged ``False``: no pause shape and ALL
+    THREE planes ran → proven absence.
 
-    The effects artifact is passed **with claims attached**, because the claims
-    matcher is the thing that proves it; passing a claim-free artifact would
-    pin ``False`` on an input where the discriminating evidence was never
-    computed (and, since the fix, would answer ``None``)."""
+    The effects artifact is passed **with claims attached** and the real trees
+    artifact alongside it, because those are the two things that prove the
+    detectors could see: passing either degraded input would pin ``False`` on
+    a run where the discriminating evidence was never computed (and, since the
+    fix, answers ``None``)."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
-    contract, pause_info, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
-    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims)
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
     assert pausability["is_pausable"] is False
     assert pausability["pause_variables"] == []
 
@@ -553,17 +555,47 @@ def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path)
 
     The third is the one a populated-``functions`` test cannot see: ``core``
     runs ``build_effects`` (``core.py:225-235``) and the claims block
-    (``:243-250``) under separate ``try``/``except``. When only the claims
+    (``:243-253``) under separate ``try``/``except``. When only the claims
     block raises, every function record is present and every record is
     claim-free — so "the effects map is non-empty" is not evidence that the
     only detector able to see a struct-member latch ever looked."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
-    contract, pause_info, _, claim_free = _pause_inputs(tmp_path, _NO_PAUSE)
+    contract, pause_info, trees, _, claim_free = _pause_inputs(tmp_path, _NO_PAUSE)
     degraded = {"schema_version": "semantic", "error": "boom"}
-    assert _detect_pausability(contract, tmp_path, pause_info, degraded)["is_pausable"] is None
-    assert _detect_pausability(contract, tmp_path, pause_info, None)["is_pausable"] is None
+    assert _detect_pausability(contract, tmp_path, pause_info, degraded, trees)["is_pausable"] is None
+    assert _detect_pausability(contract, tmp_path, pause_info, None, trees)["is_pausable"] is None
     # The claims stage raised; the effects map is fully populated.
     assert claim_free["functions"], "guard: this arm is only meaningful on a populated map"
     assert all("claims" not in record for record in claim_free["functions"].values())
-    assert _detect_pausability(contract, tmp_path, pause_info, claim_free)["is_pausable"] is None
+    assert _detect_pausability(contract, tmp_path, pause_info, claim_free, trees)["is_pausable"] is None
+
+
+def test_detect_pausability_is_not_determined_without_the_trees_plane(tmp_path):
+    """R1/R2 on the THIRD independently degradable plane.
+
+    ``core.py:206-221`` catches the trees stage on its own and substitutes
+    ``{"schema_version": "semantic", "error": ...}`` plus an empty
+    ``PauseInfo``. Downstream nothing raises: ``build_claims`` runs on the
+    stub and ``attach_claims_to_effects`` still writes ``claims`` on every
+    record, so the claims-key discriminator answers True while BOTH pause
+    detectors were blind. ``None`` is the only honest verdict.
+
+    The shapes here are the two ways that input can arrive wrong — the stub
+    ``core`` actually builds, and an omitted argument."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, _pause_info, _trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
+    degraded_trees = {"schema_version": "semantic", "error": "boom"}
+    empty_pause_info = {
+        "pause_state_vars": [],
+        "pause_toggle_functions": [],
+        "reentrancy_state_vars": [],
+        "reentrancy_guarded_functions": [],
+    }
+    # Guard: the claims plane looks healthy, which is exactly the trap.
+    assert with_claims["functions"], "guard: this arm is only meaningful on a populated map"
+    assert any("claims" in record for record in with_claims["functions"].values())
+
+    assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, degraded_trees)["is_pausable"] is None
+    assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, None)["is_pausable"] is None
