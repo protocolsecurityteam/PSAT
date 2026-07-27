@@ -169,4 +169,46 @@ contract ExecBinding {
         address t = a;
         IExec(t).exec(a, d);
     }
+
+    // ---- bodies with MORE than one candidate call op ------------------------
+    //
+    // The fragment must be an answer over ALL of them. A first-op answer turns
+    // the pair below into an order-dependence: the guard-first body loses its
+    // genuine arbitrary call to the guard's state_var destination, while its
+    // statement-swapped twin keeps it.
+
+    // The Safe/Zodiac transaction-guard idiom: a fixed guard checks (target,
+    // data), then the caller-supplied target is called with the caller-supplied
+    // data. The arbitrary call is REAL and must mint, whichever statement is
+    // first.
+    function guardThenExec(address target, bytes calldata data) external {
+        IExec(fallbackRoute).exec(target, data);
+        (bool ok, ) = target.call(data);
+        require(ok, "call failed");
+    }
+
+    // The same two statements, swapped — the order-independence control.
+    function execThenGuard(address target, bytes calldata data) external {
+        (bool ok, ) = target.call(data);
+        require(ok, "call failed");
+        IExec(fallbackRoute).exec(target, data);
+    }
+
+    // EVERY candidate op's destination is storage-held: the suppression's
+    // proven absence is genuinely function-wide here, and only here may it
+    // fire on a multi-op body.
+    function twoStateVarSinks(address a, bytes calldata d) external {
+        IExec(fallbackRoute).exec(a, d);
+        ISwapper(swapper).swap(a, a, d);
+    }
+
+    // A proven absence beside an OPEN question: the branched destination is
+    // not determined, and not-determined outranks state_var — the function
+    // still mints, as a hedged claim.
+    function stateVarThenBranched(address a, address b, bytes calldata d, bool flag) external {
+        IExec(fallbackRoute).exec(a, d);
+        address t = a;
+        if (flag) t = b;
+        IExec(t).exec(a, d);
+    }
 }

@@ -29,6 +29,7 @@ DELEGATECALL = "0x00000000000000000000000000000000000000c0"
 EXEC_BINDING = "0x00000000000000000000000000000000000000d0"
 TREE_ABSENT = "0x00000000000000000000000000000000000000e0"
 TIMED_LATCH = "0x00000000000000000000000000000000000000f0"
+RATE_LIMITED = "0x0000000000000000000000000000000000000110"
 POLICY_CALLER = "0x0000000000000000000000000000000000000100"
 
 
@@ -69,24 +70,55 @@ def test_every_golden_claim_carries_its_witness():
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_param_destinations_are_currently_indistinguishable():
-    """The measured "before". Three of these destinations cannot be freely
-    chosen — a hash commitment, a mapping allowlist, a storage equality — and the
-    fourth genuinely can, yet all four publish the same lattice value.
+def _target_constraint(fn: dict) -> dict:
+    return _claim(fn, "flow.out")["witness"]["flows"][0]["target_constraint"]
 
-    This is what makes an A4 narrowing meaningful here: it must move the first
-    three and leave ``payAnyone`` alone. When that lands, THIS test fails, and it
-    should — replace it with the asymmetry, do not delete it.
+
+def test_the_four_param_destinations_are_told_apart_by_their_guards():
+    """The A4 asymmetry, replacing the "all four are indistinguishable" pin this
+    test carried before the narrowing landed (that test named itself as the
+    measured *before* and asked to be replaced by exactly this).
+
+    The lattice kind is still ``param`` on all four — the caller does name the
+    destination in every one of them, and that fact did not change. What changed
+    is the sentence attached to it: three of the four cannot be freely chosen,
+    and the verdict names WHICH guard proved it, so a consumer can stop rendering
+    them as caller-chosen without inventing a safety claim.
     """
     fns = _functions(CONSTRAINED)
-    constrained = [
-        "payCommitted(IERC20,address,uint256,bytes32)",
-        "payAllowlisted(IERC20,address,uint256)",
-        "payTreasuryOnly(IERC20,address,uint256)",
-    ]
-    unconstrained = "payAnyone(IERC20,address,uint256)"
-    for name in [*constrained, unconstrained]:
+    expected = {
+        "payCommitted(IERC20,address,uint256,bytes32)": ("constrained", "hash_commitment"),
+        "payAllowlisted(IERC20,address,uint256)": ("constrained", "mapping_allowlist"),
+        "payTreasuryOnly(IERC20,address,uint256)": ("constrained", "equality_vs_storage"),
+        # NEGATIVE CONTROL. Same body, same claim, same lattice kind, no guard.
+        # A narrowing that also moves this one is wrong.
+        "payAnyone(IERC20,address,uint256)": ("unconstrained_proven", None),
+    }
+    for name, (state, guard) in expected.items():
         assert _destination(fns[name])["kind"] == "param", name
+        verdict = _target_constraint(fns[name])
+        assert verdict["state"] == state, name
+        assert verdict.get("guard") == guard, name
+
+
+def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
+    """``payCommitted``'s destination is proven through ``derived_from`` — the
+    argument provenance of the ``keccak256(abi.encode(to, salt))`` the guard
+    compares. That provenance is flow-INSENSITIVE (WAVE_0 L-24: it misbinds one
+    origin on a locally reassigned name), so the verdict records the binding it
+    used. A consumer that must not rest on a flow-insensitive proof can see that
+    it did; the two direct-operand shapes say ``operand``."""
+    fns = _functions(CONSTRAINED)
+    committed = _target_constraint(fns["payCommitted(IERC20,address,uint256,bytes32)"])
+    assert committed["binding"] == "derived_from"
+    # A flow-insensitive binding never publishes a proven pin: the guard is
+    # real, but which parameter it confines on every path is not settled, so
+    # the caller-chosen reading stays.
+    assert committed["pins"] is None
+    for name in ("payAllowlisted(IERC20,address,uint256)", "payTreasuryOnly(IERC20,address,uint256)"):
+        verdict = _target_constraint(fns[name])
+        assert verdict["binding"] == "operand", name
+        assert verdict["pins"] is True, name
 
 
 def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignores_it():
@@ -116,10 +148,83 @@ def test_the_corpus_has_delegatecall_execution_rows_at_all():
     fns = _functions(DELEGATECALL)
     labelled = [n for n, f in fns.items() if "delegatecall_execution" in f["effect_labels"]]
     assert sorted(labelled) == [
+        "execBothModules(bytes)",
+        "execFixedSlot(bytes)",
         "execModule(bytes)",
         "execModuleViaLibrary(bytes)",
         "execUserModule(bytes)",
+        "fallback()",
     ]
+
+
+def test_the_a8_claim_resolves_all_five_delegatecall_routes():
+    """A8's gate. The delegatecall SINK TARGET is a different string on every
+    route — this contract's storage variable, the LIBRARY's own parameter, an IR
+    reference, an assembly temporary — and only one of the four names something
+    that exists here. A classifier reading that string publishes
+    ``not_determined`` for a destination that is provably a storage setter, and
+    BOTH production rows are assembly routes, so the corpus is the only place
+    this can be caught.
+
+    Each row below is a discriminating pair with the one above or below it:
+    direct vs library (same real destination, different recorded target), and
+    settable-slot vs unwritten-slot (same read, different writer set).
+    """
+    fns = _functions(DELEGATECALL)
+    expected = {
+        "execModule(bytes)": ("storage_setter", "module"),
+        "execModuleViaLibrary(bytes)": ("storage_setter", "module"),
+        "fallback()": ("storage_setter", None),
+        "execFixedSlot(bytes)": ("storage_no_setter", None),
+        # A caller-keyed mapping element. Resolving it to ``userModule`` would
+        # assert ONE destination where there is one per caller — the worst
+        # over-claim available on this field.
+        "execUserModule(bytes)": ("indeterminate", None),
+    }
+    for name, (kind, variable) in expected.items():
+        destination = _claim(fns[name], "delegatecall.execute")["witness"]["destination"]
+        assert destination["target_kind"] == kind, name
+        if variable is not None:
+            assert destination["variable"] == variable, name
+    # The two assembly rows are told apart by the WRITER, not by the read.
+    assert _claim(fns["fallback()"], "delegatecall.execute")["witness"]["destination"]["writer_signatures"] == [
+        "setAdminImpl(address)"
+    ]
+    assert (
+        "writer_signatures" not in _claim(fns["execFixedSlot(bytes)"], "delegatecall.execute")["witness"]["destination"]
+    )
+    assert _claim(fns["execUserModule(bytes)"], "delegatecall.execute")["witness"]["destination"]["reason"] == (
+        "mapping_or_array_element"
+    )
+
+
+def test_a_two_site_fold_publishes_the_union_never_one_sites_answer():
+    """R1 on the fold. Two delegatecall sites agreeing on ``storage_setter`` used
+    to fold to the FIRST site's ``variable`` and ``writer_signatures`` — a
+    complete-looking, owner-gated writer set with the second site's UNGATED
+    writer invisible, and no representable "partial" state to warn a consumer.
+    ``writer_signatures`` answers who can replace the code running in this
+    contract's storage, so the honest fold is the union: both variables, every
+    site's writers, and no singular ``variable`` key that a consumer could bind
+    as the whole answer."""
+    fns = _functions(DELEGATECALL)
+    destination = _claim(fns["execBothModules(bytes)"], "delegatecall.execute")["witness"]["destination"]
+    assert destination["target_kind"] == "storage_setter"
+    assert destination["sites"] == 2
+    assert "variable" not in destination
+    assert destination["variables"] == ["module", "sideModule"]
+    # The union is the point: the ungated writer must be visible next to the
+    # gated one.
+    assert destination["writer_signatures"] == ["setModule(address)", "setSideModule(address)"]
+
+
+def test_the_a8_claim_is_not_upgrade_implementation():
+    """Kept separate on purpose: ``upgrade.implementation`` carries the
+    EIP-1967/UUPS population and its statistics, and a non-standard split proxy
+    admitted into it would corrupt them. No corpus delegatecall row carries it."""
+    fns = _functions(DELEGATECALL)
+    for name in ("execModule(bytes)", "fallback()", "execUserModule(bytes)"):
+        assert [c["claim_id"] for c in fns[name]["claims"]] == ["delegatecall.execute"], name
 
 
 def test_the_library_route_records_a_symbol_that_does_not_exist_in_this_contract():
@@ -375,3 +480,63 @@ def test_a_callee_with_an_interface_typed_parameter_is_unreachable_across_the_jo
     # the evidence.
     recovery = _functions("0x0000000000000000000000000000000000000070")
     assert _claim(recovery["sweepTo(IERC20,address,uint256)"], "flow.out")["tier"] == "standard_exact"
+
+
+# ---------------------------------------------------------------------------
+# A5. the rate limiter is a fact, and it does NOT move the amount lattice
+# ---------------------------------------------------------------------------
+
+
+def test_the_rate_limiter_is_recorded_as_a_zero_weight_fact():
+    """The limiter is detected off its PUBLISHED selectors, and what it publishes
+    is a fact carrying its own zero weight — not a member of the amount
+    lattice."""
+    fns = _functions(RATE_LIMITED)
+    for name in ("withdrawLimited(address,uint256)", "withdrawTokenLimited(address,uint256)"):
+        claim = _claim(fns[name], "rate_limit.consume")
+        assert claim["tier"] == "idiom_structural", name
+        assert claim["witness"]["severity_weight"] == 0, name
+        assert claim["witness"]["mandatory"] == {"state": "proven"}, name
+
+
+def test_the_limiter_does_not_change_a_single_byte_of_the_flow_witness():
+    """THE ASSERTION THAT PINS THE DECISION. ``withdrawLimited`` and
+    ``withdrawUnlimited`` differ by exactly one statement — the limiter call —
+    and their ``flow.out`` witnesses must be byte-identical. A refilling bucket
+    bounds throughput per window, not total loss, so crediting it in
+    ``amount_kind`` would invent a ceiling that does not exist.
+
+    If a later change moves the lattice for a limiter, THIS test goes red, which
+    is the point: the decision is enforced, not merely documented."""
+    fns = _functions(RATE_LIMITED)
+    limited = _claim(fns["withdrawLimited(address,uint256)"], "flow.out")
+    control = _claim(fns["withdrawUnlimited(address,uint256)"], "flow.out")
+    assert limited["witness"]["flows"] == control["witness"]["flows"]
+    assert limited["tier"] == control["tier"]
+    # ...and the limiter-free control carries no limiter fact at all.
+    assert [c["claim_id"] for c in fns["withdrawUnlimited(address,uint256)"]["claims"]] == ["flow.out"]
+
+
+def test_the_configuration_discriminators_are_present_and_explicitly_unread():
+    """G7's generalisation requirement, in the data. ``setRefillRate(id, 0)`` is
+    one governance call away and turns a throughput cap into a one-shot total
+    cap; a zero capacity reverts, which makes it a pause in disguise. So the two
+    numbers are part of the fact — carried as three-state fields that say
+    ``not_determined`` rather than being absent, because a consumer that read an
+    absent field as 0 would read a rate limit as a freeze."""
+    witness = _claim(_functions(RATE_LIMITED)["withdrawLimited(address,uint256)"], "rate_limit.consume")["witness"]
+    for field in ("capacity", "refill_rate", "bounds_total_extraction"):
+        assert witness[field] == {"state": "not_determined", "source": "chain_state"}, field
+    # The witness names the reads that would fill them, so the follow-up is not a
+    # guess about which getter holds the numbers.
+    assert witness["config_reader"]["get_limit_selector"] == "0xd200f8c2"
+    assert "one-shot total cap" in witness["interpretation"]
+    assert "pause in disguise" in witness["interpretation"]
+
+
+def test_a_same_named_different_selector_callee_earns_nothing():
+    """NEGATIVE CONTROL for name-based detection. ``decoyLimiter.consume`` is
+    spelled identically and publishes a different signature, so a different
+    selector. Nothing here keys on the identifier."""
+    fns = _functions(RATE_LIMITED)
+    assert [c["claim_id"] for c in fns["withdrawDecoy(address,uint256)"]["claims"]] == ["flow.out"]

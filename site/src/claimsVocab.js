@@ -54,6 +54,20 @@ const CLAIM_VOCAB = {
     legacy: "arbitrary_external_call",
     score: { kind: "execution", severity: 0.95 },
   },
+  // Foreign code running in THIS contract's storage. Kept out of
+  // upgrade.implementation on purpose: that claim carries the EIP-1967/UUPS
+  // population and its statistics, and a non-standard split proxy admitted into
+  // it would corrupt them to say the same severity-relevant thing. A consumer
+  // that wants "logic can be replaced" reads the union of the two.
+  "delegatecall.execute": {
+    family: "exec",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "runs foreign code in its own storage",
+    priority: 1,
+    legacy: "delegatecall_execution",
+    score: { kind: "execution", severity: 0.95 },
+  },
   contract_deployment: {
     family: "exec",
     lane: "top",
@@ -373,6 +387,25 @@ const CLAIM_VOCAB = {
     legacy: null,
     score: null,
   },
+
+  // ── facts (present for provenance; contribute nothing to severity) ────────
+  // A bucket rate limiter bounds throughput per window, not total loss — over N
+  // windows the extractable total is unbounded — so it is recorded and scored at
+  // zero rather than credited as a ceiling. It sits in ops, never a flow lane,
+  // so it can never displace the claim that describes the actual value move.
+  // The severity meaning INVERTS on configuration (a zero refill rate is a
+  // one-shot total cap; a zero capacity is a freeze), and both numbers are chain
+  // state the static witness marks not-determined — so no consumer may derive a
+  // grade from this claim as it stands.
+  "rate_limit.consume": {
+    family: "fact",
+    lane: "ops",
+    tone: null,
+    sentence: "passes through a rate limiter",
+    priority: 11,
+    legacy: null,
+    score: null,
+  },
 };
 
 const TIER_LABEL = {
@@ -497,7 +530,14 @@ export function toneForClaims(fn) {
   const claims = claimsOf(fn);
   if (primary.claim_id === "flow.out" || primary.claim_id === "value_router") {
     const s = flowOutTargetSummary(claims);
-    if (s.sawCaller) return TONE_FLOW_OUT_CALLER;
+    // The hazard tint covers the proven caller-chosen case, the guard whose
+    // pinning is not proven, AND the param whose constraint was never analysed
+    // (absent field / not_determined): dropping the tint on any of them would
+    // read absence of a proof as the proof itself (round-2 R3: all four real
+    // "constrained" rows are blacklists and had lost the tint; round-4 R1:
+    // every legacy payload and every `several`-fold param member has NO
+    // verdict, and had lost it too).
+    if (s.sawCaller || s.sawUnprovenPin || s.sawUnknownParam) return TONE_FLOW_OUT_CALLER;
     // Calm-tint only a purely-fixed out-flow (mirrors flowOutQualifier's "fixed"
     // gate): any admin-settable, indeterminate, self or unclassified path blocks it.
     if (s.sawFixed && !s.sawOther && !s.sawSetter) return TONE_FLOW_OUT_FIXED;
@@ -631,10 +671,60 @@ function memberKinds(kinds) {
   return out.length ? out : [null];
 }
 
+// A "param" destination proves the caller NAMES the destination. Whether they
+// can name it FREELY is a separate, three-state question the producer answers in
+// `target_constraint` — a mandatory revert gate that pins the parameter (a
+// storage equality, an allowlist, a hash commitment) means the caller chooses
+// from a set an authority wrote, which is not the theft-shaped fact this
+// vocabulary's "caller-chosen" wording asserts.
+//
+// Two verdicts license that wording: `unconstrained_proven`, and `constrained`
+// whose guard PROVABLY does not pin (`pins: false` — a denylist excludes a set
+// and leaves the rest of the address space freely chosen; the producer's own
+// docstring says the consumer must keep treating it as caller-chosen).
+// `constrained` with `pins: true` is the only state that may SOFTEN the
+// reading into "gated"; `pins` null/absent is a real guard whose set semantics
+// are not determined (another contract's revert surface can be a blacklist as
+// easily as an allowlist — on the local artifacts all four such rows ARE
+// blacklists), so it keeps the hazard reading with its own wording.
+// `not_determined` and an ABSENT field KEEP the caller-chosen hazard reading
+// (same tone as the unconstrained case), with wording that notes the gate was
+// not analysed. The `param` destination is the PROVEN fact here — the caller
+// names the address — and the missing verdict is only the answer to a
+// secondary question; reading strictly-less-knowledge as strictly-safer would
+// demote every payload minted before the producer answered (82/82 persisted
+// param flow destinations carry no verdict) and every fold member, for which
+// the producer never mints a verdict at all. Only a PRESENT `constrained`
+// verdict may soften. Nothing here launders a constraint into reassurance, and
+// no absence of proof ever suppresses the theft-shaped signal.
+//
+// msg_sender / caller_controlled carry no such question: the destination IS the
+// caller, provably, so they stay unconditional.
+// The three-state pinning answer of a `constrained` verdict. `pins` is the
+// producer's field; on a payload minted before it existed the guard NAME still
+// carries one proof: `denylist` is BY CLASSIFICATION a falsy membership — a
+// guard that excludes a set and pins nothing — so it reads as proven
+// non-pinning even without the field. Every other guard without `pins` is
+// undetermined: absence of the proof is never the proof.
+function constraintPins(verdict) {
+  if (!verdict) return null;
+  if (verdict.pins === true || verdict.pins === false) return verdict.pins;
+  if (verdict.guard === "denylist") return false;
+  return null;
+}
+
+function paramDestinationIsFreelyChosen(flow) {
+  const c = flow && flow.target_constraint;
+  return !!(c && c.state === "unconstrained_proven");
+}
+
 function flowOutTargetSummary(claims) {
   let sawCaller = false;
   let sawSetter = false;
   let sawFixed = false;
+  let sawGuardedParam = false; // param + mandatory gate PROVEN to pin (pins: true)
+  let sawUnprovenPin = false; // param + real guard, pinning not proven (pins null/absent)
+  let sawUnknownParam = false; // param + constraint not determined
   let sawOther = false; // indeterminate / self / unclassified → blocks a "fixed" claim
   let total = 0;
   for (const c of claims) {
@@ -658,14 +748,46 @@ function flowOutTargetSummary(claims) {
           ? f.target_kind.kind
           : null;
       for (const k of kind === "several" ? memberKinds(f.target_kinds) : [kind]) {
-        if (OUT_TARGET_CALLER.has(k)) sawCaller = true;
+        if (k === "param") {
+          // A "several" fold carries ONE constraint verdict for the flow, and
+          // the verdict is keyed to the resolved target_param_index — which a
+          // fold only has when one site supplied it. Reading it per member
+          // would attribute one member's proof to another, so a param member
+          // inside a fold is only ever freely-chosen when the flow-level
+          // verdict says so.
+          if (paramDestinationIsFreelyChosen(f)) sawCaller = true;
+          else if (f.target_constraint && f.target_constraint.state === "constrained") {
+            // Only a guard PROVEN to pin may soften the reading. A proven
+            // non-pinning guard (denylist) IS the caller-chosen fact; a guard
+            // whose pinning is not determined keeps the hazard reading under
+            // its own wording — three states, none conflated (R3, round 2).
+            const pins = constraintPins(f.target_constraint);
+            if (pins === true) sawGuardedParam = true;
+            else if (pins === false) sawCaller = true;
+            else sawUnprovenPin = true;
+          } else sawUnknownParam = true;
+        } else if (OUT_TARGET_CALLER.has(k)) sawCaller = true;
         else if (k === "storage_setter") sawSetter = true;
         else if (OUT_TARGET_FIXED.has(k)) sawFixed = true;
         else sawOther = true;
       }
     }
   }
-  return { sawCaller, sawSetter, sawFixed, sawOther, total };
+  // A param destination without a proven-free verdict still blocks the "fixed"
+  // reading exactly like an indeterminate one — otherwise a function with one
+  // guarded (or unanalysed) param and one immutable path would read
+  // "(fixed destination)".
+  if (sawGuardedParam || sawUnprovenPin || sawUnknownParam) sawOther = true;
+  return {
+    sawCaller,
+    sawSetter,
+    sawFixed,
+    sawGuardedParam,
+    sawUnprovenPin,
+    sawUnknownParam,
+    sawOther,
+    total,
+  };
 }
 
 // Worst-case across a multi-flow function: a single caller-chosen path is the
@@ -675,9 +797,84 @@ function flowOutQualifier(claims) {
   const s = flowOutTargetSummary(claims);
   if (!s.total) return null;
   if (s.sawCaller) return "(caller-chosen destination)";
+  // An UNANALYSED param ranks directly under the proven-free case and ABOVE
+  // every softer reading: the caller provably names the destination, and with
+  // no verdict at all — legacy payload, `several`-fold member, producer not yet
+  // run — nothing is known that the unconstrained case doesn't also satisfy.
+  // Knowing strictly less must never read strictly safer (round-4 R1); the
+  // wording keeps the caller-chosen claim and notes the unanswered question.
+  if (s.sawUnknownParam) return "(caller-chosen destination; gate not analysed)";
+  // A real guard whose pinning is NOT proven sits at the hazard end with the
+  // caller-chosen case (it may well be a blacklist — all four local rows are),
+  // but under wording that claims exactly what was proven and no more.
+  if (s.sawUnprovenPin) return "(destination checked; pinning not proven)";
   if (s.sawSetter) return "(admin-settable destination)";
+  // Below admin-settable in the worst case and above "fixed": a gate an
+  // authority wrote is weaker evidence than an unwritable address. This is the
+  // ONLY param state that softens — it takes a PRESENT constrained verdict
+  // with a proven pin to get here.
+  if (s.sawGuardedParam) return "(destination gated by a guard)";
   if (s.sawFixed && !s.sawOther) return "(fixed destination)";
   return null;
+}
+
+// Where the foreign code a delegatecall runs comes from. The claim itself says
+// only that it happens; who can change the code is the severity question, and
+// the three states are kept distinct — `storage_setter` names a real capability,
+// `indeterminate` is an unanswered question that must not read as either
+// "settable" or "fixed".
+const DELEGATECALL_DESTINATION_WORD = {
+  storage_setter: "target is admin-settable storage",
+  storage_no_setter: "target is storage with no writer",
+  immutable: "target is immutable",
+  constant: "target is a compile-time constant",
+  param: "target is caller-supplied",
+  indeterminate: "target not determined",
+};
+
+function delegatecallDestination(claims) {
+  for (const c of claims) {
+    if (c.claim_id !== "delegatecall.execute") continue;
+    const d = c.witness && c.witness.destination;
+    const word = d && DELEGATECALL_DESTINATION_WORD[d.target_kind];
+    if (word) return `(${word})`;
+  }
+  return null;
+}
+
+// Worst destination-constraint state across a function's exec.arbitrary claims,
+// or null when none carries the field. The claim's own sentence ("arbitrary
+// external call") asserts an unconstrained target; where a mandatory gate pins
+// it — an allowlist, the timelock's hash commitment — the sentence overstates,
+// and this is the qualifier that says so beside it.
+function execTargetConstraint(claims) {
+  let guarded = null;
+  let unprovenPin = false;
+  let unknown = false;
+  for (const c of claims) {
+    if (c.claim_id !== "exec.arbitrary") continue;
+    const k = c.witness && c.witness.destination_constraint;
+    if (!k || typeof k.state !== "string") {
+      // No verdict on the claim at all: the question was not answered for this
+      // row (an older payload, or a destination no parameter determines).
+      unknown = true;
+      continue;
+    }
+    if (k.state === "unconstrained_proven") return null;
+    if (k.state === "constrained") {
+      // Only a guard PROVEN to pin softens the claim's own "arbitrary"
+      // sentence. A proven non-pinning guard (pins: false, a denylist) leaves
+      // the sentence standing unqualified — that is the honest reading, not a
+      // gap. Pinning not determined gets its own wording; it never reads as
+      // "gated" (round-2 R3).
+      const pins = constraintPins(k);
+      if (pins === true) guarded = k;
+      else if (pins !== false) unprovenPin = true;
+    } else unknown = true;
+  }
+  if (guarded) return `(target gated by ${guarded.guard || "a guard"})`;
+  if (unprovenPin) return "(target checked; pinning not proven)";
+  return unknown ? "(target constraint not determined)" : null;
 }
 
 // The fork-observed pause summary (only the behavioral tier carries it).
@@ -771,6 +968,10 @@ export function qualifierForClaims(fn) {
     // same qualifier; flowOutTargetSummary already admits only outbound routes.
     case "value_router":
       return flowOutQualifier(claims);
+    case "exec.arbitrary":
+      return execTargetConstraint(claims);
+    case "delegatecall.execute":
+      return delegatecallDestination(claims);
     case "pause.set":
       return pauseQualifier(claims);
     case "supply.mint":
@@ -876,6 +1077,70 @@ function formatUsdUpperBound(value) {
   return `up to ~${text}`;
 }
 
+// What a mandatory revert gate proved about a caller-named destination. Reads
+// the flow claims' `target_constraint` and the exec claim's
+// `destination_constraint` — the same three-state verdict on two witnesses.
+// Only a PRESENT verdict produces a row: an absent one is the question being
+// unanswered, and the inspector says nothing rather than implying either proof.
+const GUARD_WORD = {
+  mapping_allowlist: "a storage allowlist the caller did not write",
+  hash_commitment: "a hash commitment in storage",
+  equality_vs_storage: "equality against a storage address",
+  equality_vs_caller: "equality against the caller",
+  numeric_bound: "a numeric bound",
+  merkle_inclusion: "a merkle inclusion proof",
+  signature_witness: "a signature check",
+  denylist: "a denylist",
+  external_call_revert: "another contract's revert surface",
+};
+
+function constraintText(verdict) {
+  if (!verdict || typeof verdict.state !== "string") return null;
+  if (verdict.state === "unconstrained_proven")
+    return "no mandatory gate references it (freely chosen)";
+  if (verdict.state === "not_determined") return "not determined";
+  const word = GUARD_WORD[verdict.guard] || verdict.guard || "a guard";
+  const via =
+    verdict.binding === "derived_from"
+      ? " (bound through a computation's argument provenance)"
+      : "";
+  // `pins` is three-state and the wording tracks it exactly: "gated by" is
+  // reserved for a guard PROVEN to pin; a proven non-pinning guard and a guard
+  // of undetermined set semantics both read "checked by", each with its own
+  // caveat. An absent `pins` (older payload) is the undetermined case — never
+  // the proof.
+  const pins = constraintPins(verdict);
+  if (pins === true) return `gated by ${word}${via}`;
+  if (pins === false)
+    return `checked by ${word}${via} — excludes a set; does NOT pin the destination`;
+  return `checked by ${word}${via} — whether it pins the destination is not proven`;
+}
+
+function destinationConstraintText(claims) {
+  const seen = [];
+  for (const c of claims) {
+    let verdict = null;
+    if (c.claim_id === "exec.arbitrary") {
+      verdict = c.witness && c.witness.destination_constraint;
+    } else if (c.claim_id === "flow.out" || c.claim_id === "value_router") {
+      const rows =
+        c.claim_id === "value_router"
+          ? routedOutFlows(c.witness)
+          : c.witness && c.witness.direction === "out" && Array.isArray(c.witness.flows)
+            ? c.witness.flows
+            : [];
+      for (const f of rows) {
+        const t = constraintText(f && f.target_constraint);
+        if (t && !seen.includes(t)) seen.push(t);
+      }
+      continue;
+    }
+    const t = constraintText(verdict);
+    if (t && !seen.includes(t)) seen.push(t);
+  }
+  return seen.length ? seen.join(", ") : null;
+}
+
 // Verbose witness rows for the function inspector: [{label, value}]. Every row is
 // derived from a present, at-the-bar field — absent facts produce no row (the
 // same honesty rule as the chip; an unwitnessed destination shows nothing rather
@@ -924,6 +1189,9 @@ export function claimWitnessFacts(fn) {
   }
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
+  const destConstraint = destinationConstraintText(claims);
+  if (destConstraint)
+    facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
   if (reachIndeterminate) {

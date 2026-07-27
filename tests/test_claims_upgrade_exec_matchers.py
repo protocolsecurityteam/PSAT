@@ -51,20 +51,40 @@ OWNED_CLAIM_IDS = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
-    """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
+def _pipeline_claim_records(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, list[dict]]:
+    """Run the full static pipeline and return ``{signature: [claim dicts]}`` —
+    the full rows, so a test can hold the WITNESS to account, not only the
+    (claim_id, tier) pair a false verdict can hide behind."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / fixture_file).read_text()
     project_dir = write_foundry_project(tmp_path, contract_name, source)
     _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
     assert effects is not None and "functions" in effects
-    out: dict[str, set[tuple[str, str]]] = {}
+    out: dict[str, list[dict]] = {}
     for signature, record in effects["functions"].items():
         # The claims phase always attaches the field, even when empty.
         assert "claims" in record, signature
-        out[signature] = {(c["claim_id"], c["tier"]) for c in record["claims"]}
+        out[signature] = list(record["claims"])
     return out
+
+
+def _claims_view(records: dict[str, list[dict]]) -> dict[str, set[tuple[str, str]]]:
+    return {sig: {(c["claim_id"], c["tier"]) for c in rows} for sig, rows in records.items()}
+
+
+def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
+    """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
+    return _claims_view(_pipeline_claim_records(tmp_path, fixture_file, contract_name))
+
+
+def _claim_witness(records: dict[str, list[dict]], name: str, claim_id: str) -> dict:
+    """The single ``claim_id`` witness on the single function named ``name``."""
+    matches = [sig for sig in records if sig.split("(", 1)[0] == name]
+    assert len(matches) == 1, f"function {name!r}: {matches}"
+    rows = [c for c in records[matches[0]] if c["claim_id"] == claim_id]
+    assert len(rows) == 1, f"{name!r} {claim_id!r}: {rows}"
+    return rows[0].get("witness") or {}
 
 
 def _find(claims: dict[str, set[tuple[str, str]]], name: str) -> set[tuple[str, str]]:
@@ -107,7 +127,8 @@ def test_non_proxy_upgradeto_is_near_miss_negative(tmp_path):
 def test_safe_family_positive(tmp_path):
     """SafeL2-class: signer/module/guard control claims + exec.arbitrary on the
     execute entries, all under the getThreshold+getOwners+execTransaction gate."""
-    claims = _pipeline_claims(tmp_path, "safe_wallet.sol", "SafeWallet")
+    records = _pipeline_claim_records(tmp_path, "safe_wallet.sol", "SafeWallet")
+    claims = _claims_view(records)
     signer = ("safe.signer_mgmt", "standard_exact")
     for fn in ("addOwnerWithThreshold", "removeOwner", "swapOwner", "changeThreshold"):
         assert _find(claims, fn) == {signer}, fn
@@ -123,6 +144,25 @@ def test_safe_family_positive(tmp_path):
     assert _find(claims, "getOwners") == set()
     # 4 signer + 2 module + 1 guard + 3 exec = 10 owned claims across the Safe family.
     assert _owned_total(claims) == 10
+    # Round-3 R1: the WITNESS, not only the (claim_id, tier) pair.
+    # execTransaction's destination rides under the owners' threshold
+    # signatures — the standard commitment, published identically on the exec
+    # and flow witnesses so the two can never contradict on one function.
+    signed = {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
+    assert _claim_witness(records, "execTransaction", "exec.arbitrary")["destination_constraint"] == signed
+    exec_flow = _claim_witness(records, "execTransaction", "flow.out")
+    assert exec_flow["flows"][0]["target_constraint"] == signed
+    # The module-exec entries share the selectors and the gate, but their guard
+    # (`modules[msg.sender]`) is an allowlist on the CALLER: no signature
+    # commits `to`, an enabled module calls any target with any calldata. The
+    # tree walk sees exactly that caller-keyed gate and PROVES the destination
+    # free — the verdict that keeps the caller-chosen hazard standing
+    # downstream, and above all never `pins: True`.
+    free = {"state": "unconstrained_proven"}
+    for fn in ("execTransactionFromModule", "execTransactionFromModuleReturnData"):
+        assert _claim_witness(records, fn, "exec.arbitrary")["destination_constraint"] == free, fn
+        module_flow = _claim_witness(records, fn, "flow.out")
+        assert module_flow["flows"][0]["target_constraint"] == free, fn
 
 
 def test_oz_timelock_family_positive(tmp_path):
@@ -263,15 +303,144 @@ def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
     assert witness["calldata_basis"] is None
 
 
-def test_a_state_variable_destination_names_no_parameter(tmp_path):
-    """The ``rebalance`` shape: the call goes to a storage-held swapper, two
-    address parameters ride along as arguments, and NO parameter is the
-    destination. ``state_var`` says that positively — the caller cannot choose
-    where this call goes — where the old pick published an argument's name."""
-    witness = _binding_witnesses(tmp_path)["rebalance"]
-    assert witness["destination_kind"] == "state_var"
-    assert witness["destination_param"] is None
-    assert witness["destination_basis"] is None
+def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
+    """INVERTED. This test previously asserted that the ``rebalance`` shape
+    carries an ``exec.arbitrary`` claim whose witness says ``state_var`` — i.e.
+    that the claim is minted beside the proof of its own negation. It is a pure
+    false positive on the real row it was modelled on (LRTSquaredAdmin.rebalance:
+    the call goes to the storage-held ``swapper``, the two address parameters
+    ride along as ARGUMENTS of a fixed-selector ``ISwapper.swap``, and no
+    arbitrary call exists anywhere in the function).
+
+    The claim's sentence is "forwards a caller-supplied target". ``state_var``
+    is the proof that the caller does not supply it, so the honest output is no
+    claim — and, through the legacy projection, no ``arbitrary_external_call``
+    label and no "Executes arbitrary external calldata" prose either.
+
+    The proven-absent DESTINATION classification is still exercised, and still
+    matters: it is what this suppression keys on. See
+    ``test_the_state_var_destination_state_is_still_produced`` below."""
+    assert "rebalance" not in _binding_witnesses(tmp_path)
+
+
+def test_the_state_var_destination_state_is_still_produced(tmp_path):
+    """R2 for the suppression above: the branch it fires on is reachable, and it
+    is reached by real compiler output rather than by construction — on a
+    single-op body AND on a multi-op body whose every candidate op resolves to
+    storage. The fragment's ``state_var`` is a function-wide quantifier now, so
+    the multi-op arm is what proves the suppression still has something real to
+    fire on after the quantifier change."""
+    from slither import Slither
+
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers._taint import arbitrary_exec_taint
+    from services.static.contract_analysis_pipeline.effects import build_effects
+    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+
+    source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
+    project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
+    subject = _select_subject_contract(Slither(str(project_dir)), "ExecBinding")
+    assert subject is not None
+    ctx = ClaimContext(subject, build_effects(subject), {})
+    for signature in ("rebalance(address,address,bytes)", "twoStateVarSinks(address,bytes)"):
+        taint = arbitrary_exec_taint(ctx, signature)
+        assert taint is not None, "the taint fragment is what the suppression reads"
+        assert taint["destination_kind"] == "state_var", signature
+        assert taint["destination_param"] is None, signature
+
+
+def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
+    """R4 — the un-hedged positive the suppression must not eat. The Safe/Zodiac
+    transaction-guard idiom calls a FIXED guard with ``(target, data)`` and then
+    calls the caller-supplied target with the caller-supplied data. The first op
+    resolves ``state_var``; the second IS the arbitrary call. A fragment that
+    answered with the first op suppressed the whole claim — silently, and only
+    in this statement order — so both orders are pinned to the same param
+    binding here."""
+    witnesses = _binding_witnesses(tmp_path)
+    fragment_fields = (
+        "destination_param",
+        "destination_kind",
+        "destination_basis",
+        "calldata_param",
+        "calldata_kind",
+        "calldata_basis",
+    )
+    for name in ("guardThenExec", "execThenGuard"):
+        witness = witnesses[name]
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param"), name
+        assert (witness["calldata_param"], witness["calldata_kind"]) == ("data", "param"), name
+    # Order-independence, field by field: swapping the two statements must not
+    # move a byte of the published binding.
+    assert {f: witnesses["guardThenExec"][f] for f in fragment_fields} == {
+        f: witnesses["execThenGuard"][f] for f in fragment_fields
+    }
+
+
+def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tmp_path):
+    """Round-5 R1, on real compiler output: a mandatory NONVIEW guard call
+    vetting the caller-supplied ``(target, data)`` — the Safe/Zodiac
+    transaction-guard idiom — must leave the destination-constraint answer
+    OPEN, while the guardless control alone earns the negative proof. Before
+    the per-op transparency proof, both published ``unconstrained_proven``:
+    the guard's leaf was swallowed because its callee was a body call, and the
+    consumer could not tell the vetted function from the open one."""
+    records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
+    guarded = _claim_witness(records, "execGuarded", "exec.arbitrary")
+    open_control = _claim_witness(records, "execOpen", "exec.arbitrary")
+    # Same claim, same binding — only the constraint verdict may differ.
+    for witness in (guarded, open_control):
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param")
+    assert guarded["destination_constraint"] == {"state": "not_determined"}
+    assert open_control["destination_constraint"] == {"state": "unconstrained_proven"}
+
+
+def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path):
+    """R2 firing proof for the withheld-subtraction branch, on compiled source.
+    ``execSharedIdentity`` calls ``exec`` on a FIXED receiver and on the
+    caller-chosen one: a tree leaf carries the callee identity but not the
+    receiver, so the shared identity proves vacuousness for neither op and the
+    answer stays open. ``execTyped`` — the same caller-chosen op with no fixed
+    sibling — is the discriminating control that keeps this from being an
+    always-hedge: its identity survives the subtraction and the negative proof
+    stays reachable."""
+    records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
+    shared = _claim_witness(records, "execSharedIdentity", "exec.arbitrary")
+    typed = _claim_witness(records, "execTyped", "exec.arbitrary")
+    for witness in (shared, typed):
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param")
+    assert shared["destination_constraint"] == {"state": "not_determined"}
+    assert typed["destination_constraint"] == {"state": "unconstrained_proven"}
+
+
+def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
+    """R4 — the un-hedged sibling of the guard test above: transparency is
+    earned, not abolished. An op whose destination the IR proves parameter-
+    rooted keeps its own revert surface out of the walk — through a singly
+    assigned local (``t.exec``), through a typed call on the parameter itself
+    (``compose``), and through a resolved library forwarder
+    (``manageViaLibrary``) — so the negative proof stays reachable on compiled
+    source. The two guard-shaped bodies stay open in BOTH statement orders:
+    their ``exec`` leaf belongs to the fixed-destination sibling op — not to
+    the arbitrary ``target.call`` — so its identity is withheld and the leaf
+    blocks."""
+    witnesses = _binding_witnesses(tmp_path)
+    for name in ("singlyAssignedLocal", "compose", "manageViaLibrary"):
+        assert witnesses[name]["destination_constraint"] == {"state": "unconstrained_proven"}, name
+    for name in ("guardThenExec", "execThenGuard"):
+        assert witnesses[name]["destination_constraint"] == {"state": "not_determined"}, name
+
+
+def test_the_suppression_requires_every_op_to_be_state_var(tmp_path):
+    """The suppression's quantifier: it may fire only where EVERY candidate op's
+    destination is proven storage-held (``twoStateVarSinks``), and an open
+    question on any op outranks a proven absence on another
+    (``stateVarThenBranched`` mints the hedge)."""
+    witnesses = _binding_witnesses(tmp_path)
+    assert "twoStateVarSinks" not in witnesses
+    hedged = witnesses["stateVarThenBranched"]
+    assert hedged["destination_kind"] == "not_determined"
+    assert hedged["destination_param"] is None
 
 
 def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
@@ -351,7 +520,11 @@ def test_every_binding_state_is_reachable_on_one_corpus(tmp_path):
     """R2: a state that cannot be produced is not a mitigation. All three
     destination states and all three calldata states are minted by this corpus."""
     witnesses = _binding_witnesses(tmp_path)
-    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "state_var", "not_determined"}
+    # ``state_var`` is absent from the CLAIMS because it now suppresses the claim
+    # (it is the proof that the caller does not choose the destination); the
+    # state itself is still produced and asserted in
+    # ``test_the_state_var_destination_state_is_still_produced``.
+    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "not_determined"}
     assert {w["calldata_kind"] for w in witnesses.values()} == {"param", "call_argument", "not_determined"}
 
 

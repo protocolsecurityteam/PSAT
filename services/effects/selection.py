@@ -59,6 +59,17 @@ _NODE_PREFIX = "address:"
 _FLOW_CLAIM_PREFIX = "flow."
 _SUPPLY_CLAIM_PREFIX = "supply."
 
+# Claim classes TRANSPARENT to enrollment: they record facts that do not EXPLAIN
+# the function's value/supply behaviour — ``rate_limit.consume`` is a fact at
+# zero severity weight (the call passes through a throughput limiter), and
+# ``delegatecall.execute`` names where foreign code comes from, not what the
+# function does to value. INVARIANT: a zero-weight FACT must never remove a
+# function from evidence-gathering. These ids are filtered out BEFORE
+# :func:`_enrolled_families` buckets, so a row whose only claims are transparent
+# stays the §6 blank default (``families=None`` → full synthesis) exactly as if
+# it carried no claims at all.
+_ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({"rate_limit.consume", "delegatecall.execute"})
+
 # The claims that admit a PUBLIC function to the candidate set (see
 # :func:`_cascade_rows`). Deliberately these two and no others: they are the
 # claims that say value LEAVES the unit or that units are PRINTED, which is
@@ -795,8 +806,15 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
     * the **empty** frozenset — the function carries only other claims (pause,
       upgrade, …); already explained, so the caller drops it (fail-closed: an
       unrecognized claim shape enrolls nothing).
+
+    Claims in :data:`_ENROLLMENT_TRANSPARENT_CLAIM_IDS` are removed BEFORE the
+    bucketing above — they are facts, not explanations, and must never flip a
+    blank row from ``None`` (probe everything) to the empty set (probe nothing).
     """
     if not isinstance(claims, list) or not claims:
+        return None
+    claims = [c for c in claims if not (isinstance(c, dict) and c.get("claim_id") in _ENROLLMENT_TRANSPARENT_CLAIM_IDS)]
+    if not claims:
         return None
     families: set[str] = set()
     for claim in claims:

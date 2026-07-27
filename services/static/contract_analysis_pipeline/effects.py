@@ -190,6 +190,18 @@ class ValueFlow(TypedDict):
     # prober needs before it substitutes a nonzero value — a quantity written into
     # an id/index/deadline argument is how a probe reverts on its own input.
     amount_param_index: NotRequired[int]
+    # ``value_router`` flows only: the identity of every call that CARRIES the
+    # routed move — the body call the walk crossed to find it (``vault.exit``),
+    # or, for a boundary-less routed pull, the pull op itself. Each entry is
+    # ``{"selector": canonical-selector-or-None, "callee": bare-name-or-None}``,
+    # sorted for determinism. The flow's own ``selector`` names the CALLEE's
+    # inner transfer, which is not a call the entry body makes, so without this
+    # record a routed move has no identity a mandatory-gate walk can join a
+    # leaf against. Consumers treat exactly these ops as "the described
+    # effect's own revert surface"; ABSENCE of the record makes nothing
+    # transparent — an unrecorded router identity can only block a negative
+    # proof, never mint one.
+    router_ops: NotRequired[list[dict[str, str | None]]]
 
 
 class EffectInfo(TypedDict):
@@ -393,6 +405,17 @@ def _own_selector(fn: Any) -> str | None:
     if _is_fallback_or_receive(fn):
         return None
     return _selector_for(_function_full_name(fn))
+
+
+def _bare_callee_name(signature: str | None) -> str | None:
+    """The bare function name of a ``name(types)`` signature, or ``None``.
+    The name half of a router-op identity: a DECLARED signature carrying an
+    interface-typed parameter does not hash to the selector a leaf recorded,
+    so the name is the join that survives canonicalization differences."""
+    if not isinstance(signature, str) or "(" not in signature:
+        return None
+    name = signature.split("(", 1)[0].strip()
+    return name or None
 
 
 def _sink_id(function_name: str, kind: str, target: str, idx: int) -> str:
@@ -2900,6 +2923,12 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
     amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
+    # Per routed-flow key: the ``(selector, bare name)`` identities of the ops
+    # that carry the move (see ``ValueFlow.router_ops``). Only ever populated
+    # for ``value_router`` flows; identity-less sites simply record nothing,
+    # which downstream reads as "router op not determined" (blocks, never
+    # proves).
+    router_ops_by_key: dict[tuple[str, str | None, str, bool, str], set[tuple[str | None, str | None]]] = {}
 
     entry_contract = getattr(function, "contract", None)
     # Per-contract classification context (state vars + the setter/alias/scan
@@ -2955,6 +2984,8 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         amount_override: tuple[str, str] | None = None,
         identity_possible: bool = False,
         routed_unless_sink_is_self: bool = False,
+        router_op: tuple[str | None, str | None] | None = None,
+        op_identity: tuple[str | None, str | None] | None = None,
     ) -> None:
         # A move of a provably-zero amount moves nothing — ``transfer(to, 0)``
         # transfers no tokens, and a router handing a callee a literal ``0`` (which
@@ -2997,6 +3028,14 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         if routed_unless_sink_is_self and target_site[0] != "self":
             flow = {**flow, "direction": "value_router"}
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        if flow["direction"] == "value_router":
+            # A move found beyond a boundary is carried by the call that
+            # CROSSED it; a boundary-less routed pull is carried by its own
+            # op. Recorded per key so the published flow can name the op(s)
+            # whose revert surface IS this effect — and only those.
+            identity = router_op if crossed else op_identity
+            if identity is not None and (identity[0] or identity[1]):
+                router_ops_by_key.setdefault(key, set()).add(identity)
         target_sites.setdefault(key, []).append(target_site)
         # ``amount_override`` is for a sink whose trailing slot the ABI proves is
         # not a quantity at all: tracing its provenance would answer a question
@@ -3025,6 +3064,11 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         depth: int,
         crossed: bool,
         class_contract: Any,
+        # The FIRST boundary-crossing call on this walk path — the entry-side
+        # op whose revert surface carries every routed move found below it.
+        # ``None`` until a boundary is crossed; never overwritten by a nested
+        # crossing (the entry's tree only sees the first one).
+        router_op: tuple[str | None, str | None] | None = None,
     ) -> None:
         sig = None if param_bindings is None else frozenset(param_bindings.items())
         # The index half is part of the identity: two sites can forward the same
@@ -3080,9 +3124,11 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                         getattr(ir, "call_value", None),
                         context(),
                         crossed,
+                        router_op=router_op,
                     )
                 elif op == "HighLevelCall":
-                    selector = _selector_for(_callee_signature(ir))
+                    signature = _callee_signature(ir)
+                    selector = _selector_for(signature)
                     arguments = list(getattr(ir, "arguments", []) or [])
                     if selector in _ERC20_PULL_SELECTORS:
                         from_arg = arguments[0] if arguments else None
@@ -3102,6 +3148,8 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             _TOKEN_IDENTITY_AMOUNT if selector in _ERC721_IDENTITY_SELECTORS else None,
                             identity_possible=selector == _AMBIGUOUS_PULL_SELECTOR,
                             routed_unless_sink_is_self=not from_self,
+                            router_op=router_op,
+                            op_identity=(selector, _bare_callee_name(signature)),
                         )
                     elif selector in _ERC20_SEND_SELECTORS:
                         add(
@@ -3116,6 +3164,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             arguments[1] if len(arguments) > 1 else None,  # amount
                             context(),
                             crossed,
+                            router_op=router_op,
                         )
                 elif op == "LowLevelCall" and "value:" in str(ir):
                     # A provably-zero value call (OZ SafeERC20's
@@ -3134,6 +3183,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                         getattr(ir, "call_value", None),
                         context(),
                         crossed,
+                        router_op=router_op,
                     )
                 # A token-first library/internal transfer (SafeTransferLib /
                 # SafeERC20) whose value move is invisible to the selector scan and
@@ -3146,7 +3196,8 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                 # true direction; only a move made across a boundary is routed.
                 token_first = _token_first_transfer(ir) if op in ("HighLevelCall", "LibraryCall") else None
                 if token_first is not None:
-                    selector = _selector_for(_callee_signature(ir))
+                    signature = _callee_signature(ir)
+                    selector = _selector_for(signature)
                     if token_first[0] == "send":
                         _kind, to_arg, amount_arg = token_first
                         add(
@@ -3161,6 +3212,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             amount_arg,
                             context(),
                             crossed,
+                            router_op=router_op,
                         )
                     else:  # pull
                         _kind, from_arg, to_arg, amount_arg = token_first
@@ -3178,6 +3230,8 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             context(),
                             crossed,
                             routed_unless_sink_is_self=not from_self,
+                            router_op=router_op,
+                            op_identity=(selector, _bare_callee_name(signature)),
                         )
                 if op in ("InternalCall", "LibraryCall"):
                     # Descend even into a callee the recognizer just classified.
@@ -3207,6 +3261,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             depth + 1,
                             crossed,
                             class_contract,
+                            router_op=router_op,
                         )
                 elif op == "HighLevelCall":
                     # Route into a RESOLVED in-unit callee that is not itself one
@@ -3214,7 +3269,8 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                     # BODY moves value (``BoringVault.enter``/``exit``). Crossing
                     # sets ``crossed`` and rebases the classification context onto
                     # the callee's own contract.
-                    selector = _selector_for(_callee_signature(ir))
+                    signature = _callee_signature(ir)
+                    selector = _selector_for(signature)
                     is_direct_value = (
                         selector in _ERC20_PULL_SELECTORS
                         or selector in _ERC20_SEND_SELECTORS
@@ -3233,6 +3289,10 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             depth + 1,
                             True,
                             getattr(callee, "contract", None),
+                            # The op that carries every move found beyond this
+                            # boundary. A nested crossing keeps the FIRST one —
+                            # the only call the entry's own tree can see.
+                            router_op=router_op if crossed else (selector, _bare_callee_name(signature)),
                         )
 
     walk(function, "body", True, None, None, 0, False, entry_contract)
@@ -3241,6 +3301,10 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     flows.extend(router_flows)
     for flow in flows:
         key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        if flow["direction"] == "value_router":
+            ops = sorted(router_ops_by_key.get(key, ()), key=lambda op: (op[0] or "", op[1] or ""))
+            if ops:
+                flow["router_ops"] = [{"selector": op_selector, "callee": op_name} for op_selector, op_name in ops]
         target = _fold_sites(target_sites.get(key, []))
         amount = _fold_sites(amount_sites.get(key, []))
         if target is not None:

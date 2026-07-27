@@ -235,7 +235,7 @@
       "path": "claims_upgrade_exec/exec_arbitrary_binding.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "ExecBinding",
-      "description": "Discriminating corpus for the exec.arbitrary parameter BINDING: two address params with the destination second, a state-variable destination no param reaches, three resolvable library forwarders (low-level, reversed operand order, inline assembly), a two-step forwarder that resolves to not_determined, five destinations reaching the call through a name the body defines twice (branch, reassignment, write-after-call on a param and on storage) and the singly-assigned sibling that must still bind.",
+      "description": "Discriminating corpus for the exec.arbitrary parameter BINDING: two address params with the destination second, a state-variable destination no param reaches, three resolvable library forwarders (low-level, reversed operand order, inline assembly), a two-step forwarder that resolves to not_determined, five destinations reaching the call through a name the body defines twice (branch, reassignment, write-after-call on a param and on storage), the singly-assigned sibling that must still bind, and four multi-op bodies pinning the fragment's over-all-ops quantifier (guard-then-exec in both statement orders, an all-state-var body where the suppression still fires, and a state-var op beside a branched not_determined one).",
       "detection_patterns": [
         "param_taint",
         "claim_exec_arbitrary",
@@ -245,11 +245,36 @@
       ]
     },
     {
+      "path": "claims_upgrade_exec/transaction_guard.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "GuardedExec",
+      "description": "The Safe/Zodiac transaction-guard idiom beside its open control: a mandatory nonview guard call vets the caller-supplied (target, data) before the arbitrary call, so the guarded entry's destination constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that a swallowed guard leaf can never mint the negative proof. Two further shapes pin the transparency set's identity algebra: a typed caller-chosen call whose own revert surface stays transparent, and the same callee identity shared between a fixed-destination op and the caller-chosen one, which must be withheld.",
+      "detection_patterns": [
+        "transaction_guard",
+        "claim_exec_arbitrary",
+        "destination_constraint",
+        "external_call_revert"
+      ]
+    },
+    {
       "path": "claims_upgrade_exec/plain_transfer_call.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "PayableToken",
       "description": "Adversarial taint near-miss NEGATIVE: address-tainted destination but no dynamic-bytes calldata parameter, so the value send earns no exec.arbitrary claim.",
       "detection_patterns": ["near_miss", "address_taint_only", "claim_negative"]
+    },
+    {
+      "path": "claims_flows/router_guard.sol",
+      "category": "claims_flows",
+      "contract_name": "GuardedTeller",
+      "description": "The transaction-guard idiom on the value-routing side, beside its open control: a mandatory nonview guard call vets the caller-supplied destination before the routed vault.exit, so the guarded entry's target_constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that value_flow-mode transparency belongs to the recorded router op, never to every body call.",
+      "detection_patterns": [
+        "router_guard",
+        "value_router",
+        "target_constraint",
+        "router_ops",
+        "external_call_revert"
+      ]
     }
   ]
 }

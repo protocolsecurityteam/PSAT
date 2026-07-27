@@ -302,6 +302,62 @@ def _forwarded_operand_indices(callee: Any) -> tuple[int, int] | None:
     return None
 
 
+def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) -> tuple[set[str], set[str]] | None:
+    """``(selectors, bare callee names)`` of the body call ops whose DESTINATION
+    is proven parameter-rooted — the transparency set for ``exec``-mode
+    constraint walks.
+
+    The vacuousness that earns a mandatory revert leaf transparency is a
+    property of the callee call's *destination*, never of being a body call: a
+    call whose receiver the caller picks cannot vet the caller's choice (point
+    it at a contract that always succeeds and the "gate" passes), while a call
+    to a FIXED receiver — a Safe/Zodiac transaction guard — is a genuine
+    precondition whose leaf must stay evaluable. So an identity enters the set
+    only when the op's destination resolves to a parameter through the same IR
+    machinery the binding fragment uses, and it is withheld again the moment any
+    op with a fixed (``state_var``) or unresolved destination shares it: a tree
+    leaf carries the callee identity but not the receiver, so a shared identity
+    cannot say which op the leaf describes, and withholding fails toward a
+    hedge rather than a proof. Low-level calls are skipped — their mandatory
+    check reaches the tree as a bare result equality with no callee identity,
+    so there is nothing to make transparent and nothing to withhold.
+
+    ``None`` when the Slither subject is unavailable: nobody looked, which the
+    caller must keep distinguishable from a looked-and-empty set."""
+    function = _slither_function(ctx, signature)
+    if function is None:
+        return None
+    # Selector/name computed exactly as the effects producer computes them for
+    # the sink records, so this set joins against tree leaves the same way the
+    # sink-derived set did.
+    from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
+
+    from ...contract_analysis_pipeline.effects import _callee_signature, _selector_for
+
+    parameters = list(getattr(function, "parameters", None) or [])
+    definitions = _definitions(function)
+    param_selectors: set[str] = set()
+    param_names: set[str] = set()
+    withheld_selectors: set[str] = set()
+    withheld_names: set[str] = set()
+    for node in getattr(function, "nodes", None) or []:
+        for ir in getattr(node, "irs", None) or []:
+            if isinstance(ir, LowLevelCall) or not isinstance(ir, (HighLevelCall, LibraryCall)):
+                continue
+            destination_operand, destination_state, _payload, _payload_state, _basis = _call_positions(ir, definitions)
+            _name, destination_kind = _classify_destination(
+                destination_operand, destination_state, definitions, parameters
+            )
+            proven = destination_kind == "param"
+            selector = _selector_for(_callee_signature(ir))
+            if selector:
+                (param_selectors if proven else withheld_selectors).add(selector)
+            callee_name = getattr(ir, "function_name", None)
+            if callee_name is not None and str(callee_name):
+                (param_names if proven else withheld_names).add(str(callee_name))
+    return param_selectors - withheld_selectors, param_names - withheld_names
+
+
 def _call_positions(ir: Any, definitions: dict[int, Any]) -> tuple[Any, str, Any, str, str | None]:
     """``(destination_operand, destination_state, payload_operand, payload_state,
     basis)`` for one call op.
@@ -357,9 +413,16 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     destination and calldata on a body call op, else ``None``.
 
     Whether the fragment is returned at all is decided exactly as before — by
-    read-set membership. What changed is what the fragment SAYS: the two names
-    are read off the destination and payload operand positions, so a name is
-    published only where the IR puts that parameter in that position."""
+    read-set membership. What the fragment SAYS is answered over EVERY candidate
+    call op, never the first one: the two names are read off the destination and
+    payload operand positions of the op whose destination resolution is the most
+    adverse (``param`` over ``not_determined`` over ``state_var``). So a proven
+    absence (``state_var``) in the returned fragment is a statement about the
+    whole function — every candidate op's destination is storage-held — and a
+    consumer may suppress on it without re-quantifying. A first-op answer read
+    a per-op fact as that function-wide proof, and a Safe-guard body
+    (``guard.checkTransaction(target, data)`` followed by ``target.call(data)``)
+    lost its genuine arbitrary call to whichever statement came first."""
     function = _slither_function(ctx, signature)
     if function is None:
         return None
@@ -386,6 +449,7 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
     definitions = _definitions(function)
+    fragments: list[dict[str, Any]] = []
     for node in getattr(function, "nodes", None) or []:
         for ir in getattr(node, "irs", None) or []:
             if not isinstance(ir, (LowLevelCall, HighLevelCall, LibraryCall)):
@@ -412,12 +476,28 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
                 data_param, data_kind = None, ("call_argument" if carried else "not_determined")
             else:
                 data_param, data_kind = None, "not_determined"
-            return {
-                "destination_param": dest_param,
-                "destination_kind": dest_kind,
-                "destination_basis": basis if dest_kind == "param" else None,
-                "calldata_param": data_param,
-                "calldata_kind": data_kind,
-                "calldata_basis": basis if data_kind == "param" else None,
-            }
-    return None
+            fragments.append(
+                {
+                    "destination_param": dest_param,
+                    "destination_kind": dest_kind,
+                    "destination_basis": basis if dest_kind == "param" else None,
+                    "calldata_param": data_param,
+                    "calldata_kind": data_kind,
+                    "calldata_basis": basis if data_kind == "param" else None,
+                }
+            )
+    if not fragments:
+        return None
+    # The most adverse candidate op speaks for the function. ``param`` is the
+    # claim itself, ``not_determined`` is an open question that still mints, and
+    # ``state_var`` is a proven absence — so ``state_var`` survives to the
+    # returned fragment only when every candidate op resolved to it, which is
+    # the quantifier a downstream suppression needs. Ties rank the calldata slot
+    # the same way (a caller-chosen blob over an open question over a proven
+    # argument-only op), then fall to body order, which is deterministic.
+    dest_rank = {"param": 2, "not_determined": 1, "state_var": 0}
+    data_rank = {"param": 2, "not_determined": 1, "call_argument": 0}
+    return max(
+        fragments,
+        key=lambda f: (dest_rank.get(f["destination_kind"], 1), data_rank.get(f["calldata_kind"], 1)),
+    )

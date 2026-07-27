@@ -34,13 +34,13 @@ def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvi
         witness={
             "kind": "value_flow",
             "direction": direction,
-            "flows": [_flow_entry(f) for f in flows],
+            "flows": [_flow_entry(ctx, function, f) for f in flows],
             "sink_ids": sorted(set(sink_ids)),
         },
     )
 
 
-def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
+def _flow_entry(ctx: ClaimContext, function: str, f: dict[str, Any]) -> dict[str, Any]:
     """Project a value-flow fact into the witness. ``target_kind`` (where funds
     go) and ``amount_kind`` (how much can leave) — each ``{kind, tier}`` — carry
     the theft-vs-routing discriminators when the fact layer classified them;
@@ -72,6 +72,14 @@ def _flow_entry(f: dict[str, Any]) -> dict[str, Any]:
         entry["target_param_index"] = f["target_param_index"]
     if f.get("amount_param_index") is not None:
         entry["amount_param_index"] = f["amount_param_index"]
+    # A3+A4 narrowing: a ``param`` destination proves the caller NAMES the
+    # destination; whether they can name it FREELY is a separate three-state
+    # question answered by the mandatory-gate analysis, and only
+    # ``unconstrained_proven`` licenses the caller-chosen (theft-shaped)
+    # reading downstream. Attached only where the destination question exists
+    # (folded kind ``param``), so no consumer reads a guessed value elsewhere.
+    if isinstance(f.get("target_kind"), dict) and f["target_kind"].get("kind") == "param":
+        entry["target_constraint"] = _facts.param_constraint(ctx, function, f.get("target_param_index"))
     return entry
 
 

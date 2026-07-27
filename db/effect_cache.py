@@ -118,23 +118,145 @@ logger = logging.getLogger(__name__)
 # Order there is Slither's ``list(set(vars_written))`` over identity-hashed
 # objects, so it tracks allocation addresses; the (kind, target, selector,
 # origin) multiset is identical.
-# v11: the predicate trees the probe is seeded from now cover two shapes they
-# could not reach before (W1-A, G3 classes F and R). (a) The cross-function gate
-# recursion was suppressed whenever a call's result was read anywhere, not only
-# where it reaches a branch condition, so every `return gatedCallee(...)`
-# forwarder arrived at the probe with the callee's gate missing — 406 function
-# entries move across the 88 production compilation units, and on the corpus
+# v11: the ``flow.out``/``value_router`` and ``exec.arbitrary`` witnesses now
+# carry a three-state destination-constraint verdict (``target_constraint`` /
+# ``destination_constraint``): whether a MANDATORY revert gate between entry and
+# sink references the destination parameter. A ``param`` destination was
+# previously published as one undifferentiated fact and read downstream as
+# "the caller can send this anywhere"; on the local artifacts 4 of 80 param
+# destinations carry a proven gate and 18 more are not determined, and 7 of the
+# 20 ``exec.arbitrary`` sites carry one. The probe selects and shapes its inner
+# call from the destination witness, so a v10 row records a verdict reached
+# without knowing whether the destination it synthesised was reachable at all —
+# a different probe input, not merely a different label.
+# v12: ``exec.arbitrary`` is no longer minted where the destination is PROVEN to
+# be a state variable. The claim asserts a caller-supplied target and
+# ``state_var`` is the proof that the caller does not supply one, so a v11 row on
+# such a function carries a claim whose witness states its own negation — and
+# the executor probe builds its inner call from that witness, so it synthesised a
+# call around a destination the caller cannot reach. ``not_determined`` still
+# mints (an open question is not a proof of absence), so this covers only the
+# rows where the two contradict.
+# Between v12 and v13, recorded late (an as-committed R5 violation, noted for
+# the audit trail): the A5 commit introduced the ``rate_limit.consume`` claim
+# class — a zero-severity-weight FACT witness carrying the ``refillRate``/
+# ``capacity`` discriminators — onto 10 local functions with no bump. The v13
+# argument below applies to it verbatim: the probe's candidate selection and
+# its synthesized call both read the claim set, so until the enrollment-
+# transparency restoration under the v17 entry, a cached row on those functions
+# was reached with this class absent from the set (the same 12-13 rows that
+# restoration names). No retroactive bump is needed for correctness on this
+# branch — every pre-branch row predates v11 and the branch's own bumps already
+# invalidate it — but the class introduction itself belongs in this ledger,
+# and the branch-scoped tier-0 gate cannot record it after the fact (its R5
+# check fires only on ``services/effects/*`` paths).
+# v13: the new ``delegatecall.execute`` claim class. A function whose foreign-code
+# execution was previously carried only by the legacy ``delegatecall_execution``
+# label now publishes a witness naming where that code comes from
+# (``storage_setter`` with its writer, ``indeterminate`` for a caller-keyed
+# mapping element). The probe's candidate selection and its synthesized call both
+# read the claim set, so a v12 row was reached with this class absent from it.
+# v14: ``unconstrained_proven`` in the destination-constraint verdict now
+# requires the leaf projection to be checkably complete (expression/parameter
+# cross-check, keyed-collection reads, parameter_names presence), a computed
+# operand always blocks the negative proof (L-24), and a proven OZ-timelock /
+# Safe exec entry publishes the standard's own commitment for every parameter.
+# A v13 row can carry a positive proof of absence minted from a lossy
+# projection's silence — measured on the local artifacts: 4 of 32 such proofs
+# were false (two timelock ``execute`` destinations that are hash-committed,
+# a merkle-drop ``account`` the ``verify`` leaf touches, a Teller ``to`` gated
+# by ``beforeTransferData[to].denyTo``) — and the probe shapes its call from
+# that verdict, so those rows must not be served to the new probe.
+# v15: every ``constrained`` destination verdict now carries ``pins`` — the
+# three-state answer to whether the guard PINS the parameter (True allowlist /
+# commitment, False denylist / ordering bound, None external revert surface
+# whose set semantics are another contract's). A v14 row's ``constrained`` was
+# one undifferentiated state that consumers rendered as "gated", which on the
+# local artifacts silently promoted 4/4 blacklist-checked flow destinations
+# (EtherFiRedemptionManager.redeem*) into pinned ones; the probe reads the
+# verdict to decide whether a synthesized destination can be reached at all,
+# so a row minted without the discriminator must not be served to the probe
+# that now expects it.
+# v16: the ``exec.arbitrary`` taint fragment now answers over EVERY candidate
+# call op instead of the first one in body order, so the v12 suppression's
+# ``state_var`` is a function-wide proof rather than a first-op fact. Under v15
+# a body holding a storage-destination op ahead of a genuine
+# ``target.call(data)`` — the Safe/Zodiac transaction-guard idiom — published
+# NO claim and no ``arbitrary_external_call`` label, and its statement-swapped
+# twin published both; the probe's candidate selection and its synthesized call
+# read the claim set, so a v15 row on such a function was reached with the
+# function's highest-severity claim absent for a reason that was statement
+# order, not evidence.
+# v17: a multi-site ``delegatecall.execute`` destination whose sites agree on a
+# kind now publishes the UNION of every site's evidence (plural ``variables``,
+# merged ``writer_signatures``) instead of the first site's record. A v16 row on
+# a two-module body carries one module's writer set presented as the whole
+# answer — an ungated second writer invisible behind a gated first — and the
+# probe reads the claim witness, so such a row was reached from a witness that
+# understates who can replace the executing code.
+#
+# Still v17 — enrollment transparency (a restoration, not a new analysis):
+# ``rate_limit.consume`` and ``delegatecall.execute`` are now TRANSPARENT to the
+# probe's candidate selection (``services/effects/selection.py:
+# _enrolled_families``): a function whose only claims are these fact classes
+# stays the §6 blank full-synthesis candidate it is today, instead of silently
+# leaving the candidate set the moment the claims plane mints the new ids (13
+# local rows: LRTSquaredAdmin.depositToStrategy and the 12 EtherFiNodesManager
+# rate-limited queue/consolidation functions). No bump: for those rows the
+# candidate shape the probe sees — full synthesis, ``restrict_families=None`` —
+# is byte-identical before and after the fact claims are minted, so a cached
+# verdict remains an answer to the same probe; every other row's claim set and
+# probe input are untouched.
+# v18: exec-mode destination-constraint transparency is now EARNED per call op —
+# an identity enters the transparency set only when IR proves that op's own
+# destination parameter-rooted, and is withheld when any fixed- or unresolved-
+# destination op shares it — instead of covering every body external call. A
+# v17 row on a Safe/Zodiac transaction-guard body (a mandatory nonview guard
+# call vetting the caller-supplied target before the arbitrary call) carries
+# ``destination_constraint: unconstrained_proven`` minted from the swallowed
+# guard leaf, byte-identical to a genuinely guardless function; the same walk
+# now answers ``not_determined``. The probe shapes its synthesized call from
+# that verdict, so such a row was reached from a proof of absence the walk can
+# no longer mint. Measured: 0 of the local DB's recomputable exec/delegatecall
+# rows flip (none carries a swallowed nonview guard leaf — a lower bound, not
+# a population claim); the two corpus guard-idiom rows are the realised flips.
+# v19: the v18 rule now reaches the VALUE-FLOW side. A routed move carries the
+# identity of the call that crossed the boundary (``ValueFlow.router_ops``,
+# recorded by the producer at the crossing site), and value_flow-mode
+# destination-constraint transparency is granted to exactly that op — no
+# longer to every body external call of a routed function. A v18 row on a
+# routed body with a mandatory nonview destination guard beside the router
+# (``guard.checkDestination(to)`` before ``vault.exit(to, …)``) carries
+# ``target_constraint: unconstrained_proven`` minted from the swallowed guard
+# leaf, byte-identical to the guard-free control; the same walk now answers
+# ``not_determined``. The probe selects and shapes its inner call from the
+# destination witness (the v11 argument), so such a row was reached from a
+# proof of absence the walk can no longer mint. Measured: on the persisted
+# (pre-``router_ops``) artifacts the two ``bulkWithdraw`` param destinations
+# fall to ``not_determined`` until re-analysis records the op; on recomputed
+# source the corpus router rows keep their verdicts (0 flips) and the
+# guard-idiom fixture pair is the realised discrimination.
+# v20 (Leg A of Wave 1; authored as "v11" against the same v10 base Leg C
+# branched from, renumbered at the merge — only the ordinals moved, and the
+# "a v10 row" argument below now reads as "a pre-v20 row"): the predicate trees
+# the probe is seeded from now cover two shapes they could not reach before
+# (W1-A, G3 classes F and R). (a) The cross-function gate recursion was
+# suppressed whenever a call's result was read anywhere, not only where it
+# reaches a branch condition, so every `return gatedCallee(...)` forwarder
+# arrived at the probe with the callee's gate missing — 406 function entries
+# move across the 88 production compilation units, and on the corpus
 # `TreeAbsentPublics.withdrawAll` goes from no tree to a caller_authority leaf.
-# (b) `fallback` / `receive` had no tree BUILT at all, so a caller-gated fallback
-# was seeded as unguarded; on the corpus both `TreeAbsentPublics` entry points
-# gain a caller_authority leaf, and in the local corpus PriorityWithdrawalQueue
-# and WithdrawRequestNFT gate `receive()` on `msg.sender != liquidityPool`.
-# A v10 row therefore records a verdict reached from a strictly smaller gate set
-# than the same probe now sees. The same change also replaces the fabricated
-# `keccak("fallback()")[:4]` / `keccak("receive()")[:4]` selectors with the
-# empty-string sentinel this file already fixes, so v10 rows for those functions
-# are keyed on an identity no caller could ever produce.
-EFFECT_CACHE_SCHEMA_VERSION = 11
+# (b) `fallback` / `receive` had no tree BUILT at all, so a caller-gated
+# fallback was seeded as unguarded; on the corpus both `TreeAbsentPublics` entry
+# points gain a caller_authority leaf, and in the local corpus
+# PriorityWithdrawalQueue and WithdrawRequestNFT gate `receive()` on
+# `msg.sender != liquidityPool`. A pre-v20 row therefore records a verdict
+# reached from a strictly smaller gate set than the same probe now sees. The
+# same change also replaces the fabricated `keccak("fallback()")[:4]` /
+# `keccak("receive()")[:4]` selectors with the empty-string sentinel this file
+# already fixes, so pre-v20 rows for those functions are keyed on an identity no
+# caller could ever produce.
+EFFECT_CACHE_SCHEMA_VERSION = 20
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

@@ -285,3 +285,64 @@ def test_value_router_claim_is_minted_for_routers(_unit):
     assert router_claim["tier"] == "standard_exact"
     witness_flow = router_claim["witness"]["flows"][0]
     assert witness_flow["target_param_index"] == 1
+
+
+# --- the routed move's own op is recorded, and only it is transparent -------
+
+
+def test_a_crossing_records_the_router_op_identity(_unit):
+    """A routed flow's ``selector`` names the CALLEE's inner transfer; the op
+    this entry actually makes — the call that crossed the boundary — is
+    recorded in ``router_ops``, keyed by the callee's own canonical selector
+    and bare name. This is the only identity the mandatory-gate walk may treat
+    as the effect's own revert surface."""
+    from services.static.contract_analysis_pipeline.effects import _selector_for
+
+    fns = _effects(_unit, "Router")
+    flow = _router_flows(fns["withdraw(uint256,address)"])[0]
+    # The canonical form lowers the interface-typed parameter (IERC20 →
+    # address), so this IS the EVM selector of the crossed call — the same
+    # identity an external-call sink records, which is what a leaf joins on.
+    exit_selector = _selector_for("exit(address,address,uint256,address,uint256)")
+    assert flow["router_ops"] == [{"selector": exit_selector, "callee": "exit"}]
+
+
+def test_a_boundary_less_routed_pull_records_its_own_op(_unit):
+    """``payFee``'s third-party pull is routed with no crossing: the op that
+    carries the move IS the pull, and its identity is recorded so the walk can
+    keep treating exactly that revert surface as the effect's own."""
+    flow = _router_flows(_effects(_unit, "Bridger")["payFee(uint256)"])[0]
+    assert flow["router_ops"] == [{"selector": "0x23b872dd", "callee": "transferFrom"}]
+
+
+def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_path):
+    """Round-5 R1 on real compiler output, value-flow side: a mandatory NONVIEW
+    guard call vetting the caller-supplied destination (``guard.checkDestination(to)``)
+    before the routed ``vault.exit(to, …)`` must leave ``target_constraint``
+    OPEN, while the guard-free control alone earns the negative proof. Before
+    per-op transparency, BOTH published ``unconstrained_proven`` — the guarded
+    function was byte-identical to the open one, a proof of absence minted from
+    a leaf the walk chose not to evaluate."""
+    from pathlib import Path
+
+    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+    from tests.support.foundry_project import write_foundry_project
+
+    source = (
+        Path(__file__).resolve().parent / "fixtures" / "contracts" / "claims_flows" / "router_guard.sol"
+    ).read_text()
+    project_dir = write_foundry_project(tmp_path, "GuardedTeller", source)
+    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+
+    def _routed_witness_flow(signature: str) -> dict:
+        claims = effects["functions"][signature]["claims"]
+        claim = next(c for c in claims if c["claim_id"] == "value_router")
+        return claim["witness"]["flows"][0]
+
+    guarded = _routed_witness_flow("redeemGuarded(address,IERC20,uint256)")
+    open_control = _routed_witness_flow("redeemOpen(address,IERC20,uint256)")
+    # Same claim, same destination binding — only the constraint verdict may differ.
+    for flow in (guarded, open_control):
+        assert (flow["target_kind"]["kind"], flow["target_param_index"]) == ("param", 0)
+    assert guarded["target_constraint"] == {"state": "not_determined"}
+    assert open_control["target_constraint"] == {"state": "unconstrained_proven"}
