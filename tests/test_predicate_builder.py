@@ -1449,14 +1449,13 @@ def test_hash_commitment_leaf_keeps_its_computed_operand_and_names_what_it_commi
     leaves = _all_leaves(build_predicate_tree(_function(sl, "refund")))
     leaf = next(le for le in leaves if "keccak256" in str(le.get("operands")))
     computed = next(o for o in leaf["operands"] if o["source"] == "computed")
-    assert computed["computed_kind"].startswith("keccak256")
+    computed_kind = computed.get("computed_kind")
+    assert computed_kind is not None and computed_kind.startswith("keccak256")
     assert leaf["kind"] == "equality"
     # (1) the commitment is bound to what it commits
-    bound = {
-        (o.get("parameter_index"), o.get("parameter_name"))
-        for o in computed["derived_from"]
-        if o["source"] == "parameter"
-    }
+    derived_from = computed.get("derived_from")
+    assert derived_from is not None
+    bound = {(o.get("parameter_index"), o.get("parameter_name")) for o in derived_from if o["source"] == "parameter"}
     assert bound == {(1, "receiver"), (2, "amount")}
     # (2) and the committed parameters did NOT displace the operand or leak into
     # the leaf's direct-operand parameter list.
@@ -1485,7 +1484,7 @@ def test_computed_operand_without_argument_provenance_says_not_determined(tmp_pa
     computed = [o for le in leaves for o in le["operands"] if o["source"] == "computed"]
     assert computed, leaves
     assert all("derived_from" in o for o in computed)
-    assert all(o["derived_from"] is None for o in computed)
+    assert all(o.get("derived_from") is None for o in computed)
 
 
 def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
