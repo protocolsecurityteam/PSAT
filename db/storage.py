@@ -34,8 +34,11 @@ class StorageUnavailable(StorageError):
 class StorageKeyMissing(StorageError):
     """A key was requested and the bucket holds no object at it.
 
-    This is *proven-absent for that key*, never "we had no key to try" —
-    ``StorageKeyAbsent`` carries that second, different fact. ``tried`` lists
+    This is *proven-absent for that key* — the second of the three states, never
+    "we had no key to try", which is the third and is ``StorageKeyAbsent``. Every
+    consumer must keep them apart: ``routers.analyses`` answers 404 for this one
+    and 503 for that one, and ``workers.retry_policy`` calls this one terminal
+    and that one transient. ``tried`` lists
     every candidate key actually requested (see ``storage_key_candidates``) so
     a reader can tell a one-shot miss from an exhausted fallback.
     """
@@ -53,6 +56,13 @@ class StorageKeyAbsent(StorageError):
     and answered "not here"; this one means we never had an address to ask
     about, so the content's existence is *not determined*. Collapsing the two
     is what let 8,256 unreadable rows read as empty.
+
+    Because it is the third state, its consumers must treat it as one:
+    ``routers.analyses`` answers 503 with ``X-PSAT-Artifact-State:
+    not_determined`` (never a 404, which is byte-identical to an artifact the
+    job never produced) and ``workers.retry_policy`` classifies it transient
+    (only a re-run can turn it into a fact). Real rows: 21 keyless
+    ``contract_materializations`` blob-key cells in the working DB.
     """
 
 

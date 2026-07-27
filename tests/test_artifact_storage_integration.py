@@ -298,6 +298,53 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
     assert (outage.status_code, outage.text) != (body_gone.status_code, body_gone.text)
 
 
+def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(
+    api_with, db_session, storage_bucket, monkeypatch
+):
+    """R1/R2. ``StorageKeyAbsent`` is the class that names the third state, so
+    the boundary must publish it as the third state.
+
+    Reachable by construction on the *real* write path, which is how this test
+    builds the row rather than hand-inserting one: ``store_artifact`` with an
+    unconfigured backend and no payload writes ``storage_key`` NULL beside a
+    NULL inline body (``db/queue.py``), and ``_artifact_row_to_value`` raises
+    ``StorageKeyAbsent`` for exactly that row. It answered 404
+    ``{"detail":"Artifact not found"}`` with no state header — byte-identical to
+    the never-produced artifact asserted below as the negative control, which is
+    the substitution W0-1 exists to remove.
+    """
+    import db.queue as queue_mod
+    from db.models import Artifact
+    from db.queue import store_artifact
+
+    job = _completed_job(db_session, "keyless-third-state")
+
+    # The real inline path: backend unconfigured, nothing to serialise.
+    monkeypatch.setattr(queue_mod, "get_storage_client", lambda: None)
+    store_artifact(db_session, job.id, "dependencies")
+    monkeypatch.undo()
+
+    row = db_session.execute(
+        select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "dependencies")
+    ).scalar_one()
+    assert row.storage_key is None and row.data is None and row.text_data is None
+
+    client = TestClient(api_with.app)
+    unknown = client.get("/api/analyses/keyless-third-state/artifact/dependencies", headers=_admin_headers())
+    assert unknown.status_code == 503
+    assert unknown.headers.get("X-PSAT-Artifact-State") == "not_determined"
+    assert unknown.json()["artifact"] == "dependencies"
+    assert "StorageKeyAbsent" in unknown.json()["reason"]
+
+    # Negative control — the job never produced this one. Determined, and it
+    # must stay a silent 404 with no state header.
+    never = client.get("/api/analyses/keyless-third-state/artifact/no_such_artifact", headers=_admin_headers())
+    assert never.status_code == 404
+    assert never.json() == {"detail": "Artifact not found"}
+    assert never.headers.get("X-PSAT-Artifact-State") is None
+    assert (unknown.status_code, unknown.text) != (never.status_code, never.text)
+
+
 def test_artifact_endpoint_not_determined_still_prefers_a_real_synthesised_body(api_with, db_session, storage_bucket):
     """The 503 is the *last* answer, not the first: if a body can be rebuilt from
     another source (upgrade_history from UpgradeEvent rows) that real payload

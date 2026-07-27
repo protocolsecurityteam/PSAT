@@ -27,7 +27,13 @@ export function EntityActivity({
   const [history, setHistory] = useState(null);
   // Three states for the upgrade history, not two: loaded, proven-absent, and
   // "the server could not determine it". Only the third gets a marker.
-  const [historyUnknown, setHistoryUnknown] = useState(false);
+  //
+  // Held as the job_id the 503 was about, never as a bare boolean: this
+  // component is reused across selections (ActivityPanel renders it with no
+  // key), so a boolean outlives the selection that earned it and hedges the
+  // *next* entity — a history that read fine, or an entity with no history at
+  // all. Tying the marker to the identity it describes makes that unrenderable.
+  const [unknownForJob, setUnknownForJob] = useState(null);
 
   const address = machine?.address;
   const chain = machine?.chain || contract?.chain || "ethereum";
@@ -55,11 +61,14 @@ export function EntityActivity({
   // job_id across selections. Only upgrade_history is needed — the timeline
   // renders impl addresses, not resolved names, so dependencies is skipped.
   useEffect(() => {
+    // Cleared before either early return: a cached history is proven-present
+    // and a non-proxy has no history to hedge, so both paths must drop a
+    // previous selection's marker rather than inherit it.
+    setUnknownForJob(null);
     if (!isProxy || !machine?.job_id) { setHistory(null); return undefined; }
     const cached = cache && cache[machine.job_id];
     if (cached?.history) { setHistory(cached.history); return undefined; }
     let cancelled = false;
-    setHistoryUnknown(false);
     const jid = encodeURIComponent(machine.job_id);
     api(`/api/analyses/${jid}/artifact/upgrade_history`)
       .then((body) => {
@@ -76,13 +85,16 @@ export function EntityActivity({
         // never been upgraded, so this state has to be said out loud rather
         // than rendered as the same empty rail. A 404 is a real negative and
         // stays silent. Never cached — the answer can change without us.
-        setHistoryUnknown(e?.status === 503);
+        setUnknownForJob(e?.status === 503 ? machine.job_id : null);
       });
     return () => { cancelled = true; };
     // cache/onCache omitted deliberately: read once per selection so this
     // fetch's own cache write doesn't retrigger the effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine?.job_id, isProxy]);
+
+  // Only ever true for the selection the 503 was actually about.
+  const historyUnknown = isProxy && Boolean(machine?.job_id) && unknownForJob === machine.job_id;
 
   const proxy = useMemo(() => {
     if (!history?.proxies) return null;

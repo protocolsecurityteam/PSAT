@@ -236,10 +236,19 @@ def analysis_artifact(
             artifact = deps.get_artifact(session, job.id, lookup_name)
             if artifact is None:
                 artifact = deps.get_artifact(session, job.id, artifact_name)
-        except (StorageKeyMissing, StorageKeyAbsent, StorageContentAbsent) as exc:
-            # The bucket was asked and answered, or there was never a key to ask
-            # about. Determined: this job has no body for that name.
+        except (StorageKeyMissing, StorageContentAbsent) as exc:
+            # The bucket was asked about every candidate key and answered "no
+            # object here". Determined: this job has no body for that name.
             logger.warning("artifact %s for job %s is absent: %s", lookup_name, job.id, exc)
+        except StorageKeyAbsent as exc:
+            # The row records no key and holds no inline body, so the bucket was
+            # never asked — the third state, not the second. Published as
+            # not-determined for the same reason ``db.storage.StorageKeyAbsent``
+            # names it separately: answering 404 here is byte-identical to a job
+            # that never produced the artifact, and no consumer can tell them
+            # apart from the response.
+            not_determined = f"{type(exc).__name__}: {exc}"
+            logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
         except Exception as exc:
             # Everything else — StorageUnavailable, StorageContentNotDetermined,
             # a deserialize failure, an unconfigured backend — means we did not

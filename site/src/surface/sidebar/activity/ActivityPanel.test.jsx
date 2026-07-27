@@ -47,6 +47,26 @@ const SAFE_CONTRACT = {
   updated_at: "2026-07-13T00:00:00Z",
 };
 
+// A second proxy, on a different job, whose history is already in the shared
+// cache — i.e. proven-present without a fetch. The discriminating control for
+// the not-determined marker: nothing about this entity is unknown.
+const POOL_MACHINE = { address: POOL, name: "Pool", is_proxy: true, job_id: "job2", chain: "ethereum" };
+const POOL_CONTRACT = { ...PROXY_CONTRACT, id: "c-pool", address: POOL };
+const POOL_CACHE = {
+  job2: {
+    history: {
+      proxies: {
+        [POOL.toLowerCase()]: {
+          proxy_type: "ERC1967",
+          current_implementation: CUR,
+          upgrade_count: 1,
+          implementations: [{ address: CUR, block_introduced: 300, timestamp_introduced: 1720000000 }],
+        },
+      },
+    },
+  },
+};
+
 const HISTORY = {
   proxies: {
     [PROXY.toLowerCase()]: {
@@ -83,12 +103,12 @@ function mockActivity({ contracts = [], monitoredEvents = [], history = null, pr
   setFetchHandler((url) => /\/api\/company\/[^/]+\/addresses$/.test(url.pathname), () => ({ all_addresses: [] }));
 }
 
-function renderPanel(props) {
-  return render(
+function panelElement(props) {
+  return (
     <ActivityPanel
       companyData={{ protocol_id: 7 }}
       companyName="etherfi"
-      machines={[PROXY_MACHINE, SAFE_MACHINE]}
+      machines={[PROXY_MACHINE, SAFE_MACHINE, POOL_MACHINE]}
       selectedMachine={null}
       selectedPrincipal={null}
       onSelect={() => {}}
@@ -96,9 +116,19 @@ function renderPanel(props) {
       cache={{}}
       onCache={() => {}}
       {...props}
-    />,
+    />
   );
 }
+
+function renderPanel(props) {
+  return render(panelElement(props));
+}
+
+const notDetermined = () =>
+  new Response(JSON.stringify({ detail: "Artifact state not determined" }), {
+    status: 503,
+    headers: { "Content-Type": "application/json", "X-PSAT-Artifact-State": "not_determined" },
+  });
 
 describe("ActivityPanel — proxy entity mode", () => {
   beforeEach(() => {
@@ -308,6 +338,36 @@ describe("ActivityPanel — upgrade history the server could not determine", () 
     );
     renderPanel({ selectedMachine: PROXY_MACHINE });
     expect(await screen.findByText("Timeline")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  // The pair above unmounts between arms, so it cannot see the marker outliving
+  // the selection that earned it. ActivityPanel renders EntityActivity with no
+  // key, so React reuses the instance across selections: a marker held as a bare
+  // boolean hedged the *next* entity. These two are the reachable sequences —
+  // both render "unknown, not absent" over something that is not unknown.
+  it("drops the marker when the next selection's history is served from cache", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT, POOL_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
+
+    const { rerender } = renderPanel({ selectedMachine: PROXY_MACHINE, cache: POOL_CACHE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+
+    rerender(panelElement({ selectedMachine: POOL_MACHINE, cache: POOL_CACHE }));
+    // Proven-present: the cached history renders its implementations.
+    expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  it("drops the marker when the next selection is not a proxy at all", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT, SAFE_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
+
+    const { rerender } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+
+    rerender(panelElement({ selectedMachine: SAFE_MACHINE }));
+    expect(await screen.findByText("Treasury Safe")).toBeInTheDocument();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
 });

@@ -22,7 +22,12 @@ from typing import Literal
 import requests
 import urllib3.exceptions
 
-from db.storage import StorageContentAbsent, StorageContentNotDetermined, StorageUnavailable
+from db.storage import (
+    StorageContentAbsent,
+    StorageContentNotDetermined,
+    StorageKeyAbsent,
+    StorageUnavailable,
+)
 from services.discovery.classifier import ClassificationIncompleteError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 
@@ -100,16 +105,19 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # degrade-and-advance, never failed_terminal.
     AnvilSpawnError,
     ForkRpcTimeoutError,
-    # Storage that could not answer. ``StorageUnavailable`` is the backend
-    # being unreachable or unconfigured; ``StorageContentNotDetermined`` is a
-    # read that could not establish content for at least one row it was asked
-    # about. Both mean "we did not find out", and a stage that re-runs is the
-    # only thing that can turn that into a fact.
+    # Storage that could not answer. ``StorageUnavailable`` is the backend being
+    # unreachable or unconfigured; ``StorageContentNotDetermined`` is a read that
+    # could not establish content for at least one row it was asked about;
+    # ``StorageKeyAbsent`` is a row that records no key and holds no inline body,
+    # so the bucket was never asked at all. All three mean "we did not find out",
+    # and a stage that re-runs is the only thing that can turn that into a fact.
+    # ``StorageKeyAbsent`` in particular is written by the inline path when the
+    # backend is unconfigured (``db/queue.py`` ``store_artifact``) — the same
+    # condition ``StorageUnavailable`` already retries on, one row later.
     #
-    # ``StorageKeyMissing``, ``StorageKeyAbsent`` and ``StorageContentAbsent``
-    # are deliberately NOT here: the first is the bucket answering "no object at
-    # this key", the second is the row recording no key to ask about, and the
-    # third is a collection read where every shortfall was one of those. All are
+    # ``StorageKeyMissing`` and ``StorageContentAbsent`` are deliberately NOT
+    # here: the first is the bucket answering "no object at this key", the second
+    # is a collection read where every shortfall was one of those. Both are
     # determined, and re-asking a question already answered just burns the retry
     # budget before the same terminal verdict. The collection reads
     # (``get_all_artifacts`` / ``get_source_files`` / the ``hydrate_*`` family)
@@ -117,6 +125,7 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # unreachable bucket used to arrive here as the same class and this comment
     # was false for the first of them.
     StorageContentNotDetermined,
+    StorageKeyAbsent,
     StorageUnavailable,
     *_PSYCOPG2_OPERATIONAL,
 )

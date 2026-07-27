@@ -1155,13 +1155,20 @@ def test_storage_not_determined_from_resolution_is_retryable():
     ``BaseWorker`` computed ``will_retry=False`` and the job died on attempt
     one with the same 'we could not read it' state it started with.
 
-    ``StorageKeyMissing`` / ``StorageKeyAbsent`` / ``StorageContentAbsent`` stay
-    terminal on purpose: those are determined facts (the bucket answered, or
-    there was no key to ask about), and retrying re-asks an answered question.
-    ``StorageContentAbsent`` is the collection-read form of the first, and it
-    exists because the collection reads used to raise the *transient* class for
-    a proven-absent object — the same key read directly classified terminal, so
-    the comment stating this invariant was false one layer up.
+    ``StorageKeyMissing`` / ``StorageContentAbsent`` stay terminal on purpose:
+    those are determined facts (the bucket was asked and answered), and retrying
+    re-asks an answered question. ``StorageContentAbsent`` is the collection-read
+    form of the first, and it exists because the collection reads used to raise
+    the *transient* class for a proven-absent object — the same key read directly
+    classified terminal, so the comment stating this invariant was false one
+    layer up.
+
+    ``StorageKeyAbsent`` is transient with the other two not-determined classes.
+    It was terminal here while ``db/storage.py`` defined it as *not determined*;
+    the row records no key and holds no inline body, so nothing was ever asked
+    and only a re-run can produce the answer. The row is written by the inline
+    path when the backend is unconfigured — the same condition
+    ``StorageUnavailable`` already retried on, one row later.
     """
     from db.storage import (
         StorageContentAbsent,
@@ -1174,8 +1181,8 @@ def test_storage_not_determined_from_resolution_is_retryable():
 
     assert classify(StorageContentNotDetermined("bucket unreachable")) == "transient"
     assert classify(StorageUnavailable("storage is not configured")) == "transient"
+    assert classify(StorageKeyAbsent("row records no key")) == "transient"
     assert classify(StorageKeyMissing("artifacts/j/n")) == "terminal"
-    assert classify(StorageKeyAbsent("row records no key")) == "terminal"
     assert classify(StorageContentAbsent("2/2 bodies proven absent")) == "terminal"
     # The type hierarchy is the discriminator, so pin it: a consumer catching
     # "we could not find out" must not silently absorb "we found out, it's gone".
