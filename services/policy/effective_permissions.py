@@ -608,14 +608,18 @@ def _function_records_from_semantic_artifacts(
             if signature in predicate_trees_by_function:
                 record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
                 record["status"] = "unsupported"
-            elif signature in abi_only_signatures or signature in assembly_only_signatures:
-                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
-                record["status"] = "unsupported"
             elif signature in guard_uncertain_signatures:
                 # The static stage found a caller-authority (msg.sender EQ/NEQ)
                 # guard it could not lower into a tree. Absence here is "guard
                 # not extracted", not "unguarded" — fail closed, never public.
+                # Checked BEFORE the abi/assembly-only arms: a marked signature
+                # is usually also state-changing, and the specific evidence ("a
+                # caller guard was SEEN") must not be shadowed by the generic
+                # "authority not extracted" reason.
                 record["capability_expr"] = _unsupported_capability("guard_extraction_uncertain")
+                record["status"] = "unsupported"
+            elif signature in abi_only_signatures or signature in assembly_only_signatures:
+                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
                 record["status"] = "unsupported"
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
