@@ -278,3 +278,119 @@ A third nondeterminism surface survives Wave 0 outside the W0-8 gate's two class
 W0-9's NULL block_number relocates into an unfixed consumer branch: synthesize_from_events -> _build_implementation_timeline publishes block_introduced/block_replaced None for a poll-detected upgrade, and site/src/auditMatching.js:51-55 folds those to -Infinity/+Infinity in the hard block-range branch, so a fully block-bounded audit spreads onto the poll-introduced era — the same '+infinity spread' class _publishable_block_bounds closed on the coverage side. Second site, same class: contract_audit_timeline.py:70-71 still publishes to_block:None for a window closed by a block-less successor (impl_windows has no production consumer today). Latent — 0 NULL-block rows exist, 23 pollers armed — and strictly less wrong than the pre-fix block-0 corruption. Needs a WITNESS_INTEGRITY_LEDGER.md entry with an owner (W0-9 sibling / W3-E), not a wave halt.
 
 **Evidence:** services/discovery/upgrade_history.py:867-940 orders nullslast and emits events with block_number None; :334-361 sets block_introduced/block_replaced from those values with no successor discriminator; site/src/auditMatching.js matchesEra: 'const eraFrom = impl?.block_introduced ?? -Infinity; const eraTo = impl?.block_replaced ?? Infinity' — overlap test then admits any bounded audit against a None-introduced era. grep shows impl_windows consumed only by tests. The W0-9 commit message updated coverage.py both sites and auditMatching's covered_* reading but not this era-side route.
+
+---
+
+# Wave 1 exit sweep (2026-07-28: leg reviews + tier-3 verifier findings)
+
+## L-27 · (found by W1 Leg A review)
+
+PRE-EXISTING structural is_pausable false positive on EigenStrategy (contract 607): the Plane-0 PauseAnalyzer admits `totalShares` as a pause state variable, so is_pausable is True and pause_functions lists `deposit`/`withdraw`. Present identically at BASE and at HEAD (byte-identical replay output), so the leg neither introduced nor widened it — but it is the reason one of the 8 bitmap-family contracts reads pausable, which could be misread as a breach of the Leg A ordering constraint.
+
+**Reproduction/evidence:** `set -a; source /home/riley/PSAT/.env; set +a; cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/work; for R in /home/riley/PSAT /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a; do REPO=$R PYTHONHASHSEED=0 /home/riley/PSAT/.venv/bin/python -c "import sys;sys.path.insert(0,'.');import replay;a,t,e=replay.analyze(607);print(a['summary']['is_pausable'], a['pausability']['pause_variables'])"; done   # both print: True ['`
+
+## L-28 · (found by W1 Leg A review)
+
+CONSEQUENT of the above, and the worse half: `_maybe_classify_guard_leaf` relabels leaves that read the mis-identified pause variable, so on EigenStrategy 2 predicate-tree leaves (on `deposit(IERC20,uint256)` and `withdraw(address,IERC20,uint256)`) are published with authority_role="pause" when the underlying guard is a share-accounting invariant over `totalShares`. Pre-existing; unchanged by the leg.
+
+**Reproduction/evidence:** `set -a; source /home/riley/PSAT/.env; set +a; cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/work; REPO=/tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a PYTHONHASHSEED=0 /home/riley/PSAT/.venv/bin/python -c "import sys;sys.path.insert(0,'.');import replay;a,t,e=replay.analyze(607);h=[];\nimport json\ndef w(n,s):\n  if not isinstance(n,dict):return\n  if n.get('op')=='LEAF':\n    if (n.get('leaf') or {}).get('autho`
+
+## L-29 · (found by W1 Leg A review)
+
+NEW but inert consequence of the widening: on the ERC-7201 namespaced family the claim flag resolves to the SLOT CONSTANT, so `pause_variables` publishes `PAUSABLE_STORAGE_SLOT` / `PAUSABLE_UNTIL_STORAGE_SLOT` (contracts 537, 629 and the other 13 namespaced rows) — a name no getter can resolve. Mitigating fact the implementer's report did not state: the only field these flow into is `analysis['tracking_hints']`, and `grep -rn tracking_hints` over services/workers/routers/db/site/src finds NO consumer anywhere in the repo, so nothing false is published today. Ledger it for whichever wave gives tracking_hints a reader.
+
+**Reproduction/evidence:** `set -a; source /home/riley/PSAT/.env; set +a; cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/work; REPO=/tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a PYTHONHASHSEED=0 /home/riley/PSAT/.venv/bin/python -c "import sys;sys.path.insert(0,'.');import replay;a,t,e=replay.analyze(629);print(a['pausability']['pause_variables'])"   # ['PAUSABLE_STORAGE_SLOT','PAUSABLE_UNTIL_STORAGE_SLOT'] ;  then: cd /tmp/claude-1000/-h`
+
+## L-30 · (found by W1 Leg A review)
+
+NULL-FOLDING CONSUMERS of the values the leg made three-state (distinct from the row-ABSENCE default at company_overview.py:1264-1267 that constraint (c) already carves out to Wave 3). `company_overview.py:1252` `if summary_row.is_pausable: caps_set.add("pause")` and `:1276` `elif has_timelock or control_model == "governance"` fold a not-determined `None` to the same outcome as a proven `False`; likewise `site/src/surface/sidebar/activity/helpers.js:32` and `site/src/surface/layout/elkLayout.js:854`. The JSON payload itself DOES preserve the three states (`"is_pausable": is_pausable` passes the null through), so only the derived `role`/`capabilities`/band folds lose it, and realised None rows are currently zero. Not a rejection ground: the leg correctly declined to edit site/ to avoid a concurrent write with the parallel legs, and this is Wave 3 Leg E's surface.
+
+**Reproduction/evidence:** `cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a && sed -n '1250,1280p' services/aggregations/company_overview.py && sed -n '30,34p' site/src/surface/sidebar/activity/helpers.js && sed -n '852,856p' site/src/surface/layout/elkLayout.js`
+
+## L-31 · (found by W1 Leg A review)
+
+`site/src/surface/layout/elkLayout.js:857-865` prose is now factually stale: it states "Has-timelock is a property assigned to contracts *controlled by* a timelock, not the timelock itself, which is why we need the explicit name check." The leg inverts that semantics — has_timelock now means THIS CONTRACT IS A TIMELOCK — so `bandFor` already returns 0 at :854 for TimelockController rows and the name regex is redundant for them. Harmless (both paths return 0) but it is a stale prose copy of the old contract, exactly the R3 relocation shape. Confirmed the semantics flip does NOT reach the scorer: site/src/protocolScore.js keys on `principalType(principal)`/`principal.details.delay` from the resolution plane, never on `summary.has_timelock`, so no fabricated protective credit enters scoring.
+
+**Reproduction/evidence:** `cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a && sed -n '845,870p' site/src/surface/layout/elkLayout.js && grep -n 'has_timelock' site/src/protocolScore.js   # no hits in the scorer`
+
+## L-32 · (found by W1 Leg A review)
+
+`Summary.is_upgradeable` is left two-state (`bool`) while reading the same effects artifact `is_factory` does, so a degraded effects stage publishes a proven-absence of upgradeability. Outside the declared six columns; pre-existing shape. Additionally, `schemas/contract_analysis.py` now declares `Summary.standards: list[str] | None` and `Summary.is_nft: bool | None`, but the producer can never emit None for either (both are IR-derived and unconditional) — a nullable the producer cannot reach, which is the inverse of the R2 dead-sentinel hygiene rule. Schema hygiene only; nothing false is published.
+
+**Reproduction/evidence:** `cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-a && sed -n '62,82p' schemas/contract_analysis.py && grep -n 'is_upgradeable' services/static/contract_analysis_pipeline/core.py services/static/contract_analysis_pipeline/summaries.py | head && grep -n '"standards": classification' services/static/contract_analysis_pipeline/core.py`
+
+## L-33 · (found by W1 Leg F review)
+
+IN-SCOPE RESIDUAL, not a rejection ground (not realised on the corpus). `call_target` can still be minted for an address the caller IS provably checked against, when the gate lowers into a leaf whose operand resolves to `computed`: the leaf then gets `authority_role="business"`, the state var is named only under `operands[].derived_from`, `_collect_state_var_authority_roles` reads direct operands only, and `guard_extraction_uncertain` never fires (a subtree WAS built), so the round-2 blind-spot arm never sees the function. This is a DIFFERENT mechanism from the residual the implementer declared (per-gate lowering completeness), and unlike that one it is fixable entirely inside the leg's own file (tracking.py could union `derived_from` state-var names of any leaf with `references_msg_sender=true` into the unanswered set) — it does NOT need Leg A's predicate_artifacts.py. Measured blast radius on the local corpus: ZERO. I ran the narrow query over all 129 stored predicate_trees artifacts: 0 addresses have a msg.sender-referencing, non-authority-role leaf naming a state var via derived_from that is missing from caller_gate_vars. Broadening to direct state-var operands gives 4 contracts / 81 edge rows, all of which I inspected and all are `safeTransferFrom(...)` external-call-revert leaves on genuine callees (eETH/weETH) — true negatives, not gates. I also tried 11 natural Solidity gate shapes (struct member, array index, mapping index, internal helper, branchy helper, local reassignment, loop, OR-mix, inline assembly sload, assembly caller(), delegated canCall) and the builder lowered ALL of them to `caller_gate`; only the contrived abi.decode(abi.encode(x)) round-trip reproduces. Recommend a ledger entry, not a fix.
+
+**Reproduction/evidence:** `cd <leg-f worktree>; set -a; source .env; set +a; uv run --project . python /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/probe5.py   # dumps the leaf: authority_role=business, references_msg_sender=true, derived_from names `registry`
+uv run --project . python /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/probe3.py | grep encoded_roundtrip   # -> registry_prov=call_target on a contract whose ONLY caller gate is on registry
+u`
+
+## L-34 · (found by W1 Leg F review)
+
+IN-SCOPE, non-blocking vocabulary defect on the new `analysis_state` field: `_analysis_state` stamps `not_a_contract` on every node whose `resolved_type` is outside ANALYZABLE_TYPES = {contract, timelock, proxy_admin}. On the local corpus that is 230 Gnosis **Safe** nodes (plus 945 eoa, 61 zero) out of 1,236. A Safe is a contract; the token published on the /api analysis-detail payload (services/aggregations/analysis_detail.py:394) therefore states something literally false about 230 addresses. The intended meaning ('not an ANALYZABLE type') is documented correctly in schemas/resolved_control_graph.ResolvedAnalysisState, and the handoff §5 itself named this population 'not-a-contract', so this is inherited vocabulary rather than leg invention — but nothing downstream reads the schema comment. Suggested rename at closeout: `not_analyzable`. No frontend consumer reads the field yet, so the rename is still free.
+
+**Reproduction/evidence:** `cd <leg-f worktree>; set -a; source .env; set +a; uv run --project . python /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/repro_not_a_contract.py
+# -> analysis_state ...: {'analyzed': 1183, 'not_a_contract': 1236, None: 55, 'attempt_failed': 28, 'beyond_depth_horizon': 29}
+# -> resolved_type of nodes stamped not_a_contract: {'zero': 61, 'eoa': 945, 'safe': 230}`
+
+## L-35 · (found by W1 Leg F review)
+
+IN-SCOPE residual, fail-open on an exception path. `_recursive_read` (services/static/contract_analysis_pipeline/tracking.py:461-479) catches any exception from the Slither accessor (all_state_variables_read / all_solidity_variables_read) and silently degrades to the NON-recursive attribute (state_variables_read / solidity_variables_read). That is a strictly narrower set, so a gate reached through an internal call becomes invisible, the name drops out of the blind spot, and `call_target` — a proven-absence claim — is minted from a failure to determine. The safe direction is to propagate not-determined (return None from `_caller_gate_blind_spot_vars`, as it already does when `functions_entry_points` cannot be enumerated). Marked `# pragma: no cover`; I did not observe it firing.
+
+**Reproduction/evidence:** `Inspection + mutation: in the leg-f worktree, make the `except Exception` branch reachable (insert `raise RuntimeError('x')` before `values = accessor()` in _recursive_read), then run `uv run --project . pytest -m "not live" -q tests/test_controller_provenance_split.py::test_gate_in_an_unlowered_function_is_not_published_as_a_callee` — the fixture's receive() gate is only found via the recursive accessor.`
+
+## L-36 · (found by W1 Leg F review)
+
+Test-coverage gap at the persistence boundary. The three new persisted columns (controller_values.authority_provenance, control_graph_nodes.analysis_state, control_graph_nodes.graph_max_depth) are written in workers/resolution_worker.py:204,296-301 and asserted nowhere: tests/test_resolution_worker.py was not touched, and every new assertion stops at the in-memory artifact. That is exactly the boundary where 'absent in the snapshot => SQL NULL' must hold, and where the jsonb-null trap lives (the leg correctly added JSONB(none_as_null=True) on ControllerValue.details and pinned it with db.jsonb.jsonb_state, but only for the watcher path). This is a 'trivial residual — a missing test arm' per WITNESS_INTEGRITY_OPERATIONS.md §2 and can be closed directly by the driving agent.
+
+**Reproduction/evidence:** `cd <leg-f worktree>; grep -rn "authority_provenance\|analysis_state\|graph_max_depth" tests/test_resolution_worker.py   # no matches`
+
+## L-37 · (found by W1 Leg F review)
+
+Bookkeeping only, no shipped code affected: the implementer's scratchpad script /tmp/.../wave1/measure_blindspot.py prints `not-determined round2 : 639  (+533 restored)`, which double-counts (n_undet_r2 already includes the 106 artifact-level not-determined). The figures in the ROUND 2 report table (533 not-determined, +427 restored) are the arithmetically correct ones and match `call_target 1200 -> 773`. Flagging so a later reader diffing the script against the report does not conclude the report inflated the restore count.
+
+**Reproduction/evidence:** `cd <leg-f worktree>; set -a; source .env; set +a; uv run --project . python ../measure_blindspot.py   # line 'not-determined round2 : 639  (+533 restored)' vs 'call_target round1 1200 / round2 773'`
+
+## L-38 · (found by W1 Leg C final review)
+
+PREDICATE-TREE OMISSION OF INTERNAL-CALLEE MODIFIER GATES -> a false `unconstrained_proven` on real production rows. EigenLayer StrategyManager (job 664aa2be-8623-46f1-8401-53b7f8b91721) routes both deposit entries through `_depositIntoStrategy(...) internal onlyStrategiesWhitelistedForDeposit(strategy)` whose body is `require(strategyIsWhitelistedForDeposit[strategy], StrategyNotWhitelisted())` -- a mapping-allowlist on parameter 0 -- but neither entry's predicate tree carries any leaf for it (2 and 3 mandatory leaves: pause + reentrancy [+ signature] only). `param_constraints()` therefore publishes {'state': 'unconstrained_proven'} for the destination parameter of depositIntoStrategy(IStrategy,IERC20,uint256) and depositIntoStrategyWithSignature(...) -- a positive proof of absence over a gate that exists. This is a DIFFERENT lossiness layer from the three projection-completeness checks the leg added (those are leaf-projection lossiness); nothing in the persisted artifacts lets the claims plane detect it. Fix belongs to predicate extraction (walk internal-call modifiers the way body requires already are). Failure direction is a false ADVERSE, not a false credit (unconstrained_proven renders as the caller-chosen hazard tint), so it does not inflate safety. Identified by an earlier Leg C review round; re-reproduced here. 2 of the 12 `unconstrained_proven` rows in the local DB are this.
+
+**Reproduction/evidence:** `cd /tmp/claude-1000/-home-riley-PSAT/b4f9f02c-c3af-4273-bccf-1e8a13045413/scratchpad/wave1/leg-c && set -a && source .env && set +a && uv run python ../oos_tree_omission_repro.py   # prints: tree leaves 2/3, any whitelist leaf: False, param 0 verdict {'state': 'unconstrained_proven'}, plus the source modifier text`
+
+## L-39 · (found by W1 tier-3 verifier)
+
+Leg F's committed judgment-free regression metric does not reproduce from the production code path: commit faef37cd states 'mutual directed control edges 66 -> 28, distinct directed pairs 372 -> 296' with '13 genuine bidirectional gate pairs plus 2 self-loops', but projecting the production build_controller_tracking output over the 4,882 persisted edges gives 66 -> 32, 372 -> 306, with 17 unordered survivors (15 genuine pairs + 2 mapping:_roles self-loops). The committed number came from the scratchpad gate_vars() re-implementation. Direction and the >= halving hold either way and no test pins 28, but the commit's stated number must be restated (32/306) or the discrepancy recorded in the ledger.
+
+**Reproduction/evidence:** `Base re-derived by my own SQL over control_graph_edges (relations controller_value/mapping_member/safe_owner): 372 directed pairs, 66 mutual. Head reproduced by running legf_diff.py over 88-contract replay projections I validated (fresh replays of cids 499/559/537 byte-identical to stored head_full/*.json): 'MUTUAL directed control edges: base=66 head=32; distinct directed control pairs: base=372 head=306; surviving mutual pairs at head: 17 unordered' incl. LiquidityPool<->EETH, LiquidityPool<->`
+
+## L-40 · (found by W1 tier-3 verifier)
+
+Unowned A-into-F merge interaction (differential finding E1, independently confirmed): Leg A's class-F/R tree widening creates 37 NEW controller-tracking targets across 15 contracts at head (0 removed), every one with authority_provenance ABSENT and a polling read_spec, including pure constants (MAX_SHARE_AMOUNT, TYPE_3, HUNDRED_PERCENT_IN_BPS) and non-authority mappings (_balances, peers, assetData). Because Leg F's rule is 'not-determined does NOT demote', each would persist as relation=controller_value — a control claim feeding the selection.py authority closure — on the next resolution run. Possibly partially mitigated by the existing primitive-scalar guard for non-address values, which cannot be verified without running resolution (cost boundary). Needs an explicit owner (Wave 2 item or a kind/type guard in tracking.py) before any resolution run.
+
+**Reproduction/evidence:** `My own recount over the validated projections: 'NEW targets at head: 37; by provenance: {<ABSENT>: 37}; by kind: {state_variable: 35, role_identifier: 2}; REMOVED targets at head: 0' — e.g. (167, state_variable:MAX_SHARE_AMOUNT, read_spec=True), (22, state_variable:_balances), (62, state_variable:HUNDRED_PERCENT_IN_BPS). tracking.py _provenance_for returns None (absent) for names in no lowered gate leaf, and faef37cd demotes only authority_provenance == 'call_target'.`
+
+## L-41 · (found by W1 tier-3 verifier)
+
+Cross-leg A→F interaction confirmed and refined: 37 new provenance-absent controller-tracking targets appear at head (0 disappear); 9 are dropped by the primitive-scalar skip, but 28 survive and would persist as relation='controller_value' control edges on the next resolution run. Unowned over-claim surface created by the merge.
+
+**Reproduction/evidence:** `Recomputed from base_full/head_full dumps: 37 new, 37/37 authority_provenance absent, all with read_specs. Applied services.resolution.tracking_plan.is_primitive_scalar_read_spec: 9 skipped, 28 survive (incl. mappings peers/assetData/strategyIsWhitelistedForDeposit, address var REWARDS_COORDINATOR). services/resolution/recursive.py:1265-1270: provenance absent -> EDGE_RELATION_CONTROLLER_VALUE ('not-determined must not silently demote'). Mechanism: _collect_state_var_operands enrolls ANY tree-le`
+
+## L-42 · (found by W1 tier-3 verifier)
+
+Leg F's committed regression metric is stale in three inconsistent versions and none reproduces from the production path: faef37cd/8ec22c04 claim 66->28, f9a4a02e supersedes with 66->44 'the honest number', production build_controller_tracking at merged HEAD gives 66->32 (372->306). The v21 cache comment still states 66->28 with only the 427/1,200 figure annotated stale.
+
+**Reproduction/evidence:** `git log bodies: faef37cd 'mutual directed control edges 66 -> 28'; f9a4a02e 'mutual directed edges 66 -> 28 -> 44 ... 44 is the honest number'; db/effect_cache.py v21 entry 'drops mutual control pairs 66 -> 28' with merge note covering only the 427 figure. legf.txt production-path replay: base=66 head=32 (17 unordered pairs incl. 2 self-loops). Direction and >=halving hold in every variant; no test pins any stale number (grep clean). Restate as 32 or re-derive.`
+
+## L-43 · (found by W1 tier-3 verifier)
+
+exec.arbitrary narrowing lands 8 of the expected 9; the EndpointV2.lzCompose miss is upstream of Leg C — the mandatory-leaf operand extraction discards the _to operand, so param_constraints honestly answers not_determined. L-24 cousin; needs a ledger owner.
+
+**Reproduction/evidence:** `full_claims.txt cid=457: destination_constraint -> {state: not_determined}; head census: constrained 7 + removed 1 = 8 narrowed of 20. The pre-Wave-0 misbinding (_from as destination) would have read 'constrained' for the wrong reason had W0-3 not fixed it. This is the definitive collapsed-input instance for Leg C.`
+
+## L-44 · (found by W1 tier-3 verifier)
+
+Harness invalidation extends to Leg C's own commit-message measurements: ee46c314's census (4/31/45 param states; 11 unconstrained_proven exec rows; forwardExternalCall 'constrained/mapping_allowlist') came from the artifact-only build_claims(None,...) recompute and does not match merged HEAD (16/15/49; exec unconstrained_proven 0/19; forwardExternalCall constrained via external_call_revert). States held; the numbers must not be re-cited.
+
+**Reproduction/evidence:** `ee46c314 commit body vs full replay full_claims.txt: cid=586 forwardExternalCall {binding: operand, guard: external_call_revert}; exec census head = {constrained 7, not_determined 12, unconstrained_proven 0}; param census 16/15/49. Differential's flagged item 4 (scratchpad/recompute_legc.py drops every idiom-tier exec.arbitrary under contract=None) is the same defect; any future A3/A4 re-derivation must use the full-replay substrate.`

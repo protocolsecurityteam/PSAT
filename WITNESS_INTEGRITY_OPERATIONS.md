@@ -38,6 +38,17 @@ conflict. Subagent prompts cite this file; read it before starting.
   agent bloat on trivial fixes.
 - Reviewers reproduce, never take on claim; refuting is success; every
   violation carries an exact reproduction command. Unchanged from the handoff.
+- **Implementer prompts must carry the reviewer's lens up front** (added
+  2026-07-28 after Leg C's 5 rounds; the round count came from checks that
+  happened for the first time at review): (1) enumerate every consumer of
+  every field you change and state per consumer how it keeps the three states
+  apart — the reviewer verifies the enumeration, not samples for gaps; (2) for
+  each new/changed evidence field, write the input-shape → published-state
+  table and verify the two chronic failure routes — a not-determined input
+  reaching a proven state, and the adverse branch never executing; (3) ask
+  the collapsed-inputs question of your OWN new code; (4) implementers may
+  look beyond their item list freely — report out-of-scope observations in
+  the report (same channel as reviewers), never fix them silently.
 
 ## 3. Cost boundary — what verification may and may not do
 
@@ -64,6 +75,13 @@ If proving a claim seems to require any of these, the claim is
 Rationale: each push would trigger a preview deploy + ~27-min live suite on
 real credits, and pipeline runs burn OpenRouter/Etherscan/eRPC quota at scale.
 Zero pushes and zero pipeline runs ⇒ zero of that spend.
+
+## 3b. Model floor
+
+**No haiku agents** (operator decision 2026-07-28): the tier-0 gate runner is
+**opus** (effort low) — the session's only structured-output contract failure
+came from a haiku runner. Acceptable alternative: fold the gate run into the
+merge/closing agent of the phase instead of a dedicated runner.
 
 ## 4. Bookkeeping
 

@@ -314,7 +314,19 @@ async function runLeg(leg) {
   let accepted = false
   let report = null
   let review = null
-  for (let round = 1; round <= 3 && !accepted; round++) {
+  // Driving-agent adjudication 2026-07-28: Leg C granted ONE extra round. Its
+  // round-3 reject was two reproduced in-scope consumer violations with clear
+  // minimal fixes (selection.py claim transparency; claimsVocab absent-key
+  // hazard tint), and the reviewer explicitly deferred the selection.py
+  // placement decision to the driving agent — decided: fix here, minimally,
+  // so Wave 2 Leg D inherits a clean baseline.
+  // Second Leg C extension (2026-07-28): round-4 mandate items landed and
+  // reproduced; round-4 review found a genuine R1 at the leg's CORE surface —
+  // param_constraints() publishes unconstrained_proven through the
+  // carries_effect fall-through. In-scope, concrete, repro in hand. Round 5 is
+  // the last extension; if it fails, the driving agent closes out directly.
+  const cap = 3 + (leg.key === 'C' ? 2 : 0)
+  for (let round = 1; round <= cap && !accepted; round++) {
     const retryNote = feedback
       ? `\n\nThis is a RETRY (round ${round}). A reviewer rejected the previous attempt. Fix exactly these in the SAME worktree/branch (do not recreate it; amend or add commits), do not re-litigate:\n${feedback}`
       : ''
@@ -341,6 +353,67 @@ async function runLeg(leg) {
       feedback = (review.violations || [])
         .map((v) => `- [${v.rule}] ${v.detail}\n  reproduce: ${v.reproduction}`)
         .join('\n')
+      if (leg.key === 'C' && round === 3) {
+        feedback += `
+
+ADJUDICATION NOTE from the driving agent — binding for this round. Fix exactly
+the two violations, nothing broader:
+1. [R3 / selection.py] The driving agent has decided the repair lands HERE,
+   minimally, so Wave 2 Leg D inherits a clean baseline. Shape: make claim
+   classes that do not explain value/supply behaviour TRANSPARENT to
+   \`_enrolled_families\` — filter fact-class claims (rate_limit.consume) and
+   delegatecall.execute out BEFORE bucketing, so a function whose only claims
+   are transparent stays families=None (full §6 synthesis) exactly as before
+   the leg. Do NOT redesign the bucketing; do NOT enumerate flow./supply.
+   differently. Pin with a test: the 13 measured rows (ef 647 depositToStrategy
+   + the 12 EtherFiNodesManager rate-limit rows) must remain in the candidate
+   set — assert via _cascade_rows/_enrolled_families against the local DB shape
+   or a synthetic fixture reproducing it. A zero-weight FACT must never remove
+   a function from evidence-gathering — state that invariant in a comment at
+   the filter. Ensure the EFFECT_CACHE_SCHEMA_VERSION comment covers this
+   (extend v15's reason or bump; the probe set changes back to pre-leg for
+   those 13, which is the intended restoration).
+2. [R1 / claimsVocab.js] Minimum fix as the reviewer prescribed: an ABSENT
+   target_constraint keeps the hazard tint and the caller-chosen reading
+   (sawUnknownParam must set the same tone path as the unconstrained case, or
+   route into sawCaller), wording may note the gate is not yet analysed. Only
+   a PRESENT constrained verdict may soften. Add the regression test: a
+   legacy-shaped claim (no target_constraint key) must render the same tone
+   chip as before the leg (compare against bf240fe9 behaviour, which the
+   reviewer's repro script already does).
+Run the touched test files + full vitest; report counts. Same worktree, same
+branch, new commit(s).`
+      }
+      if (leg.key === 'C' && round === 4) {
+        feedback += `
+
+ADJUDICATION NOTE from the driving agent — binding for this round (the LAST
+extension; fix exactly these two, nothing broader):
+1. [R1 / _facts.py:548-568] The carries_effect \`continue\` must BLOCK the
+   positive proof, not erase the leaf: a mandatory leaf that references the
+   parameter but is excluded from counting as a constraint (because it is the
+   function's own value sink / in the transparency set) means "cannot prove
+   unconstrained" — route the function-wide default to not_determined, never
+   unconstrained_proven. unconstrained_proven may only be published when every
+   mandatory leaf referencing the param was actually assessed and none
+   constrains. CONSTRAINT: both declared controls must hold — sweepDust stays
+   at its currently-published state and the corpus negative controls
+   (payAnyone, withdrawUnlimited/withdrawDecoy) stay clean. If honouring this
+   rule CHANGES sweepDust's published state, STOP on that item and report the
+   exact leaf-by-leaf tension instead of choosing silently — the driving agent
+   decides. Fix the effect_sink_identities docstring to state the true
+   consequence. Pin with tests: one function where the only param-referencing
+   mandatory leaf carries_effect (must publish not_determined), and the
+   existing positive/negative controls re-asserted.
+2. [guard mislabel / _facts.py:465-467] Structural discriminators run FIRST;
+   \`via_derived\` may set the BINDING (derived_from) but must not coerce the
+   guard word: hash_commitment only when the computation is actually a
+   commitment shape (keccak/abi.encode computed_kind), a comparison bound stays
+   numeric_bound. Update the claimsVocab GUARD_WORD rendering only if the
+   emitted vocabulary changes; enumerate any golden rows that change.
+Run the touched test files + full vitest + the corpus gate; report counts.
+Same worktree, same branch, new commit(s).`
+      }
       log(`Leg ${leg.key}: rejected round ${round} — ${(review.violations || []).length} violation(s)`)
     }
   }
@@ -394,7 +467,9 @@ judgments — execute and report.
 
 Return passed=true only if the script prints "GATE: PASS". List every FAIL line
 in failures. Put the full summary block in raw.`,
-  { label: 'tier0-gate', phase: 'Exit gate', model: 'haiku', effort: 'low', schema: GATE_SCHEMA }
+  // opus, not haiku: the only structured-output contract failure in this
+  // session came from the haiku gate runner (operator decision 2026-07-28).
+  { label: 'tier0-gate', phase: 'Exit gate', model: 'opus', effort: 'low', schema: GATE_SCHEMA }
 )
 
 const differential = await agent(

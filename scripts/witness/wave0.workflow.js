@@ -220,7 +220,8 @@ Return passed=true only if the script prints "GATE: PASS". List every FAIL line
 in \`failures\`. Put the full summary block in \`raw\`.
 
 ${note || ''}`,
-    { label: 'tier0-gate', phase: 'Exit gate', model: 'haiku', effort: 'low', schema: GATE_SCHEMA }
+    // was haiku; opus per operator decision 2026-07-28 (structured-output reliability)
+    { label: 'tier0-gate', phase: 'Exit gate', model: 'opus', effort: 'low', schema: GATE_SCHEMA }
   )
 }
 
