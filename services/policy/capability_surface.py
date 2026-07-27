@@ -569,6 +569,7 @@ def _rows_for_finite_set(cap_dict: dict[str, Any], conditions: list[dict[str, An
                 "details": _details_with_conditions(
                     {
                         "source": "semantic_predicate_capability_resolver",
+                        "resolver_path": resolver_path(cap_dict),
                         "membership_quality": cap_dict.get("membership_quality"),
                         "confidence": cap_dict.get("confidence"),
                         "trace": cap_dict.get("trace") or [],
@@ -615,6 +616,7 @@ def _rows_for_threshold_group(
                     "owners": owners,
                     "total_signers": len(owners),
                     "source": "semantic_predicate_capability_resolver",
+                    "resolver_path": resolver_path(cap_dict),
                 },
                 conditions,
             ),
@@ -641,6 +643,8 @@ def _rows_for_signature_witness(cap_dict: dict[str, Any], conditions: list[dict[
                     {
                         "signer_kind": "finite_set",
                         "source": "semantic_predicate_capability_resolver",
+                        # The signer set's own path, not the wrapper's.
+                        "resolver_path": resolver_path(signer),
                     },
                     conditions + signer_conditions,
                 ),
@@ -654,6 +658,31 @@ def _row_with_conditions(row: dict[str, Any], conditions: list[dict[str, Any]]) 
     details = dict(out.get("details") or {})
     out["details"] = _details_with_conditions(details, conditions)
     return out
+
+
+def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
+    """Which resolver path produced this capability's members (W2-B item 9).
+
+    ``function_principals.origin`` and ``principal_type`` are single constants —
+    ``semantic_capability:finite_set`` / ``controller`` on 1132/1132 rows — so the
+    columns that assert "here is the provenance of this principal attribution"
+    prove only "this row exists": a Safe threshold read, a Solmate ``canCall``
+    enumeration and an event fold are the same six words. Neither column can be
+    repurposed (``origin`` is read as a role name by ``services/chat/data.py`` and
+    as a controller label by the governance payload), so the path is recorded
+    beside them.
+
+    Three states: a non-empty list of adapter trace steps in order (proven), and
+    ``None`` when the capability carries no trace at all — resolved, path NOT
+    recorded, which is a third of the local rows and must not be read as any
+    particular resolver. Absence of the key entirely means the row predates this
+    field.
+    """
+    trace = cap_dict.get("trace")
+    if not isinstance(trace, list):
+        return None
+    steps = [str(step["step"]) for step in trace if isinstance(step, dict) and step.get("step")]
+    return steps or None
 
 
 def _details_with_conditions(details: dict[str, Any], conditions: list[dict[str, Any]]) -> dict[str, Any]:

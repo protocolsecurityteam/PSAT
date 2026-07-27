@@ -312,3 +312,42 @@ def test_capability_currency_composite_takes_the_least_current_conjunct():
     verdict = capability_currency(composite, index_head=25_619_300)
     assert verdict["last_indexed_block"] == 25_000_000
     assert verdict["verdict"] == "stale"
+
+
+def test_resolver_path_is_recorded_on_every_principal_row_shape():
+    """W2-B item 9: ``function_principals.origin`` / ``principal_type`` are
+    single constants (``semantic_capability:finite_set`` / ``controller`` on
+    1132/1132 rows), so the columns asserting "here is the provenance of this
+    attribution" prove only "this row exists". Neither can be repurposed
+    (``origin`` is read as a role name by services/chat/data.py), so the path is
+    recorded beside them — three-state."""
+    from services.policy.capability_surface import resolver_path
+
+    traced = {
+        "kind": "finite_set",
+        "members": [ADDR_A],
+        "membership_quality": "exact",
+        "trace": [{"step": "enumerable_role_store"}, {"step": "differential_probe"}],
+    }
+    assert resolver_path(traced) == ["enumerable_role_store", "differential_probe"]
+    rows = project_capability_surface(traced).principal_rows
+    assert rows[0]["details"]["resolver_path"] == ["enumerable_role_store", "differential_probe"]
+
+    # No trace at all -> resolved, path NOT recorded. A third of the local rows
+    # are this; it must not read as any particular resolver.
+    untraced = {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}
+    assert resolver_path(untraced) is None
+    assert project_capability_surface(untraced).principal_rows[0]["details"]["resolver_path"] is None
+
+    # Safe threshold rows carry it too.
+    safe = {"kind": "threshold_group", "threshold": {"m": 2, "signers": [ADDR_A, ADDR_B]}}
+    assert project_capability_surface(safe).principal_rows[0]["details"]["resolver_path"] is None
+
+    # A signature_witness row reports the SIGNER set's path, not the wrapper's.
+    witness = {
+        "kind": "signature_witness",
+        "signer": {"kind": "finite_set", "members": [ADDR_A], "trace": [{"step": "live_getter_resolution"}]},
+    }
+    assert project_capability_surface(witness).principal_rows[0]["details"]["resolver_path"] == [
+        "live_getter_resolution"
+    ]
