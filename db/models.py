@@ -731,7 +731,15 @@ class ControllerValue(Base):
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    # ``none_as_null=True``: a Python ``None`` here means "not determined" and
+    # must reach the database as SQL NULL. SQLAlchemy's default renders it as
+    # the jsonb scalar ``null``, which is a DIFFERENT state that no ``IS NULL``
+    # test can see (db/jsonb.py, W0-5). The watcher clears this field on a
+    # controller rotation, so the distinction is load-bearing.
+    details: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # How the current value was observed: 'eth_call' / 'eth_call_impl_fallback'
+    # / 'eth_call_error' / 'beacon_owner' from the resolution snapshot, or
+    # 'event_log' / 'storage_poll' when the watcher rotated it.
     observed_via: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # 'caller_gate' | 'call_target' | NULL. NULL is a third state — the static
     # stage did not determine why this address is attached — and is NOT a
@@ -821,6 +829,13 @@ CONTROL_EDGE_RELATIONS = frozenset(
         "mapping_member",
     }
 )
+
+
+# ``ControllerValue.observed_via`` values written by the monitoring watcher.
+# The resolution snapshot's own vocabulary ('eth_call', 'eth_call_error',
+# 'eth_call_impl_fallback', 'beacon_owner') lives in services/resolution.
+CONTROLLER_OBSERVED_VIA_EVENT_LOG = "event_log"
+CONTROLLER_OBSERVED_VIA_STORAGE_POLL = "storage_poll"
 
 
 # ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the

@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import (
+    CONTROLLER_OBSERVED_VIA_EVENT_LOG,
+    CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
     UPGRADE_SOURCE_EVENT_SCAN,
     UPGRADE_SOURCE_POLL,
     Contract,
@@ -1177,7 +1179,14 @@ def _sync_relational_tables(
                     rotated = True
                 c.admin = str(new_value)
 
-        if _update_controller_value_rows(session, mc, write_target, new_value):
+        if _update_controller_value_rows(
+            session,
+            mc,
+            write_target,
+            new_value,
+            observed_via=CONTROLLER_OBSERVED_VIA_EVENT_LOG,
+            block_number=parsed.get("block_number"),
+        ):
             if write_target in _GOVERNANCE_ROTATION_WRITE_TARGETS:
                 rotated = True
 
@@ -1224,6 +1233,9 @@ def _update_controller_value_rows(
     mc: MonitoredContract,
     write_target: str,
     new_value: object,
+    *,
+    observed_via: str,
+    block_number: int | None = None,
 ) -> bool:
     """Write *new_value* into every ControllerValue row keyed by the
     three canonical controller_id forms the analyzer emits
@@ -1235,6 +1247,38 @@ def _update_controller_value_rows(
     ``protocolAdmin`` propagates through either path without per-slot
     code. Returns True iff a row's value actually moved — the caller uses
     that to decide whether a governance rotation needs re-enrollment.
+
+    When the value moves, ``resolved_type`` and ``details`` are CLEARED, not
+    carried over. They are the classifier's answer about the OLD address:
+    ``("safe", {"address", "owners", "threshold"})`` or
+    ``("timelock", {"address", "delay", "owner"})``. This function has no RPC
+    and cannot re-classify, so the only honest states are NULL — not
+    determined, re-derived by the next resolution run.
+
+    Carrying them is not a cosmetic staleness. ``company_overview`` republishes
+    the stale payload under the NEW address (``_record_principal_lookup`` keys
+    on ``cv.value`` while merging ``cv.details``), and
+    ``_principal_lookup_type`` promotes on ``details`` alone via
+    ``_has_timelock_delay`` — so a Timelock -> EOA rotation publishes a
+    freshly-installed EOA as ``resolved_type="timelock"`` carrying the old
+    ``delay``, which inv 9 makes credit-bearing. That is a safety-inflating
+    false credit, on top of a false statement about a named individual's keys.
+    A Safe -> Safe rotation is the milder half: the new Safe inherits the old
+    one's ``owners``/``threshold`` and ``details["address"]`` stays the OLD
+    Safe, which ``setdefault("address", addr)`` downstream cannot correct
+    because the key is already present.
+
+    ``block_number``/``observed_via`` are reassigned for the same reason: they
+    described the old read. The poll path knows no block, so it passes None —
+    "not determined", never the stale one.
+
+    Rows are updated in place rather than appended. ``controller_values`` is
+    read as CURRENT state by every consumer (company_overview's ``controllers``
+    map, capability_resolver, enrollment, chat) with no ordering or dedup, and
+    the resolution worker deletes-then-reinserts the whole per-contract set on
+    each run, so an append-only key would multiply every existing read without
+    accumulating coherent history. The history planes are ``upgrade_events``
+    and the ``principal_history`` artifact.
     """
     if not mc.contract_id:
         return False
@@ -1258,6 +1302,10 @@ def _update_controller_value_rows(
     for cv in cv_rows:
         if cv.value != nv:
             cv.value = nv
+            cv.resolved_type = None
+            cv.details = None
+            cv.block_number = block_number
+            cv.observed_via = observed_via
             changed = True
     return changed
 
@@ -1318,7 +1366,16 @@ def _sync_relational_from_poll(
                 mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
         return
 
-    if _update_controller_value_rows(session, mc, field_name, new_value):
+    # A poll reads a slot; no block is knowable here, so block_number goes
+    # NULL rather than keeping the block of the previous (now wrong) read.
+    if _update_controller_value_rows(
+        session,
+        mc,
+        field_name,
+        new_value,
+        observed_via=CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
+        block_number=None,
+    ):
         if field_name in _GOVERNANCE_ROTATION_WRITE_TARGETS:
             contract = session.get(Contract, mc.contract_id)
             if contract is not None and contract.protocol_id:
