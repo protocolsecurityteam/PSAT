@@ -959,6 +959,69 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     });
   });
 
+  it("states the destination even when the static matcher produced no flows (A6)", () => {
+    // The approve-then-pull shape: reach renders, `flows` is empty, and the inspector
+    // used to say NOTHING about the destination — the worst combination available
+    // beside a $472M figure.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 170,
+          observed: {
+            observed_reach_value_usd: 472_190_234.24,
+            reach_determined: true,
+            destination_shape: "unknown",
+            shape_proved_by: "none",
+          },
+        },
+      }],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Destination",
+      value: "not determined (no static classification, no sentinel landed)",
+    });
+    expect(facts).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$472.2M" });
+  });
+
+  it("renders a fork-proven caller-chosen destination on the chip and in the facts", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { destination_shape: "caller_arbitrary", shape_proved_by: "simulation" },
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Destination",
+      value: "caller-chosen (a sentinel address received the outflow)",
+    });
+  });
+
+  it("keeps the static lattice in charge when it has an answer", () => {
+    // The observed shape must not override a static destination row: the static
+    // lattice is a universal about the code and the observation is one execution.
+    const fn = {
+      claims: [
+        flowOut({ kind: "immutable", tier: "dispositive_ast" }),
+        {
+          claim_id: "flow.out",
+          tier: "behavioral_observed",
+          witness: { effect_verdict_id: 1, observed: { destination_shape: "unknown", shape_proved_by: "none" } },
+        },
+      ],
+    };
+    const dest = claimWitnessFacts(fn).filter((f) => f.label === "Destination");
+    expect(dest).toHaveLength(1);
+    expect(dest[0].value).toContain("immutable");
+  });
+
   it("shows a TVL-refused reach as refused, never as the number", () => {
     const fn = {
       claims: [{

@@ -169,6 +169,31 @@ def test_value_out_projects_the_measured_reach_discriminator():
     assert claim["witness"]["observed"]["reach_determined"] is True
 
 
+def test_the_observed_destination_answer_reaches_the_claim(a6=True):
+    """A6 / C3-S1. NO claim in the database carried ``destination_shape`` or
+    ``shape_proved_by``: the fork proved ``caller_arbitrary`` on 35 rows and a consumer
+    had never seen it, while the two approve-then-pull rows published $472M of reach
+    with no destination statement at all (their transfer sink lives in the callee, so
+    the static matcher emitted nothing to carry forward).
+
+    Unconditional, not scoped to those two rows: the class is 7 functions — 2 manifest,
+    5 latent — and each new successful probe converts a latent one, so a fix keyed on
+    "the 2 rows" would be wrong the next time coverage improves."""
+    witness = {"value_moved": True, "destination_shape": "unknown", "shape_proved_by": "none"}
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    assert claim is not None
+    observed = claim["witness"]["observed"]
+    assert observed["destination_shape"] == "unknown"
+    assert observed["shape_proved_by"] == "none"
+
+    # ...and the proven-adverse answer travels identically.
+    proven_witness = {"value_moved": True, "destination_shape": "caller_arbitrary", "shape_proved_by": "simulation"}
+    proven_claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=proven_witness))
+    assert proven_claim is not None
+    assert proven_claim["witness"]["observed"]["destination_shape"] == "caller_arbitrary"
+    assert proven_claim["witness"]["observed"]["shape_proved_by"] == "simulation"
+
+
 def test_reach_is_never_read_off_the_cacheable_witness():
     # The plane leak this fix closes: while reach sat on ``witness`` it was
     # written to the CROSS-DEPLOYMENT behavioral cache and re-published as another

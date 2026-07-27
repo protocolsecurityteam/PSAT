@@ -795,7 +795,19 @@ function flowOutTargetSummary(claims) {
 // EVERY classified out-flow is fixed and none is indeterminate/self/unclassified.
 function flowOutQualifier(claims) {
   const s = flowOutTargetSummary(claims);
-  if (!s.total) return null;
+  if (!s.total) {
+    // No static flow lattice at all (the approve-then-pull shape, A6). If the fork
+    // PROVED the caller picks the destination, that is the finding — the chip stayed
+    // unqualified only because the static side had nothing to say.
+    for (const c of claims) {
+      const observed = c.witness && c.witness.observed;
+      if (!observed) continue;
+      if (observed.destination_shape === "caller_arbitrary" && observed.shape_proved_by === "simulation") {
+        return "(caller-chosen destination)";
+      }
+    }
+    return null;
+  }
   if (s.sawCaller) return "(caller-chosen destination)";
   // An UNANALYSED param ranks directly under the proven-free case and ABOVE
   // every softer reading: the caller provably names the destination, and with
@@ -1159,6 +1171,34 @@ function destinationConstraintText(claims) {
 // derived from a present, at-the-bar field — absent facts produce no row (the
 // same honesty rule as the chip; an unwitnessed destination shows nothing rather
 // than a reassuring default).
+// The fork-observed destination answer for an outflow claim, as prose, or null.
+// Reads `destination_shape` + `shape_proved_by` off the behavioral witness (A6 /
+// C3-S1): the fork proved `caller_arbitrary` on 35 rows and no consumer had ever seen
+// it, because the bridge did not forward either key.
+const OBSERVED_SHAPE_WORD = {
+  caller_arbitrary: "caller-chosen (a sentinel address received the outflow)",
+  immutable_fixed: "fixed — an immutable address static proved",
+  storage_determined: "storage-determined (no setter reached it)",
+};
+
+function observedDestinationShape(claims) {
+  for (const c of claims) {
+    if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
+    const observed = c.witness && c.witness.observed;
+    if (!observed) continue;
+    const shape = observed.destination_shape;
+    const provedBy = observed.shape_proved_by;
+    if (typeof shape !== "string") continue;
+    if (shape === "unknown" || provedBy === "none") {
+      // The honest sentence for the A6 rows: nothing was established, and no attempt
+      // is hidden. NOT silence — silence beside a large reach figure reads as "fine".
+      return "not determined (no static classification, no sentinel landed)";
+    }
+    return OBSERVED_SHAPE_WORD[shape] || `${shape} (observed)`;
+  }
+  return null;
+}
+
 export function claimWitnessFacts(fn) {
   const claims = claimsOf(fn);
   const facts = [];
@@ -1223,6 +1263,15 @@ export function claimWitnessFacts(fn) {
   }
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
+  else {
+    // A6: the static flows matcher produces nothing for an approve-then-pull outflow
+    // (the transfer sink lives in the callee), so the inspector used to show a
+    // half-billion-dollar reach with NO statement about the destination at all —
+    // indistinguishable from a destination examined and found unclassifiable. The
+    // fork's own three-valued answer is now forwarded and rendered.
+    const observedShape = observedDestinationShape(claims);
+    if (observedShape) facts.push({ label: "Destination", value: observedShape });
+  }
   const destConstraint = destinationConstraintText(claims);
   if (destConstraint)
     facts.push({ label: "Destination constraint", value: destConstraint });

@@ -353,7 +353,14 @@ logger = logging.getLogger(__name__)
 # valued, including a holdings list at the fetcher's one-page cap. A pre-v27 row's
 # reach was never checked against the protocol's own TVL: the worst published row
 # asserted $3.489B against a TVL of $3.297B.
-EFFECT_CACHE_SCHEMA_VERSION = 27
+# v28 (Wave 2 Leg D, A6 / C3-S1): the claim witness now forwards
+# ``destination_shape`` and ``shape_proved_by``. NO claim in the database carried
+# either, so the fork's ``caller_arbitrary`` proof on 35 rows had never reached a
+# consumer, and the two approve-then-pull rows published $472M of reach with no
+# destination statement at all. The cache row already held both keys in ``details``;
+# the bump is because the claim projection a hit re-publishes now includes them, so a
+# pre-v28 row's ``details`` is served into a consumer contract that expects them.
+EFFECT_CACHE_SCHEMA_VERSION = 28
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

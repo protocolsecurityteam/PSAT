@@ -232,8 +232,25 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     value in current state". A scorer must not treat it as a live outflow of
     #     present treasury, and must not read its ABSENCE as "the contract is
     #     funded" — absence only means no balance override was needed.
+    # ``destination_shape`` / ``shape_proved_by`` are the fork's three-valued answer to
+    # "where can this outflow go", and NO claim in the database carried either (A6 /
+    # C3-S1). The two rows that made it visible are approve-then-pull outflows whose
+    # transfer sink lives in the CALLEE, so the static flows matcher emitted nothing at
+    # all: the merged claim carried $472M of reach and not one word about the
+    # destination, indistinguishable from a destination we examined and could not
+    # classify. The class is 7 functions (2 manifest, 5 latent) and it grows as
+    # coverage improves — every new successful probe converts a latent row — so the
+    # forwarding is unconditional rather than scoped to the rows that show it today.
+    #
+    # CONTRACT: ``shape_proved_by`` names the EVIDENCE — "static" (a universal proof
+    # from the code), "simulation" (a sentinel that landed, proving caller_arbitrary),
+    # or "none" (no evidence obtained). ``"none"`` means the destination contributes
+    # ZERO severity in either direction: it is a confidence gap, not a fixed
+    # destination and not a theft-shaped one (inv. 2).
     keep = (
         "supply_delta_sign",
+        "destination_shape",
+        "shape_proved_by",
         "gate_mutation",
         "historical",
         "current_capability",
