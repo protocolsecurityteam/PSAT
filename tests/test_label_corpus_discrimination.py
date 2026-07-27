@@ -148,6 +148,7 @@ def test_the_corpus_has_delegatecall_execution_rows_at_all():
     fns = _functions(DELEGATECALL)
     labelled = [n for n, f in fns.items() if "delegatecall_execution" in f["effect_labels"]]
     assert sorted(labelled) == [
+        "execBothModules(bytes)",
         "execFixedSlot(bytes)",
         "execModule(bytes)",
         "execModuleViaLibrary(bytes)",
@@ -195,6 +196,26 @@ def test_the_a8_claim_resolves_all_five_delegatecall_routes():
     assert _claim(fns["execUserModule(bytes)"], "delegatecall.execute")["witness"]["destination"]["reason"] == (
         "mapping_or_array_element"
     )
+
+
+def test_a_two_site_fold_publishes_the_union_never_one_sites_answer():
+    """R1 on the fold. Two delegatecall sites agreeing on ``storage_setter`` used
+    to fold to the FIRST site's ``variable`` and ``writer_signatures`` — a
+    complete-looking, owner-gated writer set with the second site's UNGATED
+    writer invisible, and no representable "partial" state to warn a consumer.
+    ``writer_signatures`` answers who can replace the code running in this
+    contract's storage, so the honest fold is the union: both variables, every
+    site's writers, and no singular ``variable`` key that a consumer could bind
+    as the whole answer."""
+    fns = _functions(DELEGATECALL)
+    destination = _claim(fns["execBothModules(bytes)"], "delegatecall.execute")["witness"]["destination"]
+    assert destination["target_kind"] == "storage_setter"
+    assert destination["sites"] == 2
+    assert "variable" not in destination
+    assert destination["variables"] == ["module", "sideModule"]
+    # The union is the point: the ungated writer must be visible next to the
+    # gated one.
+    assert destination["writer_signatures"] == ["setModule(address)", "setSideModule(address)"]
 
 
 def test_the_a8_claim_is_not_upgrade_implementation():

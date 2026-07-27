@@ -231,14 +231,42 @@ def _resolve(ctx: ClaimContext, unit: Any, bindings: dict[int, Any], depth: int)
 
 def _fold(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Collapse the per-site destinations. Distinct resolved kinds fold to
-    ``indeterminate`` with the members published — never to the most favourable
-    one, and never to the first seen."""
+    ``indeterminate`` with the members published; agreeing kinds over several
+    sites publish the UNION of every site's evidence — never the most
+    favourable answer, and never the first seen.
+
+    The union direction matters on ``writer_signatures``: it answers *who can
+    replace the code running in this contract's storage*, and a function that
+    delegatecalls two storage-held modules is owned by whoever passes ANY
+    writer's gate — moduleA behind an owner-gated setter plus moduleB behind an
+    ungated one is an ungated capability. Publishing one site's writers presents
+    a complete, gated writer set with the ungated writer invisible; there is no
+    ``partial`` state a consumer could read its way out of. Agreeing evidence
+    keeps its singular key (``variable``); disagreeing evidence moves to the
+    plural (``variables``), so a consumer that binds the singular never holds
+    one site's value as the whole answer."""
     if not records:
         return {"target_kind": "indeterminate", "reason": "no_resolved_site"}
+    if len(records) == 1:
+        return dict(records[0])
     kinds = sorted({record["target_kind"] for record in records})
-    if len(kinds) == 1:
-        return dict(records[0]) if len(records) == 1 else {**records[0], "sites": len(records)}
-    return {"target_kind": "indeterminate", "reason": "sites_disagree", "site_kinds": kinds}
+    if len(kinds) > 1:
+        return {"target_kind": "indeterminate", "reason": "sites_disagree", "site_kinds": kinds}
+    merged: dict[str, Any] = {"target_kind": kinds[0], "sites": len(records)}
+    for field, plural in (
+        ("variable", "variables"),
+        ("storage_slot_variable", "storage_slot_variables"),
+        ("reason", "reasons"),
+    ):
+        values = sorted({str(record[field]) for record in records if record.get(field)})
+        if len(values) == 1:
+            merged[field] = values[0]
+        elif values:
+            merged[plural] = values
+    writers = sorted({writer for record in records for writer in record.get("writer_signatures") or []})
+    if writers:
+        merged["writer_signatures"] = writers
+    return merged
 
 
 def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:

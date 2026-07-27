@@ -174,7 +174,14 @@ logger = logging.getLogger(__name__)
 # read the claim set, so a v15 row on such a function was reached with the
 # function's highest-severity claim absent for a reason that was statement
 # order, not evidence.
-EFFECT_CACHE_SCHEMA_VERSION = 16
+# v17: a multi-site ``delegatecall.execute`` destination whose sites agree on a
+# kind now publishes the UNION of every site's evidence (plural ``variables``,
+# merged ``writer_signatures``) instead of the first site's record. A v16 row on
+# a two-module body carries one module's writer set presented as the whole
+# answer — an ungated second writer invisible behind a gated first — and the
+# probe reads the claim witness, so such a row was reached from a witness that
+# understates who can replace the executing code.
+EFFECT_CACHE_SCHEMA_VERSION = 17
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

@@ -44,6 +44,7 @@ contract DelegatecallRoutes {
 
     address public owner;
     address public module;
+    address public sideModule;
     mapping(address => address) public userModule;
 
     modifier onlyOwner() {
@@ -55,6 +56,12 @@ contract DelegatecallRoutes {
         module = newModule;
     }
 
+    // UNGATED on purpose: the two-site fold below is honest only if this
+    // writer is visible in the union.
+    function setSideModule(address newModule) external {
+        sideModule = newModule;
+    }
+
     function setUserModule(address newModule) external {
         userModule[msg.sender] = newModule;
     }
@@ -63,6 +70,19 @@ contract DelegatecallRoutes {
     function execModule(bytes calldata data) external onlyOwner {
         (bool ok, ) = module.delegatecall(data);
         require(ok, "module call failed");
+    }
+
+    // TWO sites, ONE kind. Both destinations are storage-held with a setter,
+    // but the setters are gated differently — the owner-gated ``setModule`` and
+    // the UNGATED ``setSideModule``. The folded destination must publish BOTH
+    // variables and the UNION of the writers: one site's answer presents a
+    // complete, gated writer set while the ungated writer stays invisible,
+    // which is the severity question answered wrongly.
+    function execBothModules(bytes calldata data) external onlyOwner {
+        (bool a, ) = module.delegatecall(data);
+        require(a, "module call failed");
+        (bool b, ) = sideModule.delegatecall(data);
+        require(b, "side module call failed");
     }
 
     // DIRECT, caller-keyed mapping element. Must resolve not-determined.

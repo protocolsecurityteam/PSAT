@@ -3251,6 +3251,67 @@
       "solc_version": "0.8.27",
       "functions": [
         {
+          "full_name": "execBothModules(bytes)",
+          "selector": "0x43f73504",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "sites": 2,
+                  "target_kind": "storage_setter",
+                  "variables": [
+                    "module",
+                    "sideModule"
+                  ],
+                  "writer_signatures": [
+                    "setModule(address)",
+                    "setSideModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execBothModules(bytes):sink0:delegatecall:module",
+                  "execBothModules(bytes):sink1:delegatecall:sideModule"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "module",
+              "origin": "body"
+            },
+            {
+              "target": "sideModule",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 3,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
           "full_name": "execFixedSlot(bytes)",
           "selector": "0xc6e07347",
           "effect_labels": [
@@ -3270,7 +3331,7 @@
                 },
                 "kind": "delegatecall_sink",
                 "sink_ids": [
-                  "execFixedSlot(bytes):sink0:delegatecall:assembly_delegatecall:TMP_25"
+                  "execFixedSlot(bytes):sink0:delegatecall:assembly_delegatecall:TMP_28"
                 ]
               }
             }
@@ -3279,7 +3340,7 @@
           "external_calls": [],
           "delegatecall_sinks": [
             {
-              "target": "assembly_delegatecall:TMP_25",
+              "target": "assembly_delegatecall:TMP_28",
               "origin": "body"
             }
           ],
@@ -3428,7 +3489,7 @@
                 },
                 "kind": "delegatecall_sink",
                 "sink_ids": [
-                  "execUserModule(bytes):sink0:delegatecall:REF_3"
+                  "execUserModule(bytes):sink0:delegatecall:REF_5"
                 ]
               }
             }
@@ -3437,7 +3498,7 @@
           "external_calls": [],
           "delegatecall_sinks": [
             {
-              "target": "REF_3",
+              "target": "REF_5",
               "origin": "body"
             }
           ],
@@ -3478,7 +3539,7 @@
                 },
                 "kind": "delegatecall_sink",
                 "sink_ids": [
-                  "fallback():sink0:delegatecall:assembly_delegatecall:TMP_10"
+                  "fallback():sink0:delegatecall:assembly_delegatecall:TMP_13"
                 ]
               }
             }
@@ -3487,7 +3548,7 @@
           "external_calls": [],
           "delegatecall_sinks": [
             {
-              "target": "assembly_delegatecall:TMP_10",
+              "target": "assembly_delegatecall:TMP_13",
               "origin": "body"
             }
           ],
@@ -3542,6 +3603,21 @@
               "equality"
             ],
             "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setSideModule(address)",
+          "selector": "0x5fcce199",
+          "effect_labels": [],
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "sideModule"
+          ],
+          "predicate_tree": {
+            "present": false
           }
         },
         {

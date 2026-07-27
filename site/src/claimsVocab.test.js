@@ -1401,6 +1401,20 @@ describe("delegatecall.execute — where the foreign code comes from", () => {
       .toBe("(target is admin-settable storage)");
   });
 
+  it("reads a multi-site union destination by its agreed kind", () => {
+    // Two sites agreeing on storage_setter publish the union (plural
+    // `variables`, merged writers, no singular `variable`); the qualifier binds
+    // target_kind alone, so the union shape renders the same — and truthfully,
+    // since the kind now holds across every site rather than the first seen.
+    const union = {
+      target_kind: "storage_setter",
+      sites: 2,
+      variables: ["module", "sideModule"],
+      writer_signatures: ["setModule(address)", "setSideModule(address)"],
+    };
+    expect(qualifierForClaims({ claims: [dc(union)] })).toBe("(target is admin-settable storage)");
+  });
+
   it("does not read a caller-keyed mapping element as settable OR as fixed", () => {
     const q = qualifierForClaims({ claims: [dc({ target_kind: "indeterminate", reason: "mapping_or_array_element" })] });
     expect(q).toBe("(target not determined)");
