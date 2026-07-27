@@ -23,6 +23,7 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
+from schemas.contract_analysis import SemanticControlAnalysis, TimelockAnalysis  # noqa: E402
 from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -169,7 +171,11 @@ def test_control_model_does_not_read_not_determined_as_governance(tmp_path):
     """``has_timelock is True``, not truthiness: a not-determined timelock must
     not silently promote the contract to ``governance``, and must not silently
     demote it either -- it falls through to the semantic pattern."""
-    semantic = {"pattern": "role_control"}
-    assert _determine_control_model(None, semantic, {"has_timelock": True}) == "governance"
-    assert _determine_control_model(None, semantic, {"has_timelock": None}) == "role_control"
-    assert _determine_control_model(None, semantic, {"has_timelock": False}) == "role_control"
+    semantic = cast("SemanticControlAnalysis", {"pattern": "role_control"})
+
+    def timelock(has: bool | None) -> TimelockAnalysis:
+        return cast("TimelockAnalysis", {"has_timelock": has})
+
+    assert _determine_control_model(None, semantic, timelock(True)) == "governance"
+    assert _determine_control_model(None, semantic, timelock(None)) == "role_control"
+    assert _determine_control_model(None, semantic, timelock(False)) == "role_control"
