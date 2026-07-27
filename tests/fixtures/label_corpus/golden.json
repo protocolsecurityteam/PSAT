@@ -3020,7 +3020,7 @@
                       "leaf_path": [
                         0
                       ],
-                      "pins": true,
+                      "pins": null,
                       "state": "constrained"
                     },
                     "target_kind": {

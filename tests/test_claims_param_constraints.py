@@ -320,6 +320,12 @@ def test_a_hash_commitment_binds_through_derived_from_and_says_so():
     # reassigned name it can name one branch's origin and omit another's, so a
     # consumer that must not rest on it can tell.
     assert verdict["binding"] == "derived_from"
+    # ...and BECAUSE it is flow-insensitive, the verdict never claims a proven
+    # pin: `pins` is the one field that may soften the caller-chosen reading
+    # downstream, and a union over branches is not a proof that the guard
+    # confines this parameter on every path (`address t = defaultTo; if (cond)
+    # t = to;` — on the `!cond` branch `to` is wholly unconstrained).
+    assert verdict["pins"] is None
 
 
 def test_a_computed_operand_with_UNDETERMINED_provenance_blocks_the_unconstrained_proof():

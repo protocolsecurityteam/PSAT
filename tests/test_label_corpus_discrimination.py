@@ -109,9 +109,16 @@ def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
     used. A consumer that must not rest on a flow-insensitive proof can see that
     it did; the two direct-operand shapes say ``operand``."""
     fns = _functions(CONSTRAINED)
-    assert _target_constraint(fns["payCommitted(IERC20,address,uint256,bytes32)"])["binding"] == "derived_from"
+    committed = _target_constraint(fns["payCommitted(IERC20,address,uint256,bytes32)"])
+    assert committed["binding"] == "derived_from"
+    # A flow-insensitive binding never publishes a proven pin: the guard is
+    # real, but which parameter it confines on every path is not settled, so
+    # the caller-chosen reading stays.
+    assert committed["pins"] is None
     for name in ("payAllowlisted(IERC20,address,uint256)", "payTreasuryOnly(IERC20,address,uint256)"):
-        assert _target_constraint(fns[name])["binding"] == "operand", name
+        verdict = _target_constraint(fns[name])
+        assert verdict["binding"] == "operand", name
+        assert verdict["pins"] is True, name
 
 
 def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignores_it():

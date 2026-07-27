@@ -485,6 +485,20 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     expect(toneForClaims({ claims: [legacy] })).toBe("#a8746a");
   });
 
+  it("keeps the hazard tint for a guard bound through flow-insensitive provenance (derived_from)", () => {
+    // WAVE_0 L-24: `derived_from` is a union over branches — `address t =
+    // defaultTo; if (cond) t = to;` binds `to` on one branch only, and the
+    // artifact cannot tell the branches apart. The producer therefore mints
+    // pins: null on every derived_from binding, and the chip must read
+    // "checked", never "gated", with the tint at the hazard end.
+    const committed = flowOut(
+      { kind: "param", tier: "dispositive_ast" },
+      { constraint: { state: "constrained", guard: "hash_commitment", pins: null, binding: "derived_from", leaf_path: [0] } },
+    );
+    expect(qualifierForClaims({ claims: [committed] })).toBe("(destination checked; pinning not proven)");
+    expect(toneForClaims({ claims: [committed] })).toBe("#a8746a");
+  });
+
   it("does not let a several fold promote a GATED param member to caller-chosen", () => {
     // Same fold, one verdict: the flow's destination parameter is pinned by a
     // mandatory gate. The admin-settable member is then the worst thing left,
@@ -1243,6 +1257,10 @@ describe("qualifierForClaims — exec.arbitrary target constraint (A3)", () => {
 
 describe("claimWitnessFacts — destination constraint row", () => {
   it("spells out the guard, and marks a flow-insensitive binding as one", () => {
+    // The producer never mints `pins: true` on a `derived_from` binding — the
+    // provenance is flow-insensitive, so the guard is real but whether it
+    // confines THIS parameter is not proven. The row must carry both the
+    // binding and the not-proven caveat, and never read as "gated by".
     const fn = {
       claims: [{
         claim_id: "flow.out",
@@ -1253,7 +1271,7 @@ describe("claimWitnessFacts — destination constraint row", () => {
           flows: [{
             kind: "callee_erc20_selector",
             target_kind: { kind: "param", tier: "dispositive_ast" },
-            target_constraint: { state: "constrained", guard: "hash_commitment", pins: true, binding: "derived_from" },
+            target_constraint: { state: "constrained", guard: "hash_commitment", pins: null, binding: "derived_from" },
           }],
           sink_ids: [],
         },
@@ -1262,6 +1280,8 @@ describe("claimWitnessFacts — destination constraint row", () => {
     const row = claimWitnessFacts(fn).find((f) => f.label === "Destination constraint");
     expect(row.value).toContain("a hash commitment in storage");
     expect(row.value).toContain("argument provenance");
+    expect(row.value).toContain("whether it pins the destination is not proven");
+    expect(row.value).not.toContain("gated by");
   });
 
   it("renders a denylist as one that pins nothing", () => {

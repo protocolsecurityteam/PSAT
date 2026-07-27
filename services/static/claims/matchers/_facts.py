@@ -185,9 +185,11 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 # as ground truth (WAVE_0 L-24: it misbinds one origin on flow-insensitive
 # local reassignment — it can OMIT a genuinely committed parameter and PUBLISH
 # one that only reaches the name on another branch). Two bounds follow:
-#   * positive direction: a ``derived_from`` binding may prove ``constrained``,
-#     but the verdict records ``binding: "derived_from"`` so a consumer can
-#     tell the flow-insensitive binding from a direct operand one;
+#   * positive direction: a ``derived_from`` binding may prove ``constrained``
+#     (the guard is real), but never ``pins: True`` — the verdict carries
+#     ``pins: None`` and ``binding: "derived_from"``, because a flow-insensitive
+#     union cannot prove the guard confines THIS parameter on every path, and
+#     ``pins`` is the one field allowed to soften the caller-chosen reading;
 #   * negative direction: a parameter's ABSENCE from every ``derived_from``
 #     proves nothing, so any mandatory leaf carrying a computed operand blocks
 #     ``unconstrained_proven`` for every parameter it does not positively
@@ -655,19 +657,26 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
             # proof for everyone.
             blocked_all = True
         for index in sorted(direct | derived):
-            guard = _classify_constraining_leaf(leaf, via_derived=index in derived and index not in direct)
+            via_derived = index in derived and index not in direct
+            guard = _classify_constraining_leaf(leaf, via_derived=via_derived)
             if guard is None:
                 continue
             incumbent = verdicts.get(index)
             if incumbent is not None and incumbent.get("guard") != "denylist":
                 continue
+            binding = "derived_from" if via_derived else "operand"
             verdict: dict[str, Any] = {
                 "state": "constrained",
                 "guard": guard,
                 # Three-state by construction: an unmapped guard kind must not
                 # read as pinning, so absence from the map is None, not False.
-                "pins": _GUARD_PINS.get(guard),
-                "binding": "derived_from" if index in derived and index not in direct else "operand",
+                # A ``derived_from`` binding caps ``pins`` at None regardless of
+                # the guard: the binding is flow-insensitive (L-24), so the
+                # guard's set semantics are proven but WHICH parameter it
+                # confines is not — only a proven pin may soften the
+                # caller-chosen reading downstream.
+                "pins": None if binding == "derived_from" else _GUARD_PINS.get(guard),
+                "binding": binding,
                 "leaf_path": list(path),
             }
             verdicts[index] = verdict
