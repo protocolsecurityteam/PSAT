@@ -151,6 +151,36 @@ def test_boring_vault_manage_idiom_positive(tmp_path):
     assert _find(claims, "manageDirect") == {idiom}
 
 
+def test_the_manage_positive_still_names_its_two_parameters(tmp_path):
+    """The positive control for the binding change: where the answer was already
+    right it must stay right, by proof rather than by there being one candidate.
+
+    ``manage`` reaches its call through the library and ``manageDirect`` calls
+    directly, so the two bases are exercised on the same contract."""
+    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+
+    source = (FIXTURES_DIR / "boring_vault_manage.sol").read_text()
+    project_dir = write_foundry_project(tmp_path, "BoringVault", source)
+    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    assert effects is not None
+    witnesses = {
+        signature.split("(", 1)[0]: claim["witness"]
+        for signature, record in effects["functions"].items()
+        for claim in record.get("claims") or []
+        if claim["claim_id"] == "exec.arbitrary"
+    }
+    assert witnesses["manage"]["destination_param"] == "target"
+    assert witnesses["manage"]["calldata_param"] == "data"
+    assert witnesses["manage"]["destination_basis"] == "library_forwarder"
+    assert witnesses["manageDirect"]["destination_param"] == "target"
+    assert witnesses["manageDirect"]["calldata_param"] == "data"
+    assert witnesses["manageDirect"]["destination_basis"] == "call_destination"
+    # The batch overload forwards an ELEMENT of each array; the binding names the
+    # array parameter the element came from.
+    assert witnesses["manageBatch"]["destination_param"] == "targets"
+    assert witnesses["manageBatch"]["calldata_param"] == "data"
+
+
 def test_batch_manage_idiom_positive(tmp_path):
     """The batch overload is the same executor with one array level added, and it
     minted nothing: the declared types are ``address[]``/``bytes[]`` rather than
@@ -168,17 +198,18 @@ def test_library_mediated_batch_executor_is_a_deliberate_under_claim(tmp_path):
     """A real arbitrary-call executor that this matcher knowingly stays silent on.
 
     ``using Address for address`` puts the LIBRARY in the destination and the
-    target in argument position, so the only handle left is "an address
-    parameter appears in the call's read set" — which is exactly what a fixed
-    destination forwarder also looks like. For a scalar parameter that ambiguity
-    is tolerated (the shape is common and the sibling positive covers it); for an
-    array it is not, because the same allowance put a false arbitrary-call badge
-    on published output.
+    target in argument position, so the only handle the MINTING gate has left is
+    "an address parameter appears in the call's read set" — which is exactly what
+    a fixed destination forwarder also looks like. For a scalar parameter that
+    ambiguity is tolerated (the shape is common and the sibling positive covers
+    it); for an array it is not, because the same allowance put a false
+    arbitrary-call badge on published output.
 
-    Separating the two needs the library body, i.e. interprocedural work. Until
-    then this is an under-claim, which is the safe direction — and a proven
-    effects verdict still catches this function if it moves value. Delete this
-    test the day the destination can be traced through a library call."""
+    The library body is now read to BIND the published parameter names (see the
+    binding tests below), but the minting gate deliberately still is not: the
+    claim population is not this fix's to change. So this stays an under-claim,
+    which is the safe direction — and a proven effects verdict still catches this
+    function if it moves value."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "manageBatchViaLibrary") == set()
 
@@ -189,6 +220,94 @@ def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
     an address array."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "commitBatch") == set()
+
+
+def _binding_witnesses(tmp_path: Path) -> dict[str, dict]:
+    """``{function name: exec.arbitrary witness}`` over the binding corpus."""
+    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+
+    source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
+    project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
+    _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
+    assert effects is not None
+    out: dict[str, dict] = {}
+    for signature, record in effects["functions"].items():
+        for claim in record.get("claims") or []:
+            if claim["claim_id"] == "exec.arbitrary":
+                out[signature.split("(", 1)[0]] = claim["witness"]
+    return out
+
+
+def test_the_destination_is_read_off_the_operand_not_the_read_set(tmp_path):
+    """Two address parameters, and the destination is the second one.
+
+    A pick taken from the read-set intersection lands on either — and on the two
+    production functions where a choice existed it landed on the wrong one both
+    times (``lzCompose`` published ``_from``, a SOURCE). The operand position is
+    the only thing that separates them, and it is what is published now."""
+    witness = _binding_witnesses(tmp_path)["compose"]
+    assert (witness["destination_param"], witness["destination_kind"]) == ("to", "param")
+    assert witness["destination_basis"] == "call_destination"
+    assert witness["destination_param"] != "from"
+
+
+def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
+    """``IComposer(to).compose(from, message, extra)`` fixes the selector, so no
+    argument of it is an arbitrary calldata blob. Naming one — as the read-set
+    pick did on three production rows — asserts caller-chosen calldata that the
+    op does not carry. ``call_argument`` is the proven absence; it is not the
+    same fact as ``not_determined``."""
+    witness = _binding_witnesses(tmp_path)["compose"]
+    assert witness["calldata_kind"] == "call_argument"
+    assert witness["calldata_param"] is None
+    assert witness["calldata_basis"] is None
+
+
+def test_a_state_variable_destination_names_no_parameter(tmp_path):
+    """The ``rebalance`` shape: the call goes to a storage-held swapper, two
+    address parameters ride along as arguments, and NO parameter is the
+    destination. ``state_var`` says that positively — the caller cannot choose
+    where this call goes — where the old pick published an argument's name."""
+    witness = _binding_witnesses(tmp_path)["rebalance"]
+    assert witness["destination_kind"] == "state_var"
+    assert witness["destination_param"] is None
+    assert witness["destination_basis"] is None
+
+
+def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
+    """``using Lib for address`` puts the library in the destination operand and
+    the real target in argument position. The library body says which argument
+    that is — as a low-level call, as inline assembly, and with the library's
+    own parameters in either order."""
+    witnesses = _binding_witnesses(tmp_path)
+    for name in ("manageViaLibrary", "manageReversed", "manageViaAssembly"):
+        witness = witnesses[name]
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param"), name
+        assert (witness["calldata_param"], witness["calldata_kind"]) == ("data", "param"), name
+        assert witness["destination_basis"] == witness["calldata_basis"] == "library_forwarder", name
+
+
+def test_an_unresolved_forwarder_publishes_not_determined_not_the_only_candidate(tmp_path):
+    """The third state, reached on a real library shape: OpenZeppelin's own
+    ``functionCall`` forwards to a sibling rather than calling, so one level of
+    resolution never reaches a call op.
+
+    ``target`` is the only address parameter here, so a read-set pick would name
+    it and be right by luck. This is the case that distinguishes "we proved the
+    binding" from "there was only one thing to say", and the witness must not
+    collapse them — the hedge and the un-hedged value are both reachable, which
+    is what keeps this from being a sentinel that never fires."""
+    witness = _binding_witnesses(tmp_path)["manageViaTwoStepLibrary"]
+    assert witness["destination_kind"] == witness["calldata_kind"] == "not_determined"
+    assert witness["destination_param"] is None and witness["calldata_param"] is None
+
+
+def test_every_binding_state_is_reachable_on_one_corpus(tmp_path):
+    """R2: a state that cannot be produced is not a mitigation. All three
+    destination states and all three calldata states are minted by this corpus."""
+    witnesses = _binding_witnesses(tmp_path)
+    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "state_var", "not_determined"}
+    assert {w["calldata_kind"] for w in witnesses.values()} == {"param", "call_argument", "not_determined"}
 
 
 def test_plain_transfer_is_taint_near_miss_negative(tmp_path):

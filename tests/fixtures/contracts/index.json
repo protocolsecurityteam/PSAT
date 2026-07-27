@@ -232,6 +232,13 @@
       "detection_patterns": ["manage_idiom", "param_taint", "claim_exec_arbitrary"]
     },
     {
+      "path": "claims_upgrade_exec/exec_arbitrary_binding.sol",
+      "category": "claims_upgrade_exec",
+      "contract_name": "ExecBinding",
+      "description": "Discriminating corpus for the exec.arbitrary parameter BINDING: two address params with the destination second, a state-variable destination no param reaches, three resolvable library forwarders (low-level, reversed operand order, inline assembly) and a two-step forwarder that resolves to not_determined.",
+      "detection_patterns": ["param_taint", "claim_exec_arbitrary", "destination_binding", "library_forwarder"]
+    },
+    {
       "path": "claims_upgrade_exec/plain_transfer_call.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "PayableToken",

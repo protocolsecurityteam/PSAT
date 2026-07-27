@@ -68,7 +68,15 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         witness={
             "kind": "param_taint",
             "sink_ids": sink_ids,
+            # ``*_param`` names a binding only when the matching ``*_kind`` is
+            # ``param``; ``state_var`` / ``call_argument`` are proven absences and
+            # ``not_determined`` is an open question. All three publish a null
+            # name, so the kind is the only thing that separates them.
             "destination_param": taint["destination_param"],
+            "destination_kind": taint["destination_kind"],
+            "destination_basis": taint["destination_basis"],
             "calldata_param": taint["calldata_param"],
+            "calldata_kind": taint["calldata_kind"],
+            "calldata_basis": taint["calldata_basis"],
         },
     )

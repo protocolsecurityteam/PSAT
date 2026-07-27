@@ -912,15 +912,23 @@ def _forwards_param_destination(fn: "FunctionFacts") -> bool:
 
 
 def _named_executor_slots(fn: "FunctionFacts", types: Sequence[str]) -> tuple[int, int] | None:
-    """The two slots the ``exec.arbitrary`` witness NAMES, when both name a
-    parameter of the right shape. The witness carries entry-parameter names read
-    off the IR, so this is the precise answer where it exists."""
+    """The two slots the ``exec.arbitrary`` witness PROVES, when both name a
+    parameter of the right shape.
+
+    A name counts only when its ``*_kind`` is ``param`` — i.e. the IR put that
+    parameter in the call's destination / calldata operand position. The other
+    kinds publish no name, and a witness written before those kinds existed
+    carries a name with no kind at all: that is an unread question, not a proof,
+    so it falls through to the ABI-uniqueness reasoning below exactly as a
+    ``not_determined`` would."""
     names = _declared_param_names(fn, len(types))
     for claim in fn.effect_info.get("claims") or []:
         if not isinstance(claim, dict) or claim.get("claim_id") != _EXEC_ARBITRARY_CLAIM:
             continue
         witness = claim.get("witness")
         if not isinstance(witness, dict):
+            continue
+        if witness.get("destination_kind") != "param" or witness.get("calldata_kind") != "param":
             continue
         destination, payload = witness.get("destination_param"), witness.get("calldata_param")
         if not isinstance(destination, str) or not isinstance(payload, str) or not destination or not payload:

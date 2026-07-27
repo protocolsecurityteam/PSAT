@@ -84,7 +84,16 @@ logger = logging.getLogger(__name__)
 # tiebreak. Order decides which candidates a ``resource_cap`` run reaches, so a v6
 # row records what a probe queue built from rounding noise happened to visit; it
 # is not the row the now-deterministic queue produces.
-EFFECT_CACHE_SCHEMA_VERSION = 7
+# v8: the ``exec.arbitrary`` witness now names a destination/calldata parameter
+# only where the call IR puts that parameter in that operand position, and says
+# ``state_var`` / ``call_argument`` / ``not_determined`` where it does not. The
+# old names came from an arbitrary member of a read-set intersection over
+# identity-hashed Slither objects, so they were wrong on both functions where a
+# choice existed and varied with allocation order between processes. The executor
+# probe builds its inner call from those two slots, so a v7 row records a call
+# synthesized around a parameter that is not the destination — a different probe
+# input, not merely a different label.
+EFFECT_CACHE_SCHEMA_VERSION = 8
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

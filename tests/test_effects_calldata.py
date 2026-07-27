@@ -417,8 +417,9 @@ def test_the_lattice_names_the_executor_slots_when_the_claim_does_not():
 
 
 def test_the_claim_witness_names_the_executor_slots_directly():
-    """Where static named the two parameters, they are used verbatim rather than
-    inferred from the ABI."""
+    """Where static PROVED the two parameters, they are used verbatim rather than
+    inferred from the ABI. A name counts only with its ``param`` kind — the kind
+    is what separates a proved binding from a guess."""
     executor = _executor_for(
         "rebalance(address,address,uint256,bytes)",
         ["fromAsset", "toAsset", "amount", "swapData"],
@@ -426,12 +427,73 @@ def test_the_claim_witness_names_the_executor_slots_directly():
         claims=[
             {
                 "claim_id": "exec.arbitrary",
-                "witness": {"kind": "param_taint", "destination_param": "fromAsset", "calldata_param": "swapData"},
+                "witness": {
+                    "kind": "param_taint",
+                    "destination_param": "fromAsset",
+                    "destination_kind": "param",
+                    "calldata_param": "swapData",
+                    "calldata_kind": "param",
+                },
             }
         ],
     )
     assert executor is not None
     assert executor.slots == (0, 3)
+
+
+def test_a_witness_that_names_no_binding_does_not_get_treated_as_one():
+    """``state_var`` says no parameter is the destination — the LRTSquaredAdmin
+    shape, where the call goes to a storage-held swapper. With two address
+    parameters the ABI admits no unique pair either, so nothing is synthesized.
+
+    The pre-fix witness named ``fromAsset`` here and this probe built an inner
+    call around it."""
+    executor = _executor_for(
+        "rebalance(address,address,uint256,bytes)",
+        ["fromAsset", "toAsset", "amount", "swapData"],
+        flows=[],
+        claims=[
+            {
+                "claim_id": "exec.arbitrary",
+                "witness": {
+                    "kind": "param_taint",
+                    "destination_param": None,
+                    "destination_kind": "state_var",
+                    "calldata_param": None,
+                    "calldata_kind": "call_argument",
+                },
+            }
+        ],
+    )
+    assert executor is None
+
+
+def test_a_kindless_legacy_witness_is_an_unread_question_not_a_proof():
+    """Rows minted before the binding was proven carry two names and no kind.
+    Absent is not-determined: the names are not used, and the slots fall through
+    to the ABI-uniqueness reasoning, which needs the lattice's own proof."""
+    witness = {"kind": "param_taint", "destination_param": "fromAsset", "calldata_param": "swapData"}
+    claims = [{"claim_id": "exec.arbitrary", "witness": witness}]
+    assert (
+        _executor_for(
+            "rebalance(address,address,uint256,bytes)",
+            ["fromAsset", "toAsset", "amount", "swapData"],
+            flows=[],
+            claims=claims,
+        )
+        is None
+    )
+    # …and with the lattice's proof the ABI still admits no unique pair here, so
+    # the fallback does not quietly reinstate the old answer either.
+    assert (
+        _executor_for(
+            "rebalance(address,address,uint256,bytes)",
+            ["fromAsset", "toAsset", "amount", "swapData"],
+            flows=[_FORWARDS_PARAM],
+            claims=claims,
+        )
+        is None
+    )
 
 
 def test_an_executor_with_no_inner_call_reports_vacuous_inputs():
