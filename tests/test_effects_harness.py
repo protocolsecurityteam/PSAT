@@ -957,3 +957,129 @@ def test_code_upgrade_tier0_historical_only_current_fails_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.concrete["current_check_passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# §5a backing — the WITHHOLDING branches (W0-7 fixture 7)
+#
+# ``inflow_observed`` was ``true`` on 11/11 rows and ``backing_withheld`` on
+# zero, anywhere. Every one of the four branches below the ASYMMETRIC BURDEN
+# comment had therefore never executed, and they are the adverse half: the
+# negative is what renders as "(unbacked)" and as the inspector's "supply rose
+# alone (dilution)" sentence. Etherfi's mints are deposit-backed conversions, so
+# 11/11 is a property of that corpus, not of the code.
+#
+# Withholding is NOT the negative. Each test below asserts that ``backing`` is
+# ABSENT rather than present-and-false: a mint whose backing could not be
+# measured must not be published as dilution.
+# ---------------------------------------------------------------------------
+
+
+def _mint_block(supply_before: int = 1000, supply_after: int = 1500, logs=()):
+    """read -> mint -> read, with the mint emitting ``logs``."""
+    return SimResult(calls=(ok(uint_ret(supply_before)), ok(logs=logs), ok(uint_ret(supply_after))))
+
+
+def test_backing_withheld_when_a_proven_token_slot_kept_the_encoder_filler():
+    """Reason 1 — ``token_param_unresolved``. The static plane PROVED parameter 1
+    carries a token and no seeded retry ever supplied one, so the call was made
+    with a non-token in a known token slot. Nothing about backing is witnessable
+    from it, and the absent inflow is an artifact of the argument."""
+    zero = "0x" + "00" * 20
+    store = RecordingStore()
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(_mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)])),
+        store=store,
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+        token_param_indexes=(1,),
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "mint"
+    assert "backing" not in eff.details
+    # The reason is named on the transcript, so a run can say what it could not
+    # prove instead of going quiet.
+    assert store.stored[-1]["backing_withheld"] == "token_param_unresolved"
+
+
+def test_backing_withheld_when_no_identity_could_fill_the_address_arguments():
+    """Reason 3 — ``prober_address_unidentifiable``. With no principal the
+    encoder wrote ``address(0)`` into every address argument, and a call to a
+    codeless address is a silent no-op inside every safe-transfer wrapper. The
+    mint executed and nothing came in — but the reason nothing came in may be the
+    prober's own zero address, and nothing here can tell which slots those were."""
+    zero = "0x" + "00" * 20
+    store = RecordingStore()
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(_mint_block(logs=[transfer_log(TOKEN, zero, CONTRACT, 500)])),
+        store=store,
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=None,
+        mint_calldata="0x40c10f19" + "00" * 64,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "mint"
+    assert "backing" not in eff.details
+    assert store.stored[-1]["backing_withheld"] == "prober_address_unidentifiable"
+
+
+def test_backing_withheld_when_the_prober_supplied_address_is_not_proven_inert():
+    """Reason 2 — ``prober_address_not_proven_inert``. The prober wrote its own
+    identity into an address argument, no inflow was seen, and the differential
+    (same block, reverting code at that address) did NOT reproduce the same
+    delta. The execution depended on an address this prober invented, so the
+    empty inflow describes the argument and not the function."""
+    zero = "0x" + "00" * 20
+    principal_word = PRINCIPAL[2:].rjust(64, "0")
+    store = RecordingStore()
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(
+            _mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
+            # The inertness differential: the mint now reverts with the suspect
+            # stubbed out, so the pull it made was on the executed path.
+            SimResult(calls=(ok(uint_ret(1000)), rv(), ok(uint_ret(1000)))),
+        ),
+        store=store,
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + principal_word + "00" * 32,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["supply_delta_sign"] == "mint"
+    assert "backing" not in eff.details
+    assert store.stored[-1]["backing_withheld"] == "prober_address_not_proven_inert"
+
+
+def test_the_same_call_publishes_dilution_once_the_prober_address_is_proven_inert():
+    """THE DISCRIMINATING SIBLING for the three above, and the reason they are not
+    just "withhold everything". Identical calldata, identical logs; the only
+    change is that the differential REPRODUCES the delta with reverting code at
+    the prober's address, so no pull was silently skipped and the empty inflow is
+    a statement about F. ``inflow_observed: false`` is then earned."""
+    zero = "0x" + "00" * 20
+    principal_word = PRINCIPAL[2:].rjust(64, "0")
+    store = RecordingStore()
+    eff = recipes.supply(
+        simulate=ScriptedSimulate(
+            _mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
+            # Same +500 delta with the suspect stubbed: provably independent.
+            SimResult(calls=(ok(uint_ret(1000)), ok(), ok(uint_ret(1500)))),
+        ),
+        store=store,
+        ctx=CTX,
+        token_address=TOKEN,
+        principal=PRINCIPAL,
+        mint_calldata="0x40c10f19" + principal_word + "00" * 32,
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["backing"]["inflow_observed"] is False
+    assert eff.details["backing"]["minted"] is True
+    assert "backing_withheld" not in store.stored[-1]

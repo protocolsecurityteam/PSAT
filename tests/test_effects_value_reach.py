@@ -151,3 +151,49 @@ def test_a_holder_that_moved_nothing_still_floors_and_stays_indeterminate():
     eff = _value_out([moved], holders=((HOLDER, 42.0),), floor=250.0)
     assert eff.concrete["observed_reach_value_usd"] == 250.0
     assert eff.concrete["reach_indeterminate"] is True
+
+
+def test_a_zero_balance_deployment_publishes_zero_reach_AND_says_it_is_unmeasured():
+    """W0-7 fixture 8 — the shape that makes ``observed_reach_value_usd: 0.0``
+    ambiguous, and the flag that resolves it.
+
+    The acting deployment holds nothing, so the floor IS zero. Published alone,
+    ``0.0`` is indistinguishable from "we measured downstream reach and it was
+    nothing" — a proven absence — when what happened is that nothing was measured
+    and the floor happened to be empty. Both keys must travel together, and this
+    is the only test in which the floor's own value is zero: every other one
+    floors to 250.0 or 100.0, so a consumer reading the number without the flag
+    still looked right.
+    """
+    moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved_nothing], holders=((HOLDER, 42.0),), floor=0.0)
+
+    assert eff.verdict == VERDICT_PROVEN
+    # The value_out itself is PROVEN — value left — while its reach is unknown.
+    # A row that pairs a proven outflow with a zero reach and no flag reads as
+    # "moves money, reaches nothing".
+    assert eff.concrete["observed_reach_value_usd"] == 0.0
+    assert eff.concrete["reach_indeterminate"] is True
+    assert "observed_reach_holders" not in eff.concrete
+
+
+def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
+    """The discriminating sibling: the SAME published number, earned. The holder
+    moved value, the sum of what moved is genuinely 0.0 USD, and no flag is set.
+    Without this row, "0.0 always carries the flag" would be indistinguishable
+    from "the flag is unconditional"."""
+    moved = SimResult(
+        calls=(
+            SimCallResult(
+                True,
+                "0x",
+                None,
+                (transfer_log(CONTRACT, CONTRACT, PAYEE, 5), transfer_log(CONTRACT, HOLDER, PAYEE, 7)),
+            ),
+        )
+    )
+    eff = _value_out([moved], holders=((HOLDER, 0.0),), floor=250.0)
+
+    assert eff.concrete["observed_reach_value_usd"] == 0.0
+    assert eff.concrete["observed_reach_holders"] == [HOLDER.lower()]
+    assert "reach_indeterminate" not in eff.concrete
