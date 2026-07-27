@@ -129,7 +129,15 @@ logger = logging.getLogger(__name__)
 # call from the destination witness, so a v10 row records a verdict reached
 # without knowing whether the destination it synthesised was reachable at all —
 # a different probe input, not merely a different label.
-EFFECT_CACHE_SCHEMA_VERSION = 11
+# v12: ``exec.arbitrary`` is no longer minted where the destination is PROVEN to
+# be a state variable. The claim asserts a caller-supplied target and
+# ``state_var`` is the proof that the caller does not supply one, so a v11 row on
+# such a function carries a claim whose witness states its own negation — and
+# the executor probe builds its inner call from that witness, so it synthesised a
+# call around a destination the caller cannot reach. ``not_determined`` still
+# mints (an open question is not a proof of absence), so this covers only the
+# rows where the two contradict.
+EFFECT_CACHE_SCHEMA_VERSION = 12
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

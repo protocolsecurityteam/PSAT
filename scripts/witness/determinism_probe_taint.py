@@ -144,6 +144,38 @@ def _run(fixture: str, contract: str) -> Mapping[str, Any]:
     return effects or {}
 
 
+def _suppressions(fixture: str, contract: str) -> dict[str, Any]:
+    """Taint fragments that resolved a PROVEN-ABSENT destination, so no claim was
+    minted (``exec_arbitrary`` drops the ``state_var`` case: the claim asserts a
+    caller-supplied target and ``state_var`` proves the caller supplies none).
+
+    Published beside ``binding`` because the suppression is now the ONLY place
+    that fact is observable, and a determinism gate that only diffed the minted
+    claims would stop watching it the moment the claim went away — a coverage
+    hole opened by a correctness fix is still a coverage hole."""
+    from slither import Slither
+
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers._taint import arbitrary_exec_taint
+    from services.static.contract_analysis_pipeline.effects import build_effects
+    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+    from tests.support.foundry_project import write_foundry_project
+
+    source = (FIXTURES / fixture).read_text()
+    with tempfile.TemporaryDirectory() as tmp:
+        project = write_foundry_project(Path(tmp), contract, source)
+        subject = _select_subject_contract(Slither(str(project)), contract)
+        if subject is None:
+            return {}
+        ctx = ClaimContext(subject, build_effects(subject), {})
+        out: dict[str, Any] = {}
+        for signature in ctx.function_signatures():
+            fragment = arbitrary_exec_taint(ctx, signature)
+            if fragment is not None and fragment["destination_kind"] == "state_var":
+                out[signature] = fragment
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--preamble", default="")
@@ -186,7 +218,12 @@ def main() -> int:
 
     print(
         json.dumps(
-            {"binding": binding, "unordered_control": control, "anchor_violation": violation},
+            {
+                "binding": binding,
+                "suppressed_state_var": _suppressions(*TARGET),
+                "unordered_control": control,
+                "anchor_violation": violation,
+            },
             sort_keys=True,
             indent=1,
         )

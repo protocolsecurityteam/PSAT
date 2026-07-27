@@ -119,9 +119,17 @@ def test_the_control_instrument_is_wired_and_disagrees_with_the_binding(matrix):
     assert matrix[0]["binding"]["compose(address,address,bytes,bytes)"]["destination_param"] == "to"
 
     # `rebalance` has no parameter destination at all — the call goes to a storage
-    # variable — so any read-set pick is wrong by construction.
+    # variable — so any read-set pick is wrong by construction. The pre-fix idiom
+    # still names one of the two argument parameters; the current pipeline mints
+    # NO claim here at all, because a proven state-variable destination is the
+    # proof that the claim's sentence ("forwards a caller-supplied target") is
+    # false. The proven-absent fact moved out of `binding` and into
+    # `suppressed_state_var`, which is where the gate now watches it.
     assert control["rebalance(address,address,bytes)"]["destination_param"] in {"fromAsset", "toAsset"}
-    assert matrix[0]["binding"]["rebalance(address,address,bytes)"]["destination_kind"] == "state_var"
+    assert "rebalance(address,address,bytes)" not in matrix[0]["binding"]
+    suppressed = matrix[0]["suppressed_state_var"]
+    assert suppressed["rebalance(address,address,bytes)"]["destination_kind"] == "state_var"
+    assert suppressed["rebalance(address,address,bytes)"]["destination_param"] is None
 
 
 def test_the_gate_still_carries_the_column_that_sees_the_allocation_class():

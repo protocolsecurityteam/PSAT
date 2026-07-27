@@ -263,15 +263,45 @@ def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
     assert witness["calldata_basis"] is None
 
 
-def test_a_state_variable_destination_names_no_parameter(tmp_path):
-    """The ``rebalance`` shape: the call goes to a storage-held swapper, two
-    address parameters ride along as arguments, and NO parameter is the
-    destination. ``state_var`` says that positively — the caller cannot choose
-    where this call goes — where the old pick published an argument's name."""
-    witness = _binding_witnesses(tmp_path)["rebalance"]
-    assert witness["destination_kind"] == "state_var"
-    assert witness["destination_param"] is None
-    assert witness["destination_basis"] is None
+def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
+    """INVERTED. This test previously asserted that the ``rebalance`` shape
+    carries an ``exec.arbitrary`` claim whose witness says ``state_var`` — i.e.
+    that the claim is minted beside the proof of its own negation. It is a pure
+    false positive on the real row it was modelled on (LRTSquaredAdmin.rebalance:
+    the call goes to the storage-held ``swapper``, the two address parameters
+    ride along as ARGUMENTS of a fixed-selector ``ISwapper.swap``, and no
+    arbitrary call exists anywhere in the function).
+
+    The claim's sentence is "forwards a caller-supplied target". ``state_var``
+    is the proof that the caller does not supply it, so the honest output is no
+    claim — and, through the legacy projection, no ``arbitrary_external_call``
+    label and no "Executes arbitrary external calldata" prose either.
+
+    The proven-absent DESTINATION classification is still exercised, and still
+    matters: it is what this suppression keys on. See
+    ``test_the_state_var_destination_state_is_still_produced`` below."""
+    assert "rebalance" not in _binding_witnesses(tmp_path)
+
+
+def test_the_state_var_destination_state_is_still_produced(tmp_path):
+    """R2 for the suppression above: the branch it fires on is reachable, and it
+    is reached by real compiler output rather than by construction."""
+    from slither import Slither
+
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers._taint import arbitrary_exec_taint
+    from services.static.contract_analysis_pipeline.effects import build_effects
+    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
+
+    source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
+    project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
+    subject = _select_subject_contract(Slither(str(project_dir)), "ExecBinding")
+    assert subject is not None
+    ctx = ClaimContext(subject, build_effects(subject), {})
+    taint = arbitrary_exec_taint(ctx, "rebalance(address,address,bytes)")
+    assert taint is not None, "the taint fragment is what the suppression reads"
+    assert taint["destination_kind"] == "state_var"
+    assert taint["destination_param"] is None
 
 
 def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
@@ -351,7 +381,11 @@ def test_every_binding_state_is_reachable_on_one_corpus(tmp_path):
     """R2: a state that cannot be produced is not a mitigation. All three
     destination states and all three calldata states are minted by this corpus."""
     witnesses = _binding_witnesses(tmp_path)
-    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "state_var", "not_determined"}
+    # ``state_var`` is absent from the CLAIMS because it now suppresses the claim
+    # (it is the proof that the caller does not choose the destination); the
+    # state itself is still produced and asserted in
+    # ``test_the_state_var_destination_state_is_still_produced``.
+    assert {w["destination_kind"] for w in witnesses.values()} == {"param", "not_determined"}
     assert {w["calldata_kind"] for w in witnesses.values()} == {"param", "call_argument", "not_determined"}
 
 
