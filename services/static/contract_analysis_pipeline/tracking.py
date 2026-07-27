@@ -453,6 +453,96 @@ def _collect_authority_state_vars(predicate_trees: Mapping[str, Any] | None) -> 
     return authority_vars
 
 
+# The caller is observable in the EVM only through these two builtins (and
+# through helpers that themselves read one of them, which the recursive Slither
+# accessors below follow). A function that reads neither cannot condition on who
+# called it, so its missing tree is a determined "no caller gate here" rather
+# than an unanswered question.
+_CALLER_IDENTITY_BUILTINS = frozenset({"msg.sender", "tx.origin"})
+
+
+def _recursive_read(fn: Any, recursive_attr: str, direct_attr: str) -> set[str]:
+    """Names read by ``fn`` and everything it calls, including its modifiers.
+
+    Modifiers are unioned explicitly: a guard written as ``onlyOwner`` lives in a
+    ``Modifier`` object, and reading only the function body would classify the
+    most common access-control shape in Solidity as caller-blind."""
+    names: set[str] = set()
+    for source in (fn, *(getattr(fn, "modifiers", None) or [])):
+        accessor = getattr(source, recursive_attr, None)
+        values: Any = None
+        if callable(accessor):
+            try:
+                values = accessor()
+            except Exception:  # pragma: no cover - Slither internal failure
+                values = None
+        if values is None:
+            values = getattr(source, direct_attr, None)
+        for variable in values or []:
+            name = getattr(variable, "name", None)
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
+def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, Any] | None) -> set[str] | None:
+    """State-variable names the caller-gate question was never ANSWERED for.
+
+    ``caller_gate`` is derived from the predicate leaves that were lowered.
+    ``call_target`` is then minted for every remaining external-contract slot —
+    i.e. from the *absence* of a lowered gate leaf, which is not the same fact as
+    "no gate exists". The builder only ever attempts a subset of the externally
+    reachable surface (``fallback`` / ``receive`` are skipped outright, and a
+    function whose gate could not be lowered yields no tree), so a gate living in
+    one of those functions is invisible and its address is published as a proven
+    pure callee.
+
+    A function is a blind spot when it is externally reachable, has no lowered
+    tree, and observes the caller. Every state variable it reads is then a name
+    this contract cannot answer the gate question for. Functions that read
+    neither ``msg.sender`` nor ``tx.origin`` are excluded on evidence, not on
+    convenience: with no caller in scope there is no caller gate to miss.
+
+    Returns ``None`` when the entry-point surface itself could not be enumerated
+    — the same not-determined answer, applied to every name.
+    """
+    entry_points = getattr(contract, "functions_entry_points", None)
+    if entry_points is None:
+        return None
+    trees = predicate_trees.get("trees") if isinstance(predicate_trees, dict) else None
+    lowered = set(trees) if isinstance(trees, dict) else set()
+
+    blind: set[str] = set()
+    by_full_name: dict[str, Any] = {}
+    for fn in entry_points:
+        full_name = getattr(fn, "full_name", None)
+        if isinstance(full_name, str):
+            by_full_name.setdefault(full_name, fn)
+        if getattr(fn, "visibility", None) not in ("external", "public"):
+            continue
+        if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
+            continue
+        if full_name in lowered:
+            continue
+        if not (
+            _recursive_read(fn, "all_solidity_variables_read", "solidity_variables_read") & _CALLER_IDENTITY_BUILTINS
+        ):
+            continue
+        blind |= _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+
+    # ``guard_extraction_uncertain`` names entry points whose caller-authority
+    # comparison the builder saw and could not lower. Those are treeless and
+    # caller-reading by construction, so the sweep above already covers them;
+    # unioning them explicitly keeps the dependency on that marker visible
+    # rather than incidental.
+    uncertain = predicate_trees.get("guard_extraction_uncertain") if isinstance(predicate_trees, dict) else None
+    for full_name in uncertain or []:
+        fn = by_full_name.get(full_name) if isinstance(full_name, str) else None
+        if fn is not None:
+            blind |= _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+    return blind
+
+
 def _collect_external_contract_state_vars_from_effects(
     effects: Mapping[str, Any] | None,
     state_var_names: set[str],
@@ -885,11 +975,25 @@ def build_controller_tracking(
         and bool(predicate_trees["trees"])
     )
 
+    # Artifact-level availability is not enough: ``caller_gate`` is read out of
+    # the trees that were LOWERED, so a gate living in a function with no tree
+    # is invisible to it and the name falls through to ``call_target``. That is
+    # the same "absence of a proven constraint" error one level down, and it is
+    # realised on this corpus — see ``_caller_gate_blind_spot_vars``.
+    gate_blind_spot_vars = (
+        _caller_gate_blind_spot_vars(contract, predicate_trees) if predicate_trees_available else None
+    )
+
     def _provenance_for(name: str) -> ControllerProvenance | None:
         if not predicate_trees_available:
             return None
         if name in caller_gate_vars:
+            # Proven present. A lowered leaf gates on it; a blind spot
+            # elsewhere cannot subtract from evidence already in hand.
             return "caller_gate"
+        if gate_blind_spot_vars is None or name in gate_blind_spot_vars:
+            # The gate question was never answered for this name.
+            return None
         if name in external_contract_vars_from_effects:
             return "call_target"
         return None

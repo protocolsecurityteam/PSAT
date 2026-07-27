@@ -138,6 +138,14 @@ logger = logging.getLogger(__name__)
 # so there is no pre-fix v11 row to protect. Serving concerns are covered by
 # the bump above; this note only keeps the version's stated reason matching the
 # code it ships with.
+# v11 (same version, third correction): the same absence one level down. The
+# correction above only asked whether the artifact had ANY trees; ``caller_gate``
+# is read out of the trees that were LOWERED, and the builder never lowers
+# ``receive`` / ``fallback`` and produces no tree for a gate it cannot model. A
+# gate living in one of those was invisible, so the address was still stamped
+# ``call_target`` and still dropped out of the closure — realised on 427 of the
+# 1,200 demoted edges locally. ``call_target`` is now withheld for any name an
+# unlowered, caller-observing entry point reads. Same no-bump reasoning.
 EFFECT_CACHE_SCHEMA_VERSION = 11
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
