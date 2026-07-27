@@ -60,9 +60,21 @@ class StorageKeyAbsent(StorageError):
     Because it is the third state, its consumers must treat it as one:
     ``routers.analyses`` answers 503 with ``X-PSAT-Artifact-State:
     not_determined`` (never a 404, which is byte-identical to an artifact the
-    job never produced) and ``workers.retry_policy`` classifies it transient
-    (only a re-run can turn it into a fact). Real rows: 21 keyless
-    ``contract_materializations`` blob-key cells in the working DB.
+    job never produced), ``workers.retry_policy`` classifies it transient (only
+    a re-run can turn it into a fact), and ``db.queue.get_all_artifacts`` puts
+    the row in its ``not_determined`` shortfall map rather than omitting it.
+
+    **Realisation, stated honestly.** Reachable by construction and covered by
+    tests, *not* yet realised on a real row: ``store_artifact`` with no payload
+    under an unconfigured backend writes ``storage_key`` NULL beside a NULL
+    inline body, and ``_artifact_row_to_value`` raises this for exactly that
+    row. In the working DB today that shape occurs 0/5770 times in
+    ``artifacts`` and 0/2261 times in ``source_files``. That is a lower bound
+    on prevalence — one protocol, largely one pipeline run — never a proof the
+    class is dead. It is specifically *not* the 21 keyless
+    ``contract_materializations`` blob-key cells: those are read through
+    ``db.contract_materializations._hydrate``, which returns the inline column
+    before any key is requested, so they never reach this class.
     """
 
 

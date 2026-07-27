@@ -298,9 +298,7 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
     assert (outage.status_code, outage.text) != (body_gone.status_code, body_gone.text)
 
 
-def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(
-    api_with, db_session, storage_bucket, monkeypatch
-):
+def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, db_session, storage_bucket):
     """R1/R2. ``StorageKeyAbsent`` is the class that names the third state, so
     the boundary must publish it as the third state.
 
@@ -320,9 +318,15 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(
     job = _completed_job(db_session, "keyless-third-state")
 
     # The real inline path: backend unconfigured, nothing to serialise.
-    monkeypatch.setattr(queue_mod, "get_storage_client", lambda: None)
-    store_artifact(db_session, job.id, "dependencies")
-    monkeypatch.undo()
+    # Scoped with ``patch.object`` rather than monkeypatch: pytest hands the
+    # same function-scoped monkeypatch to ``api_with`` and to the test, so a
+    # ``monkeypatch.undo()`` here also reverted the fixture's
+    # ``deps.SessionLocal`` override and pointed the TestClient at
+    # ``DATABASE_URL``. The request then 404'd at the job lookup, and the
+    # assertions below passed only in environments where DATABASE_URL and
+    # TEST_DATABASE_URL happen to coincide.
+    with patch.object(queue_mod, "get_storage_client", lambda: None):
+        store_artifact(db_session, job.id, "dependencies")
 
     row = db_session.execute(
         select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "dependencies")
@@ -1005,6 +1009,68 @@ def test_source_files_outage_is_not_the_same_answer_as_a_job_with_no_source(db_s
     # C — proven absent because the job has no source rows at all. Still the
     # empty dict: nothing fell short, so nothing is claimed to have.
     assert get_source_files(db_session, empty_job.id) == {}
+
+
+def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, storage_bucket):
+    """The third state through the two *collection* entry points.
+
+    ``_artifact_row_to_value`` raises ``StorageKeyAbsent`` for a row that
+    records no key and holds no inline body, and ``routers.analyses`` publishes
+    that as a 503. ``get_all_artifacts`` re-implemented the row resolution
+    inline with no ``else`` and dropped the same row from the returned dict —
+    no exception, no shortfall entry, one call away from
+    ``services/aggregations/analysis_detail``, which publishes exactly the two
+    maps this row was missing from. ``get_source_files`` had the identical gap.
+
+    The negative controls are in the same test on purpose: a job that stored
+    nothing must still be the empty dict, and a row that did read must not be
+    dragged into the shortfall.
+    """
+    from db.models import Artifact, SourceFile
+    from db.queue import create_job, get_all_artifacts, get_source_files, store_artifact, store_source_files
+    from db.storage import StorageContentNotDetermined
+    from workers.retry_policy import classify
+
+    job = create_job(db_session, {"address": "0xab", "name": "keyless-collection"})
+    store_artifact(db_session, job.id, "effects", data={"v": 1})
+    # Exactly what ``store_artifact`` writes when the backend is unconfigured
+    # and the stage passed no payload.
+    db_session.add(Artifact(job_id=job.id, name="dependencies", data=None, text_data=None, storage_key=None))
+    db_session.commit()
+
+    with pytest.raises(StorageContentNotDetermined) as arts:
+        get_all_artifacts(db_session, job.id)
+    assert set(arts.value.not_determined) == {"dependencies"}
+    assert arts.value.proven_absent == {}
+    # The readable row is still carried, so a page that may degrade renders it.
+    assert set(arts.value.values) == {"effects"}
+    assert classify(arts.value) == "transient"
+
+    src_job = create_job(db_session, {"address": "0xcd", "name": "keyless-source"})
+    store_source_files(db_session, src_job.id, {"src/A.sol": "contract A {}"})
+    db_session.add(SourceFile(job_id=src_job.id, path="src/B.sol", content=None, storage_key=None))
+    db_session.commit()
+
+    with pytest.raises(StorageContentNotDetermined) as srcs:
+        get_source_files(db_session, src_job.id)
+    assert set(srcs.value.not_determined) == {"src/B.sol"}
+    assert srcs.value.proven_absent == {}
+    assert set(srcs.value.values) == {"src/A.sol"}
+    assert classify(srcs.value) == "transient"
+
+    # Negative control — a keyless row with no storage sibling is still the only
+    # thing short, and a job with no rows at all stays a silent empty dict.
+    bare = create_job(db_session, {"address": "0xef", "name": "keyless-only"})
+    db_session.add(SourceFile(job_id=bare.id, path="src/C.sol", content=None, storage_key=None))
+    db_session.commit()
+    with pytest.raises(StorageContentNotDetermined) as bare_exc:
+        get_source_files(db_session, bare.id)
+    assert set(bare_exc.value.not_determined) == {"src/C.sol"}
+    assert bare_exc.value.values == {}
+
+    empty = create_job(db_session, {"address": "0x00", "name": "keyless-none"})
+    assert get_all_artifacts(db_session, empty.id) == {}
+    assert get_source_files(db_session, empty.id) == {}
 
 
 def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_bucket):

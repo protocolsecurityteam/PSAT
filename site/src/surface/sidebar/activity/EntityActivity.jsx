@@ -41,7 +41,13 @@ export function EntityActivity({
 
   // Per-contract events (all kinds), captured from enrollment forward.
   useEffect(() => {
-    if (!address) { setEvents([]); return undefined; }
+    // Dropped before the fetch, not after it resolves: this component is reused
+    // across selections, so between the new address arriving and its events
+    // landing the strip and timeline would otherwise render the *previous*
+    // contract's events under the new one — a positive claim about the wrong
+    // subject, which is worse than the empty rail it replaces.
+    setEvents([]);
+    if (!address) { return undefined; }
     let cancelled = false;
     const load = async () => {
       try {
@@ -61,11 +67,16 @@ export function EntityActivity({
   // job_id across selections. Only upgrade_history is needed — the timeline
   // renders impl addresses, not resolved names, so dependencies is skipped.
   useEffect(() => {
-    // Cleared before either early return: a cached history is proven-present
-    // and a non-proxy has no history to hedge, so both paths must drop a
-    // previous selection's marker rather than inherit it.
+    // Both pieces of state are earned by one selection and must not survive it.
+    // The marker would hedge an entity whose history read fine; the history
+    // would attribute one proxy's proven upgrade timeline to another — and the
+    // fall-through in the `proxy` memo below (`Object.values(...)[0]`) makes
+    // that happen even when the new address is not a key in the stale payload.
+    // Cleared here rather than per-branch so no path can be added that skips it;
+    // React batches these with whatever the branches set, so no extra render.
     setUnknownForJob(null);
-    if (!isProxy || !machine?.job_id) { setHistory(null); return undefined; }
+    setHistory(null);
+    if (!isProxy || !machine?.job_id) { return undefined; }
     const cached = cache && cache[machine.job_id];
     if (cached?.history) { setHistory(cached.history); return undefined; }
     let cancelled = false;

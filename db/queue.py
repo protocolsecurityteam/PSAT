@@ -1285,6 +1285,14 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     has no effective_permissions"* — the substitution of an unanswered question
     for a proven negative.
 
+    That includes the keyless row — a row with no ``storage_key`` and no inline
+    body, which ``_artifact_row_to_value`` raises ``StorageKeyAbsent`` for on
+    the single-row path. It is the *third* state (nothing was ever addressed,
+    so whether a body exists is not determined), and this function used to drop
+    it from the returned dict with no exception and no shortfall entry — a
+    silence one call away from ``/api/analyses/{id}``, which publishes exactly
+    these two maps.
+
     Which exception says *why*, and the type is load-bearing because it is all
     ``workers.retry_policy`` gets to see: ``StorageContentAbsent`` (every
     shortfall proven absent at every candidate — determined, terminal) or
@@ -1297,6 +1305,8 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     artifacts = session.execute(stmt).scalars().all()
     result: dict[str, Any] = {}
     storage_lookups: dict[str, tuple[str, str | None]] = {}
+    proven_absent: dict[str, str] = {}
+    not_determined: dict[str, str] = {}
     for artifact in artifacts:
         if artifact.storage_key:
             storage_lookups[artifact.name] = (artifact.storage_key, artifact.content_type)
@@ -1304,14 +1314,20 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
             result[artifact.name] = artifact.data
         elif artifact.text_data is not None:
             result[artifact.name] = artifact.text_data
+        else:
+            # No key and no inline body: the same row shape ``_artifact_row_to_value``
+            # raises ``StorageKeyAbsent`` for. Not determined, never absent —
+            # dropping it here made a row that exists and a name the job never
+            # emitted the same answer.
+            not_determined[artifact.name] = (
+                "row records no storage_key and holds no inline body — whether a body exists is not determined"
+            )
 
     if storage_lookups:
         client = get_storage_client()
         if client is None:
             raise RuntimeError(f"job {job_id} has artifacts with storage_key but storage is not configured")
         reads = client.get_many_results([key for key, _ in storage_lookups.values()])
-        proven_absent: dict[str, str] = {}
-        not_determined: dict[str, str] = {}
         for name, (key, content_type) in storage_lookups.items():
             read = reads.get(key)
             if read is None or not read.read:
@@ -1328,25 +1344,25 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
             value = deserialize_artifact(read.body, content_type)
             if value is not None:
                 result[name] = value
-        short = {**proven_absent, **not_determined}
-        if short:
-            logger.error(
-                "get_all_artifacts: job %s has %d/%d storage-backed artifact bodies unread "
-                "(%d proven absent, %d not determined): %s",
-                job_id,
-                len(short),
-                len(storage_lookups),
-                len(proven_absent),
-                len(not_determined),
-                ", ".join(sorted(short)),
-            )
-            raise content_shortfall(
-                f"job {job_id}: {len(short)}/{len(storage_lookups)} artifact bodies could not be read "
-                f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
-                values=result,
-                proven_absent=proven_absent,
-                not_determined=not_determined,
-            )
+
+    short = {**proven_absent, **not_determined}
+    if short:
+        logger.error(
+            "get_all_artifacts: job %s has %d/%d artifact bodies unread (%d proven absent, %d not determined): %s",
+            job_id,
+            len(short),
+            len(artifacts),
+            len(proven_absent),
+            len(not_determined),
+            ", ".join(sorted(short)),
+        )
+        raise content_shortfall(
+            f"job {job_id}: {len(short)}/{len(artifacts)} artifact bodies could not be read "
+            f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
+            values=result,
+            proven_absent=proven_absent,
+            not_determined=not_determined,
+        )
 
     return result
 
@@ -1434,6 +1450,10 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     transient), each carrying ``values`` (the files that did read) plus the
     ``proven_absent`` / ``not_determined`` maps of path → why.
 
+    A row recording neither a key nor inline content is counted as
+    ``not_determined`` for the same reason: the row is evidence the path
+    belongs to the contract, and nothing was ever addressed for it.
+
     Silently returning the short dict made "this contract has no source" and
     "every body failed to load" the same answer, and the consumers act on it:
     ``workers.static_worker`` compiles whatever it is handed, so a partial read
@@ -1446,6 +1466,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     client = get_storage_client()
 
     storage_rows: list[tuple[str, str]] = []
+    keyless: dict[str, str] = {}
     for row in rows:
         if row.storage_key:
             if client is None:
@@ -1455,8 +1476,30 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
             storage_rows.append((row.path, row.storage_key))
         elif row.content is not None:
             out[row.path] = row.content
+        else:
+            # Neither a key nor a body: the row exists, so this path is part of
+            # the contract, but nothing was ever addressed for it. Not
+            # determined. Dropping it handed the static worker a source tree
+            # that silently omits a file — the same shape as the storage
+            # shortfall below, one branch earlier.
+            keyless[row.path] = "row records no storage_key and holds no inline content — content is not determined"
 
     if not storage_rows:
+        if keyless:
+            logger.error(
+                "get_source_files: job %s read %d/%d source files; %d rows record neither key nor content",
+                job_id,
+                len(out),
+                len(rows),
+                len(keyless),
+            )
+            raise content_shortfall(
+                f"job {job_id}: {len(keyless)}/{len(rows)} source bodies could not be read "
+                f"(0 proven absent, {len(keyless)} not determined)",
+                values=out,
+                proven_absent=None,
+                not_determined=keyless,
+            )
         return out
 
     # Fan out the storage GETs the same way ``store_source_files`` fans out
@@ -1483,7 +1526,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
 
     fetch_results = parallel_map(_fetch, storage_rows)
     proven_absent: dict[str, str] = {}
-    not_determined: dict[str, str] = {}
+    not_determined: dict[str, str] = dict(keyless)
     for item, outcome in fetch_results:
         if isinstance(outcome, BaseException):
             raise outcome
@@ -1507,7 +1550,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
             len(not_determined),
         )
         raise content_shortfall(
-            f"job {job_id}: {len(short)}/{len(storage_rows)} source bodies could not be read "
+            f"job {job_id}: {len(short)}/{len(rows)} source bodies could not be read "
             f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
             values=out,
             proven_absent=proven_absent,

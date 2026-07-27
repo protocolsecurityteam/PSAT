@@ -371,3 +371,50 @@ describe("ActivityPanel — upgrade history the server could not determine", () 
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
 });
+
+// The marker is the hedge; these two are the positive claims held in the same
+// reused component. Both arrive at the next selection through a path where the
+// new answer is still in flight — the case the two cache-hit / non-proxy tests
+// above cannot reach, because both of those paths set the state synchronously.
+describe("ActivityPanel — state that must not outlive its selection", () => {
+  it("does not render the previous proxy's upgrade history while the new one is in flight", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT, POOL_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/analyses\/job1\/artifact\/upgrade_history$/.test(url.pathname), () => HISTORY);
+    // job2 never resolves: nothing is known about Pool yet.
+    setFetchHandler(
+      (url) => /\/analyses\/job2\/artifact\/upgrade_history$/.test(url.pathname),
+      () => new Promise(() => {}),
+    );
+
+    const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
+
+    rerender(panelElement({ selectedMachine: POOL_MACHINE }));
+    expect(await screen.findByText("Pool")).toBeInTheDocument();
+    // LiquidityPool's proven timeline, attributed to Pool. The `proxy` memo
+    // falls back to Object.values(history.proxies)[0], so the stale payload
+    // renders even though Pool's address is not one of its keys.
+    const entity = container.querySelector(".ps-activity-entity");
+    expect(/First deployment/i.test(entity.textContent)).toBe(false);
+    expect(entity.textContent).not.toContain(I1.slice(0, 8));
+  });
+
+  it("does not render the previous contract's events while the new one's are in flight", async () => {
+    mockActivity({ contracts: [PROXY_CONTRACT, POOL_CONTRACT] });
+    setFetchHandler(
+      (url) => /\/api\/monitored-events$/.test(url.pathname),
+      (url) =>
+        url.searchParams.get("address") === PROXY
+          ? [evRow("erole", "role_granted", 260, { account: I1, sender: I2 })]
+          : new Promise(() => {}),
+    );
+
+    const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/role granted/i)).toBeInTheDocument();
+
+    rerender(panelElement({ selectedMachine: POOL_MACHINE }));
+    expect(await screen.findByText("Pool")).toBeInTheDocument();
+    const entity = container.querySelector(".ps-activity-entity");
+    expect(/role granted/i.test(entity.textContent)).toBe(false);
+  });
+});
