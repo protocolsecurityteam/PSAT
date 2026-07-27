@@ -78,6 +78,18 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sink_ids = _body_external_call_sink_ids(ctx, function)
 
     if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
+        # execTransaction's target is committed under the owners' threshold
+        # signatures — the standard is the constraint proof, and the helper
+        # publishes it for the flow witness too. The module-exec entries earn
+        # the claim from the same gate, but their guard (``modules[msg.sender]``)
+        # is an allowlist on the CALLER and commits nothing about the
+        # destination — the helper answers ``None`` there and the verdict comes
+        # from the mandatory-gate walk instead, asked about the parameter the
+        # published ABI fixes as the destination: ``to`` at index 0 on every
+        # Safe exec entry.
+        constraint = _facts.standard_destination_commitment(ctx, function)
+        if constraint is None:
+            constraint = _facts.param_constraint(ctx, function, 0, mode="external_call")
         return ClaimEvidence(
             tier="standard_exact",
             witness={
@@ -85,11 +97,7 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
                 "standard": "safe",
                 "selector": selector,
                 "sink_ids": sink_ids,
-                # The standard itself is the constraint proof: execTransaction's
-                # target is committed under the owners' threshold signatures.
-                # Published from the same helper the flow witness reads, so the
-                # two verdicts on one function cannot contradict each other.
-                "destination_constraint": _facts.standard_destination_commitment(ctx, function),
+                "destination_constraint": constraint,
             },
         )
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):

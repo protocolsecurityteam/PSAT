@@ -771,3 +771,144 @@ def test_a_timelock_shaped_tree_without_the_standard_gate_is_not_committed():
     assert _facts.standard_destination_commitment(ctx, execute) is None
     # The mapping-element fold (key dropped) blocks the proof for every index.
     assert _facts.param_constraint(ctx, execute, 0) == {"state": "not_determined"}
+
+
+def _safe_ctx() -> ClaimContext:
+    """A Safe-gate contract (getThreshold + getOwners + execTransaction) with
+    both exec shapes. ``execTransaction``'s tree carries the opaque signature
+    check the real contract routes through ``checkSignatures`` — the walk alone
+    answers ``not_determined``; the standard's shape answers for it. The
+    module-exec tree is the published gate exactly: ``modules[msg.sender] !=
+    address(0)``, a membership whose only key is the CALLER."""
+    exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    module_exec = "execTransactionFromModule(address,uint256,bytes,uint8)"
+    module_exec_rd = "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)"
+    module_params = ["to", "value", "data", "operation"]
+    module_record = {
+        "parameter_names": list(module_params),
+        "sinks": [{"kind": "external_call", "target": "to.call", "selector": None, "origin": "body"}],
+        "value_flows": [],
+    }
+    functions = {
+        exec_tx: {
+            "abi_signature": exec_tx,
+            "parameter_names": [
+                "to",
+                "value",
+                "data",
+                "operation",
+                "safeTxGas",
+                "baseGas",
+                "gasPrice",
+                "gasToken",
+                "refundReceiver",
+                "signatures",
+            ],
+            "sinks": [{"kind": "external_call", "target": "to.call", "selector": None, "origin": "body"}],
+            "value_flows": [],
+        },
+        module_exec: {"abi_signature": module_exec, **module_record},
+        module_exec_rd: {"abi_signature": module_exec_rd, **module_record},
+        "getThreshold()": {"abi_signature": "getThreshold()"},
+        "getOwners()": {"abi_signature": "getOwners()"},
+        # The mapping's declared type is visible the way it is on a real
+        # artifact: the module-management sibling writes it.
+        "enableModule(address)": {
+            "abi_signature": "enableModule(address)",
+            "parameter_names": ["module"],
+            "state_writes": [{"var": "modules", "declared_type": "mapping(address => address)", "origin": "body"}],
+        },
+    }
+    signed_tree = _leaf(
+        kind="unsupported",
+        unsupported_reason="opaque_try_catch",
+        expression="checkSignatures(txHash,signatures)",
+    )
+    module_tree = _leaf(
+        kind="membership",
+        operator="truthy",
+        operands=[{"source": "state_variable", "state_variable_name": "modules"}],
+        set_descriptor={
+            "kind": "mapping_membership",
+            "storage_var": "modules",
+            "key_sources": [{"source": "msg_sender"}],
+        },
+        expression="require(bool,string)(modules[msg.sender] != address(0),not module)",
+    )
+    trees = {exec_tx: signed_tree, module_exec: module_tree, module_exec_rd: module_tree}
+    return ClaimContext(None, {"contract_name": "SafeWallet", "functions": functions}, {"trees": trees})
+
+
+def test_the_safe_standard_gate_commits_only_the_signed_exec_entry():
+    """Round-3 R1: ``execTransaction`` is the entry whose parameters ride under
+    the owners' threshold signatures — every one of its ten indices carries the
+    standard commitment. The module-exec entries share ``SAFE_EXEC_SELECTORS``
+    and the contract gate, but their guard is ``modules[msg.sender]`` — an
+    allowlist on the CALLER that commits nothing about any parameter — so the
+    standard helper answers ``None`` for them, never a fabricated
+    ``signature_witness``."""
+    ctx = _safe_ctx()
+    exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    for index in range(10):
+        verdict = _facts.param_constraint(ctx, exec_tx, index, mode="external_call")
+        assert verdict["state"] == "constrained"
+        assert verdict["guard"] == "signature_witness"
+        assert verdict["pins"] is True
+        assert verdict["binding"] == "standard_gate"
+    for module_fn in (
+        "execTransactionFromModule(address,uint256,bytes,uint8)",
+        "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)",
+    ):
+        assert _facts.standard_destination_commitment(ctx, module_fn) is None
+
+
+def test_a_module_exec_gate_pins_the_caller_not_the_destination():
+    """The published module gate is a complete projection — a membership whose
+    every key is ``msg.sender`` — and it references no ABI parameter, so the
+    walk PROVES the destination free: ``unconstrained_proven``, the verdict that
+    keeps the caller-chosen hazard standing downstream. What it must never be
+    is ``pins: True``: no signature commits ``to``, and an enabled module calls
+    any target with any calldata."""
+    ctx = _safe_ctx()
+    for module_fn in (
+        "execTransactionFromModule(address,uint256,bytes,uint8)",
+        "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)",
+    ):
+        for index in range(4):
+            verdict = _facts.param_constraint(ctx, module_fn, index, mode="external_call")
+            assert verdict == {"state": "unconstrained_proven"}, (module_fn, index)
+
+
+def test_the_signed_entry_alone_would_be_opaque_without_the_standard():
+    """The signed tree's ``checkSignatures`` fold is opaque; strip the Safe gate
+    siblings (keep only the exec entries) and the pre-pass cannot fire — the
+    walk answers ``not_determined``, never a commitment from a lookalike
+    selector."""
+    exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    functions = {
+        exec_tx: {
+            "abi_signature": exec_tx,
+            "parameter_names": [
+                "to",
+                "value",
+                "data",
+                "operation",
+                "safeTxGas",
+                "baseGas",
+                "gasPrice",
+                "gasToken",
+                "refundReceiver",
+                "signatures",
+            ],
+            "sinks": [],
+            "value_flows": [],
+        },
+    }
+    tree = _leaf(
+        kind="unsupported",
+        unsupported_reason="opaque_try_catch",
+        expression="checkSignatures(txHash,signatures)",
+    )
+    ctx = ClaimContext(None, {"contract_name": "NotASafe", "functions": functions}, {"trees": {exec_tx: tree}})
+    assert _facts.standard_destination_commitment(ctx, exec_tx) is None
+    assert _facts.param_constraint(ctx, exec_tx, 0, mode="external_call") == {"state": "not_determined"}

@@ -51,20 +51,40 @@ OWNED_CLAIM_IDS = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
-    """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
+def _pipeline_claim_records(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, list[dict]]:
+    """Run the full static pipeline and return ``{signature: [claim dicts]}`` —
+    the full rows, so a test can hold the WITNESS to account, not only the
+    (claim_id, tier) pair a false verdict can hide behind."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / fixture_file).read_text()
     project_dir = write_foundry_project(tmp_path, contract_name, source)
     _analysis, _trees, effects = collect_contract_analysis_with_artifacts(project_dir)
     assert effects is not None and "functions" in effects
-    out: dict[str, set[tuple[str, str]]] = {}
+    out: dict[str, list[dict]] = {}
     for signature, record in effects["functions"].items():
         # The claims phase always attaches the field, even when empty.
         assert "claims" in record, signature
-        out[signature] = {(c["claim_id"], c["tier"]) for c in record["claims"]}
+        out[signature] = list(record["claims"])
     return out
+
+
+def _claims_view(records: dict[str, list[dict]]) -> dict[str, set[tuple[str, str]]]:
+    return {sig: {(c["claim_id"], c["tier"]) for c in rows} for sig, rows in records.items()}
+
+
+def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
+    """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
+    return _claims_view(_pipeline_claim_records(tmp_path, fixture_file, contract_name))
+
+
+def _claim_witness(records: dict[str, list[dict]], name: str, claim_id: str) -> dict:
+    """The single ``claim_id`` witness on the single function named ``name``."""
+    matches = [sig for sig in records if sig.split("(", 1)[0] == name]
+    assert len(matches) == 1, f"function {name!r}: {matches}"
+    rows = [c for c in records[matches[0]] if c["claim_id"] == claim_id]
+    assert len(rows) == 1, f"{name!r} {claim_id!r}: {rows}"
+    return rows[0].get("witness") or {}
 
 
 def _find(claims: dict[str, set[tuple[str, str]]], name: str) -> set[tuple[str, str]]:
@@ -107,7 +127,8 @@ def test_non_proxy_upgradeto_is_near_miss_negative(tmp_path):
 def test_safe_family_positive(tmp_path):
     """SafeL2-class: signer/module/guard control claims + exec.arbitrary on the
     execute entries, all under the getThreshold+getOwners+execTransaction gate."""
-    claims = _pipeline_claims(tmp_path, "safe_wallet.sol", "SafeWallet")
+    records = _pipeline_claim_records(tmp_path, "safe_wallet.sol", "SafeWallet")
+    claims = _claims_view(records)
     signer = ("safe.signer_mgmt", "standard_exact")
     for fn in ("addOwnerWithThreshold", "removeOwner", "swapOwner", "changeThreshold"):
         assert _find(claims, fn) == {signer}, fn
@@ -123,6 +144,25 @@ def test_safe_family_positive(tmp_path):
     assert _find(claims, "getOwners") == set()
     # 4 signer + 2 module + 1 guard + 3 exec = 10 owned claims across the Safe family.
     assert _owned_total(claims) == 10
+    # Round-3 R1: the WITNESS, not only the (claim_id, tier) pair.
+    # execTransaction's destination rides under the owners' threshold
+    # signatures — the standard commitment, published identically on the exec
+    # and flow witnesses so the two can never contradict on one function.
+    signed = {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
+    assert _claim_witness(records, "execTransaction", "exec.arbitrary")["destination_constraint"] == signed
+    exec_flow = _claim_witness(records, "execTransaction", "flow.out")
+    assert exec_flow["flows"][0]["target_constraint"] == signed
+    # The module-exec entries share the selectors and the gate, but their guard
+    # (`modules[msg.sender]`) is an allowlist on the CALLER: no signature
+    # commits `to`, an enabled module calls any target with any calldata. The
+    # tree walk sees exactly that caller-keyed gate and PROVES the destination
+    # free — the verdict that keeps the caller-chosen hazard standing
+    # downstream, and above all never `pins: True`.
+    free = {"state": "unconstrained_proven"}
+    for fn in ("execTransactionFromModule", "execTransactionFromModuleReturnData"):
+        assert _claim_witness(records, fn, "exec.arbitrary")["destination_constraint"] == free, fn
+        module_flow = _claim_witness(records, fn, "flow.out")
+        assert module_flow["flows"][0]["target_constraint"] == free, fn
 
 
 def test_oz_timelock_family_positive(tmp_path):

@@ -153,11 +153,18 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 #
 # Standard-gate pre-pass: on a proven OZ TimelockController execute entry every
 # ABI parameter is re-hashed into the operation id a mandatory gate requires
-# scheduled, and on a proven Safe exec entry every parameter rides under the
-# owners' signature threshold. Those commitments come from the STANDARD's shape
-# (the same gates ``exec.arbitrary`` uses), not from the tree walk — and routing
-# them through here means the flow witness and the exec witness publish the SAME
-# verdict for the same parameter instead of contradicting each other.
+# scheduled, and on a proven Safe ``execTransaction`` every parameter rides
+# under the owners' signature threshold. Those commitments come from the
+# STANDARD's shape (the same gates ``exec.arbitrary`` uses), not from the tree
+# walk — and routing them through here means the flow witness and the exec
+# witness publish the SAME verdict for the same parameter instead of
+# contradicting each other. Safe's module-exec entries
+# (``execTransactionFromModule*``) are deliberately NOT in the pre-pass: their
+# standard gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
+# CALLER. No signature commits ``to``; an enabled module calls any target with
+# any calldata, so the standard commits nothing about any parameter and the
+# ordinary tree walk answers instead (review round 3, violation R1: publishing
+# ``pins: True`` there was a proof fabricated from the standard's shape).
 #
 # The tightened rule (handoff §5 Leg C): a mandatory leaf constrains a
 # parameter only if it is NOT the function's own effect sink. The sink's own
@@ -359,17 +366,25 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
     OZ TimelockController ``execute``/``executeBatch`` re-derive
     ``hashOperation(target, value, payload, predecessor, salt)`` and require the
     operation scheduled-and-ready — a hash commitment over the full parameter
-    list. Safe ``execTransaction``/module-exec check the owners' signatures over
-    the transaction — a signature witness over the full parameter list. These
-    are the same contract-shape gates ``exec.arbitrary`` proves its standard
-    tier with; publishing the flow verdict from the same source keeps the two
-    witnesses on one function from ever contradicting each other."""
-    from ._gates import SAFE_EXEC_SELECTORS, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
+    list. Safe ``execTransaction`` checks the owners' signatures over the
+    transaction — a signature witness over the full parameter list. These are
+    the same contract-shape gates ``exec.arbitrary`` proves its standard tier
+    with; publishing the flow verdict from the same source keeps the two
+    witnesses on one function from ever contradicting each other.
+
+    Safe's module-exec entries (``execTransactionFromModule`` /
+    ``...ReturnData``) get NO commitment here, although they sit in
+    ``SAFE_EXEC_SELECTORS`` and earn ``exec.arbitrary`` at the standard tier:
+    their gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
+    CALLER that says nothing about the destination. An enabled module calls any
+    target with any calldata; the destination answer must come from the
+    mandatory-gate tree walk, which sees exactly that caller-keyed gate."""
+    from ._gates import SAFE_EXEC_TRANSACTION, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
 
     selector = ctx.canonical_selector(function)
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
         return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
-    if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
+    if selector == SAFE_EXEC_TRANSACTION and is_safe_gate(ctx):
         return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     return None
 
