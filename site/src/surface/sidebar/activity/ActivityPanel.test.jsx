@@ -355,6 +355,65 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
 
+  // The marker is not the only thing on the panel that speaks about the
+  // pre-enrollment period. The timeline's own empty state sits directly under
+  // it and used to render "No activity before the line." on every one of the
+  // shapes above — an unread history yields history=null → proxy=null →
+  // below=[], which is the same input as a proven-empty one. The marker said
+  // unknown and the line under it said absent, in bold. These three pin the
+  // three distinguishable answers apart at the level of the prose, not just
+  // the marker.
+  const ABSENCE_PROSE = "No activity before the line.";
+
+  it("does not claim absence below the line when the history was never read", async () => {
+    upgradeHistoryFails(status(500, "Internal Server Error"));
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
+  });
+
+  it("keeps the absence prose for a 404 — the proven negative earns it", async () => {
+    // NEGATIVE CONTROL for the test above: suppressing the prose whenever
+    // `below` is empty would erase the one case where absence is the answer,
+    // and the 500 test alone cannot see that.
+    upgradeHistoryFails(status(404, "Artifact not found"));
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(ABSENCE_PROSE)).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  it("does not claim absence in the no-boundary empty state either", async () => {
+    // The other empty state in Timeline.jsx — reached when there is no
+    // enrollment_block at all, so there is no line to be before. Same shape:
+    // "No activity recorded yet." over a history nobody read.
+    const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
+    mockActivity({ contracts: [legacy], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), status(500, "boom"));
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText("No activity recorded yet.")).toBeNull();
+  });
+
+  it("keeps the no-boundary empty state for a 404", async () => {
+    // NEGATIVE CONTROL for the test above.
+    const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
+    mockActivity({ contracts: [legacy], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), status(404, "nope"));
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText("No activity recorded yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  it("renders the backfilled upgrades and neither line when the history reads", async () => {
+    // Confirms the prose is the absence-claim channel rather than chrome: a
+    // real history replaces it with rows.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
+    expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
   // The pair above unmounts between arms, so it cannot see the marker outliving
   // the selection that earned it. ActivityPanel renders EntityActivity with no
   // key, so React reuses the instance across selections: a marker held as a bare

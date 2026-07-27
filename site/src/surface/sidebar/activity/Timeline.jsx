@@ -61,14 +61,26 @@ function EventRow({ row, chain, now }) {
 // (omitted entirely when boundaryBlock is null — a legacy row with no
 // enrollment_block), then `below` upgrade-only backfill rows or the non-proxy
 // empty state.
-export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, chain, now }) {
+//
+// `historyUnknown` says the upgrade history behind `below` never produced an
+// answer. It changes nothing that is drawn from rows we have; it only governs
+// the empty states, because an empty `below` means two different things — the
+// server said there are no pre-enrollment upgrades, or nobody could ask — and
+// only the first may be written as absence.
+export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, chain, now, historyUnknown = false }) {
   const dateLabel = boundaryDate
     ? new Date(boundaryDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
     : null;
   const hasBoundary = boundaryBlock != null;
 
   if (!above.length && !below.length && !hasBoundary) {
-    return <div className="ps-activity-empty">No activity recorded yet.</div>;
+    return (
+      <div className="ps-activity-empty">
+        {historyUnknown
+          ? "Nothing to show — the upgrade history for this proxy could not be read."
+          : "No activity recorded yet."}
+      </div>
+    );
   }
 
   return (
@@ -90,6 +102,11 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
 
       {hasBoundary && below.length ? (
         below.map((row) => <EventRow key={row.key} row={row} chain={chain} now={now} />)
+      ) : hasBoundary && historyUnknown ? (
+        <div className="ps-activity-empty">
+          Nothing back-filled below the line — the upgrade history for this proxy
+          could not be read.
+        </div>
       ) : hasBoundary ? (
         <div className="ps-activity-empty">
           <b>No activity before the line.</b>

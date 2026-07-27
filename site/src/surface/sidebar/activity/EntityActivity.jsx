@@ -163,6 +163,10 @@ export function EntityActivity({
         isProxy={isProxy}
         chain={chain}
         now={now}
+        // The marker above and the timeline's empty states describe the same
+        // period, so they have to be driven by the same fact — otherwise the
+        // panel hedges in one line and asserts absence in the next.
+        historyUnknown={historyUnknown}
       />
     </section>
   );
