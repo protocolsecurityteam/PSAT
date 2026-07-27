@@ -385,3 +385,131 @@ def test_registry_event_indexed_picks_when_no_specialized_match():
     registry.register(EventIndexedAdapter)
     picked = registry.pick(descriptor, EvaluationContext(chain_id=1))
     assert picked is EventIndexedAdapter
+
+
+# ---------------------------------------------------------------------------
+# Same-topic0 add/remove conflict (G2 HIT 1): direction is a property of the
+# EVENT PAYLOAD, never of hint-list order.
+# ---------------------------------------------------------------------------
+
+_CONFLICT_TOPIC = "0xf93f9a76c1bf3444d22400a00cb9fe990e6abe9dbb333fda48859cfee864543d"
+
+
+def _bool_word(value: bool) -> str:
+    return "0x" + ("1" if value else "0").rjust(64, "0")
+
+
+def _conflict_rows():
+    """WhitelistUpdated(address indexed user, bool value) history:
+    ADDR_B set true; ADDR_C set true then false."""
+    return [
+        SimpleNamespace(
+            topic0=_CONFLICT_TOPIC,
+            topics=[_CONFLICT_TOPIC, _address_topic(ADDR_B)],
+            data_words=[_bool_word(True)],
+        ),
+        SimpleNamespace(
+            topic0=_CONFLICT_TOPIC,
+            topics=[_CONFLICT_TOPIC, _address_topic(ADDR_C)],
+            data_words=[_bool_word(True)],
+        ),
+        SimpleNamespace(
+            topic0=_CONFLICT_TOPIC,
+            topics=[_CONFLICT_TOPIC, _address_topic(ADDR_C)],
+            data_words=[_bool_word(False)],
+        ),
+    ]
+
+
+def _conflict_hints(value_position):
+    base = {
+        "topic0": _CONFLICT_TOPIC,
+        "topics_to_keys": {1: 0},
+        "data_to_keys": {},
+        "indexed_positions": [0],
+        "value_position": value_position,
+    }
+    return [dict(base, direction="add"), dict(base, direction="remove")]
+
+
+def _run_conflict_fold(hints):
+    repo = PostgresEventLogRepo(cast(Any, FakeSession(_conflict_rows())))
+    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)  # type: ignore[method-assign]
+    return repo.fold_event_history(
+        chain_id=1,
+        event_address=ADDR_A,
+        event_hints=hints,
+        key_sources=[{"source": "msg_sender"}],
+        block=100,
+    )
+
+
+def test_same_topic_conflict_folds_from_payload_not_hint_order():
+    result = _run_conflict_fold(_conflict_hints(1))
+    assert result.confidence == "enumerable"
+    assert result.members == [ADDR_B.lower()]
+
+
+def test_same_topic_conflict_is_hint_order_insensitive():
+    forward = _run_conflict_fold(_conflict_hints(1))
+    reversed_ = _run_conflict_fold(list(reversed(_conflict_hints(1))))
+    assert forward.members == reversed_.members == [ADDR_B.lower()]
+    assert forward.confidence == reversed_.confidence == "enumerable"
+
+
+def test_same_topic_conflict_without_value_position_fails_closed():
+    result = _run_conflict_fold(_conflict_hints(None))
+    assert result.confidence == "partial"
+    assert result.partial_reason == "ambiguous_event_direction"
+    assert result.members == []
+
+
+def test_same_topic_conflict_unreadable_payload_word_fails_closed():
+    # value_position points past the row's data words: the payload cannot be
+    # read, so the fold must not decide membership at all.
+    result = _run_conflict_fold(_conflict_hints(5))
+    assert result.confidence == "partial"
+    assert result.partial_reason == "ambiguous_event_direction"
+    assert result.members == []
+
+
+class AmbiguousEventLogRepo:
+    def fold_event_history(self, *, chain_id, event_address, event_hints, key_sources, block=None):
+        del chain_id, event_address, event_hints, key_sources, block
+        return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
+
+
+def test_event_indexed_ambiguous_direction_settles_to_gated_check():
+    descriptor = {
+        "kind": "mapping_membership",
+        "key_sources": [{"source": "msg_sender"}],
+        "enumeration_hint": [
+            {
+                "topic0": _CONFLICT_TOPIC,
+                "direction": "add",
+                "event_address": ADDR_A,
+                "topics_to_keys": {1: 0},
+                "data_to_keys": {},
+            },
+            {
+                "topic0": _CONFLICT_TOPIC,
+                "direction": "remove",
+                "event_address": ADDR_A,
+                "topics_to_keys": {1: 0},
+                "data_to_keys": {},
+            },
+        ],
+    }
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=ADDR_A,
+        meta={"event_log_repo": AmbiguousEventLogRepo()},
+    )
+    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
+    assert cap.kind == "external_check_only"
+    assert cap.check is not None
+    basis = (cap.check.extra or {}).get("basis") or []
+    assert "ambiguous_event_direction" in basis
+    # A caller-keyed allowlist that could not be decided is still an allowlist:
+    # the caller-gate tag keeps the earned-public projection gated.
+    assert "caller_keyed_membership_allowlist" in basis
