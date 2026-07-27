@@ -250,12 +250,25 @@ def test_the_pause_duration_reader_finds_no_bound_in_real_compiler_output():
 
     ``read_max_pause_duration`` wants ONE guard leaf holding all three of
     ``block.timestamp``, the latch's own state variable, and a constant. The
-    predicate builder does not emit that leaf for any source shape tried: when
-    ``block.timestamp`` survives as an operand the literal is absorbed into the
-    arithmetic, and when the literal survives ``block.timestamp`` is. So the
-    reader returns ``None`` for the TIMED latch here — a contract that declares
-    ``uint256 public constant MAX_PAUSE = 30 days`` and compares
+    predicate builder cannot emit that leaf for ANY source shape, and the reason
+    is structural rather than unlucky: a Solidity comparison lowers to a leaf
+    with exactly TWO operands, and when one side is arithmetic the operand
+    recorder keeps one sub-operand and discards the other. Five shapes were
+    compiled and every one lost exactly one of the three facts —
+    ``block.timestamp < pausedUntil + 2592000`` records
+    ``{timestamp, pausedUntil}`` (literal gone),
+    ``block.timestamp - pausedUntil < 2592000`` records
+    ``{pausedUntil, 2592000}`` (clock gone). Three facts do not fit in two
+    slots. So the reader returns ``None`` for the TIMED latch here — a contract
+    that declares ``uint256 public constant MAX_PAUSE = 30 days`` and compares
     ``block.timestamp`` against it in the guard.
+
+    CONSEQUENCE FOR THE GATE, stated so a later reader does not overrate it: this
+    fixture does NOT discriminate timed from indefinite, because both publish
+    ``None``. It discriminates a reader that INVENTS a bound (proven: forcing
+    ``read_max_pause_duration`` to fall back on a scraped 2592000 turns this
+    test red). A7 must widen the leaf's operand set before any compiled source
+    can reach the positive branch; adding more latch fixtures cannot.
 
     ``None`` is published as ``duration_bound_seconds`` and read downstream as
     "indefinite latch, most severe", so nothing false is being emitted — the
