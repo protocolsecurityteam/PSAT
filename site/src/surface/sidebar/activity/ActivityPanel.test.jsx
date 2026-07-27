@@ -420,6 +420,21 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
   });
 
+  it("treats a 200 whose body is a JSON array as unread, not empty", async () => {
+    // `typeof [] === "object"`, so an array would pass a bare object guard,
+    // hydrate as a history with no `proxies`, and render the absence prose.
+    // The wire permits it (the handler serves list bodies for other artifacts).
+    upgradeHistoryFails(() =>
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
+  });
+
   // A read that has not come back yet is the fourth state, and the one the
   // other five tests here cannot see: they all settle. Every proxy selection
   // passes through it, and `api()` (api/client.js) uses bare `fetch` with no

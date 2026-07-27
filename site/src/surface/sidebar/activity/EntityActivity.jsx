@@ -92,12 +92,13 @@ export function EntityActivity({
     api(`/api/analyses/${jid}/artifact/upgrade_history`)
       .then((body) => {
         if (cancelled) return;
-        const h = body && typeof body === "object" ? body : null;
+        const h = body && typeof body === "object" && !Array.isArray(body) ? body : null;
         setHistory(h);
-        // A 200 whose body is not an object collapses to the same `null` a
-        // failed read produces, and the timeline cannot tell them apart from
-        // the payload alone. It is not an answer about the history, so it is
-        // not written as one.
+        // A 200 whose body is not a plain object (a scalar, or an array —
+        // `typeof [] === "object"`) collapses to the same `null` a failed read
+        // produces, and the timeline cannot tell them apart from the payload
+        // alone. It is not an answer about the history, so it is not written
+        // as one.
         setHistoryOutcome({ jobId: machine.job_id, state: h ? "present" : "not_determined" });
         if (onCache) onCache(machine.job_id, h, {});
       })
