@@ -312,7 +312,14 @@ logger = logging.getLogger(__name__)
 # the declared constant), and the recipe warps the fork by that bound to test
 # auto-expiry — so a pre-v22 row for such a latch records a verdict reached
 # without the expiry probe ever running.
-EFFECT_CACHE_SCHEMA_VERSION = 22
+# v23 (Wave 2 Leg D, ledger L-4): ``_principals_by_function`` had no ORDER BY, and
+# its first element is the identity every fork probe impersonates
+# (``candidate.principal_addresses[0]``). Which holder we simulated as — and so
+# which gate the probe passed, which revert it recorded, and what the witness said
+# — was a function of the query plan, not of the data, on every multi-principal
+# function (33 principals on one local function, 27 on two more). A pre-v23 row
+# records a verdict reached as whichever holder the heap happened to return first.
+EFFECT_CACHE_SCHEMA_VERSION = 23
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

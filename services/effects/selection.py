@@ -838,12 +838,34 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
 
 
 def _principals_by_function(session: Session, function_ids: list[int]) -> dict[int, list[str]]:
+    """``function id -> its resolved principals``, in a TOTAL order.
+
+    The ORDER BY is load-bearing, not cosmetic (ledger L-4): element ``[0]`` of
+    this list becomes the identity every fork probe impersonates
+    (``candidate.principal_addresses[0]`` at ``calldata.py`` :1395, :1437, :1720,
+    :2312, and the first resolved principal of the code-upgrade plan in
+    ``orchestrator.py``). Without it, WHO the probe runs as — and therefore which
+    gate it passes, which revert it records, and what the witness says — was left
+    to the query plan / heap order rather than being a function of the data. The
+    multi-principal population is not hypothetical: fid 2527 carries 33 principals
+    locally, 801 and 811 carry 27, 2908/2909 carry 15.
+
+    Ordered on ``address`` for the same reason ``calldata._principals_by_selector``
+    is: the two must agree, because the pause plan reads the per-selector map while
+    the value probes read this one, and a job that impersonates two different
+    holders of the same function is unreproducible by construction. ``id`` makes
+    the order total when one function records the same address twice.
+
+    A third determinism class alongside PYTHONHASHSEED (W0-2) and allocation order
+    (W0-3), invisible to both gates because both of those fix the PROCESS, not the
+    plan.
+    """
     if not function_ids:
         return {}
     rows = session.execute(
-        select(FunctionPrincipal.function_id, FunctionPrincipal.address).where(
-            FunctionPrincipal.function_id.in_(function_ids)
-        )
+        select(FunctionPrincipal.function_id, FunctionPrincipal.address)
+        .where(FunctionPrincipal.function_id.in_(function_ids))
+        .order_by(FunctionPrincipal.function_id, FunctionPrincipal.address, FunctionPrincipal.id)
     ).all()
     out: dict[int, list[str]] = {}
     for fid, addr in rows:

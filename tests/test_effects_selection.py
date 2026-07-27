@@ -460,6 +460,32 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
 
 
+def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_datas(db_session):
+    """Ledger L-4. ``principal_addresses[0]`` IS the identity every fork probe
+    impersonates (``calldata`` :1395/:1437/:1720/:2312 and the code-upgrade plan),
+    so an unordered read left WHO we simulate as — and therefore which gate the
+    probe passes and what the witness records — to the query plan.
+
+    A third determinism class: PYTHONHASHSEED (W0-2) and allocation order (W0-3)
+    both fix the PROCESS, and neither can see a plan-order dependency. The rows are
+    inserted in DESCENDING address order on purpose, so a plan that hands back heap
+    order (what dropping the ORDER BY produces here) fails this assertion.
+    """
+    p = _protocol(db_session, "principal-order-proto")
+    c = _contract(db_session, p.id, ADDR(0x7100))
+    f = _fn(db_session, c.id, name="rebalance", selector="0x71000001", effect_targets=["S"])
+    holders = [ADDR(0x71FF), ADDR(0x71C0), ADDR(0x7180), ADDR(0x7140), ADDR(0x7101)]
+    for addr in holders:  # descending: insertion order is NOT the answer
+        _principal(db_session, f.id, addr)
+    db_session.commit()
+
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert list(cand.principal_addresses) == sorted(a.lower() for a in holders)
+    # The load-bearing element, stated as its own assertion because it is the one a
+    # probe actually consumes.
+    assert cand.principal_addresses[0] == ADDR(0x7101).lower()
+
+
 def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
     """effect_labels populated but claims empty => still blank => selected."""
     p = _protocol(db_session, "blank-proto")
