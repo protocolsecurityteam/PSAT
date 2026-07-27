@@ -213,6 +213,13 @@ _RESIDUE_JSON_KEYS = (
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",
+    # D3: the three-state discriminator, and the floor under its own name. Both are
+    # load-bearing rather than decorative — while the not-measured branch published
+    # the acting balance AS ``observed_reach_value_usd``, a consumer reading the
+    # number without the flag got "$0 reach" for a zero-balance router that may move
+    # millions. Omitting either key here would drop it before it reaches the row.
+    "reach_determined",
+    "observed_reach_floor_usd",
     # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
     # code-plane witness and stay on ``details``; how many Transfer logs one
     # execution emitted is an observation of this deployment at this block and

@@ -132,16 +132,41 @@ def test_value_out_projects_reach_into_observed_witness():
 
 
 def test_value_out_projects_reach_indeterminate_floor():
-    # §5b floor: reach_indeterminate + floored value both survive projection so the
-    # scorer sees "downstream reach not witnessed, floored to own balance".
-    residue = {"observed_reach_value_usd": 221_000_000.0, "reach_indeterminate": True}
+    """§5b floor: the not-measured state survives projection whole, so a scorer sees
+    "downstream reach not witnessed; the acting contract's own balance is a floor".
+
+    D3 shape: ``observed_reach_value_usd`` is ABSENT on such a row (the producer no
+    longer publishes the floor under the key that means measured reach), and
+    ``reach_determined: False`` is the discriminator. Both new keys must be in the
+    projection allowlist or they are silently dropped one layer before the consumer.
+    """
+    residue = {
+        "observed_reach_floor_usd": 221_000_000.0,
+        "reach_indeterminate": True,
+        "reach_determined": False,
+    }
     claim = claims_bridge.verdict_to_claim(
         _verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}, observed_residue=residue)
     )
     assert claim is not None
     observed = claim["witness"]["observed"]
     assert observed["reach_indeterminate"] is True
-    assert observed["observed_reach_value_usd"] == 221_000_000.0
+    assert observed["reach_determined"] is False
+    assert observed["observed_reach_floor_usd"] == 221_000_000.0
+    assert "observed_reach_value_usd" not in observed
+
+
+def test_value_out_projects_the_measured_reach_discriminator():
+    residue = {
+        "observed_reach_value_usd": 55_200_000.0,
+        "observed_reach_holders": ["0x" + "55" * 20],
+        "reach_determined": True,
+    }
+    claim = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}, observed_residue=residue)
+    )
+    assert claim is not None
+    assert claim["witness"]["observed"]["reach_determined"] is True
 
 
 def test_reach_is_never_read_off_the_cacheable_witness():

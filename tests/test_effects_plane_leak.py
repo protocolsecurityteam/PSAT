@@ -385,6 +385,9 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert row.observed_residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
+        # D3's discriminator rides the STATE plane with the figures it qualifies:
+        # it is an answer about this deployment's observation, not about the code.
+        "reach_determined": True,
     }
 
 

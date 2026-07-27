@@ -706,7 +706,9 @@ def test_value_out_reach_measures_downstream_holder_loss():
     # stores and re-publishes to every twin of this bytecode (inv. 3).
     assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
     assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
+    assert eff.concrete["reach_determined"] is True
     assert "reach_indeterminate" not in eff.concrete
+    assert "observed_reach_floor_usd" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
     assert lp.lower() not in str(eff.details)
 
@@ -729,8 +731,13 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0
+    # D3: the floor is published as a FLOOR. The key that means "measured reach" is
+    # absent, because nothing was measured — publishing the acting balance as
+    # ``observed_reach_value_usd`` is what let a zero-balance router read "$0 reach".
+    assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
+    assert eff.concrete["observed_reach_floor_usd"] == 221_000_000.0
+    assert "observed_reach_value_usd" not in eff.concrete
     assert "observed_reach_holders" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
 
@@ -751,6 +758,10 @@ def test_value_out_reach_absent_without_holder_set():
     assert eff.verdict == VERDICT_PROVEN
     assert "observed_reach_value_usd" not in eff.concrete
     assert "reach_indeterminate" not in eff.concrete
+    # ...and no discriminator either: absence of EVERY key is the third state, "no
+    # reach measurement was attempted", distinct from a measured or a floored one.
+    assert "reach_determined" not in eff.concrete
+    assert "observed_reach_floor_usd" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.details
     assert "reach_indeterminate" not in eff.details
 

@@ -1168,6 +1168,7 @@ export function claimWitnessFacts(fn) {
   const amtKinds = [];
   let reachValue = null;
   let reachIndeterminate = false;
+  let reachFloor = null;
   for (const c of claims) {
     if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
     const w = c.witness;
@@ -1199,6 +1200,12 @@ export function claimWitnessFacts(fn) {
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
+      // D3: on a not-measured row the acting deployment's own balance is a FLOOR
+      // and now arrives under its own key. Rendered as a floor, never as the reach:
+      // the producer used to publish it AS observed_reach_value_usd, so a
+      // zero-balance router read "$0 reach" for a function that can move millions.
+      if (typeof observed.observed_reach_floor_usd === "number")
+        reachFloor = observed.observed_reach_floor_usd;
     }
   }
   if (destKinds.length)
@@ -1209,9 +1216,15 @@ export function claimWitnessFacts(fn) {
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
   if (reachIndeterminate) {
+    // NOT measured. Name the floor for what it is and never as the reach: the
+    // acting contract's own balance is a lower bound on what an exercise of this
+    // function can touch, and a zero floor says nothing about the money it moves.
+    const floor = formatUsdUpperBound(reachFloor);
     facts.push({
       label: "Reach",
-      value: "floored to own balance (reach indeterminate)",
+      value: floor
+        ? `not determined (own balance floor ${floor})`
+        : "not determined (no downstream holder observed)",
     });
   } else {
     const reach = formatUsdUpperBound(reachValue);

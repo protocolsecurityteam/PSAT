@@ -329,7 +329,17 @@ logger = logging.getLogger(__name__)
 # holds no destination (inv. 3), but the hit path's residue re-observation reads the
 # shape out of ``details`` to decide whether a re-probe can yield anything, so a
 # pre-v24 row drives that decision under the old rule.
-EFFECT_CACHE_SCHEMA_VERSION = 24
+# v25 (Wave 2 Leg D, D3): the §5b reach payload gained ``reach_determined`` and now
+# publishes the acting deployment's own balance as ``observed_reach_floor_usd``
+# instead of as ``observed_reach_value_usd``. The not-measured branch fires for any
+# zap/router/adapter that moves value it does not hold (18 armed local flow.out
+# functions on 6 zero-balance contracts), and while the floor rode the
+# measured-reach key a consumer that read the number and ignored the flag scored
+# "$0 reach" for a function that may move millions. Reach itself is state-plane and
+# never enters a cache row (inv. 3) — the bump is because the same probe now returns
+# a different ``concrete`` shape, and the hit path re-publishes ``details`` beside
+# residue written under the old contract.
+EFFECT_CACHE_SCHEMA_VERSION = 25
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

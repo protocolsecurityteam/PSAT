@@ -259,14 +259,29 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 # and re-published as a DIFFERENT deployment's observation on every cache hit.
 # ``observed_residue`` is the state-plane column and is never a cache key (inv. 3).
 #
-# CONTRACT for the eventual scorer: the reach USD is a conservative upper bound (a
-# holder's full on-chain balance attributed when value provably leaves it, inv.
-# 5/7); ``reach_indeterminate is True`` means downstream reach was fork-observed to
-# be nothing, so the value is FLOORED to the acting deployment's own balance —
-# never inflated via a control-graph heuristic. ABSENCE of all three keys is NOT
-# "no reach": it means this deployment has no fork observation of its own yet (its
-# verdict came from a cache hit), so reach is simply unmeasured here.
-_REACH_KEYS = ("observed_reach_value_usd", "observed_reach_holders", "reach_indeterminate")
+# CONTRACT for the eventual scorer, in three states with ``reach_determined`` as
+# the discriminator (D3):
+#   * ``reach_determined is True`` — MEASURED. ``observed_reach_value_usd`` is a
+#     conservative upper bound (a holder's full on-chain balance attributed when
+#     value provably leaves it, inv. 5/7) over ``observed_reach_holders``.
+#   * ``reach_determined is False`` (with ``reach_indeterminate: True``) — NOT
+#     measured: no holder was observed moving value, which is NOT "reach is
+#     nothing". ``observed_reach_value_usd`` is ABSENT on such a row and
+#     ``observed_reach_floor_usd`` carries the acting deployment's own balance as a
+#     floor. Until D3 the floor was published as ``observed_reach_value_usd``
+#     itself, so a scorer reading the number and ignoring the flag scored "$0
+#     reach" for a zero-balance router that can move millions — the exact
+#     "unproven read as proven-zero" shape inv. 1 forbids.
+#   * ABSENCE of every key is NOT "no reach": this deployment has no fork
+#     observation of its own yet (its verdict came from a cache hit), so reach was
+#     never attempted here.
+_REACH_KEYS = (
+    "observed_reach_value_usd",
+    "observed_reach_holders",
+    "reach_indeterminate",
+    "reach_determined",
+    "observed_reach_floor_usd",
+)
 
 
 def _reach_summary(verdict: VerdictLike) -> dict[str, Any]:

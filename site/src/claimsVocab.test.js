@@ -933,15 +933,49 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
   });
 
-  it("floors reach to own balance when fork-observed indeterminate", () => {
+  it("names an unmeasured reach as not determined and the balance as a floor", () => {
+    // INVERTED (D3). The producer used to publish the acting contract's own balance
+    // as `observed_reach_value_usd` on this branch, so the row read as a measured
+    // reach with a flag beside it; on a zero-balance router that is "$0 reach" for a
+    // function that may move millions. The number now arrives as a FLOOR under its
+    // own key, and the row says it was not determined.
     const fn = {
       claims: [{
         claim_id: "flow.out",
         tier: "behavioral_observed",
-        witness: { effect_verdict_id: 1, observed: { reach_indeterminate: true, observed_reach_value_usd: 999 } },
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_indeterminate: true,
+            reach_determined: false,
+            observed_reach_floor_usd: 999,
+          },
+        },
       }],
     };
-    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach", value: "floored to own balance (reach indeterminate)" });
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "not determined (own balance floor up to ~$999)",
+    });
+  });
+
+  it("says not determined with no number when the floor itself is zero", () => {
+    // The zero-balance router: the floor is a real 0 and must not be dressed up as
+    // a reach figure, nor suppressed into silence that reads as "no reach".
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_indeterminate: true, reach_determined: false, observed_reach_floor_usd: 0 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "not determined (no downstream holder observed)",
+    });
   });
 
   it("emits no rows when no witness facts are present (silence, not defaults)", () => {

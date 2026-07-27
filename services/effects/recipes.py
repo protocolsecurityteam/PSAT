@@ -1523,13 +1523,27 @@ def _add_reach(
     """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
     from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
     fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
-    conservative upper bound, inv. 5/7). No holder moved ⇒ the reach beyond the
-    acting deployment is fork-observed to be nothing, so value FLOORS to the acting
-    contract's own balance and the ``reach_indeterminate`` flag records that
-    downstream reach was not witnessed. Downstream value is NEVER imputed via the
+    conservative upper bound, inv. 5/7). Downstream value is NEVER imputed via the
     control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
     edge). Skipped entirely when no value-holder set was supplied (nothing to
     measure), leaving the verdict shape unchanged.
+
+    THREE STATES, and ``reach_determined`` is the one key that tells them apart (D3
+    / R1):
+
+    * ``reach_determined: True`` + ``observed_reach_value_usd`` +
+      ``observed_reach_holders`` — measured. The USD is an upper bound.
+    * ``reach_determined: False`` + ``reach_indeterminate: True`` +
+      ``observed_reach_floor_usd`` — NOT measured. No holder was observed moving
+      value, which is not the same as "reach is nothing": this branch fires for any
+      zap / router / adapter that moves value it does not itself hold (18 armed
+      ``flow.out`` functions on 6 zero-balance contracts locally). It used to
+      publish the acting deployment's own balance as ``observed_reach_value_usd``,
+      so a consumer reading the number and ignoring the flag got **"$0 reach" for a
+      function that may move millions** — a proven-absence sentence minted out of a
+      non-observation. The floor is still recorded, under a name that says what it
+      is, and the key that means "measured reach" is now ABSENT.
+    * every key absent — no holder set was supplied, so nothing was even attempted.
 
     Writes to ``concrete``, NOT ``details`` (inv. 3). Every value here is
     per-deployment — the holders are addresses and the USD is this protocol's
@@ -1546,11 +1560,13 @@ def _add_reach(
             reach_holders.append(holder.lower())
             reached_usd += usd
     if reach_holders:
+        concrete["reach_determined"] = True
         concrete["observed_reach_value_usd"] = reached_usd
         concrete["observed_reach_holders"] = sorted(reach_holders)
     else:
-        concrete["observed_reach_value_usd"] = acting_balance_usd
+        concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
+        concrete["observed_reach_floor_usd"] = acting_balance_usd
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

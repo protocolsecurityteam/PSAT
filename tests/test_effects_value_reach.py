@@ -4,7 +4,8 @@ execution the reach is read from.
 Every one of the six proven ``value_out`` rows on the 2026-07-25 live run carried
 ``observed_reach_value_usd: 0.0`` with ``reach_indeterminate: true`` — the
 fallback firing at 100%, and its floor computing to zero on deployments holding
-billions. Two independent causes, both here:
+billions. Two independent causes, both here (and a third the shape itself carried:
+publishing the floor under the key that means MEASURED reach — D3, fixed since):
 
 1. ``contract_balances`` is FETCHED for the proxy (``resolution_worker`` reads
    ``proxy_address or address``) but STORED on the implementation's contract row.
@@ -146,34 +147,46 @@ def test_reach_is_read_from_the_execution_the_verdict_came_from():
 
 def test_a_holder_that_moved_nothing_still_floors_and_stays_indeterminate():
     """``reach_indeterminate`` keeps meaning "unmeasured here" — the floor is the
-    acting deployment's own balance, never a claim that reach is zero."""
+    acting deployment's own balance, never a claim that reach is zero.
+
+    KEPT, deliberately (handoff §11's standing correction: this test exercises a
+    LIVE branch and the criticism of it was withdrawn). Only the key names moved:
+    D3 publishes the floor as ``observed_reach_floor_usd`` and withholds
+    ``observed_reach_value_usd``, because the floor being read AS the reach is the
+    defect. The branch, the holder set and the intent are untouched."""
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=((HOLDER, 42.0),), floor=250.0)
-    assert eff.concrete["observed_reach_value_usd"] == 250.0
+    assert eff.concrete["observed_reach_floor_usd"] == 250.0
+    assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
+    assert "observed_reach_value_usd" not in eff.concrete
 
 
-def test_a_zero_balance_deployment_publishes_zero_reach_AND_says_it_is_unmeasured():
-    """W0-7 fixture 8 — the shape that makes ``observed_reach_value_usd: 0.0``
-    ambiguous, and the flag that resolves it.
+def test_a_zero_balance_deployment_publishes_no_reach_number_at_all():
+    """W0-7 fixture 8, and the D3 fix it was written to gate. INVERTED.
 
-    The acting deployment holds nothing, so the floor IS zero. Published alone,
-    ``0.0`` is indistinguishable from "we measured downstream reach and it was
-    nothing" — a proven absence — when what happened is that nothing was measured
-    and the floor happened to be empty. Both keys must travel together, and this
-    is the only test in which the floor's own value is zero: every other one
-    floors to 250.0 or 100.0, so a consumer reading the number without the flag
-    still looked right.
+    The acting deployment holds nothing, so the floor IS zero. This branch fires for
+    every zap / router / adapter that moves value it does not hold — 18 armed
+    ``flow.out`` functions on 6 zero-balance contracts locally — and it used to
+    publish that zero as ``observed_reach_value_usd``. A consumer reading the number
+    and ignoring the flag therefore got **"$0 reach" for a function that may move
+    millions**: a proven absence minted out of a non-observation, which is exactly
+    what the flag beside it was supposed to prevent and could not, because nothing
+    forces a consumer to read two keys.
+
+    The number is now simply not there. ``reach_determined: False`` is the answer,
+    and the floor keeps its own name — this is the only test where that floor is
+    zero, so it is also the one place where the old shape's ambiguity was total.
     """
     moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved_nothing], holders=((HOLDER, 42.0),), floor=0.0)
 
     assert eff.verdict == VERDICT_PROVEN
     # The value_out itself is PROVEN — value left — while its reach is unknown.
-    # A row that pairs a proven outflow with a zero reach and no flag reads as
-    # "moves money, reaches nothing".
-    assert eff.concrete["observed_reach_value_usd"] == 0.0
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
+    assert eff.concrete["observed_reach_floor_usd"] == 0.0
     assert "observed_reach_holders" not in eff.concrete
 
 
@@ -196,4 +209,9 @@ def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
 
     assert eff.concrete["observed_reach_value_usd"] == 0.0
     assert eff.concrete["observed_reach_holders"] == [HOLDER.lower()]
+    assert eff.concrete["reach_determined"] is True
     assert "reach_indeterminate" not in eff.concrete
+    # THE DISCRIMINATION D3 BUYS: a MEASURED zero and an unmeasured one are now two
+    # different payloads. Before, both published ``observed_reach_value_usd: 0.0``
+    # and differed only by a flag a consumer had to remember to read.
+    assert "observed_reach_floor_usd" not in eff.concrete
