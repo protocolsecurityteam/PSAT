@@ -959,6 +959,53 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     });
   });
 
+  it("names a witnessed-but-unvalued reach as its own state (A2)", () => {
+    // Value WAS observed leaving a holder, in an asset whose USD we do not have —
+    // the weETH recoverETH shape (a synthetic native move out of a deployment with
+    // no native balance row). Neither a reach figure nor a floor on own balance:
+    // before A2 this row published the holder's whole sheet, $3.489B, as the reach.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_holders: ["0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee"],
+            observed_reach_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+            observed_reach_unvalued_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 asset(s) of unknown value",
+    });
+  });
+
+  it("shows the priced part of an unvalued reach as a partial floor", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_unvalued_assets: ["0x" + "9d".repeat(20)],
+            observed_reach_priced_usd: 759.15,
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 asset(s) of unknown value, priced part up to ~$759",
+    });
+  });
+
   it("says not determined with no number when the floor itself is zero", () => {
     // The zero-balance router: the floor is a real 0 and must not be dressed up as
     // a reach figure, nor suppressed into silence that reads as "no reach".

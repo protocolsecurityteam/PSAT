@@ -56,6 +56,7 @@ from services.effects.seeding import (
     contract_balance_override,
     eth_value_override,
 )
+from services.effects.selection import AssetHolding
 from services.effects.simulate import (
     SimCall,
     SimCallResult,
@@ -63,6 +64,7 @@ from services.effects.simulate import (
     StateOverride,
     transfers_in,
     transfers_out,
+    transfers_out_with_asset,
 )
 from utils.rpc import EthCallResult
 
@@ -555,7 +557,7 @@ def value_out(
     sentinel_calldata: str | None = None,
     static_shape: str | None = None,
     static_destination: str | None = None,
-    value_holders: Sequence[tuple[str, float]] = (),
+    value_holders: Sequence[AssetHolding] = (),
     acting_balance_usd: float = 0.0,
     gate_ref: str = "",
     seeder: Seeder | None = None,
@@ -1517,7 +1519,7 @@ def _resolve_destination_shape(
 def _add_reach(
     concrete: dict[str, Any],
     base_call: SimCallResult,
-    value_holders: Sequence[tuple[str, float]],
+    value_holders: Sequence[AssetHolding],
     acting_balance_usd: float,
 ) -> None:
     """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
@@ -1532,17 +1534,28 @@ def _add_reach(
     / R1):
 
     * ``reach_determined: True`` + ``observed_reach_value_usd`` +
-      ``observed_reach_holders`` — measured. The USD is an upper bound.
+      ``observed_reach_holders`` + ``observed_reach_assets`` — measured, and every
+      asset that moved had a priced holding. The USD is an upper bound.
     * ``reach_determined: False`` + ``reach_indeterminate: True`` +
-      ``observed_reach_floor_usd`` — NOT measured. No holder was observed moving
-      value, which is not the same as "reach is nothing": this branch fires for any
-      zap / router / adapter that moves value it does not itself hold (18 armed
-      ``flow.out`` functions on 6 zero-balance contracts locally). It used to
-      publish the acting deployment's own balance as ``observed_reach_value_usd``,
-      so a consumer reading the number and ignoring the flag got **"$0 reach" for a
-      function that may move millions** — a proven-absence sentence minted out of a
-      non-observation. The floor is still recorded, under a name that says what it
-      is, and the key that means "measured reach" is now ABSENT.
+      ``observed_reach_floor_usd`` — NOTHING was witnessed leaving a holder, which is
+      not the same as "reach is nothing": this branch fires for any zap / router /
+      adapter that moves value it does not itself hold (18 armed ``flow.out``
+      functions on 6 zero-balance contracts locally). It used to publish the acting
+      deployment's own balance as ``observed_reach_value_usd``, so a consumer reading
+      the number and ignoring the flag got **"$0 reach" for a function that may move
+      millions** — a proven-absence sentence minted out of a non-observation. The
+      floor is still recorded, under a name that says what it is, and the key that
+      means "measured reach" is ABSENT.
+    * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
+      ``observed_reach_holders`` / ``observed_reach_assets`` /
+      ``observed_reach_unvalued_assets`` — value WAS witnessed leaving a holder and
+      its USD is not determined, because at least one asset that moved has no priced
+      holding on record. ``observed_reach_priced_usd`` carries the part that IS
+      priced (a partial floor) and is omitted when that part is nothing. This is the
+      A2 case: 1001 of 1376 local ``contract_balances`` rows are unpriced, and the
+      recoverETH row moved native ETH out of a deployment with no native balance row
+      at all — "holds nothing", "not fetched" and "fetch failed" are one shape there
+      (G6-11), so the only honest USD is *unknown*.
     * every key absent — no holder set was supplied, so nothing was even attempted.
 
     Writes to ``concrete``, NOT ``details`` (inv. 3). Every value here is
@@ -1550,23 +1563,68 @@ def _add_reach(
     balance sheet at this block — while ``details`` is the code-plane witness the
     behavioral cache stores and re-publishes to every OTHER deployment sharing the
     bytecode. Reach in ``details`` meant a second deployment's verdict named the
-    first one's holders and USD as its own."""
+    first one's holders and USD as its own.
+
+    ASSET-SCOPED MATCHING (A2). ``transfers_out`` is asked per (holder, asset), where
+    the asset is the ``Transfer`` log's EMITTER — the token contract, or
+    ``NATIVE_ASSET_LOG_EMITTER`` for a native move (measured against the live node,
+    see that constant). Asset-blind matching is what published $3.489B of reach for
+    ``WeETH.recoverETH``: the contract-balance seed gave the proxy synthetic native
+    ETH, ``traceTransfers`` emitted one synthetic ``Transfer`` out of it, and the
+    holder's ENTIRE balance — 99.99% of it eETH — was attributed as reached. Two rows
+    of that shape carried 64.96% of all published reach USD in the DB and both are
+    truly $0.
+
+    Note what is NOT done: this does not pass ``only_asset`` to a single whole-holder
+    match (the fix the handoff proposed and G7 refuted — a synthetic native log has
+    no token emitter, so that would have matched nothing and under-claimed 100%). The
+    INPUT changed: holdings arrive per asset, native included, keyed on the emitter
+    the node actually uses."""
     if not value_holders:
         return
-    reached_usd = 0.0
-    reach_holders: list[str] = []
-    for holder, usd in value_holders:
-        if transfers_out(base_call, holder):
-            reach_holders.append(holder.lower())
-            reached_usd += usd
-    if reach_holders:
-        concrete["reach_determined"] = True
-        concrete["observed_reach_value_usd"] = reached_usd
-        concrete["observed_reach_holders"] = sorted(reach_holders)
-    else:
+    priced_usd = 0.0
+    priced_any = False
+    unvalued_assets: set[str] = set()
+    reach_holders: set[str] = set()
+    reach_assets: set[str] = set()
+    # (holder, asset) -> the priced holding, or None when we hold it unpriced. A
+    # (holder, asset) pair MISSING from this map is the third case: value left that
+    # holder in an asset we have no balance row for at all.
+    known: dict[tuple[str, str], float | None] = {
+        (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
+    }
+    for holder in sorted({h.holder.lower() for h in value_holders}):
+        for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
+            reach_holders.add(holder)
+            reach_assets.add(asset)
+            if (holder, asset) not in known:
+                # No balance row at all for this (holder, asset): value left in an
+                # asset we never recorded. G6-11 — absence there conflates "holds
+                # nothing", "not fetched" and "fetch failed", so it is not a zero.
+                unvalued_assets.add(asset)
+                continue
+            usd = known[(holder, asset)]
+            if usd is None:
+                unvalued_assets.add(asset)  # held, but unpriced
+            else:
+                priced_usd += usd
+                priced_any = True
+    if not reach_holders:
         concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
         concrete["observed_reach_floor_usd"] = acting_balance_usd
+        return
+    concrete["observed_reach_holders"] = sorted(reach_holders)
+    concrete["observed_reach_assets"] = sorted(reach_assets)
+    if unvalued_assets:
+        # Witnessed, and NOT valued. The priced part is a floor, never the answer.
+        concrete["reach_determined"] = False
+        concrete["observed_reach_unvalued_assets"] = sorted(unvalued_assets)
+        if priced_any:
+            concrete["observed_reach_priced_usd"] = priced_usd
+        return
+    concrete["reach_determined"] = True
+    concrete["observed_reach_value_usd"] = priced_usd
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:

@@ -61,7 +61,7 @@ from services.effects.config import (
     SHAPE_STORAGE_DETERMINED,
 )
 from services.effects.seeding import SEED_UNIT_DECIMALS
-from services.effects.selection import Candidate
+from services.effects.selection import AssetHolding, Candidate
 from services.policy.effective_permissions import _abi_signature
 from services.resolution.differential_probe import (
     _default_value_for_type,
@@ -144,7 +144,7 @@ class ValueOutPlanInputs:
     sentinel_calldata: str | None = None
     # §5b downstream value-reach: the protocol's witnessed value-holders the recipe
     # measures against, and the acting deployment's own balance floor.
-    value_holders: tuple[tuple[str, float], ...] = ()
+    value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.

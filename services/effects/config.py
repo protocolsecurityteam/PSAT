@@ -119,6 +119,21 @@ DURATION_BOUND_GUARD_CONSTANT = "guard_constant"
 DURATION_BOUND_NO_TIME_REFERENCE = "no_time_reference"
 DURATION_BOUND_NOT_DETERMINED = "not_determined"
 
+# The pseudo-address ``eth_simulateV1``'s ``traceTransfers`` puts in the ``address``
+# (emitter) field of the SYNTHETIC ``Transfer`` log it emits for a NATIVE value move.
+# MEASURED against the live node, not assumed: 3 reads at head-10 plus a pinned read
+# at block 25619159 all return ``0xeeee…eeee`` for a plain ETH send, and a WETH
+# ``deposit()`` control in the same request emits BOTH that log and one whose emitter
+# is the token — so the field discriminates assets and this value is a real answer
+# rather than a parser artifact.
+#
+# It exists here because the §5b reach measurement is per ASSET: a holding is matched
+# against the emitter of the log that moved it, and native ETH has no token contract
+# to be the emitter. Without this key a native move matches no holding at all, which
+# is precisely why the "just pass ``only_asset``" fix was refuted — it would have
+# under-claimed 100%.
+NATIVE_ASSET_LOG_EMITTER = "0x" + "ee" * 20
+
 # Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
 # non-observation and for the inv. 15 fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"

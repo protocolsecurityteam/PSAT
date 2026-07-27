@@ -220,6 +220,12 @@ _RESIDUE_JSON_KEYS = (
     # millions. Omitting either key here would drop it before it reaches the row.
     "reach_determined",
     "observed_reach_floor_usd",
+    # A2: which ASSETS the reach was measured over, and the ones whose USD is not
+    # known. Per-deployment observations, so they ride the state plane with the
+    # figures they qualify.
+    "observed_reach_assets",
+    "observed_reach_unvalued_assets",
+    "observed_reach_priced_usd",
     # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
     # code-plane witness and stay on ``details``; how many Transfer logs one
     # execution emitted is an observation of this deployment at this block and

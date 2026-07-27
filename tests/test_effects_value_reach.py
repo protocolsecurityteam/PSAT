@@ -18,9 +18,9 @@ publishing the floor under the key that means MEASURED reach — D3, fixed since
 from __future__ import annotations
 
 from services.effects import recipes
-from services.effects.config import VERDICT_PROVEN
+from services.effects.config import NATIVE_ASSET_LOG_EMITTER, VERDICT_PROVEN  # noqa: F401
 from services.effects.harness import SimContext
-from services.effects.selection import build_authority_graph, select_candidates
+from services.effects.selection import AssetHolding, build_authority_graph, select_candidates
 from services.effects.simulate import SimCallResult, SimResult
 from tests.conftest import ADDR, requires_postgres
 from tests.test_effects_harness import RecordingStore, transfer_log
@@ -93,7 +93,10 @@ def test_candidate_floor_and_holder_set_use_the_holding_address(db_session):
 
     cand = next(c for c in select_candidates(db_session, p.id) if c.selector == "0xbbbb0201")
     assert cand.acting_balance_usd == 7_500.0
-    assert (deployment.lower(), 7_500.0) in cand.value_holders
+    # Per ASSET (A2): ``_balance`` writes a NATIVE row, so the holding is keyed on the
+    # emitter ``eth_simulateV1`` uses for a native move — the address a synthetic
+    # Transfer log for it actually carries.
+    assert AssetHolding(deployment.lower(), NATIVE_ASSET_LOG_EMITTER, 7_500.0) in cand.value_holders
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +107,12 @@ CONTRACT = "0x" + "c0" * 20
 PRINCIPAL = "0x" + "22" * 20
 PAYEE = "0x" + "33" * 20
 HOLDER = "0x" + "44" * 20
+# The asset every ``transfer_log`` below is emitted BY, so a holding of it is the
+# holding that moved. Reach matching is per asset since A2.
+TOKEN = "0x" + "7a" * 20
 
 
-def _value_out(blocks, *, seeding=None, holders=((CONTRACT, 100.0),), floor=100.0):
+def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=100.0):
     remaining = list(blocks)
 
     def simulate(calls, block_tag=None, overrides=None):
@@ -134,7 +140,7 @@ def test_reach_is_read_from_the_execution_the_verdict_came_from():
     from services.effects.seeding import Seeding
 
     reverted = SimResult(calls=(SimCallResult(False, "0x", "0x", ()),))
-    seeded = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
+    seeded = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out(
         [reverted, seeded],
         seeding=Seeding(overrides={}, readback_calls=(), readback_expected=(), tokens=(), decimals=18),
@@ -154,8 +160,8 @@ def test_a_holder_that_moved_nothing_still_floors_and_stays_indeterminate():
     D3 publishes the floor as ``observed_reach_floor_usd`` and withholds
     ``observed_reach_value_usd``, because the floor being read AS the reach is the
     defect. The branch, the holder set and the intent are untouched."""
-    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
-    eff = _value_out([moved], holders=((HOLDER, 42.0),), floor=250.0)
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=250.0)
     assert eff.concrete["observed_reach_floor_usd"] == 250.0
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
@@ -178,8 +184,8 @@ def test_a_zero_balance_deployment_publishes_no_reach_number_at_all():
     and the floor keeps its own name — this is the only test where that floor is
     zero, so it is also the one place where the old shape's ambiguity was total.
     """
-    moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(CONTRACT, CONTRACT, PAYEE, 5),)),))
-    eff = _value_out([moved_nothing], holders=((HOLDER, 42.0),), floor=0.0)
+    moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved_nothing], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=0.0)
 
     assert eff.verdict == VERDICT_PROVEN
     # The value_out itself is PROVEN — value left — while its reach is unknown.
@@ -201,11 +207,11 @@ def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
                 True,
                 "0x",
                 None,
-                (transfer_log(CONTRACT, CONTRACT, PAYEE, 5), transfer_log(CONTRACT, HOLDER, PAYEE, 7)),
+                (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, HOLDER, PAYEE, 7)),
             ),
         )
     )
-    eff = _value_out([moved], holders=((HOLDER, 0.0),), floor=250.0)
+    eff = _value_out([moved], holders=(AssetHolding(HOLDER, TOKEN, 0.0),), floor=250.0)
 
     assert eff.concrete["observed_reach_value_usd"] == 0.0
     assert eff.concrete["observed_reach_holders"] == [HOLDER.lower()]
@@ -215,3 +221,126 @@ def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
     # different payloads. Before, both published ``observed_reach_value_usd: 0.0``
     # and differed only by a flag a consumer had to remember to read.
     assert "observed_reach_floor_usd" not in eff.concrete
+
+
+# ---------------------------------------------------------------------------
+# 3. A2 — the reach figure is per ASSET, and an asset we cannot value says so
+# ---------------------------------------------------------------------------
+
+EETH = "0x" + "e1" * 20
+NATIVE = NATIVE_ASSET_LOG_EMITTER
+# The measured shape of the A2 over-claim: WeETH's proxy holds $3,488,954,369 of
+# eETH (99.99% of its sheet) and NO native balance row at all, and the probe's
+# contract-balance seed made it move synthetic native ETH.
+WEETH_SHEET = (
+    AssetHolding(CONTRACT, EETH, 3_488_954_369.29),
+    AssetHolding(CONTRACT, TOKEN, 759.15),
+)
+
+
+def _native_transfer_out(holder: str = CONTRACT) -> SimResult:
+    """One synthetic native Transfer out of ``holder``, exactly as
+    ``eth_simulateV1``'s ``traceTransfers`` emits it (emitter measured live)."""
+    return SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(NATIVE, holder, PAYEE, 10**18),)),))
+
+
+def test_a_native_move_does_not_reach_a_holders_token_balance_sheet():
+    """A2, the reproduction. Asset-blind matching attributed a holder's ENTIRE USD to
+    whichever asset happened to move: the weETH proxy moved seeded native ETH and the
+    row published $3.489B of reach — 64.96% of ALL published reach USD in the DB came
+    from two rows of this shape, both truly $0.
+
+    The holder DID move value, so this is not the not-witnessed branch: it is
+    witnessed and NOT valued. We hold no native balance row for this deployment, and
+    absence there is "holds nothing" / "not fetched" / "fetch failed" collapsed into
+    one shape (G6-11) — so the only honest USD is unknown."""
+    eff = _value_out([_native_transfer_out()], holders=WEETH_SHEET, floor=3_488_955_156.06)
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.concrete["reach_determined"] is False
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_holders"] == [CONTRACT]
+    assert eff.concrete["observed_reach_assets"] == [NATIVE]
+    assert eff.concrete["observed_reach_unvalued_assets"] == [NATIVE]
+    # Nothing priced moved, so not even a partial floor is published.
+    assert "observed_reach_priced_usd" not in eff.concrete
+    # And the eETH figure appears NOWHERE on the row.
+    assert "3488954369" not in str(eff.concrete)
+
+
+def test_the_asset_that_moved_contributes_its_own_holding_and_only_it():
+    """The positive control: the SAME sheet, and this time the token we hold priced is
+    the one that moves. The reach is that holding — not the sheet total, and not
+    nothing."""
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved], holders=WEETH_SHEET, floor=3_488_955_156.06)
+
+    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["observed_reach_value_usd"] == 759.15
+    assert eff.concrete["observed_reach_assets"] == [TOKEN.lower()]
+    assert eff.concrete["observed_reach_holders"] == [CONTRACT]
+
+
+def test_a_priced_native_holding_is_matched_by_the_emitter_the_node_uses():
+    """The other half of the native fix, and the reason the refuted ``only_asset``
+    proposal would have under-claimed 100%: a native holding IS matchable, as long as
+    it is keyed on the pseudo-address ``traceTransfers`` puts in the log's ``address``
+    field. Measured against the live node (3 reads + a pinned read at 25619159)."""
+    holdings = (AssetHolding(CONTRACT, NATIVE, 4_200.0), AssetHolding(CONTRACT, EETH, 3_488_954_369.29))
+    eff = _value_out([_native_transfer_out()], holders=holdings, floor=1.0)
+
+    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["observed_reach_value_usd"] == 4_200.0
+    assert eff.concrete["observed_reach_assets"] == [NATIVE]
+
+
+def test_an_unpriced_holding_that_moves_makes_the_total_not_determined():
+    """1001 of 1376 local ``contract_balances`` rows carry ``price_usd = 0``, which the
+    producer writes for "no price known"; ``usd_value`` is NULL on them. Reading that
+    as $0 is a CONFIDENT LOW value where the answer is unknown — inv. 1's ranking rule
+    in its numeric form. The priced part survives as an explicit partial floor."""
+    unpriced = "0x" + "9d" * 20
+    holdings = (AssetHolding(CONTRACT, TOKEN, 759.15), AssetHolding(CONTRACT, unpriced, None))
+    moved = SimResult(
+        calls=(
+            SimCallResult(
+                True,
+                "0x",
+                None,
+                (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(unpriced, CONTRACT, PAYEE, 9)),
+            ),
+        )
+    )
+    eff = _value_out([moved], holders=holdings, floor=1.0)
+
+    assert eff.concrete["reach_determined"] is False
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_unvalued_assets"] == [unpriced]
+    assert eff.concrete["observed_reach_priced_usd"] == 759.15
+    assert eff.concrete["observed_reach_assets"] == sorted([TOKEN.lower(), unpriced])
+
+
+def test_two_holders_moving_two_assets_sum_only_those_two_holdings():
+    """The multi-holder sum still works, and it is a sum over (holder, asset) pairs —
+    each holder contributes only the asset it was observed moving."""
+    other = "0x" + "b1" * 20
+    holdings = (
+        AssetHolding(CONTRACT, TOKEN, 100.0),
+        AssetHolding(CONTRACT, EETH, 999_999.0),
+        AssetHolding(other, EETH, 25.0),
+    )
+    moved = SimResult(
+        calls=(
+            SimCallResult(
+                True,
+                "0x",
+                None,
+                (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, other, PAYEE, 7)),
+            ),
+        )
+    )
+    eff = _value_out([moved], holders=holdings, floor=1.0)
+
+    assert eff.concrete["reach_determined"] is True
+    assert eff.concrete["observed_reach_value_usd"] == 125.0
+    assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT, other])

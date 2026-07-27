@@ -272,6 +272,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     itself, so a scorer reading the number and ignoring the flag scored "$0
 #     reach" for a zero-balance router that can move millions — the exact
 #     "unproven read as proven-zero" shape inv. 1 forbids.
+#   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
+#     observed leaving a holder and its USD is NOT determined, because at least one
+#     asset that moved has no priced holding on record
+#     (``observed_reach_unvalued_assets`` names them; ``observed_reach_priced_usd``
+#     is the priced part, a partial floor). A2: reach is measured PER ASSET, and
+#     1001 of 1376 local balance rows are unpriced, so this state is common and must
+#     lower confidence rather than produce a small number.
 #   * ABSENCE of every key is NOT "no reach": this deployment has no fork
 #     observation of its own yet (its verdict came from a cache hit), so reach was
 #     never attempted here.
@@ -281,6 +288,9 @@ _REACH_KEYS = (
     "reach_indeterminate",
     "reach_determined",
     "observed_reach_floor_usd",
+    "observed_reach_assets",
+    "observed_reach_unvalued_assets",
+    "observed_reach_priced_usd",
 )
 
 

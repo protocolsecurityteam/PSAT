@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import and_, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -44,7 +44,7 @@ from db.models import (
     JobStage,
     JobStatus,
 )
-from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
 from utils.logging import record_degraded
 
@@ -151,22 +151,32 @@ class Candidate:
     # (never the whole class set — we don't re-simulate what's already explained).
     restrict_families: frozenset[str] | None = None
     # §5b downstream value-reach inputs. ``value_holders`` is the protocol's
-    # WITNESSED value-holder set — ``(address, usd)`` from ``contract_balances``, NOT
-    # control_graph_edges (which has no fund-flow edge) — against which the fork
-    # value-reach probe measures value that provably LEAVES a holder when the call
-    # runs. ``acting_balance_usd`` is this function's own deployment balance, the
-    # floor when downstream reach is fork-observed to be nothing. Shared by
-    # reference across a protocol's candidates (small, immutable), so carrying it
+    # WITNESSED value-holder set from ``contract_balances`` — NOT control_graph_edges
+    # (which has no fund-flow edge) — against which the fork value-reach probe
+    # measures value that provably LEAVES a holder when the call runs.
+    # ``acting_balance_usd`` is this function's own deployment balance, the floor
+    # when downstream reach is fork-observed to be nothing. Shared by reference
+    # across a protocol's candidates (small, immutable), so carrying it
     # per-candidate is cheap.
     #
-    # These two stay ``float`` where ``value_at_stake_usd`` is ``Decimal``: unlike
-    # the sort key they are PUBLISHED — they reach ``observed_reach_value_usd`` in
-    # the verdict's jsonb, which ``json.dumps`` cannot encode from a Decimal. Each
-    # is a single exact-to-float conversion of one stored cell, never a sum over a
-    # set, so the conversion is the last step rather than the first and no
-    # order-dependence survives it. Whoever changes them to Decimal must give the
-    # jsonb path an encoder first.
-    value_holders: tuple[tuple[str, float], ...] = ()
+    # PER ASSET, not per holder (A2). This was ``(address, usd)`` — one summed
+    # figure per holder — and the reach probe matched ANY ``Transfer`` out of that
+    # holder against the whole sum. The weETH proxy's $3.489B is 99.99% eETH, the
+    # probe's synthetic native-ETH move matched it, and the row published $3.489B of
+    # reach for a call that moved $0 of ETH: 64.96% of ALL published reach USD in the
+    # DB came from two such rows, both truly $0. Matching now pins the asset (the
+    # ``Transfer`` log's EMITTER), so an asset that moved contributes only its own
+    # holding and a moved asset we hold no priced record for contributes NOTHING but
+    # marks the total not-determined.
+    #
+    # ``usd_value`` stays ``float`` (and nullable) where ``value_at_stake_usd`` is
+    # ``Decimal``: unlike the sort key it is PUBLISHED — it reaches
+    # ``observed_reach_value_usd`` in the verdict's jsonb, which ``json.dumps``
+    # cannot encode from a Decimal. Each is a single exact-to-float conversion of one
+    # stored cell, never a sum over a set, so the conversion is the last step rather
+    # than the first and no order-dependence survives it. Whoever changes them to
+    # Decimal must give the jsonb path an encoder first.
+    value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
     # Assets the acting deployment PROVABLY holds, richest first — the only honest
     # identity for a caller-supplied token PARAMETER, which has no getter behind it
@@ -333,6 +343,80 @@ def _deployment_by_contract(session: Session, protocol_id: int) -> dict[int, str
         if addr is not None:
             out.setdefault(contract_id, addr)
     return out
+
+
+class AssetHolding(NamedTuple):
+    """One (holder, asset) balance the §5b reach probe can match a moved asset to.
+
+    ``asset`` is the address that EMITS a ``Transfer`` log for it: the token
+    contract, or :data:`~services.effects.config.NATIVE_ASSET_LOG_EMITTER` for the
+    native balance (``contract_balances.token_address IS NULL``). Matching is per
+    asset because the whole A2 over-claim was asset-blindness: a synthetic native
+    move out of the weETH proxy matched a holder whose USD is 99.99% eETH, and the
+    row published $3.489B of "reach" for a call that moved $0 of ETH.
+
+    ``usd_value`` is ``None`` when the holding is UNPRICED — 1001 of 1376 local rows
+    carry ``price_usd = 0``, which the producer writes for "no price known", and
+    ``usd_value`` is the column that encodes that correctly as SQL NULL. It must
+    never be read as zero: that is a confident low value where the honest answer is
+    "unknown", which is inv. 1's ranking rule in its numeric form.
+    """
+
+    holder: str
+    asset: str
+    usd_value: float | None
+
+
+def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
+    """``deployment address -> its per-ASSET holdings``.
+
+    Keyed on the address that HOLDS the money (the proxy), because that is the only
+    address a ``Transfer`` log can name — the same reason ``deployment_balance``
+    exists beside ``balance``.
+
+    MAX per (holder, asset), not SUM, for the reason ``build_authority_graph``
+    documents: two implementation rows fronted by one proxy each carry a COPY of that
+    one deployment's holdings, and adding them reports the money twice.
+    """
+    rows = session.execute(
+        select(
+            Contract.id,
+            ContractBalance.token_address,
+            ContractBalance.usd_value,
+        )
+        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        .where(Contract.protocol_id == protocol_id)
+    ).all()
+    holders = _deployment_by_contract(session, protocol_id)
+    addresses: dict[int, str] = {
+        cid: address
+        for cid, address in session.execute(
+            select(Contract.id, Contract.address).where(Contract.protocol_id == protocol_id)
+        ).all()
+    }
+    # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
+    # is never treated as 0 in the max: a copy of the same holding that happened to be
+    # priced is strictly more informative.
+    best: dict[tuple[str, str], float | None] = {}
+    for contract_id, token_address, usd in rows:
+        holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
+        if holder is None:
+            continue
+        asset = _addr(token_address) or NATIVE_ASSET_LOG_EMITTER
+        key = (holder, asset)
+        value = None if usd is None else float(_usd(usd))
+        if key not in best:
+            best[key] = value
+            continue
+        current = best[key]
+        if current is None:
+            best[key] = value
+        elif value is not None:
+            best[key] = max(current, value)
+    out: dict[str, list[AssetHolding]] = {}
+    for (holder, asset), usd_value in sorted(best.items()):
+        out.setdefault(holder, []).append(AssetHolding(holder=holder, asset=asset, usd_value=usd_value))
+    return {holder: tuple(items) for holder, items in out.items()}
 
 
 def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
@@ -901,10 +985,19 @@ def select_candidates(
     graph = build_authority_graph(session, protocol_id)
 
     # §5b: the protocol's witnessed value-holder set (on-chain balances), built once
-    # and shared by reference across every candidate. Only positive balances — a
-    # zero-balance holder can't be a value-reach target and only adds noise. Keyed
-    # on the HOLDING address, which is the one a ``Transfer`` log can name.
-    value_holders = tuple(sorted((a, float(u)) for a, u in graph.deployment_balance.items() if u > _ZERO_USD))
+    # and shared by reference across every candidate, PER ASSET. Keyed on the HOLDING
+    # address, which is the one a ``Transfer`` log can name.
+    #
+    # An UNPRICED holding is kept (``usd_value=None``) where the old per-holder set
+    # dropped anything summing to zero: "we hold this and cannot value it" is the
+    # input that makes a reach total not-determined, and dropping it made a moved
+    # unpriced asset silently equivalent to no movement at all. A holding priced at
+    # exactly 0 is likewise kept — a measured zero is evidence.
+    value_holders = tuple(
+        holding
+        for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
+        for holding in holdings_for_deployment
+    )
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
 
     candidates: list[Candidate] = []

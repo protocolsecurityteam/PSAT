@@ -31,6 +31,7 @@ from services.effects.preflight import (
     probe_simulate_support,
     require_simulate_or_fallback,
 )
+from services.effects.selection import AssetHolding
 from services.effects.simulate import (
     TRANSFER_TOPIC,
     SimCall,
@@ -697,7 +698,11 @@ def test_value_out_reach_measures_downstream_holder_loss():
         principal=PRINCIPAL,
         calldata="0x11111111",
         simulate_supported=True,
-        value_holders=((CONTRACT, 221_000_000.0), (lp, 55_200_000.0), (other, 1_000.0)),
+        value_holders=(
+            AssetHolding(CONTRACT, TOKEN, 221_000_000.0),
+            AssetHolding(lp, TOKEN, 55_200_000.0),
+            AssetHolding(other, TOKEN, 1_000.0),
+        ),
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
@@ -727,7 +732,7 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         principal=PRINCIPAL,
         calldata="0x11111111",
         simulate_supported=True,
-        value_holders=((lp, 55_200_000.0),),
+        value_holders=(AssetHolding(lp, TOKEN, 55_200_000.0),),
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN

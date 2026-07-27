@@ -1169,6 +1169,8 @@ export function claimWitnessFacts(fn) {
   let reachValue = null;
   let reachIndeterminate = false;
   let reachFloor = null;
+  let reachUnvalued = 0;
+  let reachPriced = null;
   for (const c of claims) {
     if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
     const w = c.witness;
@@ -1206,6 +1208,13 @@ export function claimWitnessFacts(fn) {
       // zero-balance router read "$0 reach" for a function that can move millions.
       if (typeof observed.observed_reach_floor_usd === "number")
         reachFloor = observed.observed_reach_floor_usd;
+      // A2: value WAS observed leaving a holder, in an asset whose USD we do not
+      // have (unpriced, or no balance row for it at all). Its own state: neither a
+      // reach figure nor a floor on the acting contract.
+      if (Array.isArray(observed.observed_reach_unvalued_assets))
+        reachUnvalued = observed.observed_reach_unvalued_assets.length;
+      if (typeof observed.observed_reach_priced_usd === "number")
+        reachPriced = observed.observed_reach_priced_usd;
     }
   }
   if (destKinds.length)
@@ -1215,7 +1224,18 @@ export function claimWitnessFacts(fn) {
     facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
-  if (reachIndeterminate) {
+  if (reachUnvalued > 0) {
+    // Witnessed, not valued. Naming the count keeps this apart from both the
+    // measured row (a number) and the not-witnessed row (a floor on own balance).
+    const priced = formatUsdUpperBound(reachPriced);
+    const assets = `${reachUnvalued} asset(s) of unknown value`;
+    facts.push({
+      label: "Reach",
+      value: priced
+        ? `value not determined — ${assets}, priced part ${priced}`
+        : `value not determined — ${assets}`,
+    });
+  } else if (reachIndeterminate) {
     // NOT measured. Name the floor for what it is and never as the reach: the
     // acting contract's own balance is a lower bound on what an exercise of this
     // function can touch, and a zero floor says nothing about the money it moves.

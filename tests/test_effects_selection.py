@@ -34,7 +34,7 @@ from db.models import (
     JobStatus,
     Protocol,
 )
-from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.effects.selection import (
     JobScope,
     _token_holdings_by_contract,
@@ -96,6 +96,20 @@ def _balance(session: Session, contract_id: int, usd: float | Decimal | str) -> 
             contract_id=contract_id,
             token_address=None,  # native
             raw_balance="0",
+            decimals=18,
+            usd_value=usd,
+        )
+    )
+
+
+def _token_balance(session: Session, contract_id: int, token: str | None, usd: float | Decimal | str | None) -> None:
+    """One ``contract_balances`` row. ``usd=None`` is the UNPRICED shape (the producer
+    writes ``price_usd = 0`` and leaves ``usd_value`` NULL on 1001 of 1376 local rows)."""
+    session.add(
+        ContractBalance(
+            contract_id=contract_id,
+            token_address=token,
+            raw_balance="1",
             decimals=18,
             usd_value=usd,
         )
@@ -452,12 +466,63 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     db_session.commit()
 
     cand = {c.function_id: c for c in select_candidates(db_session, p.id)}[f.id]
-    holders = dict(cand.value_holders)
-    assert holders.get(ADDR(0x9001).lower()) == pytest.approx(221_000_000.0)
-    assert holders.get(ADDR(0x9002).lower()) == pytest.approx(55_200_000.0)
-    assert ADDR(0x9003).lower() not in holders  # zero balance dropped
+    # PER ASSET since A2, keyed on (holder, asset). ``_balance`` writes NATIVE rows, so
+    # the asset is the emitter a synthetic native Transfer log carries.
+    holders = {(h.holder, h.asset): h.usd_value for h in cand.value_holders}
+    native = NATIVE_ASSET_LOG_EMITTER
+    assert holders[(ADDR(0x9001).lower(), native)] == pytest.approx(221_000_000.0)
+    assert holders[(ADDR(0x9002).lower(), native)] == pytest.approx(55_200_000.0)
+    # A holding priced at exactly ZERO is KEPT, where the old per-holder set dropped
+    # it: a measured zero is evidence, and dropping it made "this holder moved an
+    # asset worth nothing" indistinguishable from "this holder moved nothing".
+    assert holders[(ADDR(0x9003).lower(), native)] == pytest.approx(0.0)
     # Acting floor is this deployment's own balance.
     assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
+
+
+@requires_postgres
+def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_session):
+    """A2's input fix. The reach probe used to receive ONE summed figure per holder and
+    match any ``Transfer`` out of it against the whole sum — so a synthetic native move
+    out of the weETH proxy claimed a sheet that is 99.99% eETH ($3.489B).
+
+    Three properties, all load-bearing:
+      * the native row is keyed on the emitter ``eth_simulateV1``'s ``traceTransfers``
+        actually uses (measured live), so a native move can match it at all;
+      * an UNPRICED holding survives as ``usd_value=None`` rather than being dropped or
+        zeroed — it is what makes a reach total not-determined;
+      * a holding is keyed on the DEPLOYMENT (the only address a Transfer log can
+        name), and two implementation rows behind one proxy do not double-count it.
+    """
+    p = _protocol(db_session, "per-asset-holdings")
+    deployment = ADDR(0x8800)
+    token = ADDR(0x88A1)
+    unpriced = ADDR(0x88A2)
+    impl_a = _contract(db_session, p.id, ADDR(0x8801))
+    impl_b = _contract(db_session, p.id, ADDR(0x8802))
+    for impl in (impl_a, impl_b):
+        _fn(
+            db_session,
+            impl.id,
+            name="withdraw",
+            selector=f"0x8800000{impl.id % 10}",
+            effect_targets=["S"],
+            deployment_address=deployment,
+        )
+        # Each code row carries a COPY of the same deployment's sheet.
+        _token_balance(db_session, impl.id, token, 250.0)
+        _token_balance(db_session, impl.id, None, 4_000.0)
+        _token_balance(db_session, impl.id, unpriced, None)
+    db_session.commit()
+
+    cand = next(c for c in select_candidates(db_session, p.id) if c.contract_id == impl_a.id)
+    holdings = {(h.holder, h.asset): h.usd_value for h in cand.value_holders}
+    assert holdings[(deployment.lower(), token.lower())] == 250.0
+    assert holdings[(deployment.lower(), NATIVE_ASSET_LOG_EMITTER)] == 4_000.0
+    assert holdings[(deployment.lower(), unpriced.lower())] is None
+    # MAX per (holder, asset), not SUM: the token appears once at 250, not twice.
+    assert sum(1 for (holder, asset) in holdings if asset == token.lower()) == 1
+    assert len(cand.value_holders) == 3
 
 
 def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_datas(db_session):

@@ -115,6 +115,35 @@ def transfers_out(
     return out
 
 
+def transfers_out_with_asset(result: SimCallResult, source_address: str) -> list[tuple[str, str, str, str]]:
+    """:func:`transfers_out` plus the ASSET each move was in — the log's EMITTER.
+
+    The §5b reach measurement needs the asset, not just the fact of a move: a
+    holder's balance sheet is per asset, and attributing the whole sheet to whichever
+    asset happened to move is the A2 over-claim (a synthetic native-ETH move matched
+    a holder whose USD was 99.99% eETH). ``transfers_out(only_asset=…)`` pins ONE
+    asset per call, so a caller with N holdings would need N scans and still could not
+    see an asset it holds no row for; this returns what actually moved, once.
+
+    Native moves surface here with the emitter ``eth_simulateV1``'s
+    ``traceTransfers`` uses for them (``config.NATIVE_ASSET_LOG_EMITTER``, measured
+    against the live node) — the same pseudo-address a native holding is keyed on, so
+    the two match without special-casing at the call site.
+    """
+    src = source_address.lower()
+    out: list[tuple[str, str, str, str]] = []
+    for log in result.logs:
+        if not log.topics or log.topics[0].lower() != TRANSFER_TOPIC.lower():
+            continue
+        if len(log.topics) < 3:
+            continue
+        frm = _topic_addr(log.topics[1])
+        to = _topic_addr(log.topics[2])
+        if frm == src:
+            out.append((frm, to, log.data, log.address.lower()))
+    return out
+
+
 def transfers_in(
     result: SimCallResult, dest_address: str, *, exclude_asset: str | None = None, only_asset: str | None = None
 ) -> list[tuple[str, str, str]]:

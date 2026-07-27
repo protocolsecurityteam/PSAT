@@ -339,7 +339,15 @@ logger = logging.getLogger(__name__)
 # never enters a cache row (inv. 3) — the bump is because the same probe now returns
 # a different ``concrete`` shape, and the hit path re-publishes ``details`` beside
 # residue written under the old contract.
-EFFECT_CACHE_SCHEMA_VERSION = 25
+# v26 (Wave 2 Leg D, A2): §5b reach is measured PER ASSET. The probe's holder set is
+# now ``(holder, asset, usd|None)`` — native keyed on the emitter
+# ``eth_simulateV1``'s traceTransfers actually uses (measured: 3 reads at head-10 + a
+# pinned read at 25619159, with an ERC-20 control) — and a moved asset with no priced
+# holding makes the total not-determined instead of contributing the holder's whole
+# balance sheet. A pre-v26 row's reach was computed asset-blind: the weETH proxy's
+# $3.489B sheet (99.99% eETH) was attributed to a synthetic native-ETH move, and two
+# rows of that shape carried 64.96% of ALL published reach USD in the DB.
+EFFECT_CACHE_SCHEMA_VERSION = 26
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
