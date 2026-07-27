@@ -147,7 +147,9 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
     assert analysis["timelock"]["has_timelock"] is False
     assert analysis["timelock"]["pattern"] == "none"
     assert analysis["contract_classification"]["is_factory"] is True
-    assert "createChild()" in analysis["contract_classification"]["factory_functions"]
+    factory_functions = analysis["contract_classification"]["factory_functions"]
+    assert factory_functions is not None, "None means the effects artifact was degraded, not that there are none"
+    assert "createChild()" in factory_functions
     assert analysis["upgradeability"]["implementation_slots"] == []
     create_child = _semantic_function(analysis, "createChild()")
     # sink_ids come from the semantic effects artifact and end with

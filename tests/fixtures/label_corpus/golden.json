@@ -1145,7 +1145,16 @@
             "token.functionCall"
           ],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
           }
         },
         {
@@ -3745,7 +3754,16 @@
             "target.functionCall"
           ],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
           }
         },
         {
@@ -4004,7 +4022,7 @@
       "functions": [
         {
           "full_name": "fallback()",
-          "selector": "0x552079dc",
+          "selector": "",
           "effect_labels": [],
           "claims": [],
           "value_flows": [],
@@ -4014,7 +4032,16 @@
             "pokes"
           ],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
           }
         },
         {
@@ -4067,7 +4094,7 @@
         },
         {
           "full_name": "receive()",
-          "selector": "0xa3e76c0f",
+          "selector": "",
           "effect_labels": [],
           "claims": [],
           "value_flows": [],
@@ -4075,7 +4102,16 @@
           "delegatecall_sinks": [],
           "effect_targets": [],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
           }
         },
         {
@@ -4090,7 +4126,16 @@
             "lastAmount"
           ],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
           }
         },
         {
@@ -4508,7 +4553,7 @@
         },
         {
           "full_name": "receive()",
-          "selector": "0xa3e76c0f",
+          "selector": "",
           "effect_labels": [
             "mint"
           ],
@@ -4555,7 +4600,16 @@
             "balanceOf"
           ],
           "predicate_tree": {
-            "present": false
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "comparison"
+            ],
+            "references_msg_sender": true
           }
         },
         {

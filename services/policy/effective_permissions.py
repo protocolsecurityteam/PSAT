@@ -29,6 +29,7 @@ from schemas.effective_permissions import (
 from services.policy.capability_surface import capability_surface_status, project_capability_surface
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
+    has_no_selector,
     is_canonical_abi_signature,
 )
 
@@ -162,8 +163,14 @@ def _abi_signature_and_selector(
     signature. Hashing a string that still names a user-defined type publishes a
     4-byte value the chain will never dispatch on, and the row's own signature
     column would then disagree with its selector — a wrong answer where no
-    answer is the honest one."""
+    answer is the honest one.
+
+    It is ``""`` for ``fallback()`` / ``receive()``: those PROVABLY have no
+    selector, which is a different answer from "we could not derive one", and
+    ``""`` is the sentinel ``db/effect_cache.py`` already fixes for them."""
     abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
+    if has_no_selector(abi_sig):
+        return abi_sig, ""
     if not is_canonical_abi_signature(abi_sig):
         return abi_sig, None
     return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]

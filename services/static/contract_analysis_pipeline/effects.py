@@ -323,17 +323,18 @@ _SPECIFIC_EFFECT_LABELS = frozenset(
 # ---------------------------------------------------------------------------
 
 
+def _is_fallback_or_receive(fn: Any) -> bool:
+    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
+        return True
+    return (getattr(fn, "name", "") or "") in ("fallback", "receive")
+
+
 def _is_externally_observable(fn: Any) -> bool:
     """External/public OR fallback/receive. Skips constructor and
     internal/private functions."""
-    if getattr(fn, "is_constructor", False):
+    if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
         return False
-    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
-        return True
-    name = getattr(fn, "name", "") or ""
-    if name == "constructor":
-        return False
-    if name in ("fallback", "receive"):
+    if _is_fallback_or_receive(fn):
         return True
     visibility = getattr(fn, "visibility", None)
     return visibility in ("external", "public")
@@ -343,9 +344,7 @@ def _is_state_changing_entry_point(fn: Any) -> bool:
     """A selector-bearing external/public, non-view, non-pure function — the
     ABI mutability surface. Excludes fallback/receive (no selector) and
     view/pure reads."""
-    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
-        return False
-    if (getattr(fn, "name", "") or "") in ("fallback", "receive"):
+    if _is_fallback_or_receive(fn):
         return False
     if getattr(fn, "visibility", None) not in ("external", "public"):
         return False
@@ -372,11 +371,28 @@ def _function_full_name(fn: Any) -> str:
 
 def _selector_for(signature: str | None) -> str | None:
     """Compute keccak256[:4] of a canonical ``name(types)`` signature.
-    Returns ``None`` if the signature isn't in canonical form (e.g.
-    fallback/receive, which have no selector)."""
+    Returns ``None`` if the signature isn't in canonical form.
+
+    Note this is a *string* test: Slither renders a fallback's ``full_name`` as
+    ``"fallback()"``, which is canonical-looking and hashes happily. Callers
+    passing a function's own name must go through :func:`_own_selector`."""
     if not signature or "(" not in signature or ")" not in signature:
         return None
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _own_selector(fn: Any) -> str | None:
+    """The 4-byte selector a caller would put in ``msg.sig`` to reach ``fn`` —
+    ``None`` for ``fallback`` / ``receive``, which have none by construction.
+
+    ``keccak("fallback()")[:4] = 0x552079dc`` and ``keccak("receive()")[:4] =
+    0xa3e76c0f`` are not dispatches: no caller can send them, and a contract
+    that did define ``function fallback()`` would own that selector instead.
+    ``db/effect_cache.py`` already fixes the empty string as the sentinel for
+    this case; this is that convention, not a second one."""
+    if _is_fallback_or_receive(fn):
+        return None
+    return _selector_for(_function_full_name(fn))
 
 
 def _sink_id(function_name: str, kind: str, target: str, idx: int) -> str:
@@ -3299,8 +3315,7 @@ def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
     has_state_write = any(s["kind"] == "state_write" for s in sinks)
     if not has_state_write:
         return []
-    signature = _function_full_name(function)
-    selector = _selector_for(signature)
+    selector = _own_selector(function)
     if selector is None:
         return []
     return [selector]
@@ -3406,7 +3421,9 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     summary = _action_summary(labels, list(effect_targets))
 
     signature = _function_full_name(function)
-    selector = _selector_for(signature) or ""
+    # "" is the no-selector sentinel (fallback/receive), matching the
+    # ``effect_verdicts`` identity key in ``db/effect_cache.py``.
+    selector = _own_selector(function) or ""
     return {
         "function": signature,
         "selector": selector,

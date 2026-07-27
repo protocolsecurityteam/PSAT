@@ -190,33 +190,45 @@ def test_a_destination_that_no_parameter_determines_is_not_determined():
 # ---------------------------------------------------------------------------
 
 
-def test_class_F_a_value_returning_forwarder_loses_its_caller_gate():
-    """``withdrawAll`` is callable in fact only by the operator: it forwards to a
-    gated overload. Because the internal call's result is CONSUMED by the
-    ``return``, the gate recursion is skipped and the function ends up with NO
-    predicate tree — which every consumer reads as a positive claim of
-    unguardedness.
+def test_class_F_a_value_returning_forwarder_keeps_its_caller_gate():
+    """INVERTED (W1-A, commit a96b2ca3). This test previously asserted the
+    defect: ``withdrawAll()`` forwards to a gated overload and, because the
+    internal call's result was CONSUMED by the ``return``, the gate recursion
+    was skipped and the function ended up with NO predicate tree — which every
+    consumer reads as a positive claim of unguardedness.
 
-    The sibling ``pokeAll`` forwards to the same gated shape and discards the
-    result, and DOES acquire the tree. That asymmetry is the finding; a fix must
-    close it without changing ``pokeAll``.
+    The asymmetry with ``pokeAll`` (same forwarding, result discarded, tree
+    present) WAS the finding. The fix closes it, and this test now pins the
+    closure plus the requirement that ``pokeAll`` is unchanged — a fix that
+    simply disabled the skip everywhere would move ``pokeAll`` too.
     """
     fns = _functions(TREE_ABSENT)
-    assert fns["withdrawAll()"]["predicate_tree"]["present"] is False
+    assert fns["withdrawAll()"]["predicate_tree"]["present"] is True
+    assert "caller_authority" in fns["withdrawAll()"]["predicate_tree"]["authority_roles"]
     assert fns["withdrawTo(uint256)"]["predicate_tree"]["present"] is True
     assert fns["pokeAll()"]["predicate_tree"]["present"] is True
     assert fns["pokeTo(uint256)"]["predicate_tree"]["present"] is True
-    # The two forwarders differ ONLY in whether the result is consumed.
+    # The two forwarders differ ONLY in whether the result is consumed, and
+    # they must now agree on the gate as well as on the labels.
     assert fns["withdrawAll()"]["effect_labels"] == fns["pokeAll()"]["effect_labels"]
+    assert (
+        fns["withdrawAll()"]["predicate_tree"]["authority_roles"]
+        == fns["pokeAll()"]["predicate_tree"]["authority_roles"]
+    )
 
 
-def test_class_R_fallback_and_receive_are_caller_gated_and_treeless():
-    """``fallback`` and ``receive`` can never carry a tree — they are excluded
-    from the externally-callable set twice over — and both of these require
-    ``msg.sender == owner``."""
+def test_class_R_fallback_and_receive_are_caller_gated_and_carry_a_tree():
+    """INVERTED (W1-A, commit c2a2ebe0). This test previously asserted the
+    defect: ``fallback`` and ``receive`` were excluded from the tree-building
+    surface, so neither could ever carry a tree, and both of these require
+    ``msg.sender == owner``. They are built for now, and the fabricated
+    ``keccak("fallback()")`` / ``keccak("receive()")`` selectors are gone."""
     fns = _functions(TREE_ABSENT)
-    assert fns["fallback()"]["predicate_tree"]["present"] is False
-    assert fns["receive()"]["predicate_tree"]["present"] is False
+    for signature in ("fallback()", "receive()"):
+        tree = fns[signature]["predicate_tree"]
+        assert tree["present"] is True, signature
+        assert "caller_authority" in tree["authority_roles"], signature
+        assert fns[signature]["selector"] == "", signature
 
 
 # ---------------------------------------------------------------------------

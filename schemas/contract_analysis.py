@@ -7,7 +7,10 @@ from typing import Literal, TypedDict
 from typing_extensions import NotRequired
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
-RiskLevel = Literal["low", "medium", "high", "unknown"]
+# ``clean`` = the detector pass ran and reported nothing. ``unknown`` is
+# retained only for rows written before the split; the producer no longer emits
+# it, and ``None`` (SQL NULL) is what "the pass did not run" now means.
+RiskLevel = Literal["low", "medium", "high", "clean", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
 TimelockPattern = Literal["oz_timelock", "governor_timelock", "custom", "none", "unknown"]
 CurrentHoldersStatus = Literal["unknown_static_only"]
@@ -51,28 +54,47 @@ class Subject(TypedDict):
 class AnalysisStatus(TypedDict):
     static_analysis_completed: bool
     slither_completed: bool
+    # ``absent`` means the Slither DETECTOR pass produced no result document.
+    # ``static_analysis_completed`` stays true because the IR-derived analysis
+    # (predicates, effects, claims, classification) did complete -- the two are
+    # different passes and were being reported as one.
+    detector_output: Literal["present", "absent"]
     errors: list[str]
 
 
 class Summary(TypedDict):
+    # Every evidence field here is nullable, and ``None`` means the detector
+    # did not run, or ran on inputs a degraded upstream stage had already
+    # emptied. ``False`` / ``[]`` is the positive claim "it ran and found
+    # nothing" — but only as strong as the producer's own ran-check: it is an
+    # absence proof exactly to the extent that the producer tests every plane
+    # its evidence travels through, which is per-field (see
+    # ``_detect_pausability``, which tests two). ``contract_summaries`` has
+    # been nullable on all of them since the baseline migration; the producer
+    # is what emitted a proven-absence on 100% of rows regardless.
     control_model: ControlModel
     is_upgradeable: bool
-    is_pausable: bool
-    has_timelock: bool
-    static_risk_level: RiskLevel
-    standards: list[str]
-    is_factory: bool
-    is_nft: bool
+    is_pausable: bool | None
+    has_timelock: bool | None
+    static_risk_level: RiskLevel | None
+    standards: list[str] | None
+    is_factory: bool | None
+    is_nft: bool | None
 
 
 class ContractClassification(TypedDict):
+    # ``standards`` / ``is_erc*`` / ``is_nft`` are IR-derived (``contract.ercs()``
+    # plus a signature+event match) and run on every parse, so ``[]`` / ``False``
+    # here are MEASURED absences, independent of the Slither detector pass.
     standards: list[str]
     is_erc20: bool
     is_erc721: bool
     is_erc1155: bool
     is_nft: bool
-    is_factory: bool
-    factory_functions: list[str]
+    # ``is_factory`` alone reads the effects artifact's ``contract_creation``
+    # sinks: ``None`` when that artifact is degraded, i.e. not determined.
+    is_factory: bool | None
+    factory_functions: list[str] | None
     evidence: list[Evidence]
 
 
@@ -124,7 +146,10 @@ class UpgradeabilityAnalysis(TypedDict):
 
 
 class PausabilityAnalysis(TypedDict):
-    is_pausable: bool
+    # ``None`` = not determined (the claims plane, the only detector that
+    # resolves a struct-member / namespaced latch, did not run). Distinct from
+    # ``False``, which is a proven absence.
+    is_pausable: bool | None
     pause_functions: list[str]
     unpause_functions: list[str]
     gating_modifiers: list[str]
@@ -134,8 +159,17 @@ class PausabilityAnalysis(TypedDict):
 
 
 class TimelockAnalysis(TypedDict):
-    has_timelock: bool
+    # ``None`` = not determined (no IR to walk). Never ``False`` for "we did
+    # not look".
+    has_timelock: bool | None
     pattern: TimelockPattern
+    # The delay VALUE is a live read (``getMinDelay()``) and this module has no
+    # chain: ``delay`` is always ``None`` with ``delay_source: "not_read"``
+    # until one is threaded. A defaulted delay would fabricate a protective
+    # credit. ``delay_variables`` names where the value lives, which is what
+    # source alone can prove.
+    delay: int | None
+    delay_source: Literal["not_read", "chain_read"]
     delay_variables: list[str]
     queue_execute_functions: list[str]
     authorized_roles: list[str]
@@ -156,8 +190,11 @@ class SlitherFinding(TypedDict):
 
 
 class SlitherSummary(TypedDict):
-    detector_counts: dict[str, int]
-    key_findings: list[SlitherFinding]
+    # ``None`` on both when ``detector_output`` is ``absent``. A zero-filled
+    # count map is a clean bill of health; a pass that never ran is not.
+    detector_output: Literal["present", "absent"]
+    detector_counts: dict[str, int] | None
+    key_findings: list[SlitherFinding] | None
 
 
 class TrackingHint(TypedDict):
