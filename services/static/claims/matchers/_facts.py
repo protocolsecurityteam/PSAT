@@ -204,10 +204,16 @@ def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
 
     ``direct`` — the operand IS the parameter. ``derived`` — the operand is a
     computed value whose ``derived_from`` provenance includes the parameter
-    (flow-insensitive; see L-24). ``opaque`` — the operand is computed but its
-    argument provenance is not determined (``derived_from`` is ``None`` or a
-    nested computed member without its own provenance), so it may involve any
-    parameter without saying so."""
+    (flow-insensitive; see L-24). ``opaque`` — the operand can involve a
+    parameter without saying so.
+
+    Every ``computed`` operand is opaque, including one whose ``derived_from``
+    resolves entirely to parameter/state/constant origins. ``derived_from`` is
+    flow-insensitive (WAVE_0 L-24): it can OMIT an origin that genuinely feeds
+    the value (Teller ``depositAsset``) while publishing one that only reaches
+    the name on another branch. A list that LOOKS complete therefore proves
+    nothing in the negative direction — it contributes positive ``derived``
+    bindings and nothing else."""
     direct: set[int] = set()
     derived: set[int] = set()
     opaque = False
@@ -221,23 +227,14 @@ def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
         else:
             opaque = True
     elif source == "computed":
+        opaque = True
         provenance = operand.get("derived_from", None)
-        if provenance is None:
-            opaque = True
-        else:
+        if isinstance(provenance, list):
             for origin in provenance:
-                if not isinstance(origin, dict):
-                    opaque = True
-                elif origin.get("source") == "parameter":
+                if isinstance(origin, dict) and origin.get("source") == "parameter":
                     index = origin.get("parameter_index")
                     if isinstance(index, int):
                         derived.add(index)
-                    else:
-                        opaque = True
-                elif origin.get("source") == "computed":
-                    # A nested computed member carries no provenance of its own;
-                    # whatever fed it is invisible here.
-                    opaque = True
     elif source == "top":
         opaque = True
     return direct, derived, opaque

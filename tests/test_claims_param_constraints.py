@@ -292,11 +292,52 @@ def test_a_computed_operand_with_UNDETERMINED_provenance_blocks_the_unconstraine
     assert _facts.param_constraint(ctx, "f(address,uint256)", 7) == {"state": "not_determined"}
 
 
-def test_a_computed_operand_proven_to_hold_only_constants_blocks_nothing():
+def test_a_computed_operand_blocks_the_unconstrained_proof_even_with_resolved_provenance():
+    """INVERTED from ``…proven_to_hold_only_constants_blocks_nothing``: the old
+    arm read a fully-resolved ``derived_from`` as a COMPLETE account and let the
+    leaf support ``unconstrained_proven`` for every unlisted parameter. That is
+    the L-24 misbind consumed as ground truth in exactly the direction WAVE_0
+    forbids — the flow-insensitive union can OMIT an origin that genuinely feeds
+    the value, so a resolved-looking list still proves nothing negatively. Every
+    ``computed`` operand blocks; the positive ``derived`` bindings survive."""
+    for provenance in ([], [_param(1, "receiver")], [STATE_VAR]):
+        ctx = _ctx(
+            _leaf(
+                operands=[
+                    {"source": "computed", "computed_kind": "keccak256(bytes)", "derived_from": provenance},
+                    STATE_VAR,
+                ]
+            )
+        )
+        assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+
+
+def test_the_l24_misbind_shape_lands_the_omitted_parameter_on_not_determined():
+    """The exact WAVE_0 L-24 shape: ``keccak(receiver, nativeWrapper)`` published
+    ``receiver`` (index 1) and OMITTED the genuinely-committed ``depositAsset``
+    (index 2). Index 1 keeps its positive ``derived_from`` binding; index 2 —
+    the misbind casualty — must be ``not_determined``, never a proof of
+    freedom."""
     ctx = _ctx(
-        _leaf(operands=[{"source": "computed", "computed_kind": "keccak256(bytes)", "derived_from": []}, STATE_VAR])
+        _leaf(
+            operands=[
+                {
+                    "source": "computed",
+                    "computed_kind": "keccak256(bytes)",
+                    "derived_from": [
+                        _param(1, "receiver"),
+                        {"source": "state_variable", "state_variable_name": "nativeWrapper"},
+                    ],
+                },
+                {"source": "state_variable", "state_variable_name": "commitments"},
+            ]
+        )
     )
-    assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
+    bound = _facts.param_constraint(ctx, "f(address,uint256)", 1)
+    assert bound["state"] == "constrained"
+    assert bound["binding"] == "derived_from"
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 2) == {"state": "not_determined"}
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 3) == {"state": "not_determined"}
 
 
 def test_an_absent_derived_from_key_on_a_computed_operand_is_undetermined_not_empty():
