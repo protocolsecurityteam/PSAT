@@ -87,13 +87,20 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
     for i in range(N_CANDIDATES):
         code = _code(i)
         addr = "0x" + f"{i:x}{tag}".ljust(40, "0")[:40]
+        # Each proxy names its OWN implementation, and that implementation's bytecode is
+        # cached below. G6-C0: a proxy row carrying function rows must never be hashed
+        # on its forwarding stub (one stub hash covers every implementation behind the
+        # pattern — measured: 15 of them behind ``UUPSProxy``), so the resolver keys on
+        # the implementation instead and this fixture has to supply it. Without the impl
+        # bytecode the candidate is skipped, which is the guard working.
+        impl_addr = "0x" + f"d{i:x}{tag}".ljust(40, "0")[:40]
         c = Contract(
             protocol_id=proto.id,
             address=addr,
             chain="ethereum",
             is_proxy=True,
             proxy_type="transparent",
-            implementation="0x" + "d1" * 20,
+            implementation=impl_addr,
         )
         session.add(c)
         session.flush()
@@ -109,7 +116,10 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
         session.flush()
         session.add(FunctionPrincipal(function_id=fn.id, address=PRINCIPAL))
         session.add(UpgradeEvent(contract_id=c.id, proxy_address=addr, block_number=1, tx_hash="0x" + "ab" * 32))
-        session.add(BytecodeCache(chain_id=1, address=addr, bytecode=code, code_keccak="0x" + "cc" * 32))
+        session.add(
+            BytecodeCache(chain_id=1, address=addr, bytecode="0x363d3d373d3d3d363d73stub", code_keccak="0x" + "bb" * 32)
+        )
+        session.add(BytecodeCache(chain_id=1, address=impl_addr, bytecode=code, code_keccak="0x" + "cc" * 32))
         cands.append(
             Candidate(
                 function_id=fn.id,
@@ -380,3 +390,146 @@ def test_claim_latch_pairs_prefetch_matches_query(clean):
         prefetch_mod.clear_prefetch(session)
     assert batched == legacy
     assert batched == {("paused", None)}
+
+
+# ---------------------------------------------------------------------------
+# G6-C0 — a proxy row's forwarding stub is never a behavioral hash
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
+    """The unstated invariant this cache rests on — "a proxy row never carries
+    ``effective_functions``" — is asserted by nothing (39 proxy rows, 0 functions, no
+    constraint, no test, no comment). When it breaks, ``candidate.contract_address`` is
+    a proxy and the bytecode at it is the forwarding STUB, whose hash is shared by every
+    implementation behind the pattern: measured, 16 colliding surface-hash groups over
+    323 mainnet ``bytecode_cache`` rows, largest group 15 distinct implementations
+    behind ``UUPSProxy``.
+
+    Two proxies of the SAME type with DIFFERENT implementations must not collide, and a
+    proxy whose implementation code is unavailable must yield no hash at all rather than
+    the stub's.
+    """
+    session = clean
+    resolver = make_bytecode_hash_resolver(1)
+    proto = Protocol(name=f"proxyhash-{uuid.uuid4().hex[:8]}")
+    session.add(proto)
+    session.flush()
+    tag = uuid.uuid4().hex[:8]
+    stub = "0x363d3d373d3d3d363d73" + "ab" * 20  # the SAME stub for both proxies
+    made: list[tuple[Candidate, str]] = []
+    for i in (1, 2):
+        proxy = "0x" + f"e{i:x}{tag}".ljust(40, "0")[:40]
+        impl = "0x" + f"f{i:x}{tag}".ljust(40, "0")[:40]
+        c = Contract(protocol_id=proto.id, address=proxy, chain="ethereum", is_proxy=True, implementation=impl)
+        session.add(c)
+        session.flush()
+        fn = EffectiveFunction(
+            contract_id=c.id,
+            deployment_address=proxy,
+            function_name="upgradeTo",
+            selector=SELECTOR,
+            authority_public=False,
+            effect_targets=["impl"],
+        )
+        session.add(fn)
+        session.flush()
+        session.add(BytecodeCache(chain_id=1, address=proxy, bytecode=stub, code_keccak="0x" + "b1" * 32))
+        session.add(
+            BytecodeCache(chain_id=1, address=impl, bytecode=_code(i + 40), code_keccak=f"0x{i:02x}" + "c1" * 31)
+        )
+        made.append(
+            (
+                Candidate(
+                    function_id=fn.id,
+                    contract_id=c.id,
+                    contract_address=proxy,
+                    selector=SELECTOR,
+                    function_name="upgradeTo",
+                    authority_public=False,
+                    effect_targets=("impl",),
+                    principal_addresses=(),
+                    deployment_address=proxy,
+                ),
+                impl,
+            )
+        )
+    session.commit()
+
+    resolved = [resolver(session, cand) for cand, _impl in made]
+    assert all(r is not None for r in resolved)
+    # The stub is shared, so hashing it would make these two IDENTICAL. They are not.
+    assert resolved[0] != resolved[1]
+    # ...and each is exactly the hash of its OWN implementation's code.
+    for (cand, impl), got in zip(made, resolved, strict=True):
+        assert got is not None
+        assert got[0] == bytecode_fallback_hash(_code_of(session, impl), cand.selector)
+    # The stub's own hash appears nowhere.
+    assert all(bytecode_fallback_hash(stub, SELECTOR) != got[0] for got in resolved if got)
+
+    # A proxy row with no resolvable implementation code: no hash at all (skip,
+    # degraded, never guess) — NEVER the stub.
+    orphan_proxy = "0x" + f"a{tag}".ljust(40, "0")[:40]
+    orphan = Contract(protocol_id=proto.id, address=orphan_proxy, chain="ethereum", is_proxy=True)
+    session.add(orphan)
+    session.flush()
+    fn = EffectiveFunction(
+        contract_id=orphan.id,
+        deployment_address=orphan_proxy,
+        function_name="upgradeTo",
+        selector=SELECTOR,
+        authority_public=False,
+        effect_targets=["impl"],
+    )
+    session.add(fn)
+    session.flush()
+    session.add(BytecodeCache(chain_id=1, address=orphan_proxy, bytecode=stub, code_keccak="0x" + "b2" * 32))
+    session.commit()
+    orphan_cand = Candidate(
+        function_id=fn.id,
+        contract_id=orphan.id,
+        contract_address=orphan_proxy,
+        selector=SELECTOR,
+        function_name="upgradeTo",
+        authority_public=False,
+        effect_targets=("impl",),
+        principal_addresses=(),
+        deployment_address=orphan_proxy,
+    )
+    assert resolver(session, orphan_cand) is None
+
+    # CONTROL: a NON-proxy row still hashes its own code, unchanged.
+    plain_addr = "0x" + f"c{tag}".ljust(40, "0")[:40]
+    plain = Contract(protocol_id=proto.id, address=plain_addr, chain="ethereum", is_proxy=False)
+    session.add(plain)
+    session.flush()
+    plain_fn = EffectiveFunction(
+        contract_id=plain.id,
+        function_name="withdraw",
+        selector="0xf3fef3a3",
+        authority_public=False,
+        effect_targets=["S"],
+    )
+    session.add(plain_fn)
+    session.flush()
+    session.add(BytecodeCache(chain_id=1, address=plain_addr, bytecode=_code(99), code_keccak="0x" + "d9" * 32))
+    session.commit()
+    plain_cand = Candidate(
+        function_id=plain_fn.id,
+        contract_id=plain.id,
+        contract_address=plain_addr,
+        selector="0xf3fef3a3",
+        function_name="withdraw",
+        authority_public=False,
+        effect_targets=("S",),
+        principal_addresses=(),
+    )
+    got = resolver(session, plain_cand)
+    assert got is not None
+    assert got[0] == bytecode_fallback_hash(_code(99), "0xf3fef3a3")
+
+
+def _code_of(session, address: str) -> str:
+    row = session.query(BytecodeCache).filter(BytecodeCache.chain_id == 1, BytecodeCache.address == address).one()
+    return row.bytecode
