@@ -758,7 +758,19 @@ class ControlGraphNode(Base):
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Kept for compatibility; ``False`` on it is four different populations at
+    # once. ``analysis_state`` is what a consumer must read.
     analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 'analyzed' | 'not_a_contract' | 'attempt_failed' | 'beyond_depth_horizon'
+    # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
+    # walk, not about the address, and is the one the bool could never express:
+    # without ``graph_max_depth`` below it was not even derivable from the row.
+    # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
+    analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The ``max_depth`` of the walk that produced this row. NULL = not
+    # determined. Without it ``depth`` alone cannot say whether an unanalysed
+    # contract was skipped by the horizon or by something else.
+    graph_max_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="control_graph_nodes")

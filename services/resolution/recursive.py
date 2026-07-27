@@ -19,7 +19,12 @@ from db.models import EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_EXTERNAL_CAL
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
-from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
+from schemas.resolved_control_graph import (
+    ResolvedAnalysisState,
+    ResolvedControlGraph,
+    ResolvedGraphEdge,
+    ResolvedGraphNode,
+)
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
@@ -463,6 +468,37 @@ def _materialize_contract_artifacts(
         "predicate_trees": predicate_trees,
         "effective_permissions": effective_permissions,
     }
+
+
+def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysisState | None:
+    """Why this node is (or is not) analysed.
+
+    ``analyzed`` is a non-nullable bool, so its ``False`` is four different
+    populations at once — a principal that was never a candidate, a contract
+    whose materialization failed, a contract the depth horizon cut off, and
+    "cannot say". The first says nothing adverse, the second is a fact about
+    the contract, the third is a fact about *our walk*, and only the fourth is
+    an absence of knowledge. Derived once here, at the end of the walk, because
+    this is the only place that holds ``max_depth`` alongside every node.
+
+    Returns ``None`` — not determined — for an analyzable contract inside the
+    horizon that is nonetheless unanalysed with no recorded failure. That
+    combination is not known to be reachable, and inventing a value for it
+    would be exactly the error this field exists to remove.
+    """
+    if node.get("analyzed"):
+        return "analyzed"
+    details = node.get("details")
+    if isinstance(details, dict) and details.get("materialize_error"):
+        return "attempt_failed"
+    resolved_type = node.get("resolved_type")
+    if resolved_type in ANALYZABLE_TYPES:
+        if int(node.get("depth") or 0) > max_depth:
+            return "beyond_depth_horizon"
+        return None
+    if resolved_type and resolved_type != "unknown":
+        return "not_a_contract"
+    return None
 
 
 def _resolved_type_rank(resolved_type: str | None) -> int:
@@ -1353,6 +1389,9 @@ def resolve_control_graph(
     record_stage_metric("recursive_levels", _levels)
     record_stage_metric("recursive_classify_hits", classify_stats["hits"])
     record_stage_metric("recursive_classify_misses", classify_stats["misses"])
+
+    for _node in nodes.values():
+        _node["analysis_state"] = _analysis_state(_node, max_depth)
 
     graph: ResolvedControlGraph = {
         "schema_version": "0.1",

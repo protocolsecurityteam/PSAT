@@ -4,9 +4,29 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from .control_tracking import ResolvedControllerType
 
 ResolvedNodeType = Literal["contract", "principal"]
+
+# Why a node is or is not analysed. ``analyzed`` alone is a non-nullable bool
+# and collapses four populations into its ``False``: a principal that was never
+# a candidate, a contract whose materialization was attempted and failed, a
+# contract left unattempted because the walk's depth horizon cut it off, and
+# "we cannot say". A consumer reading only the bool cannot tell a limit of the
+# walk from a property of the address.
+ResolvedAnalysisState = Literal[
+    "analyzed",
+    # Not an analyzable type (eoa / safe / zero / off-chain witness / …).
+    # Analysis was never applicable, so its absence says nothing adverse.
+    "not_a_contract",
+    # Materialization ran and failed. ``details.materialize_error`` carries why.
+    "attempt_failed",
+    # An analyzable contract the BFS never reached: its depth exceeded
+    # ``max_depth``. A fact about the walk, not about the contract.
+    "beyond_depth_horizon",
+]
 ResolvedEdgeRelation = Literal[
     "controller_value",
     "role_principal",
@@ -29,6 +49,9 @@ class ResolvedGraphNode(TypedDict):
     contract_name: str | None
     depth: int
     analyzed: bool
+    # Absent / None = not determined. ``analyzed`` stays for compatibility and
+    # is exactly ``analysis_state == "analyzed"`` when this is populated.
+    analysis_state: NotRequired[ResolvedAnalysisState | None]
     details: dict[str, object]
     artifacts: dict[str, str]
 

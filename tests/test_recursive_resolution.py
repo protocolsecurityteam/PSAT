@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from schemas.resolved_control_graph import ResolvedGraphEdge
+from schemas.resolved_control_graph import ResolvedGraphEdge, ResolvedGraphNode
 from services.discovery.classifier import ClassificationIncompleteError
 from services.resolution import recursive
 from services.resolution.recursive import (
@@ -1439,3 +1439,92 @@ def test_generic_type_never_overwrites_a_specific_one():
     recursive._ensure_node(nodes, address=other, resolved_type="contract", label="C", depth=1, node_type="contract")
     recursive._ensure_node(nodes, address=other, resolved_type="safe", label="C", depth=1, node_type="principal")
     assert nodes[f"address:{other}"]["resolved_type"] == "safe"
+
+
+def test_analysis_state_splits_the_analyzed_bool():
+    """``analyzed=False`` is four populations; ``analysis_state`` names which.
+
+    Each branch is proven to fire on real data — 1,183 analyzed / 1,236
+    not_a_contract / 28 attempt_failed / 29 beyond_depth_horizon / 55 NULL
+    across the 107 stored resolved_control_graph artifacts (R2) — so this test
+    pins the mapping rather than the reachability.
+    """
+    max_depth = 6
+
+    def node(**kw) -> ResolvedGraphNode:
+        base: dict = {
+            "id": "address:0x00",
+            "address": "0x00",
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": "n",
+            "contract_name": None,
+            "depth": 1,
+            "analyzed": False,
+            "details": {},
+            "artifacts": {},
+        }
+        base.update(kw)
+        return cast(ResolvedGraphNode, base)
+
+    assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
+    # A principal was never a candidate — its absence says nothing adverse.
+    assert recursive._analysis_state(node(resolved_type="eoa"), max_depth) == "not_a_contract"
+    assert recursive._analysis_state(node(resolved_type="zero"), max_depth) == "not_a_contract"
+    # A fact about the contract.
+    assert recursive._analysis_state(node(details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
+    # A fact about OUR walk, not the address. This is the one the bool could
+    # never express and the reason graph_max_depth is persisted alongside.
+    assert recursive._analysis_state(node(depth=7), max_depth) == "beyond_depth_horizon"
+    # Not determined: no classification, so none of the four can be asserted.
+    assert recursive._analysis_state(node(resolved_type="unknown"), max_depth) is None
+    # An analyzable contract inside the horizon, unanalysed, with no recorded
+    # failure: also not determined. Inventing a value here is the exact error
+    # this field exists to remove.
+    assert recursive._analysis_state(node(depth=2), max_depth) is None
+
+    # A failed materialization outranks the depth check: the walk DID reach it.
+    assert (
+        recursive._analysis_state(node(depth=7, details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
+    )
+
+
+def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
+    """The state reaches the artifact, so the worker can persist it."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    eoa_address = "0x2222222222222222222222222222222222222222"
+
+    root_bundle = _bundle(
+        root_address,
+        "Root",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Root",
+            "block_number": 1,
+            "controller_values": {
+                "state_variable:owner": {
+                    "source": "owner",
+                    "value": eoa_address,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "eoa",
+                    "details": {"address": eoa_address},
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=1,
+    )
+    states = {node["address"]: node.get("analysis_state") for node in graph["nodes"]}
+    assert states[root_address] == "analyzed"
+    assert states[eoa_address] == "not_a_contract"
