@@ -20,6 +20,15 @@ destination position is a proven *absence* of a caller-chosen destination
 (``not_determined``). A consumer may treat a name as a binding only when the
 kind is ``param``.
 
+**Both proof states are load-bearing, so both are earned rather than defaulted
+into.** The IR this reads is not in SSA form, so a name the body assigns more
+than once carries several candidate values under one variable object; which one
+the call sees is a control-flow question, and answering it with either proof
+state would be a guess in a proof's clothing — the exact inversion of the
+governing rule. Every resolution step that is not forced (a multiply-defined
+name, a cycle, a chain past ``_RESOLVE_DEPTH``, a library body that did not
+resolve) yields ``not_determined``, which under-claims by construction.
+
 Underscore-prefixed so matcher auto-discovery skips it.
 """
 
@@ -108,29 +117,81 @@ def _origin(variable: Any) -> Any:
     return getattr(variable, "points_to_origin", None) or variable
 
 
+class _Undetermined:
+    """The resolver reached a point where the operand has more than one candidate.
+
+    Deliberately NOT a Slither variable: it matches no parameter identity and is
+    an instance of no Slither class, so every caller that asks "is this a
+    parameter / is this a state variable" answers no and degrades to
+    ``not_determined`` without a branch of its own. The three published states
+    stay distinguishable (R1) precisely because this value cannot be mistaken for
+    either proof."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<undetermined>"
+
+
+UNDETERMINED = _Undetermined()
+
+
 def _definitions(function: Any) -> dict[int, Any]:
-    """``id(lvalue) -> defining IR`` for the whole function body.
+    """``id(lvalue) -> defining IR``, or ``UNDETERMINED`` where more than one
+    definition reaches that name.
 
     Keyed by identity and only ever read by direct lookup. Slither's variable
     classes inherit ``object.__hash__``, so any container of them that gets
     ITERATED orders by allocation address — not by ``PYTHONHASHSEED``, and so
-    not pinnable by any determinism gate built the obvious way."""
-    out: dict[int, Any] = {}
+    not pinnable by any determinism gate built the obvious way.
+
+    These IRs are NOT in SSA form: ``address t = fallbackRoute; if (flag) t = a;``
+    gives both assignments the same ``LocalVariable`` object, so a
+    one-IR-per-name map answers with whichever appears first in source order —
+    and the answer is then published as one of the two PROOF states. Counting is
+    what separates "this name holds one value" from "the call sees one of
+    several, and which one is a control-flow question this analysis does not
+    answer"; only the first is a binding.
+
+    A parameter arrives already holding the caller's value and a state variable
+    already holding storage's, so for those a SINGLE assignment in the body is
+    the second definition of the name, not the first."""
+    from slither.core.variables.state_variable import StateVariable
+
+    counts: dict[int, int] = {}
+    first: dict[int, Any] = {}
+    lvalues: dict[int, Any] = {}
     for node in getattr(function, "nodes", None) or []:
         for ir in getattr(node, "irs", None) or []:
             lvalue = getattr(ir, "lvalue", None)
-            if lvalue is not None:
-                out.setdefault(id(lvalue), ir)
-    return out
+            if lvalue is None:
+                continue
+            key = id(lvalue)
+            counts[key] = counts.get(key, 0) + 1
+            lvalues[key] = lvalue
+            first.setdefault(key, ir)
+    parameter_ids = {id(parameter) for parameter in getattr(function, "parameters", None) or []}
+    return {
+        key: (
+            UNDETERMINED if count > 1 or key in parameter_ids or isinstance(lvalues[key], StateVariable) else first[key]
+        )
+        for key, count in counts.items()
+    }
 
 
 def _root_variable(variable: Any, definitions: dict[int, Any]) -> Any:
-    """The variable an operand ultimately names.
+    """The variable an operand ultimately names, or ``UNDETERMINED``.
 
     Slither routes ``ISwapper(swapper).swap(…)`` through a temporary, so the call
     op's ``destination`` is a ``TemporaryVariable`` and the state variable behind
     it is reachable only through the defining ``TypeConversion``. Without this
-    walk every interface-typed destination reads as unresolvable."""
+    walk every interface-typed destination reads as unresolvable.
+
+    The walk answers with a variable only where every step of it was forced. A
+    multiply-defined name, a cycle, and a chain longer than ``_RESOLVE_DEPTH``
+    are all cases where it was not, and each returns ``UNDETERMINED`` rather than
+    whatever variable the walk happened to be holding — publishing that would be
+    a guess wearing a proof's clothes."""
     from slither.slithir.operations import Assignment, TypeConversion
 
     seen: set[int] = set()
@@ -139,16 +200,18 @@ def _root_variable(variable: Any, definitions: dict[int, Any]) -> Any:
             return None
         variable = _origin(variable)
         if id(variable) in seen:
-            return variable
+            return UNDETERMINED
         seen.add(id(variable))
         ir = definitions.get(id(variable))
+        if ir is UNDETERMINED:
+            return UNDETERMINED
         if isinstance(ir, TypeConversion):
             variable = getattr(ir, "variable", None)
         elif isinstance(ir, Assignment):
             variable = getattr(ir, "rvalue", None)
         else:
             return variable
-    return variable
+    return UNDETERMINED
 
 
 def _parameter_index(variable: Any, parameters: list[Any]) -> int | None:
@@ -158,12 +221,17 @@ def _parameter_index(variable: Any, parameters: list[Any]) -> int | None:
     return None
 
 
-def _operand_parameter_indices(variable: Any, definitions: dict[int, Any], parameters: list[Any]) -> list[int]:
-    """Every parameter index the operand is built from, ascending.
+def _operand_parameter_indices(variable: Any, definitions: dict[int, Any], parameters: list[Any]) -> list[int] | None:
+    """Every parameter index the operand is built from, ascending, or ``None``
+    when the walk crossed a name the body defines more than once.
 
     An assembly forwarder passes ``add(data, 0x20)`` rather than ``data``, so the
     payload sits one arithmetic step away from the parameter supplying it.
-    Returns a sorted list: a set of Slither objects may never decide an output."""
+    Returns a sorted list: a set of Slither objects may never decide an output.
+
+    ``None`` and ``[]`` are different facts and the caller must not merge them —
+    an enumeration that walked past a multiply-defined name has seen one branch's
+    sources, so a single index in it is not evidence that it is the only one."""
     found: set[int] = set()
     seen: set[int] = set()
     stack: list[tuple[Any, int]] = [(variable, 0)]
@@ -180,6 +248,8 @@ def _operand_parameter_indices(variable: Any, definitions: dict[int, Any], param
             found.add(index)
             continue
         ir = definitions.get(id(current))
+        if ir is UNDETERMINED:
+            return None
         if ir is None:
             continue
         for read in getattr(ir, "read", None) or []:
@@ -222,12 +292,11 @@ def _forwarded_operand_indices(callee: Any) -> tuple[int, int] | None:
             else:
                 continue
             destination_index = _parameter_index(_root_variable(destination_operand, definitions), parameters)
-            payload_indices = [
-                index
-                for index in _operand_parameter_indices(payload_operand, definitions, parameters)
-                if _is_dynamic_bytes(parameters[index])
-            ]
-            if destination_index is None or len(payload_indices) != 1:
+            payload_sources = _operand_parameter_indices(payload_operand, definitions, parameters)
+            if destination_index is None or payload_sources is None:
+                continue
+            payload_indices = [index for index in payload_sources if _is_dynamic_bytes(parameters[index])]
+            if len(payload_indices) != 1:
                 continue
             return destination_index, payload_indices[0]
     return None
@@ -263,6 +332,13 @@ def _call_positions(ir: Any, definitions: dict[int, Any]) -> tuple[Any, str, Any
 def _classify_destination(
     operand: Any, state: str, definitions: dict[int, Any], parameters: list[Any]
 ) -> tuple[str | None, str]:
+    """``(name, kind)`` for the destination operand.
+
+    Both proof states are earned here and nothing falls into them by default:
+    ``param`` needs an identity match against the parameter list and
+    ``state_var`` needs the root to BE a state variable. ``UNDETERMINED`` — what
+    ``_root_variable`` answers where the value depends on which branch ran — is
+    neither, so it lands on ``not_determined`` without a test of its own."""
     from slither.core.variables.state_variable import StateVariable
 
     if state != "operand":

@@ -68,10 +68,15 @@ interface ISwapper {
     function swap(address fromAsset, address toAsset, bytes calldata data) external;
 }
 
+interface IExec {
+    function exec(address who, bytes calldata payload) external;
+}
+
 contract ExecBinding {
     using AddressLib for address;
 
     address public swapper;
+    address public fallbackRoute;
 
     // TWO address parameters and TWO bytes parameters, and the destination is
     // the SECOND address. The EndpointV2.lzCompose shape.
@@ -107,5 +112,61 @@ contract ExecBinding {
     // NOT the only address parameter, which is what a read-set pick would say.
     function manageViaTwoStepLibrary(address target, bytes calldata data) external {
         target.functionCall(data);
+    }
+
+    // ---- destinations that reach the call through a name defined twice ------
+    //
+    // The IR is not in SSA form, so both assignments below share ONE variable
+    // object. Which value the call sees is a control-flow question, and neither
+    // published proof state may be used to answer it. The sibling
+    // `singlyAssignedLocal` is what keeps the guard from being "always hedge".
+
+    // The caller CAN choose the destination — on one path. Answering `state_var`
+    // here asserts the caller cannot, which is the governing rule inverted.
+    function branchedStateOrParam(address a, bytes calldata d, bool flag) external {
+        address t = fallbackRoute;
+        if (flag) t = a;
+        IExec(t).exec(a, d);
+    }
+
+    // Two address parameters, one per branch: naming either is a coin flip
+    // dressed as a proof.
+    function branchedParams(address a, address b, bytes calldata d, bool flag) external {
+        address t = a;
+        if (flag) t = b;
+        IExec(t).exec(a, d);
+    }
+
+    // Straight-line reassignment. The destination is `b`; a map holding the
+    // FIRST defining IR per name answers `a`.
+    function reassignedLocal(address a, address b, bytes calldata d) external {
+        address t = a;
+        t = b;
+        IExec(t).exec(a, d);
+    }
+
+    // The write FOLLOWS the call, so the destination is the parameter's incoming
+    // value — but the resolver has no flow sensitivity to know that, and reading
+    // through the one assignment it can see names the wrong parameter.
+    function paramWrittenAfterCall(address a, address b, bytes calldata d) external {
+        IExec(a).exec(a, d);
+        a = b;
+    }
+
+    // The storage write also FOLLOWS the call: this destination is whatever
+    // storage already held, which no caller supplied. Solmate's
+    // `Auth.setAuthority` — deployed inside BoringVault — is this shape, and the
+    // pre-guard resolver named its parameter.
+    function stateWrittenAfterCall(address a, bytes calldata d) external {
+        IExec(fallbackRoute).exec(a, d);
+        fallbackRoute = a;
+    }
+
+    // THE DISCRIMINATING SIBLING: one definition, so the local IS the parameter
+    // and the name is published. Without this the change above is
+    // indistinguishable from a resolver that always hedges.
+    function singlyAssignedLocal(address a, bytes calldata d) external {
+        address t = a;
+        IExec(t).exec(a, d);
     }
 }

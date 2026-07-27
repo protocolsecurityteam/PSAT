@@ -93,7 +93,18 @@ logger = logging.getLogger(__name__)
 # probe builds its inner call from those two slots, so a v7 row records a call
 # synthesized around a parameter that is not the destination — a different probe
 # input, not merely a different label.
-EFFECT_CACHE_SCHEMA_VERSION = 8
+# v9: the same witness now answers ``not_determined`` where the destination or
+# payload reaches the call through a name the function body defines more than
+# once. Under v8 those resolved through whichever defining IR came first in
+# source order and were published as one of the two PROOF states — a caller-
+# chosen destination reported as ``state_var`` (proven absent) or as the wrong
+# parameter's name. The executor probe builds its inner call from those slots and
+# a non-``param`` kind takes it down the ABI-uniqueness path instead, so a v8 row
+# on such a function records a verdict reached from a different synthesized call.
+# Measured: every one of the 28 witnesses the production compilation units mint is
+# byte-identical across the change, so this bump covers the shapes the corpus
+# proves changed, not any row observed here.
+EFFECT_CACHE_SCHEMA_VERSION = 9
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

@@ -302,6 +302,51 @@ def test_an_unresolved_forwarder_publishes_not_determined_not_the_only_candidate
     assert witness["destination_param"] is None and witness["calldata_param"] is None
 
 
+def test_a_destination_defined_twice_is_not_determined_not_either_proof(tmp_path):
+    """A name the body defines more than once carries several candidate values
+    under ONE Slither variable object — the IR is not in SSA form — so which one
+    the call sees is a control-flow question. Both published proof states are
+    wrong answers to it, in both directions:
+
+    * ``branchedStateOrParam`` reaches the call from storage on one path and from
+      a parameter on the other. ``state_var`` there is a proven ABSENCE of a
+      caller-chosen destination over a function that has one, and the consumer
+      acts on it (``_named_executor_slots`` reads any non-``param`` kind as "no
+      binding"), so the false absence suppresses a real one.
+    * ``branchedParams`` / ``reassignedLocal`` / ``paramWrittenAfterCall`` publish
+      a parameter NAME — a proof of presence on the wrong parameter, which is the
+      defect class this binding work exists to remove.
+
+    ``stateWrittenAfterCall`` is the same shape on a state variable, and it is not
+    hypothetical: Solmate's ``Auth.setAuthority``, deployed inside BoringVault,
+    calls ``authority.canCall(...)`` and assigns ``authority`` afterwards."""
+    witnesses = _binding_witnesses(tmp_path)
+    for name in (
+        "branchedStateOrParam",
+        "branchedParams",
+        "reassignedLocal",
+        "paramWrittenAfterCall",
+        "stateWrittenAfterCall",
+    ):
+        witness = witnesses[name]
+        assert witness["destination_kind"] == "not_determined", name
+        assert witness["destination_param"] is None, name
+        assert witness["destination_basis"] is None, name
+
+
+def test_a_singly_assigned_local_still_binds_to_its_parameter(tmp_path):
+    """R4 — the un-hedged sibling of the test above, and the whole difference
+    between a resolver and a resolver-shaped hedge.
+
+    ``address t = a; IExec(t).exec(a, d)`` defines ``t`` exactly once, so the
+    local IS the parameter and the name is published. A guard that hedged on
+    "the destination came through a local" would pass the not-determined test
+    above and fail here — and would take ``BoringVault.manage`` with it."""
+    witness = _binding_witnesses(tmp_path)["singlyAssignedLocal"]
+    assert (witness["destination_param"], witness["destination_kind"]) == ("a", "param")
+    assert witness["destination_basis"] == "call_destination"
+
+
 def test_every_binding_state_is_reachable_on_one_corpus(tmp_path):
     """R2: a state that cannot be produced is not a mitigation. All three
     destination states and all three calldata states are minted by this corpus."""
