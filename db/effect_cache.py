@@ -118,7 +118,18 @@ logger = logging.getLogger(__name__)
 # Order there is Slither's ``list(set(vars_written))`` over identity-hashed
 # objects, so it tracks allocation addresses; the (kind, target, selector,
 # origin) multiset is identical.
-EFFECT_CACHE_SCHEMA_VERSION = 10
+# v11: §6 candidate ordering again — ``build_authority_graph`` folded EVERY
+# ``control_graph_edges`` row into the authority closure with no relation
+# predicate, so a slot the contract merely CALLS propagated the callee's whole
+# downstream value into the caller's ``value_at_stake``. Callee edges are now
+# written as ``external_call_target`` and the closure reads only
+# ``CONTROL_EDGE_RELATIONS``. Locally that removes 1,200 of 2,756
+# external_contract-sourced edges from the closure and drops mutual control
+# pairs 66 -> 28. Order decides which candidates a ``resource_cap`` run
+# reaches (the v7 precedent), so a v10 row records what a probe queue built
+# from a closure containing non-control edges happened to visit; it is not the
+# row the corrected closure produces.
+EFFECT_CACHE_SCHEMA_VERSION = 11
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

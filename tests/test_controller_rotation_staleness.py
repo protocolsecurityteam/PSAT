@@ -184,7 +184,7 @@ def test_poll_rotation_records_no_block_rather_than_the_stale_one(db_session, su
     db_session.expire_all()
 
     row = _reload(db_session, subject.id, "state_variable:owner")
-    assert row.value.lower() == NEW_EOA
+    assert (row.value or "").lower() == NEW_EOA
     assert row.resolved_type is None
     assert row.details is None
     assert row.observed_via == CONTROLLER_OBSERVED_VIA_STORAGE_POLL
