@@ -395,6 +395,24 @@ def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tm
     assert open_control["destination_constraint"] == {"state": "unconstrained_proven"}
 
 
+def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path):
+    """R2 firing proof for the withheld-subtraction branch, on compiled source.
+    ``execSharedIdentity`` calls ``exec`` on a FIXED receiver and on the
+    caller-chosen one: a tree leaf carries the callee identity but not the
+    receiver, so the shared identity proves vacuousness for neither op and the
+    answer stays open. ``execTyped`` — the same caller-chosen op with no fixed
+    sibling — is the discriminating control that keeps this from being an
+    always-hedge: its identity survives the subtraction and the negative proof
+    stays reachable."""
+    records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
+    shared = _claim_witness(records, "execSharedIdentity", "exec.arbitrary")
+    typed = _claim_witness(records, "execTyped", "exec.arbitrary")
+    for witness in (shared, typed):
+        assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param")
+    assert shared["destination_constraint"] == {"state": "not_determined"}
+    assert typed["destination_constraint"] == {"state": "unconstrained_proven"}
+
+
 def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
     """R4 — the un-hedged sibling of the guard test above: transparency is
     earned, not abolished. An op whose destination the IR proves parameter-

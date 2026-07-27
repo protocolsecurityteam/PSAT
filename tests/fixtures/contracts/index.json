@@ -248,7 +248,7 @@
       "path": "claims_upgrade_exec/transaction_guard.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "GuardedExec",
-      "description": "The Safe/Zodiac transaction-guard idiom beside its open control: a mandatory nonview guard call vets the caller-supplied (target, data) before the arbitrary call, so the guarded entry's destination constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that a swallowed guard leaf can never mint the negative proof.",
+      "description": "The Safe/Zodiac transaction-guard idiom beside its open control: a mandatory nonview guard call vets the caller-supplied (target, data) before the arbitrary call, so the guarded entry's destination constraint must stay not_determined while the guardless control alone earns unconstrained_proven — the pair pins that a swallowed guard leaf can never mint the negative proof. Two further shapes pin the transparency set's identity algebra: a typed caller-chosen call whose own revert surface stays transparent, and the same callee identity shared between a fixed-destination op and the caller-chosen one, which must be withheld.",
       "detection_patterns": [
         "transaction_guard",
         "claim_exec_arbitrary",
