@@ -137,6 +137,19 @@ logger = logging.getLogger(__name__)
 # call around a destination the caller cannot reach. ``not_determined`` still
 # mints (an open question is not a proof of absence), so this covers only the
 # rows where the two contradict.
+# Between v12 and v13, recorded late (an as-committed R5 violation, noted for
+# the audit trail): the A5 commit introduced the ``rate_limit.consume`` claim
+# class — a zero-severity-weight FACT witness carrying the ``refillRate``/
+# ``capacity`` discriminators — onto 10 local functions with no bump. The v13
+# argument below applies to it verbatim: the probe's candidate selection and
+# its synthesized call both read the claim set, so until the enrollment-
+# transparency restoration under the v17 entry, a cached row on those functions
+# was reached with this class absent from the set (the same 12-13 rows that
+# restoration names). No retroactive bump is needed for correctness on this
+# branch — every pre-branch row predates v11 and the branch's own bumps already
+# invalidate it — but the class introduction itself belongs in this ledger,
+# and the branch-scoped tier-0 gate cannot record it after the fact (its R5
+# check fires only on ``services/effects/*`` paths).
 # v13: the new ``delegatecall.execute`` claim class. A function whose foreign-code
 # execution was previously carried only by the legacy ``delegatecall_execution``
 # label now publishes a witness naming where that code comes from
