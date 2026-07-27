@@ -142,8 +142,17 @@ class PausabilityAnalysis(TypedDict):
 
 
 class TimelockAnalysis(TypedDict):
-    has_timelock: bool
+    # ``None`` = not determined (no IR to walk). Never ``False`` for "we did
+    # not look".
+    has_timelock: bool | None
     pattern: TimelockPattern
+    # The delay VALUE is a live read (``getMinDelay()``) and this module has no
+    # chain: ``delay`` is always ``None`` with ``delay_source: "not_read"``
+    # until one is threaded. A defaulted delay would fabricate a protective
+    # credit. ``delay_variables`` names where the value lives, which is what
+    # source alone can prove.
+    delay: int | None
+    delay_source: Literal["not_read", "chain_read"]
     delay_variables: list[str]
     queue_execute_functions: list[str]
     authorized_roles: list[str]

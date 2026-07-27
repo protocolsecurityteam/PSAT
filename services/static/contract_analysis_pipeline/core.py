@@ -277,7 +277,9 @@ def collect_contract_analysis_with_artifacts(
         # struct-member or ERC-7201-namespaced latch.
         pausability = _detect_pausability(subject_contract, project_dir, pause_info, effects_artifact)
     with _phase("timelock", durations_ms):
-        timelock = _detect_timelock(subject_contract, project_dir, semantic_control["role_definitions"])
+        timelock = _detect_timelock(
+            subject_contract, project_dir, semantic_control["role_definitions"], effects_artifact
+        )
     with _phase("secondary_impl_pointers", durations_ms):
         try:
             secondary_impl_pointers = detect_secondary_impl_pointers(subject_contract)

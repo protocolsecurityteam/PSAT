@@ -1042,15 +1042,347 @@ def _classify_pause_toggle_polarity(function, pause_vars: set[str]) -> str:
     return ""
 
 
-def _detect_timelock(contract, project_dir: Path, role_definitions: list[RoleDefinition]) -> TimelockAnalysis:
-    del contract, project_dir, role_definitions
+# ---------------------------------------------------------------------------
+# Timelock detection (STATIC half only -- see _detect_timelock)
+# ---------------------------------------------------------------------------
+
+_TIMELOCK_QUEUE_CLAIMS = frozenset({"timelock.schedule"})
+_TIMELOCK_EXECUTE_CLAIMS = frozenset({"timelock.execute"})
+_TIMELOCK_CLAIMS = frozenset({"timelock.schedule", "timelock.execute", "timelock.cancel", "timelock.set_delay"})
+
+# Slither renders these as SolidityVariableComposed; ``now`` is the pre-0.7 spelling.
+_TIME_SOURCE_NAMES = frozenset({"block.timestamp", "now", "block.number"})
+
+# How far the queue/maturity walks chase internal helpers. OZ needs 3
+# (`execute` -> `_beforeCall` -> `isOperationReady`); the cap bounds the walk on
+# contracts with deep internal call graphs.
+_TIMELOCK_CALL_DEPTH = 4
+
+
+def _timelock_claim_functions(effects: Mapping[str, Any] | None) -> dict[str, set[str]]:
+    """``claim_id -> {signature}`` for the ``timelock.*`` claims on the effects
+    artifact. The claims matcher recognises the published OZ
+    ``TimelockController`` ABI (``getMinDelay`` + ``hashOperation`` + schedule +
+    execute), which is the standard-exact half of this detector."""
+    out: dict[str, set[str]] = {}
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return out
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if not isinstance(claim, Mapping):
+                continue
+            claim_id = str(claim.get("claim_id"))
+            if claim_id in _TIMELOCK_CLAIMS:
+                out.setdefault(claim_id, set()).add(signature)
+    return out
+
+
+def _ir_reads(ir: Any) -> set[str]:
+    return {str(value) for value in (getattr(ir, "read", []) or [])}
+
+
+def _transitive_irs(function: Any, depth: int = _TIMELOCK_CALL_DEPTH) -> list[Any]:
+    """Every IR in ``function``'s body plus, recursively, its internal/library
+    callees' and applied modifiers'. Cycle-safe, depth-bounded.
+
+    The timelock invariant is split across helpers in every real
+    implementation (OZ puts the write in ``_schedule`` and the maturity check
+    two frames below ``execute``), so a body-only walk sees neither half."""
+    seen: set[int] = set()
+    out: list[Any] = []
+
+    def walk(container: Any, remaining: int) -> None:
+        if container is None or remaining < 0 or id(container) in seen:
+            return
+        seen.add(id(container))
+        for node in getattr(container, "nodes", []) or []:
+            for ir in list(getattr(node, "irs_ssa", None) or []) + list(getattr(node, "irs", []) or []):
+                out.append(ir)
+                callee = getattr(ir, "function", None)
+                if callee is not None and type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    walk(callee, remaining - 1)
+        for modifier in getattr(container, "modifiers", []) or []:
+            walk(modifier, remaining - 1)
+
+    walk(function, depth)
+    return out
+
+
+def _derivation_closure(irs: list[Any], seeds: set[str]) -> set[str]:
+    """Every value name that ``seeds`` flow FORWARD into, over ``lvalue`` edges."""
+    reached = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for ir in irs:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None:
+                continue
+            name = str(lvalue)
+            if name in reached:
+                continue
+            if _ir_reads(ir) & reached:
+                reached.add(name)
+                changed = True
+    return reached
+
+
+def _state_var_names(contract) -> dict[str, Any]:
+    return {getattr(v, "name", ""): v for v in _all_state_variables(contract)}
+
+
+def _timestamp_registry_writes(contract) -> dict[str, set[str]]:
+    """``registry_var -> {other state vars in its derivation}``.
+
+    A *registry* is a state variable assigned a value that a
+    ``block.timestamp`` / ``block.number`` read flows into: the "this operation
+    matures at T" write that is the queue half of every timelock. The
+    accompanying set is the state variables that also flow into that value --
+    the delay, when the delay is stored rather than passed."""
+    state_vars = _state_var_names(contract)
+    registries: dict[str, set[str]] = {}
+    for function in getattr(contract, "functions", []) or []:
+        if getattr(function, "is_constructor", False):
+            continue
+        irs = _transitive_irs(function)
+        time_seeds = {name for ir in irs for name in _ir_reads(ir) if name in _TIME_SOURCE_NAMES}
+        if not time_seeds:
+            continue
+        derived = _derivation_closure(irs, time_seeds)
+        for ir in irs:
+            if type(ir).__name__ != "Assignment":
+                continue
+            if not (_ir_reads(ir) & derived):
+                continue
+            target = _base_written_state_var(ir, state_vars)
+            if target is None:
+                continue
+            contributors = {
+                name
+                for ir2 in irs
+                if str(getattr(ir2, "lvalue", "")) in derived
+                for name in _ir_reads(ir2)
+                if name in state_vars and name != target
+            }
+            registries.setdefault(target, set()).update(contributors)
+    return registries
+
+
+def _base_written_state_var(ir: Any, state_vars: Mapping[str, Any]) -> str | None:
+    """The contract state variable an Assignment writes, through a mapping/
+    struct reference if need be. ``None`` when the write is to a local."""
+    lvalue = getattr(ir, "lvalue", None)
+    for candidate in (lvalue, getattr(lvalue, "points_to_origin", None), getattr(lvalue, "points_to", None)):
+        name = getattr(candidate, "name", None)
+        if isinstance(name, str) and name in state_vars:
+            return name
+    return None
+
+
+def _maturity_gate_functions(contract, registries: set[str]) -> dict[str, set[str]]:
+    """``registry_var -> {signature}`` for entry points that revert unless a
+    registry value has matured against the clock.
+
+    The require and the comparison do not have to sit in the same node: they
+    routinely sit in different helpers (OZ's ``_beforeCall`` requires what
+    ``isOperationReady`` computes), and the transitive walk's scope is what
+    bounds "this revert reads this registry" -- the same relaxation
+    ``ReentrancyAnalyzer._search_revert_reading_var`` already makes."""
+    out: dict[str, set[str]] = {}
+    for function in _entry_points(contract):
+        if getattr(function, "is_constructor", False):
+            continue
+        irs = _transitive_irs(function)
+        if not any(_ir_is_require_or_revert_like(ir) for ir in irs):
+            continue
+        reads_clock = any(_ir_reads(ir) & _TIME_SOURCE_NAMES for ir in irs)
+        if not reads_clock:
+            continue
+        for ir in irs:
+            if type(ir).__name__ != "Binary":
+                continue
+            names = _ir_reads(ir)
+            if not (names & _TIME_SOURCE_NAMES) and not _binary_compares_clock(ir, irs):
+                continue
+            for registry in registries:
+                if registry in _registry_sources(irs, names):
+                    out.setdefault(registry, set()).add(
+                        getattr(function, "full_name", None) or getattr(function, "name", "")
+                    )
+    return out
+
+
+def _binary_compares_clock(ir: Any, irs: list[Any]) -> bool:
+    """The clock may reach the comparison through one temporary."""
+    sources = _backward_sources(irs, _ir_reads(ir))
+    return bool(sources & _TIME_SOURCE_NAMES)
+
+
+def _registry_sources(irs: list[Any], names: set[str]) -> set[str]:
+    return _backward_sources(irs, names)
+
+
+def _backward_sources(irs: list[Any], names: set[str]) -> set[str]:
+    """Every value name that flows INTO ``names``, over ``lvalue -> read`` edges."""
+    defs: dict[str, set[str]] = {}
+    for ir in irs:
+        lvalue = getattr(ir, "lvalue", None)
+        if lvalue is None:
+            continue
+        defs.setdefault(str(lvalue), set()).update(_ir_reads(ir))
+    reached = set(names)
+    work = list(names)
+    while work:
+        current = work.pop()
+        for source in defs.get(current, ()):
+            if source not in reached:
+                reached.add(source)
+                work.append(source)
+    return reached
+
+
+def _ir_is_require_or_revert_like(ir: Any) -> bool:
+    if type(ir).__name__ != "SolidityCall":
+        return False
+    function = getattr(ir, "function", None)
+    name = getattr(function, "name", None) or str(function or "")
+    return name.startswith("require(") or name.startswith("revert") or name == "assert(bool)"
+
+
+def _timelock_delay_variables(contract, registries: Mapping[str, set[str]], queue_functions: set[str]) -> set[str]:
+    """Where the delay VALUE lives -- the storage the live half would read.
+
+    Two sources: a state variable that flows into the maturity write (a stored
+    delay), and a mutable integer state variable the queue path reads (OZ's
+    ``require(delay >= getMinDelay())`` bottoms out in ``_minDelay``; the
+    per-operation delay is a parameter and only its floor is on chain).
+
+    The second rule is deliberately recall-generous -- it names every mutable
+    integer the queue path touches, not only the one arithmetic proves is the
+    delay. It is a POINTER for the live half, not a claim about the value, and
+    the value itself is never published from here (see ``_detect_timelock``).
+    Constants and mappings are excluded: neither is a configurable delay."""
+    state_vars = _state_var_names(contract)
+
+    def is_delay_shaped(name: str) -> bool:
+        variable = state_vars.get(name)
+        if variable is None or getattr(variable, "is_constant", False) or getattr(variable, "is_immutable", False):
+            return False
+        return str(getattr(variable, "type", "")).startswith(("uint", "int"))
+
+    out = {name for contributors in registries.values() for name in contributors if is_delay_shaped(name)}
+    for function in getattr(contract, "functions", []) or []:
+        full_name = getattr(function, "full_name", None) or getattr(function, "name", "")
+        if full_name not in queue_functions:
+            continue
+        for ir in _transitive_irs(function):
+            out |= {name for name in _ir_reads(ir) if is_delay_shaped(name)}
+    return out
+
+
+def _detect_timelock(
+    contract,
+    project_dir: Path,
+    role_definitions: list[RoleDefinition],
+    effects: Mapping[str, Any] | None = None,
+) -> TimelockAnalysis:
+    """Prove, from source alone, that THIS CONTRACT IS A TIMELOCK.
+
+    The invariant is structural and chain-free: some state variable is written
+    with a value the clock (``block.timestamp`` / ``block.number``) flows into
+    -- the queue half -- and some other entry point reverts unless that same
+    variable has matured against the clock -- the execute half. Both halves
+    live in internal helpers in every real implementation, so both walks are
+    transitive.
+
+    ``pattern`` is ``oz_timelock`` when the claims plane recognises the
+    published ``TimelockController`` ABI on top of that, ``custom`` when only
+    the structure is there.
+
+    **THE DELAY VALUE IS NOT READ HERE, AND MUST NOT BE DEFAULTED.** inv 9
+    makes the delay the credit-bearing fact (EtherFiTimelock's is 10 days), and
+    reading it needs ``getMinDelay()`` on chain. This module has no chain, no
+    ``chain_id`` and no RPC handle, and inventing one -- or defaulting the
+    delay -- would fabricate a protective credit, which inv 1 ranks worse than
+    a false adverse. So ``delay`` is ``None`` and ``delay_source`` is
+    ``"not_read"`` until a chain is threaded here. ``delay_variables`` names
+    WHERE the value lives, which is the part source can prove.
+
+    ``has_timelock`` is three-state: ``None`` when neither detector had usable
+    input (no IR to walk), never ``False``.
+    """
+    functions = list(getattr(contract, "functions", []) or [])
+    claims = _timelock_claim_functions(effects)
+
+    if not functions:
+        return {
+            "has_timelock": None,
+            "pattern": "unknown",
+            "delay": None,
+            "delay_source": "not_read",
+            "delay_variables": [],
+            "queue_execute_functions": [],
+            "authorized_roles": [],
+            "evidence": [],
+        }
+
+    registries = _timestamp_registry_writes(contract)
+    maturity = _maturity_gate_functions(contract, set(registries))
+    proven_registries = {name for name in registries if maturity.get(name)}
+
+    queue_functions: set[str] = set()
+    execute_functions: set[str] = set()
+    for registry in proven_registries:
+        execute_functions |= maturity.get(registry, set())
+    for function in _entry_points(contract):
+        full_name = getattr(function, "full_name", None) or getattr(function, "name", "")
+        if full_name in execute_functions:
+            continue
+        state_vars = _state_var_names(contract)
+        irs = _transitive_irs(function)
+        for ir in irs:
+            if type(ir).__name__ != "Assignment":
+                continue
+            target = _base_written_state_var(ir, state_vars)
+            if target in proven_registries:
+                queue_functions.add(full_name)
+                break
+    queue_functions |= claims.get("timelock.schedule", set())
+    execute_functions |= claims.get("timelock.execute", set())
+
+    structural = bool(proven_registries and queue_functions and execute_functions)
+    standard = bool(claims.get("timelock.schedule") and claims.get("timelock.execute"))
+    has_timelock = structural or standard
+
+    if not has_timelock:
+        pattern: Any = "none"
+    elif standard:
+        pattern = "oz_timelock"
+    else:
+        pattern = "custom"
+
+    evidence = []
+    if has_timelock:
+        by_full_name = {getattr(f, "full_name", getattr(f, "name", "")): f for f in functions}
+        for signature in sorted(queue_functions | execute_functions):
+            function = by_full_name.get(signature)
+            if function is not None:
+                evidence.append(_source_evidence(function, project_dir))
+
     return {
-        "has_timelock": False,
-        "pattern": "none",
-        "delay_variables": [],
-        "queue_execute_functions": [],
-        "authorized_roles": [],
-        "evidence": [],
+        "has_timelock": has_timelock,
+        "pattern": pattern,
+        "delay": None,
+        "delay_source": "not_read",
+        "delay_variables": sorted(_timelock_delay_variables(contract, registries, queue_functions))
+        if has_timelock
+        else [],
+        "queue_execute_functions": sorted(queue_functions | execute_functions),
+        "authorized_roles": sorted({role["role"] for role in role_definitions}) if has_timelock else [],
+        "evidence": evidence,
     }
 
 
@@ -1094,7 +1426,9 @@ def _determine_control_model(
     contract, semantic_control: SemanticControlAnalysis, timelock: TimelockAnalysis
 ) -> ControlModel:
     del contract
-    if timelock["has_timelock"]:
+    # ``is True``, not truthiness: ``None`` is not-determined and must not be
+    # read as a proven absence of governance either.
+    if timelock["has_timelock"] is True:
         return "governance"
     return semantic_control["pattern"]
 
