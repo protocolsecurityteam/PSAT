@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import (
+    CONTROL_EDGE_RELATIONS,
     Artifact,
     Contract,
     ContractBalance,
@@ -252,7 +253,10 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
 
     * ``control_graph_edges`` — the row stores *contract controlled BY
       controller* (``from_node`` = contract, ``to_node`` = controller), so the
-      authority direction is the reverse of the stored edge.
+      authority direction is the reverse of the stored edge. Only relations in
+      ``CONTROL_EDGE_RELATIONS`` are read: an ``external_call_target`` row says
+      the contract CALLS that address, which moves no authority and would
+      otherwise let a callee's balance flow into the caller's value-at-stake.
     * proxy-admin — a proxy's ``admin`` controls the proxy.
     * principal → contract — a function's resolved principal controls the
       contract that function lives on.
@@ -283,7 +287,10 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
     edge_rows = session.execute(
         select(ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id)
         .join(Contract, Contract.id == ControlGraphEdge.contract_id)
-        .where(Contract.protocol_id == protocol_id)
+        .where(
+            Contract.protocol_id == protocol_id,
+            ControlGraphEdge.relation.in_(CONTROL_EDGE_RELATIONS),
+        )
     ).all()
     for from_node, to_node in edge_rows:
         graph._add_control(to_node, from_node)

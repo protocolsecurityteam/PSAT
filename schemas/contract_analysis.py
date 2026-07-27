@@ -25,6 +25,22 @@ ControllerKind = Literal[
     "computed",
     "unknown",
 ]
+# Why an address is attached to a contract at all. "The caller is checked
+# against this address" and "this address gets called" are different facts and
+# only the first is a control claim; a single set that unions them cannot say
+# which one a row came from.
+#
+#   caller_gate  — proven: a predicate leaf requires the caller to equal / be a
+#                  member of this address, or the leaf delegates its authority
+#                  check to it (``authority_contract.address_source``).
+#   call_target  — proven: an ``external_call`` sink invokes this address. NOT a
+#                  claim that it is proven *not* to be a gate; it is "called,
+#                  and no gate was proven".
+#
+# Absent/NULL is the third state — not determined (no provenance was computed
+# for this target, or the row predates the field). A consumer must not read it
+# as either value.
+ControllerProvenance = Literal["caller_gate", "call_target"]
 GuardKind = Literal[
     "caller_equals_storage",
     "caller_in_mapping",
@@ -283,6 +299,8 @@ class ControllerTrackingTarget(TypedDict):
     associated_events: list[AssociatedEvent]
     polling_sources: list[str]
     notes: list[str]
+    # Absent = not determined. See ``ControllerProvenance``.
+    authority_provenance: NotRequired[ControllerProvenance]
 
 
 class SecondaryImplPointer(TypedDict):

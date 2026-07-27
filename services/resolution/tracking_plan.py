@@ -122,19 +122,23 @@ def build_control_tracking_plan(analysis: ContractAnalysis) -> ControlTrackingPl
             "notes": list(target.get("notes", [])),
         }
 
-        tracked_controllers.append(
-            {
-                "controller_id": target["controller_id"],
-                "label": target["label"],
-                "source": target["source"],
-                "kind": target["kind"],
-                "read_spec": target.get("read_spec"),
-                "tracking_mode": target["tracking_mode"],
-                "event_watch": event_watch,
-                "polling_fallback": polling_fallback,
-                "notes": list(target.get("notes", [])),
-            }
-        )
+        tracked: TrackedController = {
+            "controller_id": target["controller_id"],
+            "label": target["label"],
+            "source": target["source"],
+            "kind": target["kind"],
+            "read_spec": target.get("read_spec"),
+            "tracking_mode": target["tracking_mode"],
+            "event_watch": event_watch,
+            "polling_fallback": polling_fallback,
+            "notes": list(target.get("notes", [])),
+        }
+        # Absent stays absent: a plan built from a pre-provenance analysis
+        # artifact must not claim either value.
+        provenance = target.get("authority_provenance")
+        if provenance:
+            tracked["authority_provenance"] = provenance
+        tracked_controllers.append(tracked)
 
     return {
         "schema_version": "0.1",

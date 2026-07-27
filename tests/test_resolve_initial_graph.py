@@ -52,6 +52,22 @@ def _isolated_caches():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _default_classify(monkeypatch):
+    """Default the address classifier to the generic answer.
+
+    An analysed contract's node now takes its ``resolved_type`` from the
+    classifier instead of a hardcoded ``"contract"``, so every walk classifies
+    at least its root. Tests that care about a specific classification patch it
+    in-body (an in-test ``patch`` wins over this); this keeps the rest off the
+    wire — without it the offline guard reports blocked ``rpc`` calls.
+    """
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
+    )
+
+
 def _root_artifacts(*, with_role_principals: bool) -> LoadedArtifacts:
     """Root LoadedArtifacts used for both walks. ``with_role_principals``
     adds an effective_permissions block referencing ROLE_PRINCIPAL_EOA —
@@ -138,7 +154,7 @@ def test_initial_graph_walk_projects_new_role_principal():
         # principal is an EOA so no materialization needed for it either.
         # We patch classify_resolved_address_with_status so we don't make
         # real RPC calls when classifying the EOA.
-        def _fake_classify(_rpc_url, addr, _block_tag="latest"):
+        def _fake_classify(_rpc_url, addr, _block_tag="latest", **_kw):
             return "eoa", {"address": addr.lower()}, True
 
         with patch(
@@ -247,7 +263,7 @@ def test_initial_graph_re_walks_root_so_new_permissions_are_projected():
         "edges": [],
     }
 
-    def _fake_classify(_rpc_url, addr, _block_tag="latest"):
+    def _fake_classify(_rpc_url, addr, _block_tag="latest", **_kw):
         return "eoa", {"address": addr.lower()}, True
 
     with (

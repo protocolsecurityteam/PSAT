@@ -823,6 +823,13 @@ def build_control_snapshot(
         cid, entry = outcome
         if entry is None:
             continue
+        # Carry the static provenance onto the resolved value. Every branch of
+        # ``_compute_controller`` (including the eth_call_error one) gets it:
+        # whether the address gates the caller is a static fact and does not
+        # depend on whether the read succeeded.
+        provenance = _controller.get("authority_provenance") if isinstance(_controller, dict) else None
+        if provenance:
+            entry["authority_provenance"] = provenance
         controller_values[cid] = entry
 
     if beacon_address:

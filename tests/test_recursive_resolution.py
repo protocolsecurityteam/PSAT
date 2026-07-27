@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from schemas.resolved_control_graph import ResolvedGraphEdge
+from schemas.resolved_control_graph import ResolvedGraphEdge, ResolvedGraphNode
 from services.discovery.classifier import ClassificationIncompleteError
 from services.resolution import recursive
 from services.resolution.recursive import (
@@ -22,6 +22,27 @@ from services.resolution.recursive import (
 # offline: recursive resolution probes bytecode (eth_getCode) and, when a nested
 # contract fails to materialize, fetches its name from Etherscan to label the node.
 pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_classifier_rpc")
+
+
+@pytest.fixture(autouse=True)
+def _default_classify(monkeypatch):
+    """Default the address classifier to the generic answer.
+
+    An analysed contract's node now takes its ``resolved_type`` from the
+    classifier instead of a hardcoded ``"contract"``, so every walk classifies
+    at least its root. Tests that care about a specific classification override
+    this in-body (monkeypatch inside the test wins over an autouse fixture);
+    this keeps the rest off the wire — without it the offline guard reports
+    blocked ``rpc.example`` calls.
+    """
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -330,11 +351,11 @@ def test_resolve_control_graph_dedupes_recursive_contract_addresses(monkeypatch)
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("unknown", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("unknown", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}, True),
     )
 
     graph, _nested = resolve_control_graph(
@@ -831,7 +852,7 @@ def test_resolve_control_graph_skips_self_referential_role_principal_edges(monke
 
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
     graph, _nested = resolve_control_graph(
@@ -1005,11 +1026,11 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     graph, nested = resolve_control_graph(
@@ -1133,11 +1154,11 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     with pytest.raises(StorageContentNotDetermined):
@@ -1222,11 +1243,11 @@ def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", fake_materialize)
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
-        lambda rpc_url, address, block_tag="latest": ("contract", {"address": address}, True),
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
     )
 
     graph, nested = resolve_control_graph(
@@ -1241,3 +1262,269 @@ def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     assert "forge build failed" in str(by_addr[bad_addr]["details"]["materialize_error"])
     assert by_addr[good_addr]["analyzed"] is True
     assert bad_addr not in nested
+
+
+def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
+    """A controller value whose static provenance is ``call_target`` is wired as
+    ``external_call_target``, not ``controller_value``.
+
+    Positive control (``roleRegistry``, ``caller_gate``) must stay a control
+    edge; negative control (``eETH``, ``call_target``) must not; and a value
+    with NO provenance — a snapshot produced before the split, or a target for
+    which neither question was answered — must stay ``controller_value``,
+    because not-determined may not demote a real authority.
+    """
+    root_address = "0x1111111111111111111111111111111111111111"
+    gate_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    callee_address = "0xcccccccccccccccccccccccccccccccccccccccc"
+    legacy_address = "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    def _cv(source: str, value: str, provenance: str | None) -> dict:
+        entry = {
+            "source": source,
+            "value": value,
+            "block_number": 1,
+            "observed_via": "eth_call",
+            "resolved_type": "unknown",
+            "details": {"address": value},
+        }
+        if provenance is not None:
+            entry["authority_provenance"] = provenance
+        return entry
+
+    root_bundle = _bundle(
+        root_address,
+        "Vault",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "block_number": 1,
+            "controller_values": {
+                "external_contract:roleRegistry": _cv("roleRegistry", gate_address, "caller_gate"),
+                "external_contract:eETH": _cv("eETH", callee_address, "call_target"),
+                "external_contract:legacy": _cv("legacy", legacy_address, None),
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("unknown", {"address": address}, True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=1,
+    )
+
+    relations = {(edge["from_id"], edge["to_id"]): edge["relation"] for edge in graph["edges"]}
+    assert relations[(f"address:{root_address}", f"address:{gate_address}")] == "controller_value"
+    assert relations[(f"address:{root_address}", f"address:{callee_address}")] == "external_call_target"
+    assert relations[(f"address:{root_address}", f"address:{legacy_address}")] == "controller_value"
+
+    # The provenance is stated on the row, including the not-determined case,
+    # so a reader of the persisted edge never has to infer it from the relation.
+    notes = {(edge["from_id"], edge["to_id"]): edge["notes"] for edge in graph["edges"]}
+    assert "authority_provenance=caller_gate" in notes[(f"address:{root_address}", f"address:{gate_address}")]
+    assert "authority_provenance=call_target" in notes[(f"address:{root_address}", f"address:{callee_address}")]
+    assert "authority_provenance=not_determined" in notes[(f"address:{root_address}", f"address:{legacy_address}")]
+
+    # The callee is still a NODE — it is a real contract the subject calls.
+    # Demotion removes the control claim, not the address.
+    assert any(node["address"] == callee_address for node in graph["nodes"])
+
+
+def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):
+    """An analysed contract must not be stamped with the generic type.
+
+    ``_ensure_node`` was called with a hardcoded ``resolved_type="contract"``
+    for every analysed node, so a timelock's OWN node came back typed
+    ``contract`` with its ``delay`` missing. Whether the type survived depended
+    on walk order — it did only when the node was later re-ensured as a
+    controller of another contract.
+
+    Positive control: the timelock root keeps ``timelock`` + ``delay``.
+    Negative control: a plain contract analysed the same way stays
+    ``contract`` — the fix must not invent a type the classifier did not give.
+    """
+    timelock_address = "0x1111111111111111111111111111111111111111"
+    plain_address = "0x2222222222222222222222222222222222222222"
+
+    plain_bundle = _bundle(
+        plain_address,
+        "PlainLogic",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": plain_address,
+            "contract_name": "PlainLogic",
+            "block_number": 2,
+            "controller_values": {},
+        },
+    )
+    root_bundle = _bundle(
+        timelock_address,
+        "EtherFiTimelock",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": timelock_address,
+            "contract_name": "EtherFiTimelock",
+            "block_number": 1,
+            "controller_values": {
+                "external_contract:logic": {
+                    "source": "logic",
+                    "value": plain_address,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "contract",
+                    "details": {"address": plain_address},
+                    "authority_provenance": "caller_gate",
+                }
+            },
+        },
+    )
+
+    def fake_classify(rpc_url, address, block_tag="latest", **_kw):
+        if address == timelock_address:
+            return "timelock", {"address": timelock_address, "delay": 259200, "owner": None}
+        return "contract", {"address": address}
+
+    monkeypatch.setattr("services.resolution.recursive._materialize_contract_artifacts", lambda *a, **k: plain_bundle)
+    monkeypatch.setattr("services.resolution.recursive.classify_resolved_address", fake_classify)
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=2,
+    )
+    nodes = {node["address"]: node for node in graph["nodes"]}
+
+    assert nodes[timelock_address]["analyzed"] is True
+    assert nodes[timelock_address]["resolved_type"] == "timelock"
+    assert nodes[timelock_address]["details"]["delay"] == 259200
+    assert nodes[plain_address]["resolved_type"] == "contract"
+
+
+def test_generic_type_never_overwrites_a_specific_one():
+    """The rank fold, directly: ``contract`` is the generic answer and must not
+    replace a classification that says more. Equal ranks keep last-write-wins."""
+    nodes: dict = {}
+    address = "0x1111111111111111111111111111111111111111"
+
+    recursive._ensure_node(nodes, address=address, resolved_type="timelock", label="TL", depth=1, node_type="contract")
+    recursive._ensure_node(
+        nodes, address=address, resolved_type="contract", label="TL", depth=0, node_type="contract", analyzed=True
+    )
+    node = nodes[f"address:{address}"]
+    assert node["resolved_type"] == "timelock"
+    assert node["analyzed"] is True
+
+    # unknown must not overwrite a real answer either, and a specific type may
+    # still replace the generic one (the direction that adds information).
+    recursive._ensure_node(nodes, address=address, resolved_type="unknown", label="TL", depth=1, node_type="contract")
+    assert nodes[f"address:{address}"]["resolved_type"] == "timelock"
+
+    other = "0x2222222222222222222222222222222222222222"
+    recursive._ensure_node(nodes, address=other, resolved_type="contract", label="C", depth=1, node_type="contract")
+    recursive._ensure_node(nodes, address=other, resolved_type="safe", label="C", depth=1, node_type="principal")
+    assert nodes[f"address:{other}"]["resolved_type"] == "safe"
+
+
+def test_analysis_state_splits_the_analyzed_bool():
+    """``analyzed=False`` is four populations; ``analysis_state`` names which.
+
+    Each branch is proven to fire on real data — 1,183 analyzed / 1,236
+    not_a_contract / 28 attempt_failed / 29 beyond_depth_horizon / 55 NULL
+    across the 107 stored resolved_control_graph artifacts (R2) — so this test
+    pins the mapping rather than the reachability.
+    """
+    max_depth = 6
+
+    def node(**kw) -> ResolvedGraphNode:
+        base: dict = {
+            "id": "address:0x00",
+            "address": "0x00",
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": "n",
+            "contract_name": None,
+            "depth": 1,
+            "analyzed": False,
+            "details": {},
+            "artifacts": {},
+        }
+        base.update(kw)
+        return cast(ResolvedGraphNode, base)
+
+    assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
+    # A principal was never a candidate — its absence says nothing adverse.
+    assert recursive._analysis_state(node(resolved_type="eoa"), max_depth) == "not_a_contract"
+    assert recursive._analysis_state(node(resolved_type="zero"), max_depth) == "not_a_contract"
+    # A fact about the contract.
+    assert recursive._analysis_state(node(details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
+    # A fact about OUR walk, not the address. This is the one the bool could
+    # never express and the reason graph_max_depth is persisted alongside.
+    assert recursive._analysis_state(node(depth=7), max_depth) == "beyond_depth_horizon"
+    # Not determined: no classification, so none of the four can be asserted.
+    assert recursive._analysis_state(node(resolved_type="unknown"), max_depth) is None
+    # An analyzable contract inside the horizon, unanalysed, with no recorded
+    # failure: also not determined. Inventing a value here is the exact error
+    # this field exists to remove.
+    assert recursive._analysis_state(node(depth=2), max_depth) is None
+
+    # A failed materialization outranks the depth check: the walk DID reach it.
+    assert (
+        recursive._analysis_state(node(depth=7, details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
+    )
+
+
+def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
+    """The state reaches the artifact, so the worker can persist it."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    eoa_address = "0x2222222222222222222222222222222222222222"
+
+    root_bundle = _bundle(
+        root_address,
+        "Root",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Root",
+            "block_number": 1,
+            "controller_values": {
+                "state_variable:owner": {
+                    "source": "owner",
+                    "value": eoa_address,
+                    "block_number": 1,
+                    "observed_via": "eth_call",
+                    "resolved_type": "eoa",
+                    "details": {"address": eoa_address},
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=1,
+    )
+    states = {node["address"]: node.get("analysis_state") for node in graph["nodes"]}
+    assert states[root_address] == "analyzed"
+    assert states[eoa_address] == "not_a_contract"

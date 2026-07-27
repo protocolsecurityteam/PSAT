@@ -201,6 +201,8 @@ class ResolutionWorker(BaseWorker):
                         block_number=snapshot.get("block_number"),
                         details=cv.get("details"),
                         observed_via=cv.get("observed_via"),
+                        # Absent in the snapshot => NULL, not a guessed value.
+                        authority_provenance=cv.get("authority_provenance"),
                     )
                 )
             session.commit()
@@ -278,6 +280,7 @@ class ResolutionWorker(BaseWorker):
                     ControlGraphEdge.contract_id == contract_row.id,
                     deployment_scope(ControlGraphEdge.deployment_address, deployment_address),
                 ).delete(synchronize_session=False)
+                graph_max_depth = resolved_graph.get("max_depth")
                 for node in resolved_graph.get("nodes", []):
                     session.add(
                         ControlGraphNode(
@@ -290,6 +293,12 @@ class ResolutionWorker(BaseWorker):
                             contract_name=node.get("contract_name"),
                             depth=node.get("depth"),
                             analyzed=node.get("analyzed", False),
+                            # Absent in the graph => NULL, not a guessed value.
+                            analysis_state=node.get("analysis_state"),
+                            # The walk's horizon, which the row otherwise loses:
+                            # without it ``depth`` cannot distinguish "cut off"
+                            # from "not attempted for some other reason".
+                            graph_max_depth=graph_max_depth,
                             details=node.get("details"),
                         )
                     )

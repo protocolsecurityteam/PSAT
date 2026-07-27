@@ -15,10 +15,16 @@ from typing import Any, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.models import EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_EXTERNAL_CALL_TARGET
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
-from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
+from schemas.resolved_control_graph import (
+    ResolvedAnalysisState,
+    ResolvedControlGraph,
+    ResolvedGraphEdge,
+    ResolvedGraphNode,
+)
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
@@ -464,6 +470,61 @@ def _materialize_contract_artifacts(
     }
 
 
+def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysisState | None:
+    """Why this node is (or is not) analysed.
+
+    ``analyzed`` is a non-nullable bool, so its ``False`` is four different
+    populations at once — a principal that was never a candidate, a contract
+    whose materialization failed, a contract the depth horizon cut off, and
+    "cannot say". The first says nothing adverse, the second is a fact about
+    the contract, the third is a fact about *our walk*, and only the fourth is
+    an absence of knowledge. Derived once here, at the end of the walk, because
+    this is the only place that holds ``max_depth`` alongside every node.
+
+    Returns ``None`` — not determined — for an analyzable contract inside the
+    horizon that is nonetheless unanalysed with no recorded failure. That
+    combination is not known to be reachable, and inventing a value for it
+    would be exactly the error this field exists to remove.
+    """
+    if node.get("analyzed"):
+        return "analyzed"
+    details = node.get("details")
+    if isinstance(details, dict) and details.get("materialize_error"):
+        return "attempt_failed"
+    resolved_type = node.get("resolved_type")
+    if resolved_type in ANALYZABLE_TYPES:
+        if int(node.get("depth") or 0) > max_depth:
+            return "beyond_depth_horizon"
+        return None
+    if resolved_type and resolved_type != "unknown":
+        return "not_a_contract"
+    return None
+
+
+def _resolved_type_rank(resolved_type: str | None) -> int:
+    """How much a ``resolved_type`` claims. A more specific answer may replace a
+    vaguer one; the reverse is a loss of information.
+
+    ``"contract"`` is the GENERIC answer — "there is code here" — and every
+    analysed node was previously stamped with it unconditionally, so an address
+    already classified ``timelock`` (carrying its ``delay``) was overwritten the
+    moment the walk analysed it. Whether the type survived came down to walk
+    order: it did only when the node happened to be re-ensured as a controller
+    of a LATER-processed contract. 41 of the local corpus's 47 timelock nodes
+    survived that way; the rest read ``contract``.
+
+    Equal ranks keep last-write-wins, which is the pre-existing behaviour for
+    two specific classifications of the same address.
+    """
+    if not resolved_type:
+        return -1
+    if resolved_type == "unknown":
+        return 0
+    if resolved_type == "contract":
+        return 1
+    return 2
+
+
 def _ensure_node(
     nodes: dict[str, ResolvedGraphNode],
     *,
@@ -502,7 +563,7 @@ def _ensure_node(
     if analyzed:
         current["analyzed"] = True
         current["node_type"] = "contract"
-    if resolved_type != "unknown" or not current.get("resolved_type"):
+    if _resolved_type_rank(resolved_type) >= _resolved_type_rank(current.get("resolved_type")):
         current["resolved_type"] = resolved_type  # type: ignore[typeddict-item]
     if label:
         current["label"] = label
@@ -1133,11 +1194,26 @@ def resolve_control_graph(
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
             contract_name = str(subject.get("name", address))
+            # The classifier's answer, not a hardcoded "contract". A timelock
+            # that is itself analysed used to lose its type AND its ``delay``
+            # here: EtherFiTimelock's own node read ``resolved_type=contract``
+            # with no delay, and inv 9 makes that delay credit-bearing.
+            # ``_cached_classify`` is the same memo the controller/principal
+            # wiring already uses, so a nested contract reached as someone's
+            # controller is a cache hit; a root costs one classification.
+            analyzed_type, analyzed_details = _cached_classify(address)
             node_details: dict[str, object] = {"address": address}
+            if analyzed_type in {"", "unknown"}:
+                # Classification did not answer. "contract" is what we DO know
+                # (the artifacts materialized), and it is the generic rank, so
+                # it cannot overwrite a specific type set elsewhere.
+                analyzed_type = "contract"
+            else:
+                node_details.update(analyzed_details)
             contract_node_id = _ensure_node(
                 nodes,
                 address=address,
-                resolved_type="contract",
+                resolved_type=analyzed_type,
                 label=contract_name,
                 depth=depth,
                 node_type="contract",
@@ -1181,15 +1257,29 @@ def resolve_control_graph(
                     node_type=controller_node_type,
                     details=details,
                 )
+                # A slot the contract only CALLS is not a controller of it.
+                # Provenance absent (a pre-split analysis artifact, or a target
+                # for which neither question was answered) stays
+                # ``controller_value``: not-determined must not silently
+                # demote a real authority.
+                provenance = controller_value.get("authority_provenance")
+                relation = (
+                    EDGE_RELATION_EXTERNAL_CALL_TARGET
+                    if provenance == "call_target"
+                    else EDGE_RELATION_CONTROLLER_VALUE
+                )
                 _add_edge(
                     edges,
                     {
                         "from_id": contract_node_id,
                         "to_id": controller_node_id,
-                        "relation": "controller_value",
+                        "relation": relation,
                         "label": controller_label,
                         "source_controller_id": controller_id,
-                        "notes": [f"resolved_type={resolved_type}"],
+                        "notes": [
+                            f"resolved_type={resolved_type}",
+                            f"authority_provenance={provenance or 'not_determined'}",
+                        ],
                     },
                 )
 
@@ -1299,6 +1389,9 @@ def resolve_control_graph(
     record_stage_metric("recursive_levels", _levels)
     record_stage_metric("recursive_classify_hits", classify_stats["hits"])
     record_stage_metric("recursive_classify_misses", classify_stats["misses"])
+
+    for _node in nodes.values():
+        _node["analysis_state"] = _analysis_state(_node, max_depth)
 
     graph: ResolvedControlGraph = {
         "schema_version": "0.1",

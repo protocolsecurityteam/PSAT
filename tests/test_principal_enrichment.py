@@ -869,3 +869,73 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
             resolved_control_graph=resolved_graph,
             rpc_url="http://rpc.example",
         )
+
+
+def test_callee_edge_does_not_mint_controller_labels():
+    """``principal_labels`` inherits the gate/callee split from the edge relation.
+
+    G6-9: the same conflation surfaced here, labelling the Ethereum 2 deposit
+    contract a *controller* of StakingManager and the Curve stETH/ETH pool a
+    controller of Liquifier. Both are callees. Leg F makes the split once, at
+    ``control_graph_edges.relation``; this file's producer switches on that
+    field, so the fix reaches this plane without a second provenance rule.
+
+    Positive control: the gate keeps ``controller_value`` /
+    ``controller_<label>``. Negative control: the callee gets ``call_target``
+    and NONE of the controller labels.
+    """
+    target = "0x1111111111111111111111111111111111111111"
+    gate = "0x2222222222222222222222222222222222222222"
+    callee = "0x3333333333333333333333333333333333333333"
+
+    def _node(address: str, name: str) -> dict:
+        return {
+            "id": f"address:{address}",
+            "address": address,
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": name,
+            "contract_name": name,
+            "depth": 0 if address == target else 1,
+            "analyzed": address == target,
+            "details": {"address": address},
+            "artifacts": {},
+        }
+
+    resolved_graph = {
+        "nodes": [_node(target, "StakingManager"), _node(gate, "RoleRegistry"), _node(callee, "DepositContract")],
+        "edges": [
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{gate}",
+                "relation": "controller_value",
+                "label": "roleRegistry",
+                "source_controller_id": "external_contract:roleRegistry",
+                "notes": ["authority_provenance=caller_gate"],
+            },
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{callee}",
+                "relation": "external_call_target",
+                "label": "depositContractEth2",
+                "source_controller_id": "external_contract:depositContractEth2",
+                "notes": ["authority_provenance=call_target"],
+            },
+        ],
+    }
+
+    payload = build_principal_labels(
+        {"contract_address": target, "contract_name": "StakingManager", "functions": []},
+        resolved_control_graph=resolved_graph,
+    )
+    principals = {item["address"]: item for item in payload["principals"]}
+
+    gate_labels = set(principals[gate]["labels"])
+    assert "controller_value" in gate_labels
+    assert "controller_roleregistry" in gate_labels
+
+    callee_labels = set(principals[callee]["labels"])
+    assert "call_target" in callee_labels
+    assert "stakingmanager_calls_depositcontracteth2" in callee_labels
+    assert "controller_value" not in callee_labels
+    assert not any(label.startswith("controller_") for label in callee_labels)

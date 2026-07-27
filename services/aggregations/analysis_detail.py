@@ -390,6 +390,12 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "contract_name": n.contract_name,
                 "depth": n.depth,
                 "analyzed": n.analyzed,
+                # ``analyzed=false`` is four populations; this says which, and
+                # ``null`` is the honest fifth ("not determined") for rows
+                # written before the column. ``graph_max_depth`` is what makes
+                # "beyond_depth_horizon" checkable against ``depth``.
+                "analysis_state": n.analysis_state,
+                "graph_max_depth": n.graph_max_depth,
                 "details": n.details or {},
             }
             for n in cgn_rows

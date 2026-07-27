@@ -731,8 +731,23 @@ class ControllerValue(Base):
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    # ``none_as_null=True``: a Python ``None`` here means "not determined" and
+    # must reach the database as SQL NULL. SQLAlchemy's default renders it as
+    # the jsonb scalar ``null``, which is a DIFFERENT state that no ``IS NULL``
+    # test can see (db/jsonb.py, W0-5). The watcher clears this field on a
+    # controller rotation, so the distinction is load-bearing.
+    details: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # How the current value was observed: 'eth_call' / 'eth_call_impl_fallback'
+    # / 'eth_call_error' / 'beacon_owner' from the resolution snapshot, or
+    # 'event_log' / 'storage_poll' when the watcher rotated it.
     observed_via: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 'caller_gate' | 'call_target' | NULL. NULL is a third state — the static
+    # stage did not determine why this address is attached — and is NOT a
+    # synonym for either value. Before this column the analyzer unioned "the
+    # caller is checked against this address" with "this address gets called",
+    # so a callee (eETH, lido, liquidityPool) was indistinguishable from an
+    # authority registry on the persisted row. See ``ControllerProvenance``.
+    authority_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="controller_values")
 
@@ -751,7 +766,19 @@ class ControlGraphNode(Base):
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Kept for compatibility; ``False`` on it is four different populations at
+    # once. ``analysis_state`` is what a consumer must read.
     analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 'analyzed' | 'not_a_contract' | 'attempt_failed' | 'beyond_depth_horizon'
+    # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
+    # walk, not about the address, and is the one the bool could never express:
+    # without ``graph_max_depth`` below it was not even derivable from the row.
+    # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
+    analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The ``max_depth`` of the walk that produced this row. NULL = not
+    # determined. Without it ``depth`` alone cannot say whether an unanalysed
+    # contract was skipped by the horizon or by something else.
+    graph_max_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="control_graph_nodes")
@@ -775,6 +802,41 @@ class ControlGraphEdge(Base):
     contract: Mapped[Contract] = relationship("Contract", back_populates="control_graph_edges")
 
     __table_args__ = (Index("ix_control_graph_edges_contract_id", "contract_id"),)
+
+
+# ``ControlGraphEdge.relation`` vocabulary.
+#
+# ``controller_value`` and the owner/principal relations are *control* claims:
+# reversed, they say the to-node has authority over the from-node.
+# ``external_call_target`` is not — it says the from-node calls the to-node,
+# which is a proven fact about the code but carries no authority: being called
+# by X confers nothing over X. Until this split both were written as
+# ``controller_value``, and 66 directed edge pairs asserted "A controls B" and
+# "B controls A" at once.
+EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
+EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
+
+# Allowlist, not a denylist: a relation this set does not name contributes no
+# authority. A new relation therefore has to be classified deliberately before
+# it can move value through the authority closure, instead of being folded in
+# by default the way ``external_call_target`` would have been.
+CONTROL_EDGE_RELATIONS = frozenset(
+    {
+        EDGE_RELATION_CONTROLLER_VALUE,
+        "safe_owner",
+        "timelock_owner",
+        "proxy_admin_owner",
+        "role_principal",
+        "mapping_member",
+    }
+)
+
+
+# ``ControllerValue.observed_via`` values written by the monitoring watcher.
+# The resolution snapshot's own vocabulary ('eth_call', 'eth_call_error',
+# 'eth_call_impl_fallback', 'beacon_owner') lives in services/resolution.
+CONTROLLER_OBSERVED_VIA_EVENT_LOG = "event_log"
+CONTROLLER_OBSERVED_VIA_STORAGE_POLL = "storage_poll"
 
 
 # ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the

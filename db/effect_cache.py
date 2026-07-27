@@ -256,7 +256,37 @@ logger = logging.getLogger(__name__)
 # `keccak("receive()")[:4]` selectors with the empty-string sentinel this file
 # already fixes, so pre-v20 rows for those functions are keyed on an identity no
 # caller could ever produce.
-EFFECT_CACHE_SCHEMA_VERSION = 20
+# v21 (Leg F of Wave 1; authored as "v11" against the same v10 base Legs A and C
+# branched from, renumbered at the merge — only the ordinals moved):
+# §6 candidate ordering again — ``build_authority_graph`` folded EVERY
+# ``control_graph_edges`` row into the authority closure with no relation
+# predicate, so a slot the contract merely CALLS propagated the callee's whole
+# downstream value into the caller's ``value_at_stake``. Callee edges are now
+# written as ``external_call_target`` and the closure reads only
+# ``CONTROL_EDGE_RELATIONS``. Locally that removes 1,200 of 2,756
+# external_contract-sourced edges from the closure and drops mutual control
+# pairs 66 -> 28. Order decides which candidates a ``resource_cap`` run
+# reaches (the v7 precedent), so a pre-v21 row records what a probe queue built
+# from a closure containing non-control edges happened to visit; it is not the
+# row the corrected closure produces.
+# v21 (same version, second correction): the ``external_call_target`` demotion
+# above is driven by ``authority_provenance``, which was emitted from the
+# ABSENCE of predicate-tree evidence — a treeless artifact stamped every
+# external-contract slot ``call_target``, including proven gates, and dropped
+# them out of that same closure. Corrected in ``build_controller_tracking``.
+# No bump for it: v21 is introduced on this branch and has never been written,
+# so there is no pre-fix v21 row to protect. Serving concerns are covered by
+# the bump above; this note only keeps the version's stated reason matching the
+# code it ships with.
+# v21 (same version, third correction): the same absence one level down. The
+# correction above only asked whether the artifact had ANY trees; ``caller_gate``
+# is read out of the trees that were LOWERED, and the builder never lowers
+# ``receive`` / ``fallback`` and produces no tree for a gate it cannot model. A
+# gate living in one of those was invisible, so the address was still stamped
+# ``call_target`` and still dropped out of the closure — realised on 427 of the
+# 1,200 demoted edges locally. ``call_target`` is now withheld for any name an
+# unlowered, caller-observing entry point reads. Same no-bump reasoning.
+EFFECT_CACHE_SCHEMA_VERSION = 21
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

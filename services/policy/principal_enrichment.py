@@ -12,7 +12,13 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, EffectiveFunction, FunctionPrincipal
+from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_EXTERNAL_CALL_TARGET,
+    Contract,
+    EffectiveFunction,
+    FunctionPrincipal,
+)
 from schemas.principal_labels import PrincipalLabels, PrincipalPermission, PrincipalProfile
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
@@ -455,7 +461,7 @@ def _graph_labels_for_node(
         relation = edge["relation"]
         edge_label = _slug(edge.get("label") or relation)
         context.append(f"{source_contract_name}:{edge.get('label') or relation}")
-        if relation == "controller_value":
+        if relation == EDGE_RELATION_CONTROLLER_VALUE:
             labels.add("controller_value")
             labels.add(f"{source_slug}_{edge_label}")
             labels.add(f"controller_{edge_label}")
@@ -463,6 +469,14 @@ def _graph_labels_for_node(
                 labels.add("authority_controller")
             if edge_label == "owner":
                 labels.add("owner_controller")
+        elif relation == EDGE_RELATION_EXTERNAL_CALL_TARGET:
+            # The from-node CALLS this address. That is a proven fact and worth
+            # publishing, but it is not control: minting ``controller_*`` here
+            # is what labelled the Ethereum 2 deposit contract a controller of
+            # StakingManager and the Curve stETH/ETH pool a controller of
+            # Liquifier. Neither controls anything; both are callees.
+            labels.add("call_target")
+            labels.add(f"{source_slug}_calls_{edge_label}")
         elif relation == "safe_owner":
             labels.add("safe_signer")
         elif relation == "timelock_owner":
