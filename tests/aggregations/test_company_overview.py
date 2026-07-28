@@ -2052,3 +2052,120 @@ def test_holdings_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     assert entry["holdings_coverage"]["rows"] == TOKEN_BALANCE_PAGE_SIZE
     assert entry["holdings_coverage"]["state"] == "may_be_incomplete"
+
+
+def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
+    """The terminal-controller walk is persisted ONLY on ``principal_labels.details``,
+    and ``_build_principal_lookup`` never joined the table — so
+    ``claimsVocab.terminalControllerNote``, the one consumer that handles all six of
+    its statuses, could never receive the data (W3-E item 6 / G7 §2.8).
+
+    Measured after wiring: 229 control-graph node payloads and 6 function-principal
+    payloads on the real corpus carry the record (0 before).
+    """
+    from db.models import PrincipalLabel
+
+    p = _add_protocol(db_session, f"e2e-tp-{uuid.uuid4().hex[:8]}")
+    addr = _addr("tp1")
+    controller = _addr("tp2")
+    settled = _addr("tp3")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=c.id,
+            address=controller,
+            resolved_type="contract",
+            label="AuthorityContract",
+            details={},
+        )
+    )
+    # A walk that TERMINATED — the status the fall-through cannot express, and the
+    # one that renders "ultimate key: 0x… · safe" instead of "unresolved".
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=controller,
+            label="AuthorityContract",
+            display_name="AuthorityContract",
+            resolved_type="contract",
+            details={
+                "terminal": False,
+                "terminal_principal": {
+                    "status": "terminated",
+                    "terminal": True,
+                    "address": settled,
+                    "resolved_type": "safe",
+                    "chain": [controller, settled],
+                },
+            },
+        )
+    )
+    # A principal_labels row for an address the lookup does NOT carry: annotating it
+    # would widen the published principal set, which is a different change.
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=_addr("tp4"),
+            label="Stranger",
+            display_name="Stranger",
+            resolved_type="contract",
+            details={"terminal_principal": {"status": "cycle", "terminal": False, "address": None}},
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
+    record = nodes[controller.lower()]["details"]["terminal_principal"]
+    assert record["status"] == "terminated"
+    assert record["address"] == settled
+    assert record["resolved_type"] == "safe"
+    # NEGATIVE CONTROL: the stranger address is not published as a node.
+    assert _addr("tp4").lower() not in nodes
+
+    # The forwarding is narrow on purpose: ``terminal`` would let one plane's typing
+    # publish a SETTLED key beside another plane's ``resolved_type: contract``, and
+    # the attribution facts have their own hedged copy and their own review.
+    forwarded = nodes[controller.lower()]["details"]
+    assert "terminal" not in forwarded
+    assert "signer_overlap" not in forwarded
+    assert "shared_deployer" not in forwarded
+
+
+def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_session):
+    """``setdefault``: this pass adds the fact where it is missing, never replaces
+    one a ControlGraphNode's own ``details`` already carried."""
+    from db.models import PrincipalLabel
+
+    p = _add_protocol(db_session, f"e2e-tpo-{uuid.uuid4().hex[:8]}")
+    addr = _addr("tpo1")
+    controller = _addr("tpo2")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=c.id,
+            address=controller,
+            resolved_type="contract",
+            label="AuthorityContract",
+            details={"terminal_principal": {"status": "multi_plane", "planes": []}},
+        )
+    )
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=controller,
+            label="AuthorityContract",
+            display_name="AuthorityContract",
+            resolved_type="contract",
+            details={"terminal_principal": {"status": "unknown_unfetched", "terminal": False, "address": None}},
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
+    assert nodes[controller.lower()]["details"]["terminal_principal"]["status"] == "multi_plane"
