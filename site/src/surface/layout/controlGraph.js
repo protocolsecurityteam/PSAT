@@ -32,6 +32,11 @@ export function buildControlGraphIndex(companyData) {
       // "governance context" for a function that Safe cannot reach — the
       // frontend half of the gate/callee conflation.
       if (edge.relation === "external_call_target") continue;
+      // controller_value_unattributed says the target's authority_provenance
+      // was ABSENT — nothing proved it gates anyone. Walking it would publish
+      // an unproven governance path (Leg A's tree widening enrolled pure
+      // constants and non-authority mappings this way).
+      if (edge.relation === "controller_value_unattributed") continue;
       const from = (edge.from || "").toLowerCase();
       const to = (edge.to || "").toLowerCase();
       if (!from || !to || from === to) continue;

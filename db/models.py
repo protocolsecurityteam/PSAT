@@ -815,6 +815,19 @@ class ControlGraphEdge(Base):
 # "B controls A" at once.
 EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
 EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
+# The third state. ``controller_value`` asserts "the to-node has authority over
+# the from-node"; ``external_call_target`` asserts the opposite positive fact
+# ("merely called, confers nothing"). A tracked controller whose
+# ``authority_provenance`` is ABSENT supports NEITHER: the static stage answered
+# neither question, so the address appeared in a lowered predicate tree without
+# ever being shown to gate a caller or to be a call destination. Writing it
+# ``controller_value`` makes an authority claim nothing proved (Leg A's tree
+# widening minted 37 such targets at once, incl. pure constants like
+# HUNDRED_PERCENT_IN_BPS and non-authority mappings like _balances); writing it
+# ``external_call_target`` asserts the other unproven fact. This relation keeps
+# the edge VISIBLE and out of ``CONTROL_EDGE_RELATIONS``, so it moves no
+# authority and no value through the closure.
+EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
 
 # Allowlist, not a denylist: a relation this set does not name contributes no
 # authority. A new relation therefore has to be classified deliberately before
