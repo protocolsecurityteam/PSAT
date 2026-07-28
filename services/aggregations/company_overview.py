@@ -55,6 +55,7 @@ from db.models import (
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
+from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, token_balances_may_be_truncated
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -1319,9 +1320,12 @@ def build_governance_view(
         balance_contract = lookup_contract or contract_row
         balances_list = []
         total_usd = 0.0
+        unvalued_rows = 0
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
                 usd = float(b.usd_value) if b.usd_value is not None else None
+                if usd is None:
+                    unvalued_rows += 1
                 balances_list.append(
                     {
                         "token_symbol": b.token_symbol,
@@ -1330,11 +1334,47 @@ def build_governance_view(
                         "raw_balance": b.raw_balance,
                         "decimals": b.decimals,
                         "usd_value": usd,
+                        # ``usd_value: null`` and ``usd_value: 0`` are one
+                        # truthiness test apart in JS and mean opposite things —
+                        # "we do not know what this holding is worth" (1,001 of
+                        # 1,376 local rows) versus "priced, and worth less than
+                        # half a cent" (100 rows). The state is published rather
+                        # than left to be inferred from the value's shape.
+                        #
+                        # ``not_determined`` deliberately does not name a CAUSE:
+                        # ``utils/etherscan`` distinguishes "no price returned"
+                        # from "no token divisor returned" (which would make any
+                        # USD figure wrong by 10^n), but neither writer persists
+                        # ``decimals_reported``, so the DB cannot tell them apart
+                        # and this payload must not pretend otherwise (L-45).
+                        "usd_value_state": "measured" if usd is not None else "not_determined",
+                        # Kept for continuity, and NOT a money fact: the producer
+                        # writes 0 for "no price known" on 1,007 local rows, so a
+                        # consumer reading this column directly reads them as
+                        # worthless. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                     }
                 )
                 if usd:
                     total_usd += usd
+        # Whether this contract's holdings list is the whole set. There is no
+        # ``complete`` member ON PURPOSE: the Etherscan holdings fetch returns ONE
+        # page capped at ``TOKEN_BALANCE_PAGE_SIZE`` and neither writer persists
+        # the raw page length, so nothing here can prove a short list was not a
+        # truncated one (the loop that stores rows drops zero-balance entries, so
+        # a full page can store fewer than the cap). At-the-cap is therefore the
+        # only positive statement available — ``token_balances_may_be_truncated``'s
+        # own one-directional contract — and the other arm is not-determined,
+        # never "whole".
+        holdings_coverage = {
+            "rows": len(balances_list),
+            "page_cap": TOKEN_BALANCE_PAGE_SIZE,
+            "state": ("may_be_incomplete" if token_balances_may_be_truncated(len(balances_list)) else "not_determined"),
+            # Rows inside the stored set whose USD value was never determined.
+            # ``total_usd`` skips them, so any non-zero total is a lower bound
+            # whenever this is non-zero — independently of truncation.
+            "unvalued_rows": unvalued_rows,
+        }
 
         entry: dict[str, Any] = {
             # Canonical lowercase: node ids and selection keys downstream
@@ -1378,6 +1418,7 @@ def build_governance_view(
             "capabilities": capabilities,
             "balances": balances_list,
             "total_usd": round(total_usd, 2) if total_usd > 0 else None,
+            "holdings_coverage": holdings_coverage,
         }
 
         graph_contract = lookup_contract or contract_row

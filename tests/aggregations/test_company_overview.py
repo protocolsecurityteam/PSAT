@@ -1949,3 +1949,106 @@ def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
     lookup = _build_principal_lookup({job_p.id: c_p, job_u.id: c_u}, {}, {})
     assert lookup[proven_addr.lower()]["resolved_type"] == "timelock"
     assert lookup[unknown_addr.lower()]["resolved_type"] == "contract"
+
+
+def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
+    """``usd_value: null`` and ``usd_value: 0`` mean opposite things and are one
+    truthiness test apart in the renderer (W3-E item 2 / G6-11 / L-45).
+
+    Also pins the holdings-coverage disclosure: at-the-page-cap is the only
+    positive statement available about completeness, and the other arm is
+    not-determined — never "whole".
+    """
+    p = _add_protocol(db_session, f"e2e-bal-{uuid.uuid4().hex[:8]}")
+    addr = _addr("bal1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add_all(
+        [
+            # Priced and worth real money.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt1"),
+                token_symbol="BIG",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=5000,
+                price_usd=5000,
+            ),
+            # Priced and worth nothing — a MEASUREMENT.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt2"),
+                token_symbol="DUST",
+                decimals=18,
+                raw_balance="1",
+                usd_value=0,
+                price_usd=0,
+            ),
+            # Never valued. The producer writes price_usd=0 for "no price known",
+            # so price_usd alone reads this as worthless; usd_value is the honest
+            # discriminator and the payload must publish the state explicitly.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt3"),
+                token_symbol="UNK",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=None,
+                price_usd=0,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    by_symbol = {b["token_symbol"]: b for b in entry["balances"]}
+
+    assert by_symbol["BIG"]["usd_value_state"] == "measured"
+    assert by_symbol["DUST"]["usd_value"] == 0
+    assert by_symbol["DUST"]["usd_value_state"] == "measured"
+    assert by_symbol["UNK"]["usd_value"] is None
+    assert by_symbol["UNK"]["usd_value_state"] == "not_determined"
+
+    cov = entry["holdings_coverage"]
+    assert cov["rows"] == 3
+    assert cov["unvalued_rows"] == 1
+    # Three stored rows cannot prove a short page: the state is not-determined,
+    # and "complete" is not a member of the vocabulary at all.
+    assert cov["state"] == "not_determined"
+    assert cov["page_cap"] == 100
+    # The total skips the unvalued row, so it is a lower bound — which is exactly
+    # what ``unvalued_rows`` lets a consumer say.
+    assert entry["total_usd"] == 5000.0
+
+
+def test_holdings_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session):
+    """POSITIVE CONTROL for the coverage state: 7 local contracts sit exactly at
+    the 100-row cap (one holding $8.6B) and nothing could say so."""
+    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+
+    p = _add_protocol(db_session, f"e2e-cap-{uuid.uuid4().hex[:8]}")
+    addr = _addr("cap1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Whale")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Whale")
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr(f"cap{i}"),
+                token_symbol=f"T{i}",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=100,
+                price_usd=100,
+            )
+            for i in range(TOKEN_BALANCE_PAGE_SIZE)
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["holdings_coverage"]["rows"] == TOKEN_BALANCE_PAGE_SIZE
+    assert entry["holdings_coverage"]["state"] == "may_be_incomplete"
