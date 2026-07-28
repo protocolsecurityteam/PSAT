@@ -122,6 +122,27 @@ describe("BalanceTable — holdings coverage", () => {
     expect(screen.getByText(/counts only the priced ones/i)).toBeInTheDocument();
   });
 
+  it("discloses truncation AND unvalued rows when both facts hold", () => {
+    // L-66: the truncation sentence returned early, so the contract at the page cap
+    // that ALSO holds unpriced assets lost the pricing disclosure — the row where the
+    // total is least trustworthy. Locally all 7 at-the-cap contracts are that shape.
+    render(
+      <BalanceTable
+        machine={machine([row(), row({ token_symbol: "UNK", usd_value: null, usd_value_state: "not_determined" })], {
+          total_usd: 1234,
+          holdings_coverage: { rows: 100, page_cap: 100, state: "may_be_incomplete", unvalued_rows: 4 },
+        })}
+      />,
+    );
+    // The coverage note is the first of the two notes this view can render (the second
+    // is the dust-filter asymmetry note); both sentences must be in the SAME element,
+    // so a composed string is asserted rather than two separate matches.
+    const note = screen.getAllByRole("note")[0];
+    expect(note).toHaveTextContent(/Holdings may be incomplete/i);
+    expect(note).toHaveTextContent(/4 of 100 holdings have no determined USD value/i);
+    expect(note).toHaveTextContent(/counts only the priced ones/i);
+  });
+
   it("does not read an empty holdings list as holding nothing", () => {
     render(<BalanceTable machine={machine([])} />);
     expect(screen.getByText("No token balances recorded")).toBeInTheDocument();
