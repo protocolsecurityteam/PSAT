@@ -489,7 +489,7 @@ RESIDUE_BOOKKEEPING_KEYS = ("destination_probe_attempts",)
 # are called from the read path
 # (``workers/effects_worker.py`` — the plain-hit, audit and floor branches), so two
 # identical pipeline runs over an unchanged chain leave the DB in DIFFERENT states.
-# The determinism harness (``scripts/witness/determinism_gate.sh``) closes the float
+# The determinism harness (``scripts/determinism_gate.sh``) closes the float
 # and string-hash classes and cannot see this one: it pins the PROCESS, and this is a
 # difference in what the process WROTE.
 #

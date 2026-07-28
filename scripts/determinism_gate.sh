@@ -43,11 +43,11 @@
 # `not_determined` passed the whole suite while erasing the positive control. See
 # tests/test_determinism_gate.py::test_the_proved_binding_is_present_and_not_hedged.
 #
-# Usage: scripts/witness/determinism_gate.sh [--quick]
+# Usage: scripts/determinism_gate.sh [--quick]
 #   --quick  4 seeds instead of 8 (local iteration only; not a gating run)
 
 set -uo pipefail
-cd "$(dirname "$0")/../.." || exit 2
+cd "$(dirname "$0")/.." || exit 2
 
 SEEDS=(0 1 2 3 4 5 6 7)
 [ "${1:-}" = "--quick" ] && SEEDS=(0 1 2 3)
@@ -74,7 +74,7 @@ echo
 echo "--- class A: string-hash (set[str] iteration; PYTHONHASHSEED-pinnable) ---"
 a_ok=1
 for seed in "${SEEDS[@]}"; do
-  PYTHONHASHSEED="$seed" uv run python scripts/witness/determinism_probe_selection.py \
+  PYTHONHASHSEED="$seed" uv run python scripts/determinism_probe_selection.py \
       >"$WORK/a_$seed.json" 2>"$WORK/a_$seed.err"
   rc=$?
   # 4 = anchor violated but the payload is intact and still worth comparing.
@@ -155,7 +155,7 @@ i=0
 for cfg in "${B_CONFIGS[@]}"; do
   alloc=${cfg%%|*}; pre=${cfg#*|}
   PYTHONMALLOC="$alloc" PYTHONHASHSEED=0 \
-      uv run python scripts/witness/determinism_probe_taint.py --preamble "$pre" \
+      uv run python scripts/determinism_probe_taint.py --preamble "$pre" \
       >"$WORK/b_$i.json" 2>"$WORK/b_$i.err"
   rc=$?
   case "$rc" in

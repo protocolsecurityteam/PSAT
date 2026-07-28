@@ -6,7 +6,7 @@ the other:
 * **string-hash** — ``set[str]`` iteration, pinnable by ``PYTHONHASHSEED``.
   Covered by ``test_effects_selection.py::test_reachable_value_is_identical_across_processes``
   (real child processes, four seeds) plus the seed sweep in
-  ``scripts/witness/determinism_gate.sh``.
+  ``scripts/determinism_gate.sh``.
 * **allocation-order** — ``object.__hash__`` on Slither variables, so iteration
   follows ``id()``. **No seed pins it**, and before this file the offline suite
   had no test of the shape at all: nothing in the suite varied
@@ -34,8 +34,8 @@ import pytest
 pytest.importorskip("slither")
 
 REPO = Path(__file__).resolve().parents[1]
-PROBE = REPO / "scripts" / "witness" / "determinism_probe_taint.py"
-GATE = REPO / "scripts" / "witness" / "determinism_gate.sh"
+PROBE = REPO / "scripts" / "determinism_probe_taint.py"
+GATE = REPO / "scripts" / "determinism_gate.sh"
 
 # Enough malloc runs that agreement by chance is negligible without making the
 # suite slow. Measured at a fixed seed: pymalloc yields ONE control payload in 30
