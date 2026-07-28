@@ -373,3 +373,82 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
     }
     plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
     assert all("authority_provenance" not in c for c in plan["tracked_controllers"])
+
+
+@pytest.mark.parametrize("failing_accessor", ["all_state_variables_read", "all_solidity_variables_read"])
+def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, failing_accessor):
+    """L-35: when a recursive Slither accessor RAISES, the blind-spot answer must
+    go not-determined — never fall back to the non-recursive attribute.
+
+    The non-recursive attribute is a strictly narrower set: this function's own
+    body, without its callees. Substituting it turns "we could not read the
+    callees" into "the callees read nothing", so a gate reached through an
+    internal call becomes invisible, its name drops out of the blind spot, and
+    ``call_target`` — a claim of PROVEN ABSENCE of a caller gate — is minted from
+    a failure to determine. That is the one direction this split exists to
+    prevent.
+
+    Both accessors are exercised because they are consulted at different points:
+    ``all_solidity_variables_read`` decides whether a treeless function observes
+    the caller at all (a failure there must not let the function be EXCLUDED on
+    evidence), ``all_state_variables_read`` then collects its names.
+
+    Runs on the degraded-``receive()`` shape rather than the Vault fixture,
+    because Vault's entry points are all lowered and never reach the accessor at
+    all — a fixture where the raise cannot fire proves nothing.
+
+    R2: reachable by construction only. Slither's accessors raise on no contract
+    in the local corpus; realised rows are 0 and this is a lower bound, the same
+    convention the entry-point arm in this file already uses.
+    """
+    predicate_trees, _ = _unlowered_targets(tmp_path)
+    degraded = dict(predicate_trees)
+    degraded["trees"] = {k: v for k, v in predicate_trees["trees"].items() if not k.startswith("receive")}
+    src = textwrap.dedent(UNLOWERED_GATE_SOURCE).strip() + "\n"
+    f = tmp_path / "QueueAccessorFailure.sol"
+    f.write_text(src)
+    contract = next(c for c in Slither(str(f)).contracts if c.name == "Queue")
+    effects = build_effects(contract)
+    semantic_control = _build_semantic_control_summary(contract, tmp_path, degraded, effects)
+
+    # POSITIVE CONTROLS on the very same inputs, so this is a change of answer
+    # under failure and not a fix that erased the split.
+    clean = {t["source"]: t for t in build_controller_tracking(contract, tmp_path, degraded, effects, semantic_control)}
+    assert clean["eETH"].get("authority_provenance") == "call_target"
+    assert clean["roleRegistry"].get("authority_provenance") == "caller_gate"
+    assert "authority_provenance" not in clean["liquidityPool"]
+
+    class _FailingFn:
+        """Slither function whose recursive read accessor raises."""
+
+        def __init__(self, fn: Any) -> None:
+            self._fn = fn
+
+        def __getattr__(self, item: str) -> Any:
+            if item == failing_accessor:
+
+                def _raise() -> Any:
+                    raise RuntimeError("slither internal failure")
+
+                return _raise
+            return getattr(self._fn, item)
+
+    class _Degraded:
+        functions_entry_points = [_FailingFn(fn) for fn in contract.functions_entry_points]
+
+        def __getattr__(self, item: str) -> Any:
+            return getattr(contract, item)
+
+    by_source = {
+        t["source"]: t for t in build_controller_tracking(_Degraded(), tmp_path, degraded, effects, semantic_control)
+    }
+
+    # The name that previously earned the proven-absence answer now earns none.
+    assert "authority_provenance" not in by_source["eETH"], (
+        "a failed accessor read narrowed the gate set and minted call_target anyway"
+    )
+    # A gate already PROVEN present by a lowered leaf is evidence in hand; a
+    # failure elsewhere does not subtract from it.
+    assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
+    # And the already-withheld name stays withheld.
+    assert "authority_provenance" not in by_source["liquidityPool"]

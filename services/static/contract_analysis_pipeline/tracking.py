@@ -461,12 +461,24 @@ def _collect_authority_state_vars(predicate_trees: Mapping[str, Any] | None) -> 
 _CALLER_IDENTITY_BUILTINS = frozenset({"msg.sender", "tx.origin"})
 
 
-def _recursive_read(fn: Any, recursive_attr: str, direct_attr: str) -> set[str]:
+def _recursive_read(fn: Any, recursive_attr: str, direct_attr: str) -> set[str] | None:
     """Names read by ``fn`` and everything it calls, including its modifiers.
+    ``None`` when the recursive accessor failed — not determined.
 
     Modifiers are unioned explicitly: a guard written as ``onlyOwner`` lives in a
     ``Modifier`` object, and reading only the function body would classify the
-    most common access-control shape in Solidity as caller-blind."""
+    most common access-control shape in Solidity as caller-blind.
+
+    The ``direct_attr`` fallback covers an object that never exposed the
+    recursive accessor at all. It must NOT cover an accessor that exists and
+    raised: the direct attribute is a strictly narrower set (this function's own
+    body, not its callees), so substituting it turns "we could not read the
+    callees" into "the callees read nothing" — a gate reached through an internal
+    call disappears, its name drops out of the blind spot, and ``call_target``
+    (a claim of proven absence) gets minted from a failure to determine. That is
+    the one direction this whole function exists to prevent, so the failure is
+    propagated as not-determined instead.
+    """
     names: set[str] = set()
     for source in (fn, *(getattr(fn, "modifiers", None) or [])):
         accessor = getattr(source, recursive_attr, None)
@@ -474,8 +486,8 @@ def _recursive_read(fn: Any, recursive_attr: str, direct_attr: str) -> set[str]:
         if callable(accessor):
             try:
                 values = accessor()
-            except Exception:  # pragma: no cover - Slither internal failure
-                values = None
+            except Exception:
+                return None
         if values is None:
             values = getattr(source, direct_attr, None)
         for variable in values or []:
@@ -502,11 +514,20 @@ def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, An
     neither ``msg.sender`` nor ``tx.origin`` are excluded on evidence, not on
     convenience: with no caller in scope there is no caller gate to miss.
 
-    Returns ``None`` when the entry-point surface itself could not be enumerated
-    — the same not-determined answer, applied to every name.
+    Returns ``None`` when the surface could not be read at all — the same
+    not-determined answer, applied to every name. Two routes reach it: the
+    entry-point list could not be enumerated, or a recursive variable-read
+    accessor raised (see ``_recursive_read``). Both mean the blind-spot set is
+    incomplete, and an incomplete blind spot is indistinguishable from a small
+    one, which is what makes ``call_target`` mintable from a failure.
 
     R2 status of that ``None`` arm, stated rather than implied: it has **zero
-    realised rows** and is a lower bound, not a firing proof. Slither's
+    realised rows** and is a lower bound, not a firing proof — for BOTH routes.
+    The accessor route is reachable only when Slither's own
+    ``all_state_variables_read`` / ``all_solidity_variables_read`` raise, which
+    happens on no contract in the local corpus; it is covered by
+    ``test_accessor_failure_answers_not_determined_instead_of_narrowing``, which
+    makes the accessor raise by construction. Slither's
     ``Contract.functions_entry_points`` is a property returning a list
     comprehension, so it is never ``None`` for a real compiled contract; the arm
     is reachable only by construction (any other object passed in this position
@@ -534,11 +555,17 @@ def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, An
             continue
         if full_name in lowered:
             continue
-        if not (
-            _recursive_read(fn, "all_solidity_variables_read", "solidity_variables_read") & _CALLER_IDENTITY_BUILTINS
-        ):
+        solidity_read = _recursive_read(fn, "all_solidity_variables_read", "solidity_variables_read")
+        if solidity_read is None:
+            # Whether this function even observes the caller is unknown, so it
+            # can neither be excluded on evidence nor have its names collected.
+            return None
+        if not (solidity_read & _CALLER_IDENTITY_BUILTINS):
             continue
-        blind |= _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+        state_read = _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+        if state_read is None:
+            return None
+        blind |= state_read
 
     # ``guard_extraction_uncertain`` names entry points whose caller-authority
     # comparison the builder saw and could not lower. Those are treeless and
@@ -549,7 +576,10 @@ def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, An
     for full_name in uncertain or []:
         fn = by_full_name.get(full_name) if isinstance(full_name, str) else None
         if fn is not None:
-            blind |= _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+            state_read = _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+            if state_read is None:
+                return None
+            blind |= state_read
     return blind
 
 
