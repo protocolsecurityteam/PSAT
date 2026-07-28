@@ -379,6 +379,146 @@ def test_artifact_endpoint_not_determined_still_prefers_a_real_synthesised_body(
     assert resp.json()["synthesized"] is True
 
 
+def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_session, storage_bucket):
+    """L-1. ``static_worker`` writes no ``upgrade_history`` row in two
+    indistinguishable cases — the stage found no proxies, and the stage RAISED —
+    and the SPA consumes the resulting 404 as proven absence ("No activity before
+    the line."). Falsified on real data: contract
+    ``0x3c55986cfee455e2533f4d29006634ecf9b7c03f`` (``is_proxy=False`` but
+    ``proxy_type='beacon'``) has 0 artifact rows, 0 UpgradeEvents, the endpoint
+    returned 404, and the address has **14** ``Upgraded(address)`` logs at or
+    before block 25619159.
+
+    Reproduced in-process against the real local corpus while writing this:
+    that job now answers 503/not_determined and a self-consistent non-proxy job
+    still answers 404.
+    """
+    from db.models import Contract
+
+    client = TestClient(api_with.app)
+
+    # A — proven absent. A Contract row that says self-consistently "not a proxy":
+    # a non-proxy has no upgrade history by construction, so nothing is hidden.
+    # POSITIVE CONTROL for every hedge below — without it the marker would land on
+    # every Safe and EOA in the protocol.
+    plain_job = _completed_job(db_session, "uh-plain", address="0x" + "a1" * 20)
+    db_session.add(Contract(job_id=plain_job.id, address="0x" + "a1" * 20, chain="ethereum", is_proxy=False))
+    db_session.commit()
+    plain = client.get("/api/analyses/uh-plain/artifact/upgrade_history")
+    assert plain.status_code == 404
+    assert plain.headers.get("X-PSAT-Artifact-State") is None
+
+    # B — the L-1 row's shape: is_proxy false, proxy_type set. The row contradicts
+    # itself, so its non-proxy status cannot carry an absence.
+    beacon_job = _completed_job(db_session, "uh-beacon", address="0x" + "a2" * 20)
+    db_session.add(
+        Contract(
+            job_id=beacon_job.id,
+            address="0x" + "a2" * 20,
+            chain="ethereum",
+            is_proxy=False,
+            proxy_type="beacon",
+        )
+    )
+    db_session.commit()
+    beacon = client.get("/api/analyses/uh-beacon/artifact/upgrade_history")
+    assert beacon.status_code == 503
+    assert beacon.headers.get("X-PSAT-Artifact-State") == "not_determined"
+    assert "inconsistent about proxyhood" in beacon.json()["reason"]
+
+    # C — a proxy with no artifact at all: it SHOULD have had one.
+    proxy_job = _completed_job(db_session, "uh-proxy", address="0x" + "a3" * 20)
+    db_session.add(Contract(job_id=proxy_job.id, address="0x" + "a3" * 20, chain="ethereum", is_proxy=True))
+    db_session.commit()
+    proxy = client.get("/api/analyses/uh-proxy/artifact/upgrade_history")
+    assert proxy.status_code == 503
+    assert proxy.headers.get("X-PSAT-Artifact-State") == "not_determined"
+
+    # D — no Contract row: nothing here knows whether the target is a proxy.
+    _completed_job(db_session, "uh-bare", address="0x" + "a4" * 20)
+    bare = client.get("/api/analyses/uh-bare/artifact/upgrade_history")
+    assert bare.status_code == 503
+    assert "no contract row" in bare.json()["reason"]
+
+    assert (plain.status_code, plain.text) != (beacon.status_code, beacon.text)
+
+
+def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, storage_bucket):
+    """The other half of L-1's producer ambiguity, read at the endpoint: a job whose
+    ``dependency_upgrade_history`` sub-phase recorded a degraded failure cannot have
+    its missing artifact reported as a proven negative, even when the Contract row
+    says non-proxy.
+
+    R2 statement, honestly: **0** of the 123 local ``stage_errors`` artifacts carry
+    this phase, so this branch has zero realised rows today — the lower-bound
+    statement, not a firing proof. The read itself is demonstrably live on the same
+    artifacts through sibling phases (``controller_read`` 1,401 entries,
+    ``dependency_dynamic`` 12), so what is unrealised is the failure, not the
+    mechanism.
+    """
+    from datetime import datetime, timezone
+
+    from db.models import Contract
+    from db.queue import store_artifact
+
+    job = _completed_job(db_session, "uh-degraded", address="0x" + "a5" * 20)
+    db_session.add(Contract(job_id=job.id, address="0x" + "a5" * 20, chain="ethereum", is_proxy=False))
+    store_artifact(
+        db_session,
+        job.id,
+        "stage_errors",
+        data={
+            "job_id": str(job.id),
+            "errors": [
+                {
+                    "stage": "static",
+                    "severity": "degraded",
+                    "exc_type": "builtins.RuntimeError",
+                    "message": "etherscan 429",
+                    "phase": "dependency_upgrade_history",
+                    "job_id": str(job.id),
+                    "worker_id": "w1",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        },
+    )
+    db_session.commit()
+
+    client = TestClient(api_with.app)
+    resp = client.get("/api/analyses/uh-degraded/artifact/upgrade_history")
+    assert resp.status_code == 503
+    assert resp.headers.get("X-PSAT-Artifact-State") == "not_determined"
+    assert "degraded failure" in resp.json()["reason"]
+
+    # NEGATIVE CONTROL: a degraded record for a DIFFERENT phase says nothing about
+    # the upgrade-history stage, so the 404 stands.
+    other = _completed_job(db_session, "uh-other-phase", address="0x" + "a6" * 20)
+    db_session.add(Contract(job_id=other.id, address="0x" + "a6" * 20, chain="ethereum", is_proxy=False))
+    store_artifact(
+        db_session,
+        other.id,
+        "stage_errors",
+        data={
+            "job_id": str(other.id),
+            "errors": [
+                {
+                    "stage": "static",
+                    "severity": "degraded",
+                    "exc_type": "builtins.RuntimeError",
+                    "message": "unrelated",
+                    "phase": "dependency_dynamic",
+                    "job_id": str(other.id),
+                    "worker_id": "w1",
+                    "failed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        },
+    )
+    db_session.commit()
+    assert client.get("/api/analyses/uh-other-phase/artifact/upgrade_history").status_code == 404
+
+
 def test_storage_client_can_presign(storage_bucket):
     """presign() returns a working URL — important for any future direct-from-storage download path."""
     storage_bucket.put("artifacts/test/presign.json", b'{"ok": true}', "application/json")

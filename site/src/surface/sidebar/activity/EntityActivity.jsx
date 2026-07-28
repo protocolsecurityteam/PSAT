@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
 import { AlertControls } from "./AlertControls.jsx";
+import { proxyState } from "./helpers.js";
 import { StatusStrip } from "./StatusStrip.jsx";
 import { Timeline } from "./Timeline.jsx";
 import { buildTimeline } from "./buildTimeline.js";
@@ -24,6 +25,12 @@ export function EntityActivity({
   now,
 }) {
   const [events, setEvents] = useState([]);
+  // The settled outcome of the per-contract event read, carried with the
+  // (address, chain) it was earned by — same reasoning as `historyOutcome` below:
+  // this component is reused across selections, so identity is what turns the
+  // window between a new selection and its effect into "pending" instead of into
+  // the previous entity's answer about a different contract.
+  const [eventsOutcome, setEventsOutcome] = useState(null);
   const [history, setHistory] = useState(null);
   // The settled outcome of the upgrade-history read, as `{ jobId, state }` with
   // state in present | absent | not_determined. There is no "pending" member
@@ -41,7 +48,15 @@ export function EntityActivity({
 
   const address = machine?.address;
   const chain = machine?.chain || contract?.chain || "ethereum";
-  const isProxy = Boolean(machine?.is_proxy);
+  // Three states, not `Boolean(is_proxy)`. `not_determined` is a row whose two
+  // proxy signals contradict each other (`is_proxy: false` with a `proxy_type` or
+  // an `implementation`), and one real contract is exactly that with 14 real
+  // pre-enrollment upgrades (L-1). It must be ASKED about, never answered from
+  // the flag: `isProxy` gates what may be rendered as proven, `mayBeProxy` gates
+  // whether the question gets asked at all.
+  const proxyhood = proxyState(machine);
+  const isProxy = proxyhood === "proxy";
+  const mayBeProxy = proxyhood !== "not_proxy";
 
   // Per-contract events (all kinds), captured from enrollment forward.
   useEffect(() => {
@@ -51,15 +66,27 @@ export function EntityActivity({
     // contract's events under the new one — a positive claim about the wrong
     // subject, which is worse than the empty rail it replaces.
     setEvents([]);
+    setEventsOutcome(null);
     if (!address) { return undefined; }
     let cancelled = false;
+    const key = `${address}|${chain}`;
     const load = async () => {
       try {
         const q = `address=${encodeURIComponent(address)}&chain=${encodeURIComponent(chain)}&limit=100`;
         const evs = await api(`/api/monitored-events?${q}`);
-        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
+        if (cancelled) return;
+        setEvents(Array.isArray(evs) ? evs : []);
+        // A 200 whose body is not an array is not an answer about the events, so
+        // it does not get written as one — same rule as the history read below.
+        setEventsOutcome({ key, state: Array.isArray(evs) ? "present" : "not_determined" });
       } catch {
-        if (!cancelled) setEvents([]);
+        if (cancelled) return;
+        // NOT `setEvents([])`. This runs every 30s: a failed refresh used to
+        // replace events a previous tick had PROVEN present with an empty list,
+        // so a transient 502 turned observed activity into "none recorded" and
+        // the next tick turned it back. The proven data is kept and the failure
+        // is said out loud instead (L-2).
+        setEventsOutcome({ key, state: "not_determined" });
       }
     };
     load();
@@ -80,7 +107,7 @@ export function EntityActivity({
     // React batches these with whatever the branches set, so no extra render.
     setHistoryOutcome(null);
     setHistory(null);
-    if (!isProxy || !machine?.job_id) { return undefined; }
+    if (!mayBeProxy || !machine?.job_id) { return undefined; }
     const cached = cache && cache[machine.job_id];
     if (cached?.history) {
       setHistory(cached.history);
@@ -124,14 +151,24 @@ export function EntityActivity({
     // cache/onCache omitted deliberately: read once per selection so this
     // fetch's own cache write doesn't retrigger the effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machine?.job_id, isProxy]);
+  }, [machine?.job_id, mayBeProxy]);
+
+  // Three states for the event rail, and only ever the one this selection earned.
+  // `pending` is the ABSENCE of a settled outcome for the current (address, chain),
+  // derived rather than stored so no path can forget to re-enter it.
+  const eventsState = useMemo(() => {
+    if (!address) return "not_determined";
+    return eventsOutcome?.key === `${address}|${chain}` ? eventsOutcome.state : "pending";
+  }, [address, chain, eventsOutcome]);
 
   // Four states, and only ever the one this selection earned.
   const historyState = useMemo(() => {
-    // No back-fill channel exists for a non-proxy, so the below-the-line set is
-    // empty by construction. Nothing is in flight and nothing failed: that is an
-    // answer, not a gap.
-    if (!isProxy) return "absent";
+    // No back-fill channel exists for a PROVEN non-proxy, so the below-the-line
+    // set is empty by construction. Nothing is in flight and nothing failed: that
+    // is an answer, not a gap. A contradictory row is not this case — it falls
+    // through to the read below, whose 503 (the endpoint's own not-determined
+    // answer for exactly this shape) keeps the question open.
+    if (proxyhood === "not_proxy") return "absent";
     // A proxy with no analysis job to ask about. No read is pending, because
     // none was ever issued — so nobody knows, which is not the same as nothing
     // being there.
@@ -141,7 +178,7 @@ export function EntityActivity({
     // settles — indefinitely if it never does.
     if (historyOutcome?.jobId !== machine.job_id) return "pending";
     return historyOutcome.state;
-  }, [isProxy, machine?.job_id, historyOutcome]);
+  }, [proxyhood, machine?.job_id, historyOutcome]);
 
   // Only ever true for the selection whose read did not answer.
   const historyUnknown = historyState === "not_determined";
@@ -153,9 +190,12 @@ export function EntityActivity({
   }, [history, address]);
 
   const enrollmentBlock = contract?.enrollment_block ?? null;
+  // `mayBeProxy`, so a contradictory row whose history DID arrive renders its
+  // eras instead of dropping them; with no history the flag adds no rows either
+  // way, so the open case cannot manufacture a timeline.
   const timeline = useMemo(
-    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy }),
-    [events, proxy, enrollmentBlock, isProxy],
+    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy }),
+    [events, proxy, enrollmentBlock, mayBeProxy],
   );
 
   // "Monitoring started" label: created_at is when the MonitoredContract row was
@@ -169,7 +209,15 @@ export function EntityActivity({
 
   return (
     <section className="ps-activity-entity">
-      <StatusStrip machine={machine} contract={contract} lastEventAt={newestEventAt} now={now} />
+      <StatusStrip
+        machine={machine}
+        contract={contract}
+        lastEventAt={newestEventAt}
+        now={now}
+        // "none recorded" is a claim about the contract; without this the strip
+        // makes it on the strength of a read that failed.
+        eventsState={eventsState}
+      />
 
       {contract ? (
         <AlertControls
@@ -182,6 +230,13 @@ export function EntityActivity({
       ) : null}
 
       <div className="ps-activity-sect-title" style={{ marginTop: 2 }}>Timeline</div>
+      {eventsState === "not_determined" ? (
+        <div className="ps-activity-unknown" role="status">
+          {events.length
+            ? "The last event refresh did not complete — the rows below are the last ones read, and newer events may be missing."
+            : "Events were not read — this contract's captured events are unknown, not absent."}
+        </div>
+      ) : null}
       {historyUnknown ? (
         <div className="ps-activity-unknown" role="status">
           Upgrade history was not read — this proxy's pre-enrollment upgrades
@@ -193,7 +248,7 @@ export function EntityActivity({
         below={timeline.below}
         boundaryBlock={timeline.boundaryBlock}
         boundaryDate={boundaryDate}
-        isProxy={isProxy}
+        isProxy={mayBeProxy}
         chain={chain}
         now={now}
         // The marker above and the timeline's empty states describe the same

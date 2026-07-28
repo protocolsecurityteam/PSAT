@@ -3,8 +3,8 @@
 // empty state, protocol-wide mode, and admin-vs-non-admin control visibility.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, waitFor, within, act } from "@testing-library/react";
 
 import { ActivityPanel } from "./ActivityPanel.jsx";
 import { setFetchHandler } from "../../../test/fetchMock.js";
@@ -312,6 +312,108 @@ describe("ActivityPanel — monitored principal (safe)", () => {
   });
 });
 
+describe("ActivityPanel — a failed event poll does not erase proven events", () => {
+  const evRows = [evRow("eupg", "upgraded", 300, { implementation: CUR })];
+
+  it("says the events were not read instead of 'none recorded'", async () => {
+    // First read fails: there is nothing proven to keep, but "none recorded" is a
+    // claim about the contract and this read did not answer.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/api\/monitored-events$/.test(url.pathname), () => {
+      throw new TypeError("Failed to fetch");
+    });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/Events were not read/i)).toBeInTheDocument();
+    expect(screen.queryByText("none recorded")).toBeNull();
+    expect(screen.getByText("not determined")).toBeInTheDocument();
+  });
+
+  it("keeps the rows a previous tick proved present when the 30s refresh fails", async () => {
+    // The rail polls every 30s. `catch { setEvents([]) }` replaced events already
+    // PROVEN present with an empty list, so a transient 502 turned observed
+    // activity into "none recorded" and the next tick turned it back (L-2). The
+    // poll is what makes it a clobber rather than a first-read miss, so the test
+    // drives the real interval.
+    let calls = 0;
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/api\/monitored-events$/.test(url.pathname), () => {
+      calls += 1;
+      if (calls === 1) return evRows;
+      throw new TypeError("Failed to fetch");
+    });
+    vi.useFakeTimers();
+    try {
+      renderPanel({ selectedMachine: PROXY_MACHINE });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
+      expect(screen.queryByText(/refresh did not complete/i)).toBeNull();
+
+      // The next tick throws. The proven row survives, and the failure is said.
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_100); });
+      expect(calls).toBeGreaterThan(1);
+      expect(screen.getByText(/refresh did not complete/i)).toBeInTheDocument();
+      expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
+      expect(screen.queryByText(/Events were not read/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still reports 'none recorded' when the read answered with nothing", async () => {
+    // POSITIVE CONTROL: hedging on every empty rail would erase the one case where
+    // "this contract has no captured events" is the answer.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText("none recorded")).toBeInTheDocument();
+    expect(screen.queryByText(/Events were not read/i)).toBeNull();
+  });
+});
+
+// A contract whose two proxy signals contradict each other: `is_proxy: false` with
+// a `proxy_type`. One real row is exactly this — contract
+// 0x3c55986cfee455e2533f4d29006634ecf9b7c03f, `proxy_type: "beacon"`, with 14
+// `Upgraded(address)` logs at or before block 25619159 (L-1).
+const BEACON_MACHINE = {
+  address: PROXY,
+  name: "BeaconProxy",
+  is_proxy: false,
+  proxy_type: "beacon",
+  job_id: "job1",
+  chain: "ethereum",
+};
+
+describe("ActivityPanel — a contract whose proxyhood contradicts itself", () => {
+  it("asks about the history instead of asserting there is none", async () => {
+    // `Boolean(is_proxy)` short-circuited to "absent" and never issued the read,
+    // so 14 real pre-enrollment upgrades rendered as "No activity before the
+    // line." The endpoint answers 503/not_determined for exactly this shape; the
+    // panel has to get far enough to hear it.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
+    renderPanel({ selectedMachine: BEACON_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText("No activity before the line.")).toBeNull();
+  });
+
+  it("renders the history when the contradictory row turns out to have one", async () => {
+    // The open state is not "treat it as a non-proxy" either: a history that DOES
+    // arrive must render, not be dropped for failing a boolean.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
+    renderPanel({ selectedMachine: BEACON_MACHINE });
+    expect(await screen.findByText("First deployment")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  it("still reads a PROVEN non-proxy as absent", async () => {
+    // NEGATIVE CONTROL: a row with no proxy signal at all is an answer, and
+    // hedging it would put the marker on every Safe and EOA in the protocol.
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    expect(await screen.findByText("Timeline")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+});
+
 describe("ActivityPanel — upgrade history the read could not answer", () => {
   // The timeline draws a proxy with no history as a proxy that has never been
   // upgraded. Whenever /artifact/upgrade_history fails to answer, that render is
@@ -376,6 +478,18 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     // NEGATIVE CONTROL for the test above: suppressing the prose whenever
     // `below` is empty would erase the one case where absence is the answer,
     // and the 500 test alone cannot see that.
+    //
+    // The ledger (L-1) flagged this arm as PINNING A DEFECT, because a 404 used
+    // to mean either "the stage found no proxies" or "the stage raised" and the
+    // SPA read both as proven absence. The ambiguity is now removed at its
+    // source: routers/analyses only 404s when a Contract row says
+    // self-consistently that the target is not a proxy AND the upgrade-history
+    // sub-phase recorded no degraded failure; every other shape returns 503 /
+    // not_determined, which the arms above cover. So the mapping this arm pins is
+    // EARNED, and inverting it would make the SPA hedge the one answer the server
+    // is now entitled to give. Verified in-process against the real corpus: the
+    // beacon row 0x3c55986c… now answers 503 and a self-consistent non-proxy
+    // still answers 404.
     upgradeHistoryFails(status(404, "Artifact not found"));
     renderPanel({ selectedMachine: PROXY_MACHINE });
     expect(await screen.findByText(ABSENCE_PROSE)).toBeInTheDocument();
@@ -395,7 +509,8 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
   });
 
   it("keeps the no-boundary empty state for a 404", async () => {
-    // NEGATIVE CONTROL for the test above.
+    // NEGATIVE CONTROL for the test above. Same L-1 note as the arm above: the
+    // 404 is now earned at the endpoint rather than assumed here.
     const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
     mockActivity({ contracts: [legacy], monitoredEvents: [] });
     setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), status(404, "nope"));

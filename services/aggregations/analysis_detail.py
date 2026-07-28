@@ -26,9 +26,48 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from services.aggregations.action_summary import describe_action
 from services.policy.capability_surface import capability_currency
 
 logger = logging.getLogger(__name__)
+
+
+def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
+    """One ``principal_labels`` row as published, with two assertions narrowed.
+
+    ``confidence`` is NOT published under that name. The column is a
+    NAMING-BRANCH label: ``principal_enrichment._display_name`` returns ``"high"``
+    both for the ``safe_signer`` branch (an on-chain-verified fact) and for the
+    final fallback, where it means only *"``resolved_type`` was not the literal
+    string ``unknown``"*, and both print ``high``. Distribution: ``high`` 1,376 /
+    ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
+    ``resolved_type == "unknown"`` and no such row exists, so the field is
+    two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
+    express "I did not determine this" on a column inv 6 makes first-class.
+    Published as ``naming_rule``, which is what it measures. A real per-principal
+    confidence has to come from whether the identity was verified on-chain (Safe
+    ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
+    needs wiring this consumer does not own, and inventing one from this column
+    would be manufacturing the evidence the rename exists to stop claiming.
+
+    ``label`` is byte-identical to ``display_name`` on 1,556/1,556 rows, so a
+    consumer reading both believed there were two facts. It is published only when
+    the two actually differ.
+    """
+    out: dict[str, Any] = {
+        "address": row.address,
+        "display_name": row.display_name,
+        "resolved_type": row.resolved_type,
+        "labels": list(row.labels or []),
+        # Which naming branch produced ``display_name``. Never an epistemic
+        # confidence, and never omitted — key-absence marks a pre-rename payload.
+        "naming_rule": row.confidence,
+        "details": row.details or {},
+        "graph_context": list(row.graph_context or []),
+    }
+    if row.label is not None and row.label != row.display_name:
+        out["label"] = row.label
+    return out
 
 
 def _artifacts_or_degrade(
@@ -47,6 +86,17 @@ def _artifacts_or_degrade(
     key nothing is stored under). Every artifact this payload carries is
     consumed as evidence about the contract, and the two shortfalls are not the
     same evidence — one may resolve itself, the other never will.
+
+    NO ``site/`` CONSUMER, and this is why (L-3, W3-E item 12). Nothing in the SPA
+    fetches this merged payload at all: ``grep`` over ``site/src`` finds
+    ``/api/analyses`` only as the LISTING (``App.jsx``) plus two per-artifact reads
+    (``EntityActivity`` → ``upgrade_history``, ``layout/dependencies`` →
+    ``dependency_graph_viz``), both of which go through
+    ``routers/analyses``'s artifact endpoint and already receive the same three
+    answers on the wire via ``X-PSAT-Artifact-State``. So wiring a consumer for
+    these two maps means building a page that reads the multi-MB payload, which is
+    a feature and not a consumer-side split. The maps stay published for API
+    consumers; the SPA's equivalent distinction is served by the header.
     """
     try:
         return deps.get_all_artifacts(session, job_id)
@@ -272,19 +322,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
     )
     if pl_rows:
         payload["principal_labels"] = {
-            "principals": [
-                {
-                    "address": p.address,
-                    "display_name": p.display_name,
-                    "label": p.label,
-                    "resolved_type": p.resolved_type,
-                    "labels": list(p.labels or []),
-                    "confidence": p.confidence,
-                    "details": p.details or {},
-                    "graph_context": list(p.graph_context or []),
-                }
-                for p in pl_rows
-            ],
+            "principals": [_principal_label_payload(p) for p in pl_rows],
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
         }
@@ -355,13 +393,24 @@ def _serialize_effective_functions(
                 signature_witnesses.append(principal_dict)
             else:
                 controller_principals.append(principal_dict)
+        _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
+            ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
+        )
         entry: dict[str, Any] = {
             "function": ef.abi_signature or ef.function_name,
             "selector": ef.selector,
             "effect_labels": list(ef.effect_labels or []),
             "effect_targets": list(ef.effect_targets or []),
             "claims": list(getattr(ef, "claims", None) or []),
-            "action_summary": ef.action_summary,
+            # The quotable copy of the structured planes, reconciled against them
+            # (R3) and labelled with which shape it is: 130 local rows say
+            # "Performs a contract action." (no evidence at all), 528 restate
+            # effect_targets as a "write", and the 20 arbitrary-execution rows are
+            # the sentence A3 narrowed in Wave 1. See
+            # services/aggregations/action_summary.
+            "action_summary": _action_summary_text,
+            "action_summary_kind": _action_summary_kind,
+            "action_summary_note": _action_summary_note,
             "authority_public": ef.authority_public,
             # Three-state authority verdict beside the bool it splits. NULL on a
             # row written before the column existed — passed through as null so
@@ -520,9 +569,7 @@ def _inherit_from_impl(
             )
             if impl_pls:
                 payload["principal_labels"] = {
-                    "principals": [
-                        {"address": p.address, "label": p.label, "resolved_type": p.resolved_type} for p in impl_pls
-                    ],
+                    "principals": [_principal_label_payload(p) for p in impl_pls],
                 }
 
         if "contract_name" not in payload and impl_c.contract_name:

@@ -88,6 +88,10 @@
 .ps-activity-badge.role_control { color: #5eead4; }
 .ps-activity-badge.governance { color: #8a80a0; }
 .ps-activity-badge.regular { color: var(--muted); }
+/* Additive: the not-determined arm of contractTypeForMachine. Same colour as
+   .regular (both are the low-signal end of the badge vocabulary) and the same
+   specificity, so no existing rule's cascade changes. */
+.ps-activity-badge.unclassified { color: var(--muted); }
 
 /* ── protocol-wide summary card ── */
 .ps-activity-card {

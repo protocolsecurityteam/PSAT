@@ -248,13 +248,95 @@ describe("scoreForClaims — protocolScore kinds", () => {
   });
 });
 
+// The score path is the one place provenance strength decides something, and it
+// was the one place the tier lattice was discarded: everything except the observed
+// tier fell through untouched, so a cross-contract inference with NO
+// single-contract evidence entered at the weight of an exact ABI-selector match.
+describe("scoreForClaims — the tier lattice reaches the score", () => {
+  it("scores a policy_derived claim below the identical standard_exact claim", () => {
+    const exact = scoreForClaims({ claims: [claim("upgrade.implementation", "standard_exact")] });
+    const policy = scoreForClaims({ claims: [claim("upgrade.implementation", "policy_derived")] });
+    expect(exact.severity).toBe(1);
+    expect(policy.severity).toBeLessThan(exact.severity);
+    // The factor is read off TIER_RANK (1 of 3), not invented at the call site.
+    expect(policy.severity).toBeCloseTo(1 / 3, 10);
+    expect(policy.kind).toBe("upgrade");
+    // Named, so the score's prose can say WHY the number is smaller.
+    expect(policy.provenance_tier).toBe("policy_derived");
+  });
+
+  it("keeps the policy claim IN the candidate set", () => {
+    // Stripping it (the observed tier's treatment) would drop the action from
+    // protocolScore's candidate set entirely and make the protocol read SAFER for
+    // a risk nobody disproved — the adverse direction.
+    const policy = scoreForClaims({ claims: [claim("flow.out", "policy_derived")] });
+    expect(policy).not.toBeNull();
+    expect(policy.severity).toBeGreaterThan(0);
+  });
+
+  it("leaves idiom_structural and standard_exact at full weight", () => {
+    // NEGATIVE CONTROL: the attenuation is scoped to the tier that has no
+    // single-contract evidence. `idiom_structural` is a structural idiom in this
+    // contract's OWN code, and re-weighting it would move 123 real corpus claims.
+    expect(scoreForClaims({ claims: [claim("flow.out", "idiom_structural")] }).severity).toBe(0.78);
+    expect(scoreForClaims({ claims: [claim("flow.out", "standard_exact")] }).severity).toBe(0.78);
+    expect(scoreForClaims({ claims: [claim("flow.out")] }).provenance_tier).toBeUndefined();
+  });
+
+  it("attenuates the W0-7 fixture-10 golden row's own claim shape", () => {
+    // The corpus gate for this defect: `policy_derived` is 0 of 679 real claims, so
+    // no corpus row could catch a consumer that mishandles the weakest tier — W0-7
+    // fixture 10 exists to be that row. This is its claim verbatim from
+    // tests/fixtures/label_corpus/golden.json (contract 0x…0100, depositTo).
+    const golden = {
+      claim_id: "flow.in",
+      tier: "policy_derived",
+      witness: {
+        callee: "0x00000000000000000000000000000000000000a0",
+        kind: "cross_contract_join",
+        selector: "0xb6b55f25",
+        sink_id: "depositTo(uint256):sink0:external_call:vault.deposit",
+        source_tier: "standard_exact",
+      },
+    };
+    const scored = scoreForClaims({ claims: [golden] });
+    const asExact = scoreForClaims({ claims: [{ ...golden, tier: "standard_exact" }] });
+    expect(scored.kind).toBe(asExact.kind);
+    expect(scored.severity).toBeLessThan(asExact.severity);
+    expect(scored.provenance_tier).toBe("policy_derived");
+  });
+
+  it("still takes the strongest severity when a policy claim sits beside a stronger one", () => {
+    const both = scoreForClaims({
+      claims: [claim("upgrade.implementation", "policy_derived"), claim("flow.out", "standard_exact")],
+    });
+    expect(both.kind).toBe("asset_out");
+    expect(both.severity).toBe(0.78);
+  });
+});
+
 describe("claimSummaryLine — chip line + provenance tier", () => {
-  it("joins sentences in priority order and appends the strongest tier", () => {
+  it("names BOTH tiers when the weakest differs from the strongest", () => {
+    // INVERTED (W3-E item 5). This asserted `label` ended at "· standard": the
+    // headline tier hid the policy_derived claim on the same line, and
+    // policy_derived is defined as having no single-contract evidence at all.
+    // Surfacing only the strongest tier is what made the provenance disappear
+    // from every surface reading this line.
     const fn = { claims: [claim("flow.out", "policy_derived"), claim("ownership.transfer", "standard_exact")] };
     const line = claimSummaryLine(fn);
     expect(line.text).toBe("changes owner · moves value out");
     expect(line.tier).toBe("standard_exact");
-    expect(line.label).toBe("changes owner · moves value out · standard");
+    expect(line.weakestTier).toBe("policy_derived");
+    expect(line.label).toBe("changes owner · moves value out · standard + policy");
+  });
+
+  it("names one tier when every claim shares it", () => {
+    // NEGATIVE CONTROL: the double label is not unconditional decoration.
+    const fn = { claims: [claim("flow.out"), claim("ownership.transfer")] };
+    const line = claimSummaryLine(fn);
+    expect(line.tier).toBe("standard_exact");
+    expect(line.weakestTier).toBe("standard_exact");
+    expect(line.label.endsWith("· standard")).toBe(true);
   });
 
   it("deduplicates repeated phrases from distinct claim ids", () => {
@@ -271,7 +353,10 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
     };
     const line = claimSummaryLine(fn);
     expect(line.tier).toBe("behavioral_observed");
-    expect(line.label.endsWith("· observed")).toBe(true);
+    // The weakest tier on the line is named too — the observed claim outranks the
+    // static one, and hiding the static one is the same collapse.
+    expect(line.weakestTier).toBe("standard_exact");
+    expect(line.label.endsWith("· observed + standard")).toBe(true);
   });
 
   it("renders the bridge-only authority.grant claim", () => {
@@ -1111,6 +1196,59 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
       label: "Reach",
       value: "not determined (no downstream holder observed)",
     });
+  });
+
+  it("renders a MEASURED $0 reach as a measured zero, not as silence", () => {
+    // L-47. `formatUsdUpperBound(0)` is falsy, so a reach D3 measured at exactly $0
+    // — every asset that moved had a priced holding and the total came out at
+    // nothing — emitted no Reach row at all, which is what a never-attempted reach
+    // emits. The backend payload is already pinned correct by
+    // test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_determined: true, observed_reach_value_usd: 0 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "$0 — measured, no priced value reachable",
+    });
+  });
+
+  it("keeps a measured non-zero reach as the upper-bound row", () => {
+    // POSITIVE CONTROL: the measured branch must not have changed the wording of
+    // every real figure.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_determined: true, observed_reach_value_usd: 55_200_000 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
+  });
+
+  it("stays silent on a PRE-D3 payload whose reach figure is zero", () => {
+    // NEGATIVE CONTROL. Without `reach_determined` a 0 may be the acting
+    // deployment's own (zero) balance published as the reach — the exact
+    // "$0 reach for a function that may move millions" sentence D3 removed — so
+    // this renderer must not assert a measurement it cannot see.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: { effect_verdict_id: 1, observed: { observed_reach_value_usd: 0 } },
+      }],
+    };
+    expect(claimWitnessFacts(fn).some((f) => String(f.label).startsWith("Reach"))).toBe(false);
   });
 
   it("emits no rows when no witness facts are present (silence, not defaults)", () => {

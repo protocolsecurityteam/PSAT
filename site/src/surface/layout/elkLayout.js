@@ -851,19 +851,32 @@ const PRINCIPAL_H = 60;
 // commands" signals, so they win over `role` when both fire.
 function bandFor(m) {
   if (!m) return 2;
-  if (m.has_timelock) return 0;
+  // `=== true`, not truthiness: `has_timelock` is three-state on the payload
+  // (bool | null) and `null` means no summary row answered. Truthiness already
+  // skipped a null, but it skipped it by treating it as the proven `false`; the
+  // strict test says which state is being tested for, and the fall-through below
+  // is where not-determined stops sharing an outcome with proven-false.
+  if (m.has_timelock === true) return 0;
   if (m.control_model === "governance") return 0;
   if (m.role === "governance") return 0;
-  // Name override: the backend role classifier and the has_timelock
-  // flag both fail to surface contracts that ARE themselves a control
-  // surface (TimelockController, BoringGovernance, etc.) when those
-  // contracts also have asset-move side effects — they end up tagged
-  // value_handler and lose to the band-1 catchall. Pattern-match the
-  // name so they float to the top. Has-timelock is a property
-  // assigned to contracts *controlled by* a timelock, not the timelock
-  // itself, which is why we need the explicit name check.
+  // Name override: the backend role classifier does not surface every contract
+  // that IS itself a control surface (TimelockController, BoringGovernance,
+  // etc.) — when such a contract also has asset-move side effects it ends up
+  // tagged value_handler and loses to the band-1 catchall. Pattern-match the
+  // name so they float to the top. The check is also the only signal left when
+  // `has_timelock` is null, which is why it is not redundant with the test
+  // above: since summaries.py made the flag mean "THIS CONTRACT IS A TIMELOCK",
+  // a proven timelock returns 0 at the first test and this one only ever adds
+  // rows the flag did not prove.
   const nameLower = (m.name || "").toLowerCase();
   if (/timelock|governance|guardian/.test(nameLower)) return 0;
+  // Band 2 is a positive claim — "interfaces & plumbing": holds no authority and
+  // holds no value. A `role` the backend derived with no summary evidence at all
+  // (`role_evidence === "not_determined"`, the `utility` fall-through reached
+  // through nothing but nulls) is not evidence for it, so it takes the neutral
+  // band-1 catchall instead. Only a role earned from a positive fact places a
+  // node in the plumbing band.
+  if (m.role_evidence === "not_determined") return 1;
   if (m.role === "token" || m.role === "factory" || m.role === "utility") return 2;
   return 1;
 }

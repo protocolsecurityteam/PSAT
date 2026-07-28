@@ -47,6 +47,7 @@ from db.models import (
     FunctionPrincipal,
     Job,
     JobStatus,
+    PrincipalLabel,
     Protocol,
     TvlSnapshot,
     UpgradeEvent,
@@ -55,6 +56,7 @@ from db.models import (
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
+from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, token_balances_may_be_truncated
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -423,6 +425,7 @@ def _prefetch_child_tables(
         "balances": {},
         "cgn": {},
         "cge": {},
+        "terminal_walk": {},
     }
     if not contract_ids:
         return out
@@ -761,6 +764,51 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
+    def _terminal_walk(s: Session) -> tuple[dict[str, dict[str, Any]], int]:
+        """``{lower(address): terminal_principal record}`` from ``principal_labels``.
+
+        The terminal-controller walk (``services/governance/principals.resolve_terminal_principal``)
+        is persisted ONLY on ``principal_labels.details`` — 1,556 rows written, and
+        the one consumer that handles all six of its statuses correctly,
+        ``claimsVocab.terminalControllerNote``, could never receive it because
+        ``_build_principal_lookup`` never joined the table. A permanently
+        disconnected plane, not a rare shape.
+
+        Keyed by address, not by ``(contract_id, address)``: the walk answers "what
+        ultimately controls THIS address", and the local corpus has 0 addresses
+        whose record differs between the subject contracts that recorded it (22
+        distinct addresses across 180 rows). A narrow projection with the jsonb
+        ``has_key`` filter in the WHERE clause, so contracts with no walk cost
+        nothing.
+
+        CHAIN SCOPE, stated rather than claimed: the read is scoped by
+        ``contract_id`` (chain-scoped through ``contracts.chain``) but the returned
+        MAP is keyed by a bare lowercase address, which is the pre-existing shape of
+        the whole ``principal_lookup`` plane — ``principal_labels`` /
+        ``control_graph_nodes`` / ``controller_values`` carry no chain column at all
+        (handoff §3), and ``_build_principal_lookup`` already merges every source
+        into one bare-address dict. So a protocol spanning two chains could in
+        principle have one chain's walk annotate the other's node. Not realised: the
+        control/policy plane is 100% ethereum, and 0 addresses carry differing
+        records. Closing it means giving that plane a chain key, which is a
+        producer-side schema change, not a consumer split.
+        """
+        local: dict[str, dict[str, Any]] = {}
+        rows = 0
+        for address, details in s.execute(
+            select(PrincipalLabel.address, PrincipalLabel.details).where(
+                PrincipalLabel.contract_id.in_(id_list),
+                jsonb_has_payload(PrincipalLabel.details),
+                PrincipalLabel.details.has_key("terminal_principal"),
+            )
+        ).all():
+            record = (details or {}).get("terminal_principal")
+            if not isinstance(record, dict) or not address:
+                continue
+            local.setdefault(address.lower(), record)
+            rows += 1
+        return local, rows
+
     def _cge(s: Session) -> tuple[dict[int, list[ControlGraphEdge]], int]:
         # Drop an edge iff there exists a CGN row at its target address in
         # the same contract that the keep-clause would not retain — i.e., a
@@ -797,6 +845,7 @@ def _prefetch_child_tables(
         ("fp_function_detail", "fp_function_detail", _fp_function_detail),
         ("upgrade_events_count", "upgrade_events_count", _upgrade_count),
         ("upgrade_events_last", "upgrade_events_last", _upgrade_last),
+        ("terminal_walk", "terminal_walk", _terminal_walk),
     ]
 
     engine = session.get_bind()
@@ -970,6 +1019,7 @@ def _build_principal_lookup(
     contracts_by_job_id: dict[Any, Contract],
     controller_values_by_cid: dict[int, list[ControllerValue]],
     cgn_by_cid: dict[int, list[ControlGraphNode]],
+    terminal_walk_by_address: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     lookup: dict[str, dict[str, Any]] = {}
     seen_contract_ids: set[int] = set()
@@ -979,7 +1029,12 @@ def _build_principal_lookup(
             continue
         seen_contract_ids.add(contract.id)
         summary = contract.summary
-        contract_type = "timelock" if summary and summary.has_timelock else "contract"
+        # ``is True``: the column is three-state, and only a proven timelock earns
+        # the strong ``timelock`` type (priority 3, a settled key for
+        # ``terminalControllerNote``). A NULL or a missing row falls to
+        # ``contract`` — the WEAK, non-terminal way-point type — so the
+        # not-determined case cannot be promoted into a settled controller.
+        contract_type = "timelock" if summary is not None and summary.has_timelock is True else "contract"
         _record_principal_lookup(
             lookup,
             address=contract.address,
@@ -1007,6 +1062,42 @@ def _build_principal_lookup(
                 label=node.contract_name or node.label,
                 details=node.details,
             )
+
+    # The terminal-controller walk, forwarded from ``principal_labels`` — the only
+    # place it is persisted. Its one correct consumer,
+    # ``claimsVocab.terminalControllerNote`` (rendered by ``InspectorCard``),
+    # handles all six statuses and could never receive the data.
+    #
+    # Deliberately narrow, and it is the narrowness that keeps this attributable:
+    #
+    # * ONLY ``terminal_principal`` is forwarded. ``principal_labels.details`` also
+    #   carries ``terminal``, ``signer_overlap`` and ``shared_deployer``, and
+    #   forwarding ``terminal`` would let one plane's typing publish a SETTLED key
+    #   (``terminalControllerNote`` returns null on ``terminal === true``) beside a
+    #   ``resolved_type`` from another plane that still says ``contract`` — an
+    #   inconsistent record, and in the reassuring direction. The other two are
+    #   attribution facts with their own hedged copy and their own review.
+    # * only addresses the lookup ALREADY carries are annotated. Admitting new
+    #   addresses would widen the published principal set, which is a different
+    #   change from connecting the renderer.
+    # * ``setdefault``, so a record already merged in from a CGN/CV ``details``
+    #   payload wins — this pass adds the fact where it is missing, never
+    #   overwrites one that arrived with the row.
+    #
+    # Post-fix status distribution is UNMEASURED: all 180 persisted records carry
+    # ``unknown_unfetched`` (the only status the producer has ever written), for
+    # which the note reads identically to the ``resolved_type == "contract"``
+    # fall-through already in place, so the realised render delta today is ZERO.
+    # The other five statuses — ``terminated`` (an ultimate key), ``multi_plane``,
+    # ``ambiguous_controllers``, ``cycle``, ``depth_exceeded`` — need a policy run
+    # to appear, which is outside this session's cost boundary.
+    for address, record in (terminal_walk_by_address or {}).items():
+        entry = lookup.get(address)
+        if entry is None:
+            continue
+        details = dict(entry.get("details") or {})
+        details.setdefault("terminal_principal", record)
+        entry["details"] = details
 
     return lookup
 
@@ -1133,6 +1224,9 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
+    # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
+    # fact about the address, not about the subject contract that recorded it.
+    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
 
     # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
     # contract_id buckets. The flow/principal passes key on the primary impl
@@ -1174,7 +1268,9 @@ def build_governance_view(
             if extra_all:
                 fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
 
-    principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
+    principal_lookup = _build_principal_lookup(
+        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
+    )
 
     contracts: list[dict[str, Any]] = []
     owner_groups: dict[str, list[dict]] = {}
@@ -1249,7 +1345,13 @@ def build_governance_view(
         # a pause_toggle EffectiveFunction surfacing).
         if is_proxy:
             caps_set.add("upgradeable")
-        if summary_row and summary_row.is_pausable:
+        # ``is True``, not truthiness: the column is three-state and a ``None``
+        # means the pause detector did not answer (or there is no summary row at
+        # all). A capability chip is a positive claim — "this contract can be
+        # paused" — so only a proven ``True`` earns one. Absence of the chip is
+        # NOT published as proof of the opposite; the three-state flag below is
+        # where a consumer reads that.
+        if summary_row is not None and summary_row.is_pausable is True:
             caps_set.add("pause")
         capabilities: list[str] = sorted(caps_set)
 
@@ -1262,9 +1364,19 @@ def build_governance_view(
         if not contract_name:
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
-        is_factory = summary_row.is_factory if summary_row else False
-        has_timelock = summary_row.has_timelock if summary_row else False
-        is_pausable = summary_row.is_pausable if summary_row else False
+        # Three states through the payload. ``False`` used to be published for a
+        # contract that HAS NO SUMMARY ROW — 62 of 147 entries on the local
+        # corpus — so "this contract cannot be paused / has no timelock / is not
+        # a factory" was asserted on the strength of never having looked. The
+        # producer's own columns are three-state (``bool | None``), and a row
+        # whose column is NULL means the detector ran and could not tell; both
+        # routes to "nobody answered" publish ``None`` here, and
+        # ``summary_evidence`` below names WHICH route it was — the two are
+        # different questions for whoever wants to fix it (re-run the stage vs
+        # improve the detector), and the same answer for anyone reading the flag.
+        is_factory = summary_row.is_factory if summary_row else None
+        has_timelock = summary_row.has_timelock if summary_row else None
+        is_pausable = summary_row.is_pausable if summary_row else None
         control_model = summary_row.control_model if summary_row else None
 
         name_lower = contract_name.lower()
@@ -1274,19 +1386,36 @@ def build_governance_view(
             role = "value_handler"
         elif any(s in standards for s in ("ERC20", "ERC721", "ERC1155")):
             role = "token"
-        elif has_timelock or control_model == "governance":
+        elif has_timelock is True or control_model == "governance":
             role = "governance"
-        elif is_factory:
+        elif is_factory is True:
             role = "factory"
         else:
             role = "utility"
 
+        # ``role`` has no not-determined member and every consumer needs one:
+        # each branch above except the last fires on a POSITIVE fact (a name, an
+        # observed value effect, a declared standard, a proven timelock/factory),
+        # so only the ``utility`` fall-through can be reached by a chain of
+        # not-determined inputs. Published as its own key rather than folded into
+        # ``role`` so the existing role vocabulary — read by the canvas, the
+        # layout bands and ``protocolScore`` — keeps its meaning, and a consumer
+        # that cares can refuse to treat this row's ``utility`` as evidence.
+        role_evidence = (
+            "witnessed"
+            if role != "utility" or (summary_row is not None and has_timelock is not None and is_factory is not None)
+            else "not_determined"
+        )
+
         balance_contract = lookup_contract or contract_row
         balances_list = []
         total_usd = 0.0
+        unvalued_rows = 0
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
                 usd = float(b.usd_value) if b.usd_value is not None else None
+                if usd is None:
+                    unvalued_rows += 1
                 balances_list.append(
                     {
                         "token_symbol": b.token_symbol,
@@ -1295,11 +1424,47 @@ def build_governance_view(
                         "raw_balance": b.raw_balance,
                         "decimals": b.decimals,
                         "usd_value": usd,
+                        # ``usd_value: null`` and ``usd_value: 0`` are one
+                        # truthiness test apart in JS and mean opposite things —
+                        # "we do not know what this holding is worth" (1,001 of
+                        # 1,376 local rows) versus "priced, and worth less than
+                        # half a cent" (100 rows). The state is published rather
+                        # than left to be inferred from the value's shape.
+                        #
+                        # ``not_determined`` deliberately does not name a CAUSE:
+                        # ``utils/etherscan`` distinguishes "no price returned"
+                        # from "no token divisor returned" (which would make any
+                        # USD figure wrong by 10^n), but neither writer persists
+                        # ``decimals_reported``, so the DB cannot tell them apart
+                        # and this payload must not pretend otherwise (L-45).
+                        "usd_value_state": "measured" if usd is not None else "not_determined",
+                        # Kept for continuity, and NOT a money fact: the producer
+                        # writes 0 for "no price known" on 1,007 local rows, so a
+                        # consumer reading this column directly reads them as
+                        # worthless. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                     }
                 )
                 if usd:
                     total_usd += usd
+        # Whether this contract's holdings list is the whole set. There is no
+        # ``complete`` member ON PURPOSE: the Etherscan holdings fetch returns ONE
+        # page capped at ``TOKEN_BALANCE_PAGE_SIZE`` and neither writer persists
+        # the raw page length, so nothing here can prove a short list was not a
+        # truncated one (the loop that stores rows drops zero-balance entries, so
+        # a full page can store fewer than the cap). At-the-cap is therefore the
+        # only positive statement available — ``token_balances_may_be_truncated``'s
+        # own one-directional contract — and the other arm is not-determined,
+        # never "whole".
+        holdings_coverage = {
+            "rows": len(balances_list),
+            "page_cap": TOKEN_BALANCE_PAGE_SIZE,
+            "state": ("may_be_incomplete" if token_balances_may_be_truncated(len(balances_list)) else "not_determined"),
+            # Rows inside the stored set whose USD value was never determined.
+            # ``total_usd`` skips them, so any non-zero total is a lower bound
+            # whenever this is non-zero — independently of truncation.
+            "unvalued_rows": unvalued_rows,
+        }
 
         entry: dict[str, Any] = {
             # Canonical lowercase: node ids and selection keys downstream
@@ -1328,13 +1493,22 @@ def build_governance_view(
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
             "role": role,
+            "role_evidence": role_evidence,
             "standards": standards,
             "value_effects": value_effects,
             "is_pausable": is_pausable,
             "has_timelock": has_timelock,
+            "is_factory": is_factory,
+            # Which route a ``None`` on the three flags above took: ``absent``
+            # means no ContractSummary row exists for this entry (nor for its
+            # implementation), ``present`` means the row exists and the column
+            # itself is NULL. Never omitted, so key-absence marks a pre-fix
+            # payload rather than either state.
+            "summary_evidence": "present" if summary_row is not None else "absent",
             "capabilities": capabilities,
             "balances": balances_list,
             "total_usd": round(total_usd, 2) if total_usd > 0 else None,
+            "holdings_coverage": holdings_coverage,
         }
 
         graph_contract = lookup_contract or contract_row
@@ -2044,6 +2218,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     controller_values_by_cid: dict[int, list[ControllerValue]] = {}
     cgn_by_cid: dict[int, list[ControlGraphNode]] = {}
+    terminal_walk_by_address: dict[str, dict[str, Any]] = {}
     if relevant_contract_ids:
         id_list = list(relevant_contract_ids)
         with _time_phase(timings_ms, "principal_lookup_inputs"):
@@ -2055,7 +2230,23 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 select(ControlGraphNode).where(ControlGraphNode.contract_id.in_(id_list))
             ).scalars():
                 cgn_by_cid.setdefault(n.contract_id, []).append(n)
-    principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
+            # Same terminal-walk forwarding as the main path: the per-function
+            # principal payload built below is what ``InspectorCard`` renders
+            # ``terminalControllerNote`` from, so wiring only ``build_governance_view``
+            # would connect the plane on one endpoint and leave it dark on the other.
+            for address, details in session.execute(
+                select(PrincipalLabel.address, PrincipalLabel.details).where(
+                    PrincipalLabel.contract_id.in_(id_list),
+                    jsonb_has_payload(PrincipalLabel.details),
+                    PrincipalLabel.details.has_key("terminal_principal"),
+                )
+            ).all():
+                record = (details or {}).get("terminal_principal")
+                if isinstance(record, dict) and address:
+                    terminal_walk_by_address.setdefault(address.lower(), record)
+    principal_lookup = _build_principal_lookup(
+        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
+    )
 
     out: dict[str, list[dict[str, Any]]] = {}
     with _time_phase(timings_ms, "serialize"):

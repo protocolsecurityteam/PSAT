@@ -561,9 +561,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "get_role_holders",
             "description": (
-                "Map every protocol role to its typed holders with thresholds, delays, and function counts. "
-                "For governance-risk questions, call with no role_name first; pass role_name only to expand "
-                "one role from the summary."
+                "Map every WITNESSED protocol role to its typed holders with thresholds, delays, and "
+                "function counts. For governance-risk questions, call with no role_name first; pass "
+                "role_name only to expand one role from the summary. Read 'role_evidence' before "
+                "concluding anything from an empty or short 'roles' list: it counts the functions whose "
+                "role structure was NOT determined separately from those proven to carry no role gate. "
+                "'holders_state' is 'not_determined' when a role gates a function but its members were "
+                "not recorded — that is not 'nobody holds it'. 'authorized_callers' are callers with no "
+                "role attribution, never role holders."
             ),
             "parameters": {
                 "type": "object",
@@ -571,8 +576,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "role_name": {
                         "type": "string",
                         "description": (
-                            "Specific role to expand, e.g. 'PROTOCOL_PAUSER'. Usually omit; the no-arg "
-                            "summary already inlines holders."
+                            "Specific role to expand — a name like 'PROTOCOL_PAUSER' or a numeric role id "
+                            "like '2'/'role 2'. Usually omit; the no-arg summary already inlines holders. "
+                            "state='not_witnessed' means no grant in this protocol names that role, which "
+                            "is not the same as the role having no holders."
                         ),
                     },
                 },

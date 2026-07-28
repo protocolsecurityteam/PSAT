@@ -242,16 +242,24 @@ def seeded_protocol(db_session: Session):
         function_name="pauseContract",
         selector="0xabcd0001",
         authority_public=False,
-        authority_roles=[{"role": "PROTOCOL_PAUSER"}],
+        # The shape the producer actually emits: the grant names the role AND its
+        # members. (This fixture used to name the role with no members and carry
+        # the role name in ``FunctionPrincipal.origin`` instead — a shape
+        # ``capability_surface`` cannot produce: ``origin`` is the single constant
+        # ``semantic_capability:finite_set`` on 1132/1132 real rows.)
+        authority_roles=[{"role": "PROTOCOL_PAUSER", "principals": [{"address": EOA_ADDR}, {"address": SAFE_ADDR}]}],
     )
     db_session.add(ef)
     db_session.flush()
+    # Real ``origin`` / ``principal_type`` values: resolver-source constants. These
+    # rows are authorized CALLERS with no role attribution.
     db_session.add(
         FunctionPrincipal(
             function_id=ef.id,
             address=EOA_ADDR,
             resolved_type="eoa",
-            origin="PROTOCOL_PAUSER",
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
         )
     )
     db_session.add(
@@ -259,9 +267,20 @@ def seeded_protocol(db_session: Session):
             function_id=ef.id,
             address=SAFE_ADDR,
             resolved_type="safe",
-            origin="PROTOCOL_PAUSER",
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
         )
     )
+    # A second gated function whose grant names a role but NO members: the role
+    # gates it, who holds it was not determined.
+    ef_unknown = EffectiveFunction(
+        contract_id=plain.id,
+        function_name="sweep",
+        selector="0xabcd0002",
+        authority_public=False,
+        authority_roles=[{"role": 7}],
+    )
+    db_session.add(ef_unknown)
     db_session.commit()
     yield proto
 
@@ -801,3 +820,174 @@ def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, see
     assert "unreadable_source_files" not in res
     assert "source_completeness" not in res
     assert res["source_origin"] == "indexed"
+
+
+def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_protocol):  # noqa: PLR0915
+    """``control_graph_nodes`` has no chain column, so the chain predicate has to
+    ride the ``contract_id`` join (W3-E item 4 / G7 §2.7).
+
+    Three real cross-chain twins already exist in ``contracts``; the aliasing is
+    unrealised only because no analysis job has ever run on a second chain.
+    """
+    from sqlalchemy import select
+
+    twin = _addr("77")
+    other_job = Job(status=JobStatus.completed, stage=JobStage.done, address=twin, protocol_id=None)
+    db_session.add(other_job)
+    db_session.flush()
+    scroll_subject = Contract(
+        job_id=other_job.id,
+        address=_addr("78"),
+        chain="scroll",
+        contract_name="ScrollSubject",
+    )
+    db_session.add(scroll_subject)
+    db_session.flush()
+    # The SAME address typed differently on the two chains — the aliasing shape.
+    db_session.add(
+        ControlGraphNode(
+            contract_id=scroll_subject.id,
+            address=twin,
+            resolved_type="eoa",
+            label="scroll twin",
+            details={},
+        )
+    )
+    eth_subject = session_contract = db_session.execute(
+        select(Contract).where(Contract.address == PROXY_ADDR)
+    ).scalar_one()
+    db_session.add(
+        ControlGraphNode(
+            contract_id=eth_subject.id,
+            address=twin,
+            resolved_type="safe",
+            label="ethereum twin",
+            details={"threshold": 2, "owners": [EOA_ADDR, SAFE_ADDR]},
+        )
+    )
+    db_session.commit()
+    assert session_contract.chain == "ethereum"
+
+    assert chat_data.classify_address(db_session, twin, "scroll")["kind"] == "eoa"
+    assert chat_data.classify_address(db_session, twin, "ethereum")["kind"] == "safe"
+    # POSITIVE CONTROL for the alias fold: a row stored under one spelling must be
+    # reachable by the other, or the predicate turns a hint into a false miss.
+    assert chat_data.classify_address(db_session, twin, "mainnet")["kind"] == "safe"
+    # No chain supplied → address-only, deterministic, and never invented as
+    # mainnet: the answer is one of the two, the same one every call.
+    unscoped = {chat_data.classify_address(db_session, twin)["kind"] for _ in range(5)}
+    assert len(unscoped) == 1
+
+
+def test_classify_address_prefers_a_classified_row_deterministically(db_session, seeded_protocol):
+    """An unordered ``LIMIT 1`` is a query-plan coin flip: 2 local addresses
+    disagree between ``contract`` (a non-terminal way-point) and ``timelock`` (a
+    settled key with a delay) across their control-graph rows."""
+    from sqlalchemy import select
+
+    addr = _addr("79")
+    subject = db_session.execute(select(Contract).where(Contract.address == PROXY_ADDR)).scalar_one()
+    db_session.add(
+        ControlGraphNode(contract_id=subject.id, address=addr, resolved_type=None, label="unclassified", details={})
+    )
+    db_session.flush()
+    db_session.add(
+        ControlGraphNode(
+            contract_id=subject.id,
+            address=addr,
+            resolved_type="timelock",
+            label="the resolved one",
+            details={"delay": 172_800},
+        )
+    )
+    db_session.commit()
+
+    for _ in range(5):
+        got = chat_data.classify_address(db_session, addr, "ethereum")
+        assert got["kind"] == "timelock"
+        assert got["delay_seconds"] == 172_800
+
+
+def test_last_upgrade_reports_the_newest_not_the_newest_with_a_block(db_session, seeded_protocol):
+    """L-20: under ``block_number DESC NULLS LAST`` a poll-detected upgrade (block
+    NULL by design) sorted LAST and was reported as the OLDEST, so
+    ``last_upgrade`` named a stale block-carrying event."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    proxy = db_session.execute(select(Contract).where(Contract.address == PROXY_ADDR)).scalar_one()
+    newest_impl = _addr("7a")
+    db_session.add(
+        UpgradeEvent(
+            contract_id=proxy.id,
+            proxy_address=PROXY_ADDR,
+            block_number=None,
+            timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            new_impl=newest_impl,
+            tx_hash=None,
+        )
+    )
+    db_session.commit()
+
+    brief = chat_data.contract_brief(db_session, PROXY_ADDR, "ethereum")
+    assert brief["last_upgrade"]["new_impl"] == newest_impl
+    # An LLM reads this result: "block": null must not be left to interpretation.
+    assert brief["last_upgrade"]["detection"] == "poll_detected"
+    assert brief["last_upgrade"]["block"] is None
+
+
+def test_role_holders_reads_roles_from_grants_not_from_origin(db_session, seeded_protocol):
+    """``function_principals.origin`` is a resolver-source constant, not a role
+    name (W3-E item 3).
+
+    Measured before the fix on the real local corpus: ``role_holders`` published
+    exactly ONE "role", named ``semantic_capability:finite_set`` after the
+    resolver, with 136 "holders", and every real role name returned
+    ``{"holders": []}`` — an empty answer that reads as "nobody holds this role".
+    After: 8 real roles, 170 functions with witnessed grants, 315 whose role
+    structure was not determined.
+    """
+    summary = chat_data.role_holders(db_session, company=PROTO_NAME)
+
+    # The resolver source must never appear as a role.
+    assert all(str(r["role"]) != "semantic_capability:finite_set" for r in summary["roles"])
+    # ...and the addresses it really describes are still published, labelled.
+    caller_addrs = {c["address"].lower() for c in summary["authorized_callers"]["callers"]}
+    assert {EOA_ADDR.lower(), SAFE_ADDR.lower()} <= caller_addrs
+    assert "NOT role holders" in summary["authorized_callers"]["note"]
+
+    # POSITIVE CONTROL: a grant that names its members is witnessed, classified.
+    pauser = next(r for r in summary["roles"] if str(r["role"]) == "PROTOCOL_PAUSER")
+    assert pauser["holder_count"] == 2
+    assert {h["kind"] for h in pauser["holders"]} == {"eoa", "safe"}
+    assert pauser["holders_state"] == "witnessed"
+
+    # A grant naming a role with NO members is the third state: the role gates the
+    # function, who holds it was not determined. Not an empty holder set.
+    role7 = next(r for r in summary["roles"] if str(r["role"]) == "7")
+    assert role7["holder_count"] == 0
+    assert role7["holders_state"] == "not_determined"
+
+    evidence = summary["role_evidence"]
+    assert evidence["functions_with_witnessed_roles"] == 1
+    assert evidence["functions_with_a_role_whose_holders_are_not_determined"] == 1
+    assert evidence["functions_examined"] >= 2
+
+
+def test_role_holders_named_lookup_distinguishes_absent_from_empty(db_session, seeded_protocol):
+    """An empty holder list is the answer to two different questions and the LLM
+    reading this result cannot be expected to guess which."""
+    witnessed = chat_data.role_holders(db_session, company=PROTO_NAME, role_name="PROTOCOL_PAUSER")
+    assert witnessed["state"] == "witnessed"
+    assert {h["kind"] for h in witnessed["holders"]} == {"eoa", "safe"}
+
+    # Same bucket via the numeric/"role N" spellings an LLM is likely to produce.
+    assert chat_data.role_holders(db_session, company=PROTO_NAME, role_name="7")["state"] == "not_determined"
+    assert chat_data.role_holders(db_session, company=PROTO_NAME, role_name="role 7")["state"] == "not_determined"
+
+    # No grant names this role anywhere: NOT "the role has no holders".
+    missing = chat_data.role_holders(db_session, company=PROTO_NAME, role_name="NO_SUCH_ROLE")
+    assert missing["state"] == "not_witnessed"
+    assert missing["holders"] == []
+    assert missing["role_evidence"]["functions_examined"] >= 2

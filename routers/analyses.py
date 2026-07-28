@@ -37,6 +37,81 @@ def _is_internal_artifact_name(name: str) -> bool:
     return n in _INTERNAL_ARTIFACT_NAMES or n.startswith("stage_timing_") or n.endswith("error") or n.endswith("plan")
 
 
+# The sub-phase ``workers/static_worker`` records when the upgrade-history build
+# raised and was swallowed (both the parallel and the finalize call sites).
+_UPGRADE_HISTORY_PHASE = "dependency_upgrade_history"
+
+
+def _upgrade_history_stage_raised(session: Any, job: Job) -> str | None:
+    """Whether this job's upgrade-history sub-phase recorded a degraded failure.
+
+    Returns a reason string when the answer is "yes, or we could not find out",
+    and ``None`` only when the ``stage_errors`` record was read and carries no
+    such entry. A job with no ``stage_errors`` artifact recorded no degraded
+    errors at all, which IS an answer; a body the bucket could not produce is not.
+
+    Realised on the local corpus: **0** jobs carry this phase — the honest
+    lower-bound statement, not a firing proof. The mechanism is demonstrably live
+    on the same 123 ``stage_errors`` artifacts through sibling phases
+    (``controller_read`` 1,401 entries, ``dependency_dynamic`` 12), so what is
+    unrealised is this phase's failure, not the read.
+    """
+    try:
+        body = deps.get_artifact(session, job.id, "stage_errors")
+    except (StorageKeyMissing, StorageContentAbsent):
+        # The bucket was asked and says it holds no such object: no degraded
+        # record exists for this job.
+        return None
+    except Exception as exc:  # storage down, undeserializable, key never recorded
+        return f"stage_errors unreadable ({type(exc).__name__}): cannot rule out a failed upgrade-history stage"
+    if not isinstance(body, dict):
+        return None
+    for error in body.get("errors") or []:
+        if isinstance(error, dict) and error.get("phase") == _UPGRADE_HISTORY_PHASE:
+            return (
+                "the upgrade-history stage recorded a degraded failure "
+                f"({error.get('exc_type') or 'unknown error'}); absence of the artifact is not a proven negative"
+            )
+    return None
+
+
+def _upgrade_history_absence_reason(session: Any, job: Job, contract: Contract | None) -> str | None:
+    """Why a missing ``upgrade_history`` is NOT determined, or ``None`` if absence
+    is proven.
+
+    Absence is proven for exactly one shape: a Contract row that says
+    self-consistently that the target is not a proxy, with the upgrade-history
+    stage recording no failure. A non-proxy has no upgrade history by
+    construction, so there is nothing the missing artifact could be hiding.
+
+    Everything else keeps the question open:
+
+    * **no Contract row** — nothing here knows whether the target is a proxy.
+    * **``is_proxy`` true** — the artifact SHOULD have existed and does not.
+    * **``is_proxy`` false while ``proxy_type`` or ``implementation`` is set** —
+      the row contradicts itself, so its proxyhood is not evidence either way.
+      This is the L-1 falsification: ``0x3c55986c…`` is ``is_proxy=False`` with
+      ``proxy_type='beacon'`` and has 14 ``Upgraded(address)`` logs at or before
+      block 25619159 that the absence prose denied. 1 realised row locally.
+
+    What it cannot see, stated rather than implied: a real proxy the classifier
+    missed entirely (``is_proxy`` false, ``proxy_type`` and ``implementation``
+    both NULL) reads as a proven non-proxy here. Splitting that needs a
+    proxy-detection verdict the ``contracts`` row does not carry.
+    """
+    if contract is None:
+        return "no contract row for this job: whether the target is a proxy was never recorded"
+    proxy_signals = [name for name in ("proxy_type", "implementation") if getattr(contract, name, None)]
+    if contract.is_proxy:
+        return "the contract is a proxy and no upgrade-history artifact was stored for it"
+    if proxy_signals:
+        return (
+            f"the contract row is inconsistent about proxyhood (is_proxy is false but {', '.join(proxy_signals)} "
+            "is set), so its non-proxy status cannot carry the absence"
+        )
+    return _upgrade_history_stage_raised(session, job)
+
+
 @router.get("/api/analyses")
 def analyses(response: Response) -> list[dict]:
     """List completed analyses with their available artifacts."""
@@ -267,6 +342,16 @@ def analysis_artifact(
             contract = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
             if contract is not None:
                 artifact = synthesize_from_events(session, contract)
+            if artifact is None and not_determined is None:
+                # L-1. The writer stores no upgrade_history row in two
+                # indistinguishable cases — the stage found no proxies, and the
+                # stage RAISED (``uh_pre = None``, logged via
+                # ``record_degraded(phase="dependency_upgrade_history")``) — and a
+                # 404 here is consumed by the SPA as proven absence ("No activity
+                # before the line."). Falsified on real data: the beacon proxy at
+                # ``0x3c55986c…`` has 0 rows, 0 UpgradeEvents, and 14
+                # ``Upgraded(address)`` logs at or before block 25619159.
+                not_determined = _upgrade_history_absence_reason(session, job, contract)
 
         if artifact is None and not_determined is not None:
             # 503, not 404: whether this job produced the artifact is unknown.

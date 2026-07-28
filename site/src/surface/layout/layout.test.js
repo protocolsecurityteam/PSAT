@@ -547,3 +547,56 @@ describe("buildControlGraphIndex — callee edges are not control", () => {
     expect(reached).not.toContain(CALLEE_OWNER);
   });
 });
+
+// Band assignment is a claim about a contract, not just a coordinate: band 2 is
+// "interfaces & plumbing" (holds no authority, holds no value) and band 0 is
+// "control surface". Both are read off summary-derived fields that are
+// three-state on the payload, so the not-determined member has to land somewhere
+// that asserts neither.
+describe("layoutGroupInterior banding — three-state summary inputs", () => {
+  // Bands are packed top-to-bottom and EMPTY bands take no space, so a band is
+  // only observable relative to a reference card packed in the same call: same
+  // row y => same band, greater y => a later band.
+  const REF0 = { address: "0xref0000000000000000000000000000000000000", name: "Ref Timelock", has_timelock: true, role_evidence: "witnessed" };
+  const REF1 = { address: "0xref1000000000000000000000000000000000000", name: "Ref Handler", role: "value_handler", role_evidence: "witnessed" };
+  const SUBJECT = "0xaaa0000000000000000000000000000000000001";
+
+  const relative = (reference, machine) => {
+    const subject = { address: SUBJECT, name: "Subject", ...machine };
+    const interior = layoutGroupInterior(
+      [{ id: reference.address }, { id: subject.address }],
+      [reference, subject],
+      0,
+    );
+    return {
+      ref: interior.positions.get(reference.address).y,
+      subject: interior.positions.get(subject.address).y,
+    };
+  };
+
+  it("puts a PROVEN timelock in the control band", () => {
+    const { ref, subject } = relative(REF0, { has_timelock: true, role: "utility", role_evidence: "witnessed" });
+    expect(subject).toBe(ref);
+  });
+
+  it("does not put a NOT-DETERMINED timelock flag in the control band", () => {
+    // NEGATIVE CONTROL for the test above: promoting every non-false flag would
+    // badge an unanalysed contract a control surface.
+    const { ref, subject } = relative(REF0, { has_timelock: null, role: "value_handler", role_evidence: "witnessed" });
+    expect(subject).toBeGreaterThan(ref);
+  });
+
+  it("keeps a role with NO summary evidence out of the plumbing band", () => {
+    // `role: "utility"` reached through nothing but nulls is not evidence that a
+    // contract is plumbing. It takes the neutral band-1 catchall instead, which
+    // is the reference card's band.
+    const { ref, subject } = relative(REF1, { role: "utility", role_evidence: "not_determined" });
+    expect(subject).toBe(ref);
+  });
+
+  it("still puts a WITNESSED utility role in the plumbing band", () => {
+    // POSITIVE CONTROL: hedging every utility row would empty band 2.
+    const { ref, subject } = relative(REF1, { role: "utility", role_evidence: "witnessed" });
+    expect(subject).toBeGreaterThan(ref);
+  });
+});
