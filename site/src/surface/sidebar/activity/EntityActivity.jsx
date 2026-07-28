@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
 import { AlertControls } from "./AlertControls.jsx";
+import { proxyState } from "./helpers.js";
 import { StatusStrip } from "./StatusStrip.jsx";
 import { Timeline } from "./Timeline.jsx";
 import { buildTimeline } from "./buildTimeline.js";
@@ -41,7 +42,15 @@ export function EntityActivity({
 
   const address = machine?.address;
   const chain = machine?.chain || contract?.chain || "ethereum";
-  const isProxy = Boolean(machine?.is_proxy);
+  // Three states, not `Boolean(is_proxy)`. `not_determined` is a row whose two
+  // proxy signals contradict each other (`is_proxy: false` with a `proxy_type` or
+  // an `implementation`), and one real contract is exactly that with 14 real
+  // pre-enrollment upgrades (L-1). It must be ASKED about, never answered from
+  // the flag: `isProxy` gates what may be rendered as proven, `mayBeProxy` gates
+  // whether the question gets asked at all.
+  const proxyhood = proxyState(machine);
+  const isProxy = proxyhood === "proxy";
+  const mayBeProxy = proxyhood !== "not_proxy";
 
   // Per-contract events (all kinds), captured from enrollment forward.
   useEffect(() => {
@@ -80,7 +89,7 @@ export function EntityActivity({
     // React batches these with whatever the branches set, so no extra render.
     setHistoryOutcome(null);
     setHistory(null);
-    if (!isProxy || !machine?.job_id) { return undefined; }
+    if (!mayBeProxy || !machine?.job_id) { return undefined; }
     const cached = cache && cache[machine.job_id];
     if (cached?.history) {
       setHistory(cached.history);
@@ -124,14 +133,16 @@ export function EntityActivity({
     // cache/onCache omitted deliberately: read once per selection so this
     // fetch's own cache write doesn't retrigger the effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [machine?.job_id, isProxy]);
+  }, [machine?.job_id, mayBeProxy]);
 
   // Four states, and only ever the one this selection earned.
   const historyState = useMemo(() => {
-    // No back-fill channel exists for a non-proxy, so the below-the-line set is
-    // empty by construction. Nothing is in flight and nothing failed: that is an
-    // answer, not a gap.
-    if (!isProxy) return "absent";
+    // No back-fill channel exists for a PROVEN non-proxy, so the below-the-line
+    // set is empty by construction. Nothing is in flight and nothing failed: that
+    // is an answer, not a gap. A contradictory row is not this case — it falls
+    // through to the read below, whose 503 (the endpoint's own not-determined
+    // answer for exactly this shape) keeps the question open.
+    if (proxyhood === "not_proxy") return "absent";
     // A proxy with no analysis job to ask about. No read is pending, because
     // none was ever issued — so nobody knows, which is not the same as nothing
     // being there.
@@ -141,7 +152,7 @@ export function EntityActivity({
     // settles — indefinitely if it never does.
     if (historyOutcome?.jobId !== machine.job_id) return "pending";
     return historyOutcome.state;
-  }, [isProxy, machine?.job_id, historyOutcome]);
+  }, [proxyhood, machine?.job_id, historyOutcome]);
 
   // Only ever true for the selection whose read did not answer.
   const historyUnknown = historyState === "not_determined";
@@ -153,9 +164,12 @@ export function EntityActivity({
   }, [history, address]);
 
   const enrollmentBlock = contract?.enrollment_block ?? null;
+  // `mayBeProxy`, so a contradictory row whose history DID arrive renders its
+  // eras instead of dropping them; with no history the flag adds no rows either
+  // way, so the open case cannot manufacture a timeline.
   const timeline = useMemo(
-    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy }),
-    [events, proxy, enrollmentBlock, isProxy],
+    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy }),
+    [events, proxy, enrollmentBlock, mayBeProxy],
   );
 
   // "Monitoring started" label: created_at is when the MonitoredContract row was
@@ -193,7 +207,7 @@ export function EntityActivity({
         below={timeline.below}
         boundaryBlock={timeline.boundaryBlock}
         boundaryDate={boundaryDate}
-        isProxy={isProxy}
+        isProxy={mayBeProxy}
         chain={chain}
         now={now}
         // The marker above and the timeline's empty states describe the same

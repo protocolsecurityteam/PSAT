@@ -312,6 +312,51 @@ describe("ActivityPanel — monitored principal (safe)", () => {
   });
 });
 
+// A contract whose two proxy signals contradict each other: `is_proxy: false` with
+// a `proxy_type`. One real row is exactly this — contract
+// 0x3c55986cfee455e2533f4d29006634ecf9b7c03f, `proxy_type: "beacon"`, with 14
+// `Upgraded(address)` logs at or before block 25619159 (L-1).
+const BEACON_MACHINE = {
+  address: PROXY,
+  name: "BeaconProxy",
+  is_proxy: false,
+  proxy_type: "beacon",
+  job_id: "job1",
+  chain: "ethereum",
+};
+
+describe("ActivityPanel — a contract whose proxyhood contradicts itself", () => {
+  it("asks about the history instead of asserting there is none", async () => {
+    // `Boolean(is_proxy)` short-circuited to "absent" and never issued the read,
+    // so 14 real pre-enrollment upgrades rendered as "No activity before the
+    // line." The endpoint answers 503/not_determined for exactly this shape; the
+    // panel has to get far enough to hear it.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
+    renderPanel({ selectedMachine: BEACON_MACHINE });
+    expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
+    expect(screen.queryByText("No activity before the line.")).toBeNull();
+  });
+
+  it("renders the history when the contradictory row turns out to have one", async () => {
+    // The open state is not "treat it as a non-proxy" either: a history that DOES
+    // arrive must render, not be dropped for failing a boolean.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
+    renderPanel({ selectedMachine: BEACON_MACHINE });
+    expect(await screen.findByText("First deployment")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+
+  it("still reads a PROVEN non-proxy as absent", async () => {
+    // NEGATIVE CONTROL: a row with no proxy signal at all is an answer, and
+    // hedging it would put the marker on every Safe and EOA in the protocol.
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    expect(await screen.findByText("Timeline")).toBeInTheDocument();
+    expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
+  });
+});
+
 describe("ActivityPanel — upgrade history the read could not answer", () => {
   // The timeline draws a proxy with no history as a proxy that has never been
   // upgraded. Whenever /artifact/upgrade_history fails to answer, that render is
@@ -376,6 +421,18 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     // NEGATIVE CONTROL for the test above: suppressing the prose whenever
     // `below` is empty would erase the one case where absence is the answer,
     // and the 500 test alone cannot see that.
+    //
+    // The ledger (L-1) flagged this arm as PINNING A DEFECT, because a 404 used
+    // to mean either "the stage found no proxies" or "the stage raised" and the
+    // SPA read both as proven absence. The ambiguity is now removed at its
+    // source: routers/analyses only 404s when a Contract row says
+    // self-consistently that the target is not a proxy AND the upgrade-history
+    // sub-phase recorded no degraded failure; every other shape returns 503 /
+    // not_determined, which the arms above cover. So the mapping this arm pins is
+    // EARNED, and inverting it would make the SPA hedge the one answer the server
+    // is now entitled to give. Verified in-process against the real corpus: the
+    // beacon row 0x3c55986c… now answers 503 and a self-consistent non-proxy
+    // still answers 404.
     upgradeHistoryFails(status(404, "Artifact not found"));
     renderPanel({ selectedMachine: PROXY_MACHINE });
     expect(await screen.findByText(ABSENCE_PROSE)).toBeInTheDocument();
@@ -395,7 +452,8 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
   });
 
   it("keeps the no-boundary empty state for a 404", async () => {
-    // NEGATIVE CONTROL for the test above.
+    // NEGATIVE CONTROL for the test above. Same L-1 note as the arm above: the
+    // 404 is now earned at the endpoint rather than assumed here.
     const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
     mockActivity({ contracts: [legacy], monitoredEvents: [] });
     setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), status(404, "nope"));
