@@ -1579,7 +1579,10 @@ def _add_reach(
       ``observed_reach_unvalued_assets`` — value WAS witnessed leaving a holder and
       its USD is not determined, because at least one asset that moved has no priced
       holding on record. ``observed_reach_priced_usd`` carries the part that IS
-      priced (a partial floor) and is omitted when that part is nothing. This is the
+      priced (a partial floor); it is omitted when that part is nothing AND when the
+      TVL ceiling refuses it (``reach_tvl_check: exceeds_protocol_tvl`` +
+      ``observed_reach_rejected_usd`` + ``protocol_tvl_usd`` then record the
+      contradiction, exactly as on the measured branch). This is the
       A2 case: 1001 of 1376 local ``contract_balances`` rows are unpriced, and the
       recoverETH row moved native ETH out of a deployment with no native balance row
       at all — "holds nothing", "not fetched" and "fetch failed" are one shape there
@@ -1679,7 +1682,34 @@ def _add_reach(
         concrete["observed_reach_unvalued_assets"] = sorted(unvalued_assets)
         concrete["observed_reach_unvalued_reasons"] = sorted(unvalued_reasons)
         if priced_any:
-            concrete["observed_reach_priced_usd"] = priced_usd
+            # The CEILING applies to the partial floor too (L-46). It used to guard only
+            # the branch below, so a floor ABOVE the protocol's own measured TVL was
+            # publishable with no ``reach_tvl_check`` at all — the same contradiction on
+            # the sibling key, and worse on this branch than on a measured total: the
+            # floor is a LOWER bound over a subset of the assets that moved, so a floor
+            # above the ceiling cannot be explained by the upper bound being loose.
+            # Refused the same way (recorded, never clamped) and the unvalued-asset
+            # disclosure stands either way — the two facts are independent.
+            tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
+            concrete["reach_tvl_check"] = tvl_state
+            if tvl_state == REACH_TVL_EXCEEDED:
+                logger.warning(
+                    "§5b reach floor %.2f exceeds protocol TVL %.2f — refusing the figure; holders=%s unvalued=%s",
+                    priced_usd,
+                    protocol_tvl_usd or 0.0,
+                    sorted(reach_holders),
+                    sorted(unvalued_assets),
+                )
+                concrete["observed_reach_rejected_usd"] = priced_usd
+                concrete["protocol_tvl_usd"] = protocol_tvl_usd
+            else:
+                if tvl_note is not None:
+                    logger.warning("§5b reach TVL ceiling not applied: %s", tvl_note)
+                concrete["observed_reach_priced_usd"] = priced_usd
+        # ``priced_any`` False publishes NO ``reach_tvl_check``: there is no figure for a
+        # ceiling to bear on, and ``within_protocol_tvl`` over an absent number would
+        # read as a check that passed. Absence of the key here means "no figure", which
+        # is exactly what the absent ``observed_reach_priced_usd`` beside it says.
         return
     # CORROBORATING CEILING: no exercise of one function can reach more value than the
     # protocol holds. The worst published row asserted $3.489B against a protocol TVL

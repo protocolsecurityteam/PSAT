@@ -418,7 +418,20 @@ logger = logging.getLogger(__name__)
 # provable here in either direction. The bump is the fail-closed choice on an
 # unobservable: re-probing costs fork time, serving a verdict selected under retired
 # rules costs a witness.
-EFFECT_CACHE_SCHEMA_VERSION = 32
+# v33 (Wave 4 Leg A, L-46): the reach-vs-TVL ceiling now bears on the PARTIAL-FLOOR
+# branch too. A pre-fix row on that branch published ``observed_reach_priced_usd`` with
+# NO ``reach_tvl_check`` at all — an unchecked floor, and the ceiling's three-state
+# answer absent rather than "skipped", the shape R2 forbids. Two honest halves, per the
+# v32 precedent: (a) the mechanism v27 bumped for does not apply here — the reach keys
+# ride ``observed_residue`` (state plane, never a cache key, inv. 3), so no v32 row
+# holds a ceiling outcome to serve and a HIT publishes no reach keys for this
+# deployment at all; (b) v27 nevertheless minted a version when the ceiling was
+# introduced on these same keys, and a deployment served from a v32 row sits beside
+# rows whose residue was computed under the retired contract. The bump is the
+# fail-closed choice on a shape the local plane cannot exhibit either way (no row is
+# servable at any revision — all 150 carry ``analysis_schema_version=5``), stated so
+# the next reader does not mistake it for a demonstrated stale-serve.
+EFFECT_CACHE_SCHEMA_VERSION = 33
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

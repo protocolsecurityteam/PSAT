@@ -1350,9 +1350,17 @@ export function claimWitnessFacts(fn) {
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
   if (reachRejected) {
+    // The corroborating ceiling refused this row's USD. When the row is ALSO the
+    // partial-floor shape (assets moved whose value is unknown), that is an
+    // independent fact and the refusal must not swallow it — one early-returning
+    // sentence hiding a second disclosure is the defect L-66 records in the balance
+    // table. Compose both.
     facts.push({
       label: "Reach",
-      value: "not determined (measured figure exceeded protocol TVL and was refused)",
+      value:
+        reachUnvalued > 0
+          ? `not determined — ${reachUnvalued} asset(s) of unknown value, and the priced floor exceeded protocol TVL and was refused`
+          : "not determined (measured figure exceeded protocol TVL and was refused)",
     });
   } else if (reachUnvalued > 0) {
     // Witnessed, not valued. Naming the count keeps this apart from both the

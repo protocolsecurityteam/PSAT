@@ -1132,6 +1132,36 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(JSON.stringify(facts)).not.toContain("3.5B");
   });
 
+  it("keeps the unvalued-asset disclosure when the ceiling refuses the priced floor", () => {
+    // L-46's payload shape: the producer now applies the ceiling to the PARTIAL-FLOOR
+    // branch, so a row can carry both facts at once — assets moved whose value is
+    // unknown, AND a priced part the protocol's own TVL contradicts. They are
+    // independent, and the refusal must not swallow the disclosure (L-66's shape).
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_unvalued_assets: ["0x" + "ee".repeat(20)],
+            observed_reach_unvalued_reasons: ["asset_not_in_recorded_holdings"],
+            reach_tvl_check: "exceeds_protocol_tvl",
+            observed_reach_rejected_usd: 3_488_955_156.06,
+            protocol_tvl_usd: 3_297_344_734,
+          },
+        },
+      }],
+    };
+    const reach = claimWitnessFacts(fn).filter((f) => f.label === "Reach");
+    expect(reach).toHaveLength(1);
+    expect(reach[0].value).toContain("1 asset(s) of unknown value");
+    expect(reach[0].value).toContain("refused");
+    // Still never the number.
+    expect(reach[0].value).not.toContain("3.5B");
+  });
+
   it("names a witnessed-but-unvalued reach as its own state (A2)", () => {
     // Value WAS observed leaving a holder, in an asset whose USD we do not have —
     // the weETH recoverETH shape (a synthetic native move out of a deployment with

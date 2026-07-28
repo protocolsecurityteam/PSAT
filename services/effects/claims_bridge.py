@@ -316,7 +316,15 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     ``protocol_tvl_usd`` record the contradiction and there is no reach value), or
 #     ``skipped_no_tvl`` (no ``defillama_tvl`` snapshot — the ceiling did NOT run, and
 #     that is published rather than implied). The worst row in the DB asserted $3.489B
-#     against a protocol TVL of $3.297B with nothing checking.
+#     against a protocol TVL of $3.297B with nothing checking. The ceiling bears on
+#     WHICHEVER figure the row publishes: ``observed_reach_value_usd`` on the measured
+#     branch and ``observed_reach_priced_usd`` on the partial-floor branch (L-46 — the
+#     floor branch used to return before the check, so a floor above the protocol's own
+#     TVL was publishable with no ``reach_tvl_check`` at all). A refusal therefore means
+#     "the row's own USD was contradicted", and on the floor branch the unvalued-asset
+#     keys still stand beside it: the refusal is about the priced part, not about
+#     whether value moved. The key is ABSENT when the row publishes no USD at all
+#     (nothing priced) — absence is "no figure to check", never a check that passed.
 #   * ABSENCE of every key is NOT "no reach": this deployment has no fork
 #     observation of its own yet (its verdict came from a cache hit), so reach was
 #     never attempted here.
