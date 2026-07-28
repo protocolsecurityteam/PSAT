@@ -372,7 +372,16 @@ logger = logging.getLogger(__name__)
 # The §7 audit also gained its floor in this commit: a signature with no structural key
 # is no longer trusted on agreement alone (49 of 150 rows compare ``unknown`` with
 # itself), so which verdict a hitting deployment publishes can differ from a pre-v29 run.
-EFFECT_CACHE_SCHEMA_VERSION = 29
+# v30 (Wave 2 Leg D, A7 round 2): ``duration_bound_source`` no longer asserts
+# ``no_time_reference`` — PROVEN indefinite, the most severe freeze this system
+# states — from a LEAF-LOCAL absence of a clock. Two shapes reproduced a false proof
+# from compiled Solidity: a lowered ``||`` puts the latch and the clock in SIBLING
+# leaves (``require(!frozen || block.timestamp > unpauseAt)``, a freeze that expires),
+# and a tree persisted before the ``absorbed_operands`` widening drops the clock out
+# of ``require(block.timestamp - pausedUntil < 2592000)`` altogether. The state now
+# also requires a clock-free whole guard tree and known-complete operand lists, so a
+# pre-v30 row's ``no_time_reference`` may be a proof its evidence never supported.
+EFFECT_CACHE_SCHEMA_VERSION = 30
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

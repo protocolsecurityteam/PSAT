@@ -914,11 +914,15 @@ function formatDuration(seconds) {
 
 // A7: duration_bound_seconds === null is TWO facts, and duration_bound_source is
 // the only thing that separates them. "no_time_reference" is a PROVEN indefinite
-// latch (no lowered guard reading it touches a clock). "not_determined" — and an
-// ABSENT source, which is every verdict written before A7 — means the window was
-// not established; the four rows in production that carry it are all `pauseUntil`,
-// a latch that DOES expire, so rendering them "(indefinite)" asserted the most
-// severe reading from an extraction failure.
+// latch: no leaf ANYWHERE in the guard tree that reads the latch touches a clock,
+// and that tree's operand lists are known-complete. Both conditions are part of
+// the proof, not hygiene — a leaf-local reading called `!frozen || block.timestamp
+// > unpauseAt` proven-most-severe (Solidity lowers `||` into sibling leaves), and
+// read a pre-widening `block.timestamp - pausedUntil < 2592000` the same way.
+// "not_determined" — and an ABSENT source, which is every verdict written before
+// A7 — means the window was not established; the four rows in production that
+// carry it are all `pauseUntil`, a latch that DOES expire, so rendering them
+// "(indefinite)" asserted the most severe reading from an extraction failure.
 const PAUSE_BOUND_PROVEN_INDEFINITE = "no_time_reference";
 
 function pauseQualifier(claims) {
