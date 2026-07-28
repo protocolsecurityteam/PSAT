@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import case, func, select
+from sqlalchemy.orm import selectinload
 
 from db.models import (
     AuditContractCoverage,
@@ -478,78 +479,188 @@ def list_protocol_principals(session, name: str) -> dict[str, Any]:
     return {"principals": principals[:30]}
 
 
-def role_holders(session, *, company: str, role_name: str | None = None) -> dict[str, Any]:
-    """Who can call functions gated by which role, across a protocol.
+ROLE_SOURCE_NOT_A_ROLE = (
+    "function_principals.origin is a resolver-source constant "
+    "('semantic_capability:finite_set' on 1132/1132 rows), not a role name; roles are read from "
+    "effective_functions.authority_roles"
+)
 
-    The pipeline writes one ``FunctionPrincipal`` per (function × actual
-    address authorized to call it), with ``origin`` carrying the role
-    name (e.g. ``PROTOCOL_PAUSER``). Group those by role and annotate
-    each holder with its kind (eoa / safe / timelock / contract).
 
-    Two modes:
-      - ``role_name`` provided  → list distinct holders of that role
-      - omitted                → summary of all roles in the protocol
-        with a per-role holder breakdown by kind
+def _role_key(value: Any) -> str:
+    """Canonical string key for a role identity.
+
+    Grants carry either a numeric Solmate/Solady role id or a named role. The key
+    is used for grouping and for matching a caller's ``role_name``, so a caller
+    asking for ``"2"``, ``"role 2"`` or ``"PROTOCOL_PAUSER"`` reaches the same
+    bucket the grant created.
     """
-    from db.models import EffectiveFunction, FunctionPrincipal
+    text = str(value).strip()
+    if text.lower().startswith("role "):
+        text = text[5:].strip()
+    return text.lower()
+
+
+def _grant_principal_addresses(grant: Any) -> list[str] | None:
+    """Member addresses named by one ``authority_roles`` grant, or ``None``.
+
+    ``None`` is the third state and is NOT an empty holder set: the grant names a
+    role that gates the function but records no members, so who holds it was not
+    determined. Attributing the function's whole authorized-caller set to the role
+    would be the over-claim ``capability_role_grants`` refuses to make at
+    derivation time, and a consumer cannot redo that reasoning.
+    """
+    if not isinstance(grant, dict):
+        return None
+    raw = grant.get("principals")
+    if not isinstance(raw, list):
+        return None
+    addresses: list[str] = []
+    for member in raw:
+        address = member.get("address") if isinstance(member, dict) else member
+        if isinstance(address, str) and address.startswith("0x"):
+            lowered = address.lower()
+            if lowered not in addresses:
+                addresses.append(lowered)
+    return addresses or None
+
+
+def role_holders(session, *, company: str, role_name: str | None = None) -> dict[str, Any]:
+    """Who holds which role, across a protocol, and where that is not determined.
+
+    ROLES COME FROM ``effective_functions.authority_roles``, never from
+    ``function_principals.origin``. ``origin`` is a resolver-source constant —
+    ``semantic_capability:finite_set`` on 1132/1132 local rows — so grouping by it
+    produced exactly ONE "role", named after the resolver, holding 136 "holders",
+    while every real role name returned ``{"holders": []}``: an empty answer that
+    reads as "nobody holds this role" for a question that was never asked.
+    ``principal_type`` is likewise the single constant ``controller``.
+
+    Three states, and the caller (an LLM) is told which one it is looking at:
+
+    * a grant with members — witnessed: every listed address holds that role.
+    * a grant with no members — the role gates the function, but who holds it was
+      not determined. Reported as the role with ``holders_state:
+      "not_determined"`` and an empty holder list, never as "no holders".
+    * ``authority_roles`` NULL — nothing about this function's role structure was
+      read; ``[]`` — the gate was lowered and carries no role-keyed authority.
+      Both are counted in ``role_evidence`` rather than silently dropped, because
+      "this protocol has no roles" and "we did not look" are the same empty
+      ``roles`` array otherwise.
+
+    The authorized-caller sets ``origin`` really describes are still published,
+    under ``authorized_callers`` and labelled as not being roles.
+    """
+    from db.models import EffectiveFunction
+    from services.policy.capability_surface import capability_role_grants
 
     proto = session.execute(select(Protocol).where(Protocol.name == company)).scalar_one_or_none()
     if proto is None:
         return {"error": f"protocol not found: {company}"}
 
-    contract_ids = [c.id for c in session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars()]
-    if not contract_ids:
-        return {"roles": []}
+    contracts = list(session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars())
+    if not contracts:
+        return {"roles": [], "role_evidence": {"functions_examined": 0}, "note": ROLE_SOURCE_NOT_A_ROLE}
+    chain_by_cid = {c.id: c.chain for c in contracts}
 
-    stmt = (
-        select(FunctionPrincipal, EffectiveFunction)
-        .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
-        .where(EffectiveFunction.contract_id.in_(contract_ids))
-        .where(FunctionPrincipal.origin.is_not(None))
+    ef_rows = list(
+        session.execute(
+            select(EffectiveFunction)
+            .where(EffectiveFunction.contract_id.in_(list(chain_by_cid)))
+            .options(selectinload(EffectiveFunction.principals))
+            .order_by(EffectiveFunction.id.asc())
+        ).scalars()
     )
-    if role_name:
-        stmt = stmt.where(FunctionPrincipal.origin == role_name)
 
-    rows = session.execute(stmt).all()
+    # (role key) -> {"role": display value, "addresses": {addr: [fn names]},
+    #                "functions": set, "undetermined_functions": [fn names]}
+    by_role: dict[str, dict[str, Any]] = {}
+    caller_functions: dict[str, list[str]] = {}
+    chain_for_address: dict[str, str | None] = {}
+    counts = {
+        "functions_examined": len(ef_rows),
+        "functions_with_witnessed_roles": 0,
+        "functions_with_a_role_whose_holders_are_not_determined": 0,
+        "functions_role_structure_not_determined": 0,
+        "functions_proven_no_role_gate": 0,
+    }
 
-    # Group by (role, address). For each unique (role, address) build a
-    # holder entry once, classify the address via classify_address so the
-    # caller sees kind/threshold/owners/delay.
-    by_role: dict[str, dict[str, dict[str, Any]]] = {}
-    for fp, ef in rows:
-        role = fp.origin or ""
-        addr = (fp.address or "").lower()
-        if not addr:
+    for ef in ef_rows:
+        chain = chain_by_cid.get(ef.contract_id)
+        fn_name = ef.function_name or ef.selector or "?"
+
+        # The caller sets ``origin`` describes: authorized callers of a gated
+        # function, with no role attribution available. Kept, renamed.
+        for fp in ef.principals or []:
+            address = (fp.address or "").lower()
+            if not address:
+                continue
+            chain_for_address.setdefault(address, chain)
+            slot = caller_functions.setdefault(address, [])
+            if fn_name not in slot:
+                slot.append(fn_name)
+
+        # ``capability_role_grants`` over the persisted ``capability_expr`` is the
+        # SAME function that writes the ``authority_roles`` column, so where the
+        # column was written by the current writer the two agree by construction —
+        # and where it was not, the derivation is the only honest answer. It
+        # matters: every one of the 1,773 persisted rows still carries the
+        # pre-derivation literal ``[]``, which a consumer reading the column alone
+        # reports as "the gate was lowered and carries no role-keyed authority" for
+        # rows nobody ever asked the question of. The column remains the source
+        # when there is no resolved capability to read.
+        capability = ef.capability_expr
+        grants = (
+            capability_role_grants(capability) if isinstance(capability, dict) and capability else ef.authority_roles
+        )
+        if grants is None:
+            counts["functions_role_structure_not_determined"] += 1
             continue
-        slot = by_role.setdefault(role, {})
-        if addr not in slot:
-            slot[addr] = classify_address(session, fp.address)
-            slot[addr]["functions"] = []
-        slot[addr]["functions"].append(f"{ef.function_name}")
+        if not grants:
+            counts["functions_proven_no_role_gate"] += 1
+            continue
 
-    # Cap functions list per holder so the prompt stays small even when
-    # one principal holds the role on many contracts.
-    for role, holders in by_role.items():
-        for h in holders.values():
-            fns = h.get("functions") or []
-            h["function_count"] = len(fns)
-            h["functions"] = fns[:8]
+        saw_witnessed = False
+        saw_undetermined = False
+        for grant in grants:
+            if not isinstance(grant, dict) or "role" not in grant:
+                saw_undetermined = True
+                continue
+            key = _role_key(grant["role"])
+            entry = by_role.setdefault(
+                key,
+                {"role": grant["role"], "addresses": {}, "functions": [], "undetermined_functions": []},
+            )
+            if fn_name not in entry["functions"]:
+                entry["functions"].append(fn_name)
+            members = _grant_principal_addresses(grant)
+            if members is None:
+                saw_undetermined = True
+                if fn_name not in entry["undetermined_functions"]:
+                    entry["undetermined_functions"].append(fn_name)
+                continue
+            saw_witnessed = True
+            for address in members:
+                chain_for_address.setdefault(address, chain)
+                fns = entry["addresses"].setdefault(address, [])
+                if fn_name not in fns:
+                    fns.append(fn_name)
+        if saw_witnessed:
+            counts["functions_with_witnessed_roles"] += 1
+        if saw_undetermined:
+            counts["functions_with_a_role_whose_holders_are_not_determined"] += 1
 
-    if role_name:
-        holders = list(by_role.get(role_name, {}).values())
-        return {"role": role_name, "holders": holders}
+    def _holder(address: str, functions: list[str]) -> dict[str, Any]:
+        # Classified WITH the chain of the contract whose gate named the address:
+        # ``classify_address`` scopes the control-graph read by chain, and passing
+        # nothing would reopen the twin aliasing this leg just closed.
+        record = classify_address(session, address, chain_for_address.get(address))
+        record["function_count"] = len(functions)
+        record["functions"] = functions[:8]
+        return record
 
-    # Summary mode: include the actual holders inline so a single call
-    # answers "who can do what unilaterally?" without the agent having
-    # to drill into each role separately. Compact representation: full
-    # detail for EOAs (the high-risk single-key holders) and short
-    # metadata for Safe / Timelock / contract holders.
     def _compact(h: dict[str, Any]) -> dict[str, Any]:
         kind = h.get("kind")
-        out: dict[str, Any] = {
-            "address": h.get("address"),
-            "kind": kind,
-        }
+        out: dict[str, Any] = {"address": h.get("address"), "kind": kind}
         if h.get("label"):
             out["label"] = h["label"]
         if kind == "safe":
@@ -560,22 +671,70 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
         out["function_count"] = h.get("function_count", 0)
         return out
 
+    if role_name:
+        entry = by_role.get(_role_key(role_name))
+        if entry is None:
+            # NOT "this role has no holders": no grant in this protocol names it,
+            # which given the evidence counts below may mean nobody read the gates.
+            return {
+                "role": role_name,
+                "holders": [],
+                "state": "not_witnessed",
+                "role_evidence": counts,
+                "note": ROLE_SOURCE_NOT_A_ROLE,
+            }
+        holders = [_holder(address, fns) for address, fns in sorted(entry["addresses"].items())]
+        return {
+            "role": entry["role"],
+            "holders": holders,
+            "state": "witnessed" if holders else "not_determined",
+            "gated_functions": entry["functions"][:20],
+            "functions_with_undetermined_holders": entry["undetermined_functions"][:20],
+            "role_evidence": counts,
+            "note": ROLE_SOURCE_NOT_A_ROLE,
+        }
+
     roles_summary = []
-    for role, holders in by_role.items():
+    for key in sorted(by_role):
+        entry = by_role[key]
+        holders = [_holder(address, fns) for address, fns in sorted(entry["addresses"].items())]
         kinds: dict[str, int] = {}
-        for h in holders.values():
+        for h in holders:
             k = h.get("kind") or "unknown"
             kinds[k] = kinds.get(k, 0) + 1
         roles_summary.append(
             {
-                "role": role,
+                "role": entry["role"],
                 "holder_count": len(holders),
                 "by_kind": kinds,
-                "holders": [_compact(h) for h in holders.values()],
+                "holders": [_compact(h) for h in holders],
+                "gated_function_count": len(entry["functions"]),
+                "holders_state": "witnessed" if holders else "not_determined",
             }
         )
-    roles_summary.sort(key=lambda r: -r["holder_count"])
-    return {"roles": roles_summary[:30]}
+    roles_summary.sort(key=lambda r: (-r["holder_count"], str(r["role"])))
+
+    caller_records = [_holder(address, fns) for address, fns in sorted(caller_functions.items())]
+    caller_kinds: dict[str, int] = {}
+    for record in caller_records:
+        k = record.get("kind") or "unknown"
+        caller_kinds[k] = caller_kinds.get(k, 0) + 1
+    caller_records.sort(key=lambda r: (-r.get("function_count", 0), str(r.get("address"))))
+
+    return {
+        "roles": roles_summary[:30],
+        "role_evidence": counts,
+        "authorized_callers": {
+            "count": len(caller_records),
+            "by_kind": caller_kinds,
+            "callers": [_compact(r) for r in caller_records[:30]],
+            "note": (
+                "Addresses authorized to call gated functions. NOT role holders: the resolver "
+                "records no role attribution for them."
+            ),
+        },
+        "note": ROLE_SOURCE_NOT_A_ROLE,
+    }
 
 
 def list_protocol_addresses(session, name: str) -> set[str]:
