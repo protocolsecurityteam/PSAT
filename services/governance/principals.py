@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
-from services.aggregations.action_summary import describe_action
 
 # A principal is *terminal* when its resolved_type names a settled controlling
 # key or a recognized governance primitive (Safe / EOA / zero / timelock /
@@ -433,6 +432,14 @@ def _build_company_function_entry(
             if not entry.get("principals")
             or not all(_is_generic_authority_contract_principal(principal) for principal in entry["principals"])
         ]
+
+    # Imported inside the function, not at module scope: ``services.aggregations``'s
+    # package ``__init__`` imports ``company_overview``, which imports THIS module,
+    # so a top-level import here closes the cycle and kills a fresh interpreter on
+    # ``import services.policy`` (pinned by
+    # tests/test_worker_entrypoint_imports.test_policy_first_import_order, which is
+    # exactly how this was caught).
+    from services.aggregations.action_summary import describe_action
 
     _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
         ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
