@@ -107,11 +107,11 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 
 
 # ---------------------------------------------------------------------------
-# Parameter destination constraints (A3+A4: one analysis)
+# Parameter destination constraints
 # ---------------------------------------------------------------------------
 #
 # Answers, per ABI parameter: *does a mandatory revert gate reference this
-# parameter between entry and sink?* — three states (R1):
+# parameter between entry and sink?* — three states:
 #
 #   ``constrained``           a mandatory leaf references the parameter against
 #                             something outside the caller's control, and the
@@ -133,7 +133,7 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 #
 # Three projection-completeness checks guard the ``unconstrained_proven`` state
 # (each one is a real, measured lossiness of the leaf projection — reading its
-# silence as proof was rejected in review round 1 on production rows):
+# silence as proof demonstrably over-claims on production rows):
 #
 #   * A leaf whose ``expression`` names a declared parameter the leaf's operands
 #     do not account for (CumulativeMerkleDrop.claim's ``! verify(account, …)``
@@ -163,17 +163,17 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 # standard gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
 # CALLER. No signature commits ``to``; an enabled module calls any target with
 # any calldata, so the standard commits nothing about any parameter and the
-# ordinary tree walk answers instead (review round 3, violation R1: publishing
-# ``pins: True`` there was a proof fabricated from the standard's shape).
+# ordinary tree walk answers instead (publishing ``pins: True`` there would be a
+# proof fabricated from the standard's shape).
 #
-# The tightened rule (handoff §5 Leg C): a mandatory leaf constrains a
+# The tightened rule: a mandatory leaf constrains a
 # parameter only if it is NOT the function's own effect sink. The sink's own
 # revert surface mentions its destination argument vacuously —
 # ``safeTransfer(_to, bal)`` reverting on failure is not a constraint on
 # ``_to``, and neither is ``target.call(data)`` reverting on ``!ok`` — so a
 # leaf that IS the revert surface of the call carrying the described effect is
 # transparent. Without it ``sweepDust`` — the positive control — classifies as
-# constrained, which the spec forbids.
+# constrained, which is a false positive.
 #
 # The join is against the FACTS (``value_flows`` selectors and
 # ``_facts.body_sinks``), never against a claim witness's ``sink_ids``, which is
@@ -188,10 +188,10 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
 # ``deployedEtherFiNodes(...)``), and an effectful callee that is NOT one of
 # this function's effect sinks is left unresolved rather than assumed away.
 #
-# ``derived_from`` (the W0-4 commitment provenance) is consumed but NOT treated
-# as ground truth (WAVE_0 L-24: it misbinds one origin on flow-insensitive
-# local reassignment — it can OMIT a genuinely committed parameter and PUBLISH
-# one that only reaches the name on another branch). Two bounds follow:
+# ``derived_from`` (the commitment provenance) is consumed but NOT treated as
+# ground truth: it is flow-insensitive, so a local reassignment misbinds the
+# origin — it can OMIT a genuinely committed parameter and PUBLISH one that only
+# reaches the name on another branch. Two bounds follow:
 #   * positive direction: a ``derived_from`` binding may prove ``constrained``
 #     (the guard is real), but never ``pins: True`` — the verdict carries
 #     ``pins: None`` and ``binding: "derived_from"``, because a flow-insensitive
@@ -206,7 +206,7 @@ _MEMBERSHIP_SET_KINDS = frozenset({"mapping_membership", "array_contains", "exte
 _EXTERNAL_GATE_KINDS = frozenset({"external_call_revert", "try_catch_revert"})
 
 # Whether each guard kind PINS the destination — the three-state answer a
-# ``constrained`` verdict carries as ``pins`` (R1: a consumer must be able to
+# ``constrained`` verdict carries as ``pins`` (a consumer must be able to
 # tell proven-pins from proven-does-not-pin from not-determined, because only
 # the first may soften the caller-chosen / theft-shaped reading downstream):
 #
@@ -222,7 +222,7 @@ _EXTERNAL_GATE_KINDS = frozenset({"external_call_revert", "try_catch_revert"})
 #          and on the local artifacts every ``constrained`` flow row (4/4,
 #          EtherFiRedemptionManager.redeem*) is this kind and is in fact a
 #          blacklist. Publishing those as if they pinned dropped the
-#          caller-chosen signal on all four (review round 2, violation R3).
+#          caller-chosen signal on all four.
 _GUARD_PINS: dict[str, bool | None] = {
     "mapping_allowlist": True,
     "hash_commitment": True,
@@ -394,12 +394,12 @@ def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
 
     ``direct`` — the operand IS the parameter. ``derived`` — the operand is a
     computed value whose ``derived_from`` provenance includes the parameter
-    (flow-insensitive; see L-24). ``opaque`` — the operand can involve a
+    (flow-insensitive). ``opaque`` — the operand can involve a
     parameter without saying so.
 
     Every ``computed`` operand is opaque, including one whose ``derived_from``
     resolves entirely to parameter/state/constant origins. ``derived_from`` is
-    flow-insensitive (WAVE_0 L-24): it can OMIT an origin that genuinely feeds
+    flow-insensitive: it can OMIT an origin that genuinely feeds
     the value (Teller ``depositAsset``) while publishing one that only reaches
     the name on another branch. A list that LOOKS complete therefore proves
     nothing in the negative direction — it contributes positive ``derived``
@@ -621,10 +621,9 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
 
     tree = ctx.predicate_tree(function)
     if tree is None:
-        # No tree at all (G3 classes F/R): nothing is settled for any
-        # parameter. A missing tree is NOT proof that no gate exists — reading
-        # it as "unconstrained" is the exact error this whole effort exists to
-        # remove.
+        # No tree at all: nothing is settled for any parameter. A missing tree
+        # is NOT proof that no gate exists — reading it as "unconstrained" is
+        # exactly the over-claim this state exists to prevent.
         verdicts[-1] = {"state": "not_determined"}
         memo[(function, mode)] = verdicts
         return verdicts
@@ -691,7 +690,7 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
                 # Three-state by construction: an unmapped guard kind must not
                 # read as pinning, so absence from the map is None, not False.
                 # A ``derived_from`` binding caps ``pins`` at None regardless of
-                # the guard: the binding is flow-insensitive (L-24), so the
+                # the guard: the binding is flow-insensitive, so the
                 # guard's set semantics are proven but WHICH parameter it
                 # confines is not — only a proven pin may soften the
                 # caller-chosen reading downstream.

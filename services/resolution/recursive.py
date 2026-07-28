@@ -219,7 +219,7 @@ def _build_static_artifacts(
 def _chain_name_for_materialization(chain_id: int) -> str:
     """Canonical chain name used as the ``contract_materializations`` cache key
     component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` so mainnet
-    cache keys are unchanged. An unregistered id fails loud (inv. 6): the old
+    cache keys are unchanged. An unregistered id fails loud: the old
     ``PSAT_DEFAULT_CHAIN`` env fallback is gone, so a bad chain_id can no longer
     key an L2's artifacts under mainnet."""
     from utils.chains import require_chain
@@ -247,7 +247,7 @@ def _materialize_with_cross_process_cache(
         fixture-isolated test, or the DB is unreachable).
     """
     # Chain threaded from the job/contract (via ``_chain_name_for_materialization``
-    # at the walk entry). A chainless call is a data bug (inv. 6): fail loud
+    # at the walk entry). A chainless call is a data bug: fail loud
     # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
     from utils.chains import require_chain
 
@@ -288,7 +288,7 @@ def _materialize_with_cross_process_cache(
         }
 
     def _source_hash_fn() -> str | None:
-        # Cross-chain code-plane reuse key (inv. 1). ``get_source`` is
+        # Cross-chain code-plane reuse key. ``get_source`` is
         # in-memory + PG cached, so on the build path this shares the fetch
         # ``_build_static_artifacts`` makes; on a keccak hit it is never called.
         from services.discovery.fetch import source_content_hash
@@ -654,7 +654,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
         function_signature = str(function.get("function", ""))
         # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
         # ``None`` on a role-gated function whose role identity is not
-        # determined (W2-B item 8), and a dict default only fires on an
+        # determined, and a dict default only fires on an
         # ABSENT key — so the plain default would iterate None and raise.
         # Not-determined contributes no role principals, exactly as [] did.
         for role_grant in function.get("authority_roles") or []:
@@ -864,7 +864,7 @@ def _replay_mapping_principals(
         result = enumerate_mapping_allowlist_sync(
             address,
             mapping_specs,
-            # inv. 6: the scan URL is derived from the walk's chain, not a mainnet
+            # The scan URL is derived from the walk's chain, not a mainnet
             # default. Mainnet ("1") is byte-identical to the prior chain-less call.
             chain=str(chain_id),
             bearer_token=hypersync_token,
@@ -1011,7 +1011,7 @@ def resolve_control_graph(
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
     """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
 
-    ``chain_id`` is required (inv. 6): it scopes the two chain-sensitive reads
+    ``chain_id`` is required: it scopes the two chain-sensitive reads
     inside the walk — the ``contract_materializations`` cache key (via the
     chain's canonical name) and the mapping-writer replay's scan floor. A
     chainless walk can no longer run as mainnet; callers thread the job's chain."""
@@ -1210,7 +1210,7 @@ def resolve_control_graph(
             # The classifier's answer, not a hardcoded "contract". A timelock
             # that is itself analysed used to lose its type AND its ``delay``
             # here: EtherFiTimelock's own node read ``resolved_type=contract``
-            # with no delay, and inv 9 makes that delay credit-bearing.
+            # with no delay, and that delay is a credit-bearing scoring input.
             # ``_cached_classify`` is the same memo the controller/principal
             # wiring already uses, so a nested contract reached as someone's
             # controller is a cache hit; a root costs one classification.
@@ -1275,16 +1275,17 @@ def resolve_control_graph(
                 # relation: neither question was answered, so the address was
                 # enrolled from a predicate tree without ever being shown to
                 # gate a caller. ``controller_value`` would assert an authority
-                # nothing proved (Leg A's tree widening minted 37 such targets
-                # in one merge — pure constants like HUNDRED_PERCENT_IN_BPS,
-                # non-authority mappings like _balances, 28 of them surviving
-                # the primitive-scalar skip); ``external_call_target`` would
-                # assert the opposite unproven fact. The unattributed relation
-                # keeps the edge visible and moves no authority.
+                # nothing proved (one widening of the enrolled-target set minted
+                # 37 such targets in a single merge — pure constants like
+                # HUNDRED_PERCENT_IN_BPS, non-authority mappings like _balances,
+                # 28 of them surviving the primitive-scalar skip);
+                # ``external_call_target`` would assert the opposite unproven
+                # fact. The unattributed relation keeps the edge visible and
+                # moves no authority.
                 #
-                # This is NOT the demotion Leg F's rule forbids: that rule
-                # protects a real authority from being relabelled a mere
-                # callee. Here the not-determined input reaches a
+                # This is NOT the forbidden demotion of a proven authority to a
+                # mere callee: that rule protects an authority that was actually
+                # established. Here the not-determined input reaches a
                 # not-determined relation.
                 provenance = controller_value.get("authority_provenance")
                 if provenance == "call_target":

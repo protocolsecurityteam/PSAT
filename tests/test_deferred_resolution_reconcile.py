@@ -375,7 +375,7 @@ def test_reconciler_does_not_select_off_chain_twin(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Half 2b — the ORPHANED-CONTRACT class (L-12). ``contracts.job_id`` is
+# Half 2b — the ORPHANED-CONTRACT class. ``contracts.job_id`` is
 # ``ON DELETE SET NULL`` and every stage finds its contract through that column,
 # so deleting a job strands its contract's rows outside the reconciler's reach
 # for good: the deferred authority never resolves and the index-cold capability

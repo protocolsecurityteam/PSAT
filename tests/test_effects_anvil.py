@@ -1,7 +1,7 @@
-"""Tier-2 fork recipe tests (EFFECTS_RESOLUTION_SPEC §4.1, §8.7, §8.8).
+"""Tier-2 fork recipe tests for the pause recipe.
 
 The pause recipe is exercised two ways: against a stubbed ``AnvilTransport``
-(hermetic, always runs) for the revert-set-diff logic and the §8 rules, and
+(hermetic, always runs) for the revert-set-diff logic and the transcript rules, and
 against a real LOCAL NON-FORKING anvil with a checked-in fixture (gated behind an
 anvil-availability probe — auto-skips on a clone without foundry). A forking
 anvil / real RPC is NEVER used here (that is the user's preview step).

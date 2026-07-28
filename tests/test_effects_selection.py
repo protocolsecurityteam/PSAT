@@ -1,8 +1,8 @@
-"""Tests for services.effects.selection — §6 cascade + value-at-stake ordering.
+"""Tests for services.effects.selection — the candidate cascade + value-at-stake ordering.
 
 Synthetic fixtures drive the always-run assertions (cascade correctness,
 transitive-vs-direct ordering, dropped-work logging). One optional test
-reproduces the Appendix A funnel against the dev ``psat`` DB when present and
+reproduces the real-protocol funnel against the dev ``psat`` DB when present and
 skips cleanly otherwise, so CI (which starts from a fresh empty DB) never
 depends on dev data.
 """
@@ -69,8 +69,8 @@ def _contract(session: Session, protocol_id: int, addr: str, **kw) -> Contract:
 
 
 #: Sentinel for "this test does not set that mutability column", so the default
-#: stays SQL NULL (not-determined) — the shape every row written before W0-6's
-#: columns carries, and the shape 1,773/1,773 local rows carry today.
+#: stays SQL NULL (not-determined) — the shape every row written before the
+#: mutability columns existed carries, and the shape 1,773/1,773 local rows carry today.
 _UNSET = object()
 
 
@@ -173,7 +173,7 @@ def test_cascade_filters_sink_claim_and_public(db_session):
     with a populated ``effect_labels`` but empty ``claims`` is still blank and
     must survive.
 
-    Filter (a) reads the W0-6 evidence plane, so "dropped for having nothing to
+    Filter (a) reads the mutability evidence plane, so "dropped for having nothing to
     simulate" now requires the writer to have LOOKED: a compiler-typed view with
     ``state_writes = []`` and ``sinks = []``. The two arms this test used to pin —
     ``effect_targets`` NULL and ``[]`` with no evidence written at all — are
@@ -206,7 +206,7 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         writer_selectors=[],
     )
     # (a) INVERTED: the evidence plane was never written for this row (every row
-    # predating the W0-6 columns) -> not determined -> KEPT. Pre-D1 this row was
+    # predating the mutability columns) -> not determined -> KEPT. This row used to be
     # dropped for the absence of a display field.
     unmeasured = _fn(db_session, c.id, name="view2", selector="0xaaaa0003", effect_targets=[])
     # (b) confident claim present -> dropped
@@ -331,12 +331,12 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
     )
     # SOLE PIN for ``_evidence_proven_present(state_writes)``: a proven write
     # beside a ``view`` ABI flag. Zero realised rows on the local slice and no
-    # producer path through ``_mutability_fields`` today, because L-15's
+    # producer path through ``_mutability_fields`` today, because the
     # view-contradiction rule nulls exactly this shape (state_changing FALSE +
     # non-empty writes -> writes, sinks and selectors all withheld), which is why
     # the ``withheld`` arm below is what the plane actually carries. Kept anyway,
-    # and asserted ADMITTED: the reachable writers that bypass that rule are the
-    # same ones L-13 names (``db/effect_cache.py``, hand backfills), and a proven
+    # and asserted ADMITTED: the reachable writers that bypass that rule are
+    # ``db/effect_cache.py`` and hand backfills, and a proven
     # write is proven whatever a second witness says — the disagreement is the
     # reason to probe, never the reason to drop. Honest lower bound, not a
     # firing proof.
@@ -370,7 +370,7 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[],
         writer_selectors=[],
     )
-    # L-15: the view-contradiction rule withholds sinks/writes (89 legitimate
+    # The view-contradiction rule withholds sinks/writes (89 legitimate
     # ``external_call`` sinks on 14 local rows). Withheld is not proven-absent.
     withheld = _fn(
         db_session,
@@ -395,7 +395,7 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[],
         writer_selectors=[],
     )
-    # L-14: ``writer_selectors`` carries a FABRICATED ``keccak("fallback()")[:4]``
+    # ``writer_selectors`` carries a FABRICATED ``keccak("fallback()")[:4]``
     # on 15 fallback/receive rows. The filter does not read the column, so a
     # fabricated selector cannot mint candidacy — this row is inert and stays out.
     fabricated_selector = _fn(
@@ -433,8 +433,8 @@ def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
     candidate selection for the whole protocol — the same trap
     ``_carries_public_admission_claim`` documents. Both shapes are reachable
     today: the jsonb scalar ``null`` from any writer that bypasses
-    ``none_as_null`` (``db/effect_cache.py:462`` is a live instance of that class,
-    L-13), and a malformed payload from a hand-written backfill. Neither is
+    ``none_as_null`` (``db/effect_cache.py:462`` is a live instance of that class),
+    and a malformed payload from a hand-written backfill. Neither is
     evidence of emptiness, so both must ADMIT rather than raise or drop.
     """
     p = _protocol(db_session, "jsonb-shapes")
@@ -613,7 +613,7 @@ def test_a_public_payout_reaches_a_synthesized_probe(db_session):
 
 
 def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
-    """§5c: functions already carrying flow.*/supply.* claims are re-enrolled for
+    """Gate lift: functions already carrying flow.*/supply.* claims are re-enrolled for
     exactly those value/supply families; other claims (pause/upgrade) stay dropped;
     blank functions keep the unrestricted (None) full-synthesis default."""
     p = _protocol(db_session, "gate-lift-proto")
@@ -669,7 +669,7 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
     ``rate_limit.consume`` records a fact at zero severity weight and
     ``delegatecall.execute`` names where foreign code comes from — neither
     EXPLAINS the function's value/supply behaviour, so neither may flip a blank
-    row from ``None`` (full §6 synthesis) to the empty frozenset (dropped as
+    row from ``None`` (full synthesis) to the empty frozenset (dropped as
     "already explained").
 
     This pins the 13 measured local-DB rows that would silently leave the
@@ -711,7 +711,7 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
             {"claim_id": "delegatecall.execute", "tier": "idiom_structural"},
         ],
     )
-    # Transparency must not LAUNDER either: alongside a flow claim the §5c
+    # Transparency must not LAUNDER either: alongside a flow claim the family
     # scoping still applies, and alongside an explanatory claim the row is
     # still explained and dropped.
     fact_and_flow = _fn(
@@ -748,7 +748,7 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
 
 
 def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
-    """§5b: candidates carry the protocol's witnessed value-holder set (positive
+    """Candidates carry the protocol's witnessed value-holder set (positive
     on-chain balances) and the acting deployment's own balance floor — the inputs
     the fork value-reach probe measures against."""
     p = _protocol(db_session, "reach-inputs-proto")
@@ -763,7 +763,7 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     db_session.commit()
 
     cand = {c.function_id: c for c in select_candidates(db_session, p.id)}[f.id]
-    # PER ASSET since A2, keyed on (holder, asset). ``_balance`` writes NATIVE rows, so
+    # PER ASSET, keyed on (holder, asset). ``_balance`` writes NATIVE rows, so
     # the asset is the emitter a synthetic native Transfer log carries.
     holders = {(h.holder, h.asset): h.usd_value for h in cand.value_holders}
     native = NATIVE_ASSET_LOG_EMITTER
@@ -781,7 +781,7 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
 def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
     """The reach ceiling's input. ``tvl_snapshots.total_usd`` and ``contract_breakdown``
     are NULL on EVERY row of this table locally, so a ceiling written against them
-    could never fire — R2's dead-sentinel shape. Reading ``defillama_tvl`` is the whole
+    could never fire — a dead sentinel. Reading ``defillama_tvl`` is the whole
     point, and a row that has only ``total_usd`` must read as NO ceiling (skipped),
     not as a ceiling of zero or of that number."""
     from datetime import datetime, timedelta, timezone
@@ -811,17 +811,17 @@ def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
 
 @requires_postgres
 def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
-    """G6-11: the holdings fetch takes ONE page, and exactly-at-the-cap cannot be told
+    """The holdings fetch takes ONE page, and exactly-at-the-cap cannot be told
     from truncated — so an at-cap holder is marked ``at_page_cap`` and the reach probe
     names it as the reason an asset could not be valued instead of quietly skipping it.
 
-    INVERTED in round 2 (R4): the below-cap arm asserted ``holdings_complete is True``.
+    INVERTED: the below-cap arm used to assert ``holdings_complete is True``.
     A stored-row count cannot establish completeness in that direction — the rows are
     the fetch's output AFTER its ``raw_balance > 0`` filter, so a FULL page containing
     any zero-balance entry stores fewer than the cap and read as proven-complete. The
     below-cap answer is ``not_determined``; there is no ``complete`` state.
 
-    ARMED POPULATION, honestly (R2): ``at_page_cap`` fires on ZERO local holders. The 7
+    ARMED POPULATION, honestly: ``at_page_cap`` fires on ZERO local holders. The 7
     local contracts at the cap all have ``protocol_id IS NULL`` and this function
     filters on ``protocol_id``, so none can enter a holder set; the most token rows any
     protocol-1 contract carries is 90. Reachable by construction, covered here, 0 of 29
@@ -853,7 +853,7 @@ def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
 
 @requires_postgres
 def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_session):
-    """A2's input fix. The reach probe used to receive ONE summed figure per holder and
+    """The per-asset input fix. The reach probe used to receive ONE summed figure per holder and
     match any ``Transfer`` out of it against the whole sum — so a synthetic native move
     out of the weETH proxy claimed a sheet that is 99.99% eETH ($3.489B).
 
@@ -897,12 +897,12 @@ def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_ses
 
 
 def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_datas(db_session):
-    """Ledger L-4. ``principal_addresses[0]`` IS the identity every fork probe
+    """``principal_addresses[0]`` IS the identity every fork probe
     impersonates (``calldata`` :1395/:1437/:1720/:2312 and the code-upgrade plan),
     so an unordered read left WHO we simulate as — and therefore which gate the
     probe passes and what the witness records — to the query plan.
 
-    A third determinism class: PYTHONHASHSEED (W0-2) and allocation order (W0-3)
+    A third determinism class: pinning PYTHONHASHSEED and pinning allocation order
     both fix the PROCESS, and neither can see a plan-order dependency. The rows are
     inserted in DESCENDING address order on purpose, so a plan that hands back heap
     order (what dropping the ORDER BY produces here) fails this assertion.
@@ -944,13 +944,13 @@ def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Ordering — transitive value-at-stake (inv. 5)
+# Ordering — transitive value-at-stake
 # ---------------------------------------------------------------------------
 
 
 def test_transitive_value_beats_direct_balance(db_session):
     """A $33K contract whose principal controls a $3.2B vault outranks a
-    directly-richer-but-terminal $1B contract (inv. 5).
+    directly-richer-but-terminal $1B contract.
 
     Direct-balance ordering would bury the small controller; transitive reach
     surfaces it.
@@ -1044,7 +1044,7 @@ def test_traversal_terminates_on_a_hand_built_cycle(db_session):
 def test_callee_edges_move_no_authority(db_session):
     """A slot the contract only CALLS must not move value into its reach.
 
-    The positive half of the split (R4): A genuinely controls B, so A's reach
+    The positive half of the split: A genuinely controls B, so A's reach
     includes B's balance. The negative half: B merely calls A (``eETH``,
     ``lido``, ``liquidityPool`` shape), which is recorded as
     ``external_call_target`` and must leave B's reach at its own balance. The
@@ -1081,7 +1081,7 @@ def test_callee_edges_move_no_authority(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Cross-process determinism of the ordering value (D6)
+# Cross-process determinism of the ordering value
 #
 # The class: `reachable_value` folds balances over a `set`, and set iteration
 # order over strings varies with PYTHONHASHSEED. In binary float the fold is
@@ -1213,7 +1213,7 @@ def test_token_holdings_order_is_total_under_a_value_tie(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Resource safety-valve (inv. 4)
+# Resource safety-valve
 # ---------------------------------------------------------------------------
 
 
@@ -1250,7 +1250,7 @@ def test_resource_cap_logs_exactly_what_it_dropped(db_session, caplog):
 
 
 def test_value_never_gates_without_cap(db_session):
-    """With no cap, EVERY blank-gated behavior is selected regardless of value (inv. 4)."""
+    """With no cap, EVERY blank-gated behavior is selected regardless of value."""
     p = _protocol(db_session, "nogate-proto")
     c = _contract(db_session, p.id, ADDR(0x0E00))
     # No balances anywhere -> all value_at_stake == 0, but nothing is dropped.
@@ -1262,7 +1262,7 @@ def test_value_never_gates_without_cap(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Optional: Appendix A funnel against the dev DB (skips when absent)
+# Optional: the real-protocol funnel against the dev DB (skips when absent)
 # ---------------------------------------------------------------------------
 
 
@@ -1278,7 +1278,7 @@ def _dev_engine():
 
 
 def test_appendix_a_funnel_on_dev_db():
-    """Reproduce the §6 funnel + §5c gate-lift partition for etherfi (protocol_id=1).
+    """Reproduce the selection funnel + gate-lift partition for etherfi (protocol_id=1).
 
     Counts are computed LIVE from SQL rather than hardcoded — the dev DB drifts as
     the matchers grow, so the invariant tested is the PARTITION (blank subset ==
@@ -1328,7 +1328,7 @@ def test_appendix_a_funnel_on_dev_db():
         # The blank subset is exactly the old candidate set — the gate lift is
         # purely additive over blank functions (no blank function lost).
         assert len(blank) == expected_blank
-        # §5c gate lift: every value-mover already carries flow.out, so the lift
+        # Gate lift: every value-mover already carries flow.out, so the lift
         # re-enrolls a non-empty set of claim-carrying functions for value/supply
         # probing — restricted to exactly those families, never the whole set.
         enrolled = [c for c in cands if c.restrict_families]
@@ -1535,8 +1535,8 @@ def _prod_shape(session: Session, n_contracts: int = 4):
 
 
 def test_shape3_completed_jobs_do_not_own_a_never_planned_contract(db_session):
-    """The reviewer's hole: on prod every contract has a completed job, so a
-    row-existence rule marked all of them owned and NOTHING would plan them —
+    """On prod every contract has a completed job, so a row-existence ownership
+    rule marked all of them owned and NOTHING would plan them —
     a silent recall regression that looks exactly like a perf win."""
     proto, addrs, fns = _prod_shape(db_session)
     got = _scoped(db_session, proto.id, addrs[0])

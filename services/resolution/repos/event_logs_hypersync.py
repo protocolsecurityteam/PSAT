@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 def _hypersync_url_for_chain(chain_id: int) -> str | None:
-    """Per-chain HyperSync endpoint from the registry (inv. 5).
+    """Per-chain HyperSync endpoint from the registry.
 
     ``None`` means the chain has no proven HyperSync coverage — the repo is
     unavailable there (the same class as a missing token: a partial result, never
-    a silent mainnet fallback). Unknown chain ids resolve to ``None`` too; the
-    fail-loud raise is the later kill-the-defaults step, not this one.
+    a silent mainnet fallback). Unknown chain ids resolve to ``None`` too;
+    failing loud on an unregistered chain is a caller's job, not this lookup's.
     """
     from utils.chains import UnknownChainError, chain_by_id
 

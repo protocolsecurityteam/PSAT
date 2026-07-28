@@ -72,7 +72,7 @@ MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
 # Poller rotation slice — how many needs_polling contracts one pass claims,
-# ordered oldest-cursor-first. Bounds the pass to O(slice) memory (design §1.3).
+# ordered oldest-cursor-first. Bounds the pass to O(slice) memory.
 DEFAULT_POLL_CONTRACTS_PER_PASS = 500
 
 # monitored_events must only ingest confirmed logs — a reorg-rewound event
@@ -87,7 +87,7 @@ FETCHER_MIN_BISECT_SPAN = 125
 # Reason stamped on the enrollment-queue row when the watcher's relational sync
 # observes an on-chain controller rotation (owner/admin/authority/implementation).
 # Closes the gap where a rotation installs a new governance Safe that would
-# otherwise stay unmonitored until the slow sweep (design §2.3 call-site 5).
+# otherwise stay unmonitored until the slow sweep.
 _GOVERNANCE_ROTATION_REASON = "governance_rotation"
 
 # Write targets whose sync actually installs a new privileged controller — the
@@ -129,7 +129,7 @@ def _scan_float_env(name: str, default: float) -> float:
 
 
 def _max_getlogs_range_for(chain: str) -> int:
-    """Per-chain getLogs window width from the registry (inv. 10). Mainnet's
+    """Per-chain getLogs window width from the registry. Mainnet's
     registry value equals ``MAX_BLOCK_RANGE`` so mainnet is unchanged; an
     unresolvable chain falls back to the fleet-wide constant."""
     try:
@@ -139,7 +139,7 @@ def _max_getlogs_range_for(chain: str) -> int:
 
 
 def _confirmation_depth_for(chain: str) -> int:
-    """Per-chain reorg-confirmation depth (inv. 10). An explicit
+    """Per-chain reorg-confirmation depth. An explicit
     ``PSAT_SCAN_CONFIRMATION_DEPTH`` override still wins fleet-wide (operator
     lever); otherwise the registry's per-chain depth applies. Mainnet's registry
     value equals ``DEFAULT_CONFIRMATION_DEPTH`` so mainnet is unchanged."""
@@ -586,7 +586,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 )
             )
 
-    # Layer-1 singleton gate (design §2.4): a scan pass runs only under the
+    # Layer-1 singleton gate: a scan pass runs only under the
     # per-chain daemon lease. Acquire at pass start; a chain whose lease is
     # held elsewhere is skipped. If none are held we still beat (note=
     # 'lease_lost') so the fleet view sees a live-but-yielding process, not a
@@ -1108,8 +1108,8 @@ def _sync_relational_tables(
 
     A controller rotation (owner/admin/authority/implementation actually
     moving) marks the protocol dirty so the enrollment reconciler picks up any
-    newly-installed governance Safe within one drain tick (design §2.3
-    call-site 5) instead of waiting for the slow sweep.
+    newly-installed governance Safe within one drain tick instead of waiting
+    for the slow sweep.
     """
     if not mc.contract_id:
         return
@@ -1261,7 +1261,7 @@ def _update_controller_value_rows(
     ``_principal_lookup_type`` promotes on ``details`` alone via
     ``_has_timelock_delay`` — so a Timelock -> EOA rotation publishes a
     freshly-installed EOA as ``resolved_type="timelock"`` carrying the old
-    ``delay``, which inv 9 makes credit-bearing. That is a safety-inflating
+    ``delay``, which is a credit-bearing scoring input. That is a safety-inflating
     false credit, on top of a false statement about a named individual's keys.
     A Safe -> Safe rotation is the milder half: the new Safe inherits the old
     one's ``owners``/``threshold`` and ``details["address"]`` stays the OLD
@@ -1325,8 +1325,8 @@ def _sync_relational_from_poll(
     flows through the generic ControllerValue updater so custom slots
     (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
 
-    A controller rotation marks the protocol dirty (design §2.3 call-site 5)
-    so a newly-installed governance Safe is enrolled within one drain tick.
+    A controller rotation marks the protocol dirty so a newly-installed
+    governance Safe is enrolled within one drain tick.
     The caller only reaches here when ``new_value != old_value``, so an
     implementation swap (or a governance-relevant slot moving) is always a real
     change.
@@ -1562,7 +1562,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     from the static analyzer's tracked_controllers, plus vendored proxy
     storage slots and Safe/Timelock standard ABIs.
 
-    Rotation (design §2.2): each pass claims only the
+    Rotation: each pass claims only the
     ``PSAT_POLL_CONTRACTS_PER_PASS`` least-recently-polled active
     ``needs_polling`` contracts (``last_polled_at ASC NULLS FIRST``), so the
     pass is O(slice) in memory rather than O(all monitored contracts). Their
@@ -1581,13 +1581,13 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     (``services/monitoring/reconciler.py``) backfills the plan within its
     interval so this is a bounded transient on freshly-migrated rows.
 
-    Singleton correctness (design §2.4): the poll path is gated by the
+    Singleton correctness: the poll path is gated by the
     ``protocol_poller:<chain>`` daemon lease and — unlike the scan path — the
     lease is **load-bearing, not belt-and-braces**. ``state_changed_poll`` rows
     carry ``tx_hash=''`` / block 0 and stay ``log_index NULL``, so they sit
     outside the partial identity index by design; there is no Layer-2 idempotency
     to catch a duplicate poll detection. Two concurrent poll passes without the
-    lease MAY double-insert poll events (accepted, documented as design Risk #7).
+    lease MAY double-insert poll events — an accepted risk.
     """
     started = time.monotonic()
     slice_size = int(os.getenv("PSAT_POLL_CONTRACTS_PER_PASS", str(DEFAULT_POLL_CONTRACTS_PER_PASS)))

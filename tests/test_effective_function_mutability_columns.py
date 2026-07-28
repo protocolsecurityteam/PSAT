@@ -1,4 +1,4 @@
-"""W0-6 / D2 — the state-mutability witness is persisted, and it keeps three states.
+"""The state-mutability witness is persisted, and it keeps three states.
 
 ``effective_functions`` had no view/pure column, so the only way to ask "does
 this write state" was ``effect_targets`` — a display field that concatenates
@@ -578,7 +578,7 @@ def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, 
     assert typeofs[1] is None, "sinks was written as the jsonb scalar null"
     assert typeofs[2] is True and typeofs[3] is True
 
-    # Said once more through W0-5's own vocabulary: these columns must only ever
+    # Said once more in ``db/jsonb.py``'s vocabulary: these columns must only ever
     # reach the ``unset`` empty state, never ``written-null``. Two empty states
     # where one is meant is how the 780 ``conditions`` rows happened.
     assert jsonb_state_of(db_session, _contract, "state_writes", "mystery()") == JSONB_UNSET
@@ -612,14 +612,14 @@ def test_the_view_contradiction_sentinel_reaches_the_row_as_sql_null(db_session,
 
 
 def test_all_three_states_are_distinguishable_in_one_query(db_session, _contract) -> None:
-    """R1: proven-present, proven-absent and not-determined must be separable by
+    """Proven-present, proven-absent and not-determined must be separable by
     a consumer. One SQL query, three different answers."""
     records = _records(_EFFECTS)
     records.update(_records({}, capability_dicts={"mystery()": {"kind": "policy_check"}}))
     _write(db_session, _contract, records)
 
-    # Through ``jsonb_state``, not a raw SQL null test: W0-5's scan forbids the
-    # latter over a JSONB column, and rightly — it is only correct here because
+    # Through ``jsonb_state``, not a raw SQL null test: a bare ``IS NULL`` over a
+    # JSONB column is forbidden by convention, and rightly — it is only correct here because
     # of ``none_as_null=True``, which is a property of one column declaration and
     # not something a reader of the query can see.
     rows = db_session.execute(

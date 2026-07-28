@@ -327,9 +327,9 @@ describe("computeProtocolScore", () => {
     });
   });
 
-  // EFFECTS_RESOLUTION_SPEC §5.2: the effects bridge mints observable labels at
-  // the behavioral_observed tier, but the score must NOT consume verdicts yet
-  // (deferred to SCORING_INVARIANTS.md). The score of any input is byte-identical
+  // The effects bridge mints observable labels at the behavioral_observed tier,
+  // but the score must NOT consume verdicts while their consumption stays
+  // unspecified. The score of any input is byte-identical
   // whether or not behavioral_observed claims (and their re-projected labels) are
   // present.
   describe("behavioral_observed claims are score-inert (scoring deferred)", () => {
@@ -356,7 +356,7 @@ describe("computeProtocolScore", () => {
     });
 
     it("labeling a previously-blank money function does not move the score", () => {
-      // The core Phase-5 case: a blank outflow function gains flow.out + its
+      // The core case: a blank outflow function gains flow.out + its
       // re-projected "asset_send" label. The score must not start counting it.
       const blank = { function: "sweep()", effect_labels: [], claims: [], controllers: [] };
       const labeled = {
@@ -384,7 +384,7 @@ describe("computeProtocolScore", () => {
 });
 
 // A CREATE2 twin — the same address deployed on two of a protocol's chains — is
-// two distinct entities, not one (identity is (chain, address), inv. 13). The
+// two distinct entities, not one (identity is (chain, address)). The
 // stats-plane reductions used to key by bare address while iterating the
 // all-chains contract array, so a twin's per-chain actions/coverage collapsed
 // together. These assert the invariant directly: a same-address-two-chains

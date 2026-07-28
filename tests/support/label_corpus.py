@@ -56,9 +56,9 @@ from typing import Any, Iterable, Mapping
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
-# 4: ``claims[].witness`` and ``predicate_tree`` pinned per function (W0-7).
+# 4: ``claims[].witness`` and ``predicate_tree`` pinned per function.
 # 5: per-function ``action_summary`` pinned — the PROSE copy of the labels, which a
-# narrowed structured witness does not move (L-18).
+# narrowed structured witness does not move.
 GOLDEN_SCHEMA_VERSION = 5
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
@@ -182,7 +182,7 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/cast_wrapped_pull.sol",
     },
     {
-        # A4: parameter destinations that are NOT freely chosen — hash
+        # Parameter destinations that are NOT freely chosen — hash
         # commitment, mapping allowlist, storage equality — plus the
         # unconstrained negative control that must not narrow with them.
         "address": "0x00000000000000000000000000000000000000b0",
@@ -192,7 +192,7 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/constrained_destinations.sol",
     },
     {
-        # A8: the corpus had ZERO delegatecall_execution rows. Direct
+        # The corpus had ZERO delegatecall_execution rows. Direct
         # storage-setter destination, caller-keyed mapping element (must resolve
         # not-determined), and the library-routed shape whose recorded sink names
         # the LIBRARY's parameter instead of this contract's storage variable.
@@ -226,7 +226,7 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/tree_absent_publics.sol",
     },
     {
-        # A7: a timed pause latch with a compiler-produced duration bound and an
+        # A timed pause latch with a compiler-produced duration bound and an
         # indefinite latch in the same contract, so a bound may not be published
         # for the latch that has none.
         "address": "0x00000000000000000000000000000000000000f0",
@@ -236,7 +236,7 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/timed_latch.sol",
     },
     {
-        # A5: a bucket rate limiter in front of a value move, with the
+        # A bucket rate limiter in front of a value move, with the
         # limiter-free sibling that must publish a byte-identical flow witness
         # (the corpus form of "a rate limit does not change how much can leave"),
         # plus a same-named-different-selector decoy that must earn nothing.
@@ -251,7 +251,7 @@ MANIFEST: list[dict[str, Any]] = [
         # resolves onto CastWrappedPull above and inherits its standard_exact
         # flow.in at the policy tier; the second resolves onto AssetRecovery —
         # an interface-typed-parameter callee, joinable only through the
-        # canonical ``abi_selector`` key (L-17) — and inherits its flow.out.
+        # canonical ``abi_selector`` key — and inherits its flow.out.
         # See the fixture header: that row going empty again means the
         # canonical half of the join regressed.
         "address": "0x0000000000000000000000000000000000000100",
@@ -559,7 +559,7 @@ def _flatten_record(
                 # narrowed in the structured plane leaves this sentence intact: the
                 # corpus already holds functions whose ``destination_kind`` is
                 # ``not_determined`` while this string says "Executes arbitrary
-                # external calldata from the contract." (L-18), and the gate could see
+                # external calldata from the contract.", and the gate could see
                 # only the former. Empty string, never None, so presence is uniform.
                 "action_summary": str(info.get("action_summary") or ""),
                 # Plane-1 claims: claim_id, tier AND the full witness. The

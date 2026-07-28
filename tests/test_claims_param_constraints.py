@@ -1,8 +1,8 @@
-"""``_facts.param_constraints`` — the A3+A4 mandatory-gate analysis.
+"""``_facts.param_constraints`` — the mandatory-gate analysis.
 
 The question is *"does a mandatory revert gate reference this parameter between
 entry and sink?"*, and the answer has three states that a consumer must be able
-to tell apart (R1). These tests drive the analysis on hand-built predicate trees
+to tell apart. These tests drive the analysis on hand-built predicate trees
 so every branch — including the ones no corpus contract reaches — is exercised
 against a stated input, and on the compiled corpus so the states are reachable
 from real compiler output rather than only from a fixture.
@@ -153,7 +153,7 @@ def test_a_zero_address_check_constrains_nothing_the_sweepdust_positive_control(
     allowed form ``_to != 0``: it excludes exactly one address out of 2^160 and
     is not a constraint on where the funds go. Reading it as one classifies
     ``sweepDust`` — an operator-callable sweep to any address — as guarded, which
-    is the overshoot the spec forbids."""
+    is the overshoot this analysis must avoid."""
     ctx = _ctx(_leaf(operator="ne", operands=[_param(0), CONSTANT], parameter_indices=[0]))
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0)["state"] == "unconstrained_proven"
 
@@ -213,7 +213,7 @@ def test_an_external_revert_surface_guard_never_claims_to_pin():
     """``external_call_revert`` is another contract's answer: a blacklist
     (``nonBlacklisted``) and an allowlist (``deployedEtherFiNodes``) present the
     identical shape here, so ``pins`` is None — not determined — and a consumer
-    must not soften the caller-chosen reading on it (round-2 R3: all four real
+    must not soften the caller-chosen reading on it (all four real
     ``constrained`` flow rows are this kind and are in fact blacklists)."""
     ctx = _ctx(
         _leaf(
@@ -311,7 +311,7 @@ def test_a_routed_flows_recorded_router_op_is_transparent():
 
 
 def test_a_non_router_leaf_on_a_routed_function_blocks():
-    """The R4 sibling of the transparency positive above: a nonview body-call
+    """The sibling of the transparency positive above: a nonview body-call
     leaf that is NOT the recorded router op (``guard.checkDestination(to)``
     beside ``vault.exit(to, …)``) is unevaluable, and the function must fall to
     ``not_determined`` — not fall THROUGH to the ``unconstrained_proven``
@@ -370,7 +370,7 @@ def test_a_routed_flow_without_recorded_router_ops_makes_nothing_transparent():
 
 
 # ---------------------------------------------------------------------------
-# derived_from: consumed, never trusted as ground truth (WAVE_0 L-24)
+# derived_from: consumed, never trusted as ground truth
 # ---------------------------------------------------------------------------
 
 
@@ -414,8 +414,8 @@ def test_a_computed_operand_blocks_the_unconstrained_proof_even_with_resolved_pr
     """INVERTED from ``…proven_to_hold_only_constants_blocks_nothing``: the old
     arm read a fully-resolved ``derived_from`` as a COMPLETE account and let the
     leaf support ``unconstrained_proven`` for every unlisted parameter. That is
-    the L-24 misbind consumed as ground truth in exactly the direction WAVE_0
-    forbids — the flow-insensitive union can OMIT an origin that genuinely feeds
+    the misbind consumed as ground truth in exactly the forbidden direction —
+    the flow-insensitive union can OMIT an origin that genuinely feeds
     the value, so a resolved-looking list still proves nothing negatively. Every
     ``computed`` operand blocks; the positive ``derived`` bindings survive."""
     for provenance in ([], [_param(1, "receiver")], [STATE_VAR]):
@@ -431,7 +431,7 @@ def test_a_computed_operand_blocks_the_unconstrained_proof_even_with_resolved_pr
 
 
 def test_the_l24_misbind_shape_lands_the_omitted_parameter_on_not_determined():
-    """The exact WAVE_0 L-24 shape: ``keccak(receiver, nativeWrapper)`` published
+    """The exact misbind shape: ``keccak(receiver, nativeWrapper)`` published
     ``receiver`` (index 1) and OMITTED the genuinely-committed ``depositAsset``
     (index 2). Index 1 keeps its positive ``derived_from`` binding; index 2 —
     the misbind casualty — must be ``not_determined``, never a proof of
@@ -525,7 +525,7 @@ def test_an_unrecognised_unsupported_reason_still_blocks():
 
 
 def test_without_ir_no_effectful_callee_is_transparent_in_exec_mode():
-    """INVERTED (round-5 R1): the old arm pinned exec-mode transparency for ANY
+    """INVERTED: the old arm pinned exec-mode transparency for ANY
     body call, which is exactly the swallowing that let a mandatory Safe/Zodiac
     transaction-guard leaf publish ``unconstrained_proven`` on a vetted
     destination — byte-identical to a function with no guard at all, a proof of
@@ -571,7 +571,7 @@ def test_a_guard_origin_sink_is_never_part_of_the_transparency_set():
 
 
 # ---------------------------------------------------------------------------
-# Projection completeness — the round-2 rules (a leaf's silence is only
+# Projection completeness (a leaf's silence is only
 # evidence when its account of what it reads is checkable and complete)
 # ---------------------------------------------------------------------------
 
@@ -787,7 +787,7 @@ def _timelock_ctx() -> ClaimContext:
 
 
 def test_the_timelock_standard_gate_commits_every_parameter_of_execute():
-    """EtherFiTimelock.execute, review round 2 case (a): the generic walk saw no
+    """EtherFiTimelock.execute: the generic walk saw no
     parameter operand in the ``isOperationReady(id)`` fold and minted
     ``unconstrained_proven`` — a proof of absence — for the very parameter the
     exec witness proved hash-committed, and one claims list carried both. The
@@ -917,7 +917,7 @@ def _safe_ctx() -> ClaimContext:
 
 
 def test_the_safe_standard_gate_commits_only_the_signed_exec_entry():
-    """Round-3 R1: ``execTransaction`` is the entry whose parameters ride under
+    """``execTransaction`` is the entry whose parameters ride under
     the owners' threshold signatures — every one of its ten indices carries the
     standard commitment. The module-exec entries share ``SAFE_EXEC_SELECTORS``
     and the contract gate, but their guard is ``modules[msg.sender]`` — an

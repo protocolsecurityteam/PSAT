@@ -2369,7 +2369,7 @@
   line-height: 1.45;
 }
 
-/* Witness facts (SCORING plan §7.3): verbose destination/expiry/backing/reach
+/* Witness facts: verbose destination/expiry/backing/reach
    rows in the function inspector. */
 .ps-witness-facts {
   margin: 0;

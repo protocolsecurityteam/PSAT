@@ -91,7 +91,7 @@ def _etherscan_sources(address: str, chain: str | None) -> dict[str, str]:
         from utils.chains import UnknownChainError, chain_by_name
         from utils.etherscan import get_source
 
-        # Chat is a user-facing edge (inv. 6): no/unknown selected chain falls
+        # Chat is a user-facing edge: no/unknown selected chain falls
         # back to mainnet explicitly rather than failing the whole tool call.
         try:
             chain_id = chain_by_name(chain).chain_id if chain else 1

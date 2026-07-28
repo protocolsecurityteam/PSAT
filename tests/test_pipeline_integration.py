@@ -1463,7 +1463,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
 def test_worker_stage_chain_is_complete(monkeypatch):
     """The pipeline stage chain must connect end to end so no job gets stuck.
     ``PolicyWorker.next_stage`` is flag-dynamic (``PSAT_EFFECTS_STAGE`` gates the
-    policy->effects transition itself, §3a.4): off -> straight to coverage, on ->
+    policy->effects transition itself): off -> straight to coverage, on ->
     through the effects stage."""
     from db.models import JobStage
     from workers.coverage_worker import CoverageWorker

@@ -1,4 +1,4 @@
-"""``eth_simulateV1`` transport seam (EFFECTS_RESOLUTION_SPEC §3 / §4.2 / §4.5).
+"""``eth_simulateV1`` transport seam for the value-out and supply recipes.
 
 Tier 1 recipes that need *multi-call context* (read → mutate → read in one
 simulated block) or *value tracing* (balance / ``Transfer`` diffs) cannot use
@@ -6,10 +6,10 @@ plain ``eth_call``, which returns neither carried state nor logs. This module
 defines the injectable ``Simulate`` seam and its dataclasses, plus the single
 real-I/O implementation (:func:`eth_simulate_v1`) mirroring
 ``utils.rpc.eth_call_batch`` — so recipes stay pure/testable against stubbed
-wires exactly like ``differential_probe`` (§8.6). Tests never call the real
+wires exactly like ``differential_probe``. Tests never call the real
 wrapper; they inject recorded :class:`SimResult`s.
 
-Capability is *probed, never assumed* (inv. 14): ``eth_simulateV1`` support is
+Capability is *probed, never assumed*: ``eth_simulateV1`` support is
 checked per chain (``services.effects.preflight``); where unsupported a recipe
 declares its Tier-2 fallback explicitly, never a silent degradation.
 """
@@ -47,7 +47,7 @@ class SimLog:
 
 @dataclass(frozen=True)
 class SimCallResult:
-    """Per-call outcome, preserving RAW revert data (§8.3 — never decoded here)."""
+    """Per-call outcome, preserving RAW revert data (never decoded here)."""
 
     success: bool
     return_data: str
@@ -61,7 +61,7 @@ class SimResult:
     recipe asked to read.
 
     ``storage`` is ``{address_lower: {slot_hex: value_hex}}`` of post-block
-    values — the seam through which the code-upgrade recipe (§4.3) re-reads the
+    values — the seam through which the code-upgrade recipe re-reads the
     impl slot after the sentinel call. The real wrapper obtains it via the fork
     the caller runs the simulation against; the value is state-plane residue and
     never enters a behavioral-hash cache key.
@@ -79,7 +79,7 @@ Simulate = Callable[[Sequence[SimCall], str, "StateOverride | None"], SimResult]
 
 
 class SimulateUnsupportedError(RuntimeError):
-    """The upstream node does not implement ``eth_simulateV1`` (inv. 14). Routes
+    """The upstream node does not implement ``eth_simulateV1``. Routes
     the class to its declared Tier-2 fallback, never a silent degrade."""
 
 
@@ -93,9 +93,9 @@ def transfers_out(
     ``only_asset`` restricts the match to logs EMITTED BY that token
     (``SimLog.address``). A ``Transfer`` topic says nothing about which contract
     emitted it, so a caller asking "did *this specific* asset move" must pin the
-    emitter: the §4.5 supply recipe measures ``totalSupply`` on ONE token, and an
+    emitter: the supply recipe measures ``totalSupply`` on ONE token, and an
     unrelated token minting inside the same call would otherwise satisfy its
-    mint/sentinel witness. Unset (the §4.2 value-out use) means any asset leaving
+    mint/sentinel witness. Unset (the value-out use) means any asset leaving
     the contract counts, which is the intended reading there.
     """
     src = source_address.lower()
@@ -118,9 +118,9 @@ def transfers_out(
 def transfers_out_with_asset(result: SimCallResult, source_address: str) -> list[tuple[str, str, str, str]]:
     """:func:`transfers_out` plus the ASSET each move was in — the log's EMITTER.
 
-    The §5b reach measurement needs the asset, not just the fact of a move: a
-    holder's balance sheet is per asset, and attributing the whole sheet to whichever
-    asset happened to move is the A2 over-claim (a synthetic native-ETH move matched
+    The downstream value-reach measurement needs the asset, not just the fact of a
+    move: a holder's balance sheet is per asset, and attributing the whole sheet to
+    whichever asset happened to move over-claims (a synthetic native-ETH move matched
     a holder whose USD was 99.99% eETH). ``transfers_out(only_asset=…)`` pins ONE
     asset per call, so a caller with N holdings would need N scans and still could not
     see an asset it holds no row for; this returns what actually moved, once.
@@ -152,7 +152,7 @@ def transfers_in(
     :func:`transfers_out`: raw-log level only, no name/semantic inference, ETH moves
     surface here too via ``traceTransfers``.
 
-    Used by the §4.5 backing check (§5a): an asset transfer INTO the vault during a
+    Used by the supply recipe's mint-backing check: an asset transfer INTO the vault during a
     mint call is the co-occurring inflow that distinguishes a deposit-backed
     conversion from an unbacked (dilutive) admin mint. No new I/O — the logs are the
     ones the mint call already emitted.
@@ -165,7 +165,7 @@ def transfers_in(
     does. Backing means an inflow of some OTHER asset; newly-printed units of the
     token whose supply just rose back nothing.
 
-    ``only_asset`` is the opposite pin, and the §4.5 burn witness needs it: units
+    ``only_asset`` is the opposite pin, and the burn witness needs it: units
     destroyed are a ``Transfer`` to the zero address emitted BY the token whose
     ``totalSupply`` moved, and some OTHER token burning inside the same call says
     nothing about this one's supply. Passing both is contradictory and yields

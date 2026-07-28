@@ -143,7 +143,7 @@ describe("fetchDependencyGraphViz — only a proven negative may render as absen
     );
   });
 
-  // The three below are the reviewer's repro, inverted to pin the fix. Under
+  // The three below are a reported repro, inverted to pin the fix. Under
   // the previous `status === 503` mapping every one of them resolved to `null`
   // — the absence state — and cached it.
   it.each([

@@ -1,6 +1,6 @@
-"""Effects → claims bridge (EFFECTS_RESOLUTION_SPEC §5.2).
+"""Effects → claims bridge.
 
-Pure-mapping honesty per effect class, the two §8 fail-closed directions,
+Pure-mapping honesty per effect class, the two fail-closed directions,
 idempotent double-merge, behavioral_observed precedence over a static claim, and
 legacy effect_labels re-projection staying in sync. The DB-backed writer
 regression (call site 2 preserves observed claims across a policy rewrite) and
@@ -92,7 +92,7 @@ def test_supply_sign_selects_mint_or_burn():
 
 
 def test_supply_mint_projects_backing_into_observed_witness():
-    # §5a: the fork mint-backing object must reach claim.witness["observed"] so the
+    # Backing: the fork mint-backing object must reach claim.witness["observed"] so the
     # scorer/frontend can tell a backed conversion from an unbacked (dilutive) mint.
     backing = {"inflow_observed": False, "minted": True, "inflow_transfers": 0, "mint_transfers": 1}
     claim = claims_bridge.verdict_to_claim(
@@ -116,7 +116,7 @@ def test_freeze_pause_maps_to_pause_set_only():
 
 
 def test_value_out_projects_reach_into_observed_witness():
-    # §5b: the fork downstream-reach fields ride the flow.out claim witness — read
+    # Downstream reach: the fork reach fields ride the flow.out claim witness — read
     # from the per-deployment ``observed_residue`` column, never the witness.
     residue = {
         "observed_reach_value_usd": 55_200_000.0,
@@ -132,10 +132,10 @@ def test_value_out_projects_reach_into_observed_witness():
 
 
 def test_value_out_projects_reach_indeterminate_floor():
-    """§5b floor: the not-measured state survives projection whole, so a scorer sees
+    """Reach floor: the not-measured state survives projection whole, so a scorer sees
     "downstream reach not witnessed; the acting contract's own balance is a floor".
 
-    D3 shape: ``observed_reach_value_usd`` is ABSENT on such a row (the producer no
+    ``observed_reach_value_usd`` is ABSENT on such a row (the producer no
     longer publishes the floor under the key that means measured reach), and
     ``reach_determined: False`` is the discriminator. Both new keys must be in the
     projection allowlist or they are silently dropped one layer before the consumer.
@@ -170,7 +170,7 @@ def test_value_out_projects_the_measured_reach_discriminator():
 
 
 def test_the_observed_destination_answer_reaches_the_claim(a6=True):
-    """A6 / C3-S1. NO claim in the database carried ``destination_shape`` or
+    """NO claim in the database carried ``destination_shape`` or
     ``shape_proved_by``: the fork proved ``caller_arbitrary`` on 35 rows and a consumer
     had never seen it, while the two approve-then-pull rows published $472M of reach
     with no destination statement at all (their transfer sink lives in the callee, so
@@ -214,7 +214,7 @@ def test_reach_is_never_read_off_the_cacheable_witness():
 
 
 def test_freeze_pause_projects_severity_fields_verdict318_shape():
-    # §1 A2: the fork pause recipe records observed_blast_radius / auto_expiry /
+    # The fork pause recipe records observed_blast_radius / auto_expiry /
     # duration_bound_seconds on the verdict witness (verdict 318's real shape); the
     # projection must carry all three into claim.witness["observed"] so the scorer
     # can tell a $3.4B/30-day freeze from a harmless one.
@@ -255,14 +255,14 @@ def test_freeze_pause_indefinite_latch_fields_survive_as_none():
 
 
 def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
-    """L-58's CONTAINMENT PIN, scorer half.
+    """The duration-bound CONTAINMENT PIN, scorer half.
 
     ``duration_bound_seconds`` is a STATIC read of a guard constant and the fork
     cross-check (warp ``bound + 1`` and re-probe) is the only thing that turns it into
     a mitigation: the documented contract is "trust it as a severity REDUCER ONLY when
     ``auto_expiry is True``". That containment is what keeps a fabricated constant —
-    the harvest published lead times and cooldown offsets as freeze windows until Wave
-    4 narrowed it — from ever scoring as a shorter freeze.
+    the harvest published lead times and cooldown offsets as freeze windows until it
+    was narrowed — from ever scoring as a shorter freeze.
 
     So the pin is on the PAIRING: whenever the projection forwards a bound it must
     also forward the qualifier the witness recorded, in every one of its three states,
@@ -322,7 +322,7 @@ def test_authority_change_maps_to_registered_authority_grant():
 
 
 # ---------------------------------------------------------------------------
-# §8 fail-closed
+# Fail-closed
 # ---------------------------------------------------------------------------
 
 
@@ -332,7 +332,7 @@ def test_unknown_verdict_mints_nothing():
 
 def test_historical_with_failed_current_check_mints_nothing():
     # Tier-0 historical proves PAST capability; a failed current check means a
-    # present-tense label would overclaim (inv. 13) ⇒ withhold.
+    # present-tense label would overclaim ⇒ withhold.
     v = _verdict(EFFECT_CLASS_CODE_UPGRADE, tier=TIER_HISTORICAL, current_check_passed=False)
     assert claims_bridge.verdict_to_claim(v) is None
 

@@ -62,12 +62,12 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     # DECLARED signature, which is NOT a real selector when a parameter is
     # interface/enum/struct-typed (``sweepTo(IERC20,address,uint256)`` →
     # 0x38541c00 vs the dispatched 0x0aeef8c8), and the cross-contract join
-    # missed every such callee (L-17). Computed here because this is the one
+    # missed every such callee. Computed here because this is the one
     # pass that holds the canonical-signature map and the Slither fallback
     # (``ctx.canonical_selector``). A signature that cannot be lowered is
     # OMITTED — absence is not-determined, never a proof. ``fallback()`` /
     # ``receive()`` are excluded: they have no selector, and hashing their
-    # rendered names manufactures one (the L-14 class).
+    # rendered names manufactures a selector no caller can dispatch.
     abi_selectors = {
         signature: selector
         for signature in signatures

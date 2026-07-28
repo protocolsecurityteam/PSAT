@@ -1,4 +1,4 @@
-"""Effects worker — behavioral effect simulation (EFFECTS_RESOLUTION_SPEC §3a).
+"""Effects worker — behavioral effect simulation.
 
 The sixth pipeline stage worker, inserted between ``policy`` and ``coverage``.
 It determines what a gated function *does* by observing state transitions on a
@@ -8,26 +8,26 @@ The policy->effects transition is feature-flagged (``PSAT_EFFECTS_STAGE``,
 default-off, read in ``PolicyWorker.next_stage``); with the flag off no job ever
 enters this stage and the worker simply idles.
 
-**Consumption boundary (§3a amended by §5.2): labels-observable, scoring-
-deferred.** Verdicts persist to ``effect_behavior_cache`` / ``effect_verdicts``
-and §9 discrepancies to the warning channel (``record_degraded``). Beyond that,
+**Consumption boundary: labels-observable, scoring-deferred.** Verdicts persist
+to ``effect_behavior_cache`` / ``effect_verdicts`` and static-vs-witness
+discrepancies to the warning channel (``record_degraded``). Beyond that,
 *proven* verdicts are minted into registry claims on the matching
-``effective_functions`` rows through ``services.effects.claims_bridge`` (call
-site 1, after ``verdict_write``), so the frontend renders them as labels through
-the one shared claims vocabulary. The **score** still does not consume verdicts
-(deferred to ``SCORING_INVARIANTS.md``); the frontend score path neutralises the
+``effective_functions`` rows through ``services.effects.claims_bridge`` (after
+``verdict_write``), so the frontend renders them as labels through the one
+shared claims vocabulary. The **score** still does not consume verdicts — that
+integration is deliberately unwired; the frontend score path neutralises the
 ``behavioral_observed`` tier so it stays byte-identical.
 
 Orchestration lives here; the per-candidate probe wiring is a ``Prober`` seam
 (``services.effects.orchestrator``) and every wire (simulate / call-batch / anvil
 / transcript store / capability store / behavioral-hash resolver) is injectable,
 so the offline suite drives the whole stage against stubs with recorded
-transcripts (inv. 8) and the **zero-candidate path touches no wire at all**.
+transcripts and the **zero-candidate path touches no wire at all**.
 
 Inherited from ``BaseWorker`` (never reimplemented): lease claim, stale reclaim,
 background heartbeat, SIGTERM release, the ``[BOOT]`` banner, ``StageErrors``,
 and per-worker concurrency via ``PSAT_EFFECTS_JOB_CONCURRENCY`` (default 1,
-single-flight per inv. 16 — anvil snapshot/revert is process-global). This file
+single-flight because anvil snapshot/revert is process-global). This file
 overrides ``process()`` and the fail-forward finalizer only.
 """
 
@@ -93,7 +93,7 @@ _PHASES_AFTER_SELECTION = ("preflight", "cache_lookup", "tier1_probes", "tier2_f
 # transfer on the behavioral hash (a re-run/twin sees the same structural
 # result). Every OTHER unknown (capability fallback, precondition/mint revert,
 # malformed response) is chain-/state-/transient-dependent and must NEVER enter
-# the code-plane cache (§7) — those re-probe instead of transferring.
+# the code-plane cache — those re-probe instead of transferring.
 #
 # Membership turns on ONE question: did the probe call EXECUTE? Every reason
 # below is recorded only on a row whose ``details["observation"] == "executed"``
@@ -122,8 +122,8 @@ def _is_cacheable(eff: ObservedEffect) -> bool:
 
     Tier-0 (historical) verdicts NEVER transfer, even when proven: their truth
     depends on per-deployment state (the indexed upgrade *and* the current-state
-    check, inv. 13), so they are state-plane and live only in ``effect_verdicts``
-    (§7 "state-determined → never cached"). Caching one would let a present-tense
+    check), so they are state-plane and live only in ``effect_verdicts`` — a
+    state-determined verdict is never cached. Caching one would let a present-tense
     "upgradeable now" mint for a bytecode twin whose own current-state check was
     never run — EIP-1967 proxies of the same type share runtime bytecode, so the
     kernel hash collides across many real twins."""
@@ -135,7 +135,7 @@ def _is_cacheable(eff: ObservedEffect) -> bool:
         # so it is state-plane exactly as a Tier-0 historical verdict is — not a
         # code-plane structural fact a twin inherits. Refused whatever the reason
         # or verdict: a proven ``value_moved`` from a schedule→warp→execute is as
-        # untransferable as its reverts (§0.0.4).
+        # untransferable as its reverts.
         return False
     if eff.verdict == VERDICT_PROVEN:
         return True
@@ -143,7 +143,7 @@ def _is_cacheable(eff: ObservedEffect) -> bool:
 
 
 # Post-Cancun default per chain for the Tier-1 SimContext hardfork stamp. The
-# Tier-2 pause recipe asserts post-Cancun against the live fork separately (§8.7);
+# Tier-2 pause recipe asserts post-Cancun against the live fork separately;
 # this is only the recorded value for eth_call/eth_simulateV1 probes.
 _CHAIN_HARDFORK = {1: "prague", 8453: "prague"}
 
@@ -158,8 +158,8 @@ def _fork_enabled() -> bool:
 # --------------------------------------------------------------------------
 # State-plane residue re-observation on a cache HIT
 # --------------------------------------------------------------------------
-# A cache hit resolves the code-plane question and carries NO concrete values
-# (inv. 3), so ``_resolve_item`` returns ``concrete=None`` on both hit paths.
+# A cache hit resolves the code-plane question and carries NO concrete values, so
+# ``_resolve_item`` returns ``concrete=None`` on both hit paths.
 # That is right for the CACHE, but it leaves a hole in ``effect_verdicts``: a
 # deployment whose FIRST write is a hit — the second deployment of a behavior
 # some other contract already cached — gets NULL residue and, because a later
@@ -214,14 +214,14 @@ _RESIDUE_JSON_KEYS = (
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",
-    # D3: the three-state discriminator, and the floor under its own name. Both are
+    # The three-state discriminator, and the floor under its own name. Both are
     # load-bearing rather than decorative — while the not-measured branch published
     # the acting balance AS ``observed_reach_value_usd``, a consumer reading the
     # number without the flag got "$0 reach" for a zero-balance router that may move
     # millions. Omitting either key here would drop it before it reaches the row.
     "reach_determined",
     "observed_reach_floor_usd",
-    # A2: which ASSETS the reach was measured over, and the ones whose USD is not
+    # Which ASSETS the reach was measured over, and the ones whose USD is not
     # known. Per-deployment observations, so they ride the state plane with the
     # figures they qualify.
     "observed_reach_assets",
@@ -233,10 +233,10 @@ _RESIDUE_JSON_KEYS = (
     "reach_tvl_check",
     "observed_reach_rejected_usd",
     "protocol_tvl_usd",
-    # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
+    # Backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
     # code-plane witness and stay on ``details``; how many Transfer logs one
     # execution emitted is an observation of this deployment at this block and
-    # would otherwise be republished as every bytecode twin's own count (inv. 3).
+    # would otherwise be republished as every bytecode twin's own count.
     "backing_inflow_transfers",
     "backing_mint_transfers",
 )
@@ -251,12 +251,12 @@ def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
 
     ``code_upgrade`` is deliberately absent. Its only storable residue
     (``current_check_passed``) comes from the Tier-0 historical branch, and
-    ``_is_cacheable`` refuses to cache Tier-0 verdicts at all (inv. 13) — so no
+    ``_is_cacheable`` refuses to cache Tier-0 verdicts at all — so no
     cached row can exist for that branch and the arm that used to test for one
     was unreachable. Its Tier-1 branch yields ``impl_before``/``impl_after``,
     which this schema does not store.
 
-    A ``caller_arbitrary`` destination is excluded for the same reason (G6-3): the
+    A ``caller_arbitrary`` destination is excluded for the same reason: the
     recipe now WITHHOLDS the address on that shape — whatever a probe observes there
     is the recipient argument the prober itself supplied — so a re-probe is a
     guaranteed NULL by construction, and the attempt bound would otherwise be spent
@@ -278,7 +278,7 @@ def _residue_attempts(residue: Any) -> int:
 def _observed_residue(it: "_Item", concrete: dict[str, Any] | None) -> dict[str, Any] | None:
     """The ``effect_verdicts.observed_residue`` payload for one write.
 
-    Two things live here, both per-deployment: the §5b value-reach figures (holder
+    Two things live here, both per-deployment: the value-reach figures (holder
     ADDRESSES and this protocol's USD — state-plane, so they must never travel on
     the behavioral cache the way they did while they sat in ``details``), and the
     hit-path re-probe attempt count that bounds ``_mark_residue_gaps``. The column
@@ -330,9 +330,9 @@ def _anvil_port() -> int:
 
 
 def _resource_cap() -> int | None:
-    """Hard safety-valve only (inv. 4) — value never gates. Unset ⇒ no cap; every
-    distinct behavior is simulated. When set and exceeded, ``select_candidates``
-    logs exactly what it dropped."""
+    """Hard safety-valve only — value orders candidates, it never gates them.
+    Unset ⇒ no cap; every distinct behavior is simulated. When set and exceeded,
+    ``select_candidates`` logs exactly what it dropped."""
     raw = os.getenv("PSAT_EFFECTS_RESOURCE_CAP")
     if not raw:
         return None
@@ -420,7 +420,7 @@ class EffectsWorker(BaseWorker):
         self._injected_hash_resolver = hash_resolver
         self._injected_seams = seams
         self._capability_store: CapabilityStore = capability_store or InMemoryCapabilityStore()
-        # Single-flight fork state (inv. 16): one anvil per job, memoized on first
+        # Single-flight fork state: one anvil per job, memoized on first
         # Tier-2 plan and closed in ``process()``'s finally.
         self._anvil: Any = None
         self._anvil_error: Exception | None = None
@@ -474,7 +474,7 @@ class EffectsWorker(BaseWorker):
         )
 
     def _anvil_factory(self, chain_id: int, rpc_url: str):
-        """Single-flight forking-anvil factory (inv. 16): ONE fork per job per
+        """Single-flight forking-anvil factory: ONE fork per job per
         chain, created lazily on the first Tier-2 plan and memoized. Returns
         ``None`` when the fork is disabled, which makes the pause class emit no
         plan at all.
@@ -531,7 +531,7 @@ class EffectsWorker(BaseWorker):
             logger.warning("effects fork close failed", exc_info=True)
 
     def _make_transcript_store(self, session: Session, job: Job):
-        """Persist each transcript as a job artifact (§8.5) and return a stable,
+        """Persist each transcript as a job artifact and return a stable,
         backend-agnostic pointer resolvable via ``get_artifact(job_id, name)``.
         The pointer is the cache/verdict ``transcript_ptr`` — never an inline blob."""
 
@@ -551,7 +551,7 @@ class EffectsWorker(BaseWorker):
         try:
             self._process(session, job)
         finally:
-            # Never leak a fork subprocess, on any exit path (inv. 16).
+            # Never leak a fork subprocess, on any exit path.
             self._close_anvil()
 
     def _process(self, session: Session, job: Job) -> None:
@@ -598,9 +598,9 @@ class EffectsWorker(BaseWorker):
         # tier1_probes / tier2_fork → run recipes for misses + audit re-runs.
         self._run_probes(items, durations_ms, counters, seams)
 
-        # verdict_write → cache + state-plane persistence + §9 routing, then mint
-        # proven verdicts into registry claims on the matching effective_functions
-        # rows (§5.2 call site 1) — same job, same rows, same phase span so the
+        # verdict_write → cache + state-plane persistence + discrepancy routing,
+        # then mint proven verdicts into registry claims on the matching
+        # effective_functions rows — same job, same rows, same phase span so the
         # /monitor timeline gains no new stage.
         with log_timed_phase(logger, "verdict_write", durations_ms=durations_ms) as ph:
             self._write_verdicts(session, job, items, seams, counters)
@@ -630,7 +630,7 @@ class EffectsWorker(BaseWorker):
         protocol_id = getattr(job, "protocol_id", None)
         if not isinstance(protocol_id, int):
             # A contract job with no protocol has nothing to simulate against the
-            # §6 cascade (it needs the protocol's balances/control graph). Not an
+            # value cascade (it needs the protocol's balances/control graph). Not an
             # error — just an empty candidate set.
             return []
         address = getattr(job, "address", None)
@@ -772,7 +772,7 @@ class EffectsWorker(BaseWorker):
                     continue
                 if resolved is None:
                     # No behavioral hash (no cached bytecode) — withhold rather
-                    # than guess (per-behavior fail-forward, inv. 15).
+                    # than guess (per-behavior fail-forward).
                     counters.skipped += 1
                     unclean_contracts.add(cand.contract_id)
                     continue
@@ -818,7 +818,7 @@ class EffectsWorker(BaseWorker):
                         gate_ref=plan.gate_ref,
                     )
                 # First re-encounter of a shared hash (writer left audit_status
-                # None) triggers the §7 self-audit re-simulation.
+                # None) triggers the self-audit re-simulation.
                 needs_audit = cached is not None and cached.audit_status is None
                 items.append(
                     _Item(
@@ -906,7 +906,7 @@ class EffectsWorker(BaseWorker):
     def _run_probes(self, items: list[_Item], durations_ms: dict[str, int], counters: _Counters, seams: _Seams) -> None:
         """Run recipes for cache misses + audit re-runs. Tier-2 (fork/projection)
         and Tier-1 are timed under their own phases. A per-behavior probe failure
-        is caught here, recorded degraded, and the loop continues (inv. 15) — only
+        is caught here, recorded degraded, and the loop continues — only
         a whole-stage infra failure escapes ``process()``."""
         tier1 = [it for it in items if it.scope == SCOPE_KERNEL and (it.cached is None or it.needs_audit)]
         tier2 = [it for it in items if it.scope != SCOPE_KERNEL and (it.cached is None or it.needs_audit)]
@@ -1000,7 +1000,7 @@ class EffectsWorker(BaseWorker):
             self._route_section9(it, verdict, tier, transcript_ptr, discrepancy, counters)
 
     def _bridge_claims(self, session: Session, items: list[_Item]) -> int:
-        """§5.2 call site 1: fold this job's *proven* verdicts into registry claims
+        """Fold this job's *proven* verdicts into registry claims
         on the matching ``effective_functions`` rows. Reads the verdicts back from
         the DB (authoritative — includes cache-hit proven verdicts, not only fresh
         probes) and merges through the pure bridge. Fail-closed is the bridge's
@@ -1034,7 +1034,7 @@ class EffectsWorker(BaseWorker):
         self, session: Session, it: _Item, counters: _Counters
     ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None]:
         """Turn one worklist item into its persisted verdict, applying the cache /
-        self-audit rules (inv. 3 / §7)."""
+        self-audit rules."""
         if it.cached is None:
             # MISS — the probe result is the verdict; write it to the code-plane cache.
             eff = it.probed
@@ -1056,7 +1056,7 @@ class EffectsWorker(BaseWorker):
 
         cached = it.cached
         if it.needs_audit:
-            # §7 self-audit: compare the re-simulated kernel against the cached one.
+            # Self-audit: compare the re-simulated kernel against the cached one.
             fresh = it.probed
             if fresh is None:
                 # Could not re-simulate to audit → do not trust the unaudited hit.
@@ -1064,7 +1064,7 @@ class EffectsWorker(BaseWorker):
             if not kernel_signature_is_comparable(cached.details) or not kernel_signature_is_comparable(
                 fresh.witness_payload
             ):
-                # THE AUDIT FLOOR (§7). A signature with no structural key agrees with
+                # THE AUDIT FLOOR. A signature with no structural key agrees with
                 # itself unconditionally — 49 of 150 cache rows are ``authority_change``
                 # with ``verdict='unknown'`` and none of the five allowlisted keys, so
                 # their "audit" is the string ``unknown`` compared with itself, and a
@@ -1143,7 +1143,7 @@ class EffectsWorker(BaseWorker):
 
         bump_hit(session, cached)
         self._count_hit(it, counters)
-        # A plain hit carries no residue of its own (inv. 3). When this
+        # A plain hit carries no residue of its own. When this
         # deployment's stored row has none either, ``_mark_residue_gaps`` asked
         # for one observation; take its ``concrete`` and NOTHING else — the
         # verdict, tier, details and transcript stay the cache's, and nothing
@@ -1174,7 +1174,7 @@ class EffectsWorker(BaseWorker):
         self, session: Session, cached: EffectBehaviorCache, it: _Item, counters: _Counters, *, reason: str
     ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None]:
         """A caught hash collision / poisoned key: withhold the cached verdict and
-        file a §9 discrepancy. The cached verdict is NEVER propagated to this
+        file a discrepancy. The cached verdict is NEVER propagated to this
         deployment."""
         disc = Discrepancy(
             kind=reason,
@@ -1204,7 +1204,7 @@ class EffectsWorker(BaseWorker):
                 discrepancy.transcript_ptr = transcript_ptr
             route_discrepancy(discrepancy, contract_address=cand.probe_target, selector=cand.selector, tier=tier)
             counters.discrepancies_filed += 1
-        # Direction 3 (§7): an exact-finite_set principal rejected by a canonical
+        # Direction 3: an exact-finite_set principal rejected by a canonical
         # gate error falsifies the resolver's enumeration. Only on a FRESH probe
         # (miss) that actually executed the call — a cache hit ran nothing.
         if getattr(cand, "membership_exact", False) and it.cached is None and it.probed is not None:
@@ -1219,7 +1219,7 @@ class EffectsWorker(BaseWorker):
             )
             if filed:
                 counters.discrepancies_filed += 1
-        # Direction 2 (§9): a freshly-witnessed effect on a static-silent (blank)
+        # Direction 2: a freshly-witnessed effect on a static-silent (blank)
         # function is a candidate new static idiom — an INFORMATIONAL vocabulary-
         # growth signal, NOT a degradation (every proven verdict is one, so it
         # would flood a healthy job's stage_errors). Counted separately as a
@@ -1257,13 +1257,13 @@ class EffectsWorker(BaseWorker):
         retry_count: int | None,
         lease_id,
     ) -> None:
-        """Fail-forward (inv. 15): the effects stage NEVER emits
+        """Fail-forward: the effects stage NEVER emits
         ``failed_terminal``. On retry exhaustion (or a terminal error) advance to
         ``coverage`` instead of killing a job whose upstream policy artifacts are
         already complete and correct — flag-off is otherwise strictly better than
         flag-on, which the whole stage must not be.
 
-        Verdicts default to ``unknown`` (the §8 fail-closed value; per-behavior
+        Verdicts default to ``unknown`` (the fail-closed value; per-behavior
         probes wrote what they could before the escaping failure). The failing
         exception is already in the ``stage_errors`` artifact — ``BaseWorker``
         persisted the degraded accumulator before invoking this hook — so the

@@ -331,7 +331,7 @@ describe("ActivityPanel — a failed event poll does not erase proven events", (
   it("keeps the rows a previous tick proved present when the 30s refresh fails", async () => {
     // The rail polls every 30s. `catch { setEvents([]) }` replaced events already
     // PROVEN present with an empty list, so a transient 502 turned observed
-    // activity into "none recorded" and the next tick turned it back (L-2). The
+    // activity into "none recorded" and the next tick turned it back. The
     // poll is what makes it a clobber rather than a first-read miss, so the test
     // drives the real interval.
     let calls = 0;
@@ -372,7 +372,7 @@ describe("ActivityPanel — a failed event poll does not erase proven events", (
 // A contract whose two proxy signals contradict each other: `is_proxy: false` with
 // a `proxy_type`. One real row is exactly this — contract
 // 0x3c55986cfee455e2533f4d29006634ecf9b7c03f, `proxy_type: "beacon"`, with 14
-// `Upgraded(address)` logs at or before block 25619159 (L-1).
+// `Upgraded(address)` logs at or before block 25619159.
 const BEACON_MACHINE = {
   address: PROXY,
   name: "BeaconProxy",
@@ -479,8 +479,8 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     // `below` is empty would erase the one case where absence is the answer,
     // and the 500 test alone cannot see that.
     //
-    // The ledger (L-1) flagged this arm as PINNING A DEFECT, because a 404 used
-    // to mean either "the stage found no proxies" or "the stage raised" and the
+    // This arm once PINNED A DEFECT, because a 404 used to mean either
+    // "the stage found no proxies" or "the stage raised" and the
     // SPA read both as proven absence. The ambiguity is now removed at its
     // source: routers/analyses only 404s when a Contract row says
     // self-consistently that the target is not a proxy AND the upgrade-history
@@ -509,7 +509,7 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
   });
 
   it("keeps the no-boundary empty state for a 404", async () => {
-    // NEGATIVE CONTROL for the test above. Same L-1 note as the arm above: the
+    // NEGATIVE CONTROL for the test above. Same note as the arm above: the
     // 404 is now earned at the endpoint rather than assumed here.
     const legacy = { ...PROXY_CONTRACT, enrollment_block: null };
     mockActivity({ contracts: [legacy], monitoredEvents: [] });
@@ -657,7 +657,7 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     const entity = container.querySelector(".ps-activity-entity");
     expect(/First deployment/i.test(entity.textContent)).toBe(false);
     expect(entity.textContent).not.toContain(I1.slice(0, 8));
-    // Adopted from the tier-2 reviewer's repro, inverted. Not rendering the
+    // Adopted from a reported repro, inverted to pin the fix. Not rendering the
     // previous proxy's rows is only half of it: this fixture's whole point is
     // that "nothing is known about Pool yet", and the panel used to fill that
     // silence with a bold positive claim about Pool — byte-identical to what a

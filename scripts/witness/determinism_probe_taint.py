@@ -1,4 +1,4 @@
-"""Allocation-order determinism probe (W0-8, class B).
+"""Allocation-order determinism probe (class B).
 
 Runs the REAL static pipeline over the ``exec_arbitrary_binding.sol`` corpus
 fixture and prints a canonical JSON payload with two halves:
@@ -11,18 +11,19 @@ fixture and prints a canonical JSON payload with two halves:
 ``unordered_control``
     the *removed* idiom — ``next(iter(<set intersection of Slither variables>))``,
     copied verbatim from ``services/static/claims/matchers/_taint.py`` as it
-    stood on ``main`` before W0-3 — recomputed live over the same IR and
+    stood before the fix — recomputed live over the same IR and
     published beside the real answer. It is an instrument, never a product: the
     gate requires it to **vary** across the allocation matrix. If it stops
     varying, the matrix has lost its discriminating power and the gate says so
-    instead of reporting a green it has not earned (R2 — two sentinels in this
-    codebase were built, wired, and dead; this one proves itself on every run).
+    instead of reporting a green it has not earned. A control is only evidence
+    while it still discriminates, and this one proves itself on every run rather
+    than being trusted to still be alive.
 
 Why an allocation matrix and not just repeated processes: Slither's variable
 classes inherit ``object.__hash__``, so set iteration follows allocation
 addresses. Under pymalloc those addresses are a deterministic function of the
 allocation *sequence* — pools are page-aligned, so the low bits that decide a
-small set's probe order survive ASLR unchanged. Measured: the pre-W0-3 code
+small set's probe order survive ASLR unchanged. Measured: the pre-fix code
 produced byte-identical output across 8 fresh processes at a fixed
 ``PYTHONHASHSEED``, with and without varied preamble parses, and this probe's
 own control instrument is constant across 30 consecutive pymalloc runs.
@@ -36,7 +37,7 @@ Usage:
 
 ``--preamble`` parses other corpus fixtures first, so the target parse starts
 from a different heap. Kept because it costs nothing and is the perturbation
-that flipped the real ``LRTSquaredAdmin.rebalance`` pick during W0-3.
+that flipped the real ``LRTSquaredAdmin.rebalance`` pick while the defect was live.
 """
 
 from __future__ import annotations
@@ -68,14 +69,15 @@ PREAMBLE_FIXTURES: dict[str, tuple[str, str]] = {
 # The published binding this probe refuses to lose. A gate that can be satisfied
 # by emitting nothing is not a gate: if the pipeline stops proving a destination
 # on the one fixture function where the destination IS provable, the comparison
-# below would go green on an empty payload. See the sweepDust precedent — a
-# proposal that suppressed the positive control passed every test it was shown.
+# below would go green on an empty payload. Suppression is the failure mode that
+# got past every test the last time: a proposal that resolved every binding to
+# ``not_determined`` passed the whole suite while erasing the positive control.
 ANCHOR_SIGNATURE = "singlyAssignedLocal(address,bytes)"
 ANCHOR_EXPECTED = {"destination_kind": "param", "destination_param": "a"}
 
 
 def _prefix_idiom_pick(taint_module: Any, ctx: Any, signature: str) -> dict[str, str] | None:
-    """``_taint.arbitrary_exec_taint`` as it stood on ``main`` before W0-3.
+    """``_taint.arbitrary_exec_taint`` as it stood before the fix.
 
     Verbatim, including ``next(iter(...))`` over a set of Slither variables —
     that is the whole point. Only the return shape is narrowed to the two names.

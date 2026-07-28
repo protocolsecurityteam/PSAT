@@ -48,7 +48,7 @@ export function matchesEra(cov, impl) {
   // An ABSENT era bound is not a bound value. Folding `block_introduced` to
   // -Infinity and `block_replaced` to Infinity let a fully block-bounded audit
   // overlap an era whose window was never determined — a poll-detected impl
-  // publishes `block_introduced: null` (L-26), and the fold answers the hard
+  // publishes `block_introduced: null`, and the fold answers the hard
   // constraint "yes" from the absence of the data it is meant to test.
   //
   // KEY PRESENCE is the successor discriminator, taken from the producer:

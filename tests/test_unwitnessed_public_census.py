@@ -1,4 +1,4 @@
-"""Pin the unwitnessed-public census population definition (W2-B constraint b).
+"""Pin the unwitnessed-public census population definition.
 
 ``status='public' AND jsonb_typeof(conditions)='null'`` selects exactly the
 fall-through public population (351 rows on the production-shaped local DB) —
@@ -110,14 +110,14 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
 
 @requires_postgres
 def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_session):
-    """R1 round-2: every row the POLICY layer mints (the fall-through publics,
-    the assembly fail-closed rows, item 1's ``guard_extraction_uncertain``
+    """Every row the POLICY layer mints (the fall-through publics, the
+    assembly fail-closed rows, the ``guard_extraction_uncertain``
     reroute) must reach the table with ``authority_openness`` and
     ``authority_roles`` PROJECTED FROM the capability_expr the row itself
     publishes — never the NULL that is documented as "written before the
     column existed". Exercises the real path: ``build_effective_permissions``
     → ``write_effective_function_rows`` with an EMPTY resolver output, which
-    is exactly the branch that dropped the answers in round 1.
+    is exactly the branch that dropped the answers.
 
     Input-shape → published-state table this test pins:
 
@@ -192,16 +192,15 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
 
 @requires_postgres
 def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
-    """L-27 (a ledger item in this leg's own file surface, fixed here with
-    declared scope): ``fallback`` and ``receive`` are BOTH selector-less, so
-    after Leg A's ``""`` sentinel a contract declaring both produced two rows
-    under one observed-carry key and the carry cross-assigned one row's observed
-    claims to the other. The key is now ``(selector, function_name)``.
+    """``fallback`` and ``receive`` are BOTH selector-less, so once the
+    selector-less sentinel became ``""`` a contract declaring both produced two
+    rows under one observed-carry key and the carry cross-assigned one row's
+    observed claims to the other. The key is now ``(selector, function_name)``.
 
     Armed population: 0 realised on the local corpus (no analysed contract
     declares both, and every persisted selector-less row still carries the
-    pre-Leg-A fabricated selector) — structural on the first contract that
-    declares both after the sentinel.
+    fabricated selector that predates the sentinel) — structural on the first
+    contract that declares both after the sentinel.
     """
     from services.effects import claims_bridge
 

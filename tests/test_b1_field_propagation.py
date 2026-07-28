@@ -1,12 +1,12 @@
-"""Wave 2 T2: pin B.1 field propagation through the serializers.
+"""Pin field propagation through the serializers.
 
-Verifies the Wave-2 plumbing T2 owns:
+Verifies that:
   - ``FunctionPrincipal.principal_type`` survives both serializers
     (``services/governance/principals._function_principal_payload``
     and ``services/aggregations/analysis_detail._serialize_effective_functions``).
   - ``signature_witness`` principals reach the payload via a dedicated
     bucket on the per-function dict.
-  - The B.1 ``EffectiveFunction`` columns ``capability_expr`` /
+  - The ``EffectiveFunction`` columns ``capability_expr`` /
     ``conditions`` / ``status`` reach the per-function dict from both
     serializers.
   - ``_safe_role_int`` falls back to ``None`` for non-int identifiers
@@ -50,7 +50,7 @@ def _fp_namespace(**overrides: Any) -> SimpleNamespace:
 
 
 def test_signature_witness_bucket_in_company_function_entry() -> None:
-    """B.1 signature_witness principals route to a dedicated bucket so
+    """``signature_witness`` principals route to a dedicated bucket so
     the company-overview UI can render 'anyone with a valid signature
     from <signer>' without conflating with set-membership controllers."""
     from services.governance.principals import _build_company_function_entry
@@ -125,7 +125,7 @@ def test_signature_witness_in_serialize_effective_functions() -> None:
 
 
 def test_capability_expr_propagates_through_company_serializer() -> None:
-    """B.1 ``EffectiveFunction.capability_expr`` reaches the company
+    """``EffectiveFunction.capability_expr`` reaches the company
     payload's per-function entry verbatim."""
     from services.governance.principals import _build_company_function_entry
 
@@ -146,7 +146,7 @@ def test_capability_expr_propagates_through_company_serializer() -> None:
 
 
 def test_capability_expr_propagates_through_analysis_detail_serializer() -> None:
-    """B.1 columns reach ``/api/analyses/{run}`` payload via
+    """The ``EffectiveFunction`` columns reach ``/api/analyses/{run}`` payload via
     ``_serialize_effective_functions``."""
     from services.aggregations.analysis_detail import _serialize_effective_functions
 
@@ -164,7 +164,7 @@ def test_capability_expr_propagates_through_analysis_detail_serializer() -> None
 
 
 def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:
-    """A direct ``int(role_grant["role"])`` cast crashes on B.1's
+    """A direct ``int(role_grant["role"])`` cast crashes on the
     string role-name and Condition-mapping shapes. ``_safe_role_int``
     must coerce ints, return ``None`` for non-int, and never raise."""
     from services.policy.principal_enrichment import _safe_role_int as _safe_role_int_pe
@@ -202,7 +202,7 @@ def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
                 "authority_public": False,
                 "direct_owner": None,
                 "controllers": [],
-                # B.1-shaped role grant: role-name string instead of int.
+                # Role grant carrying a role-name string instead of an int.
                 "authority_roles": [
                     {
                         "role": "PAUSER_ROLE",

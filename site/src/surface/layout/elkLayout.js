@@ -224,7 +224,7 @@ function buildGroupControllers(primary, kids, principalList, nameByAddr, chain =
   const childSet = new Set(kids);
 
   const rowFor = (principal, isPrimary) => {
-    // Keyed by (chain, address) (inv. 13). A controls_detail row carries its own
+    // Keyed by (chain, address). A controls_detail row carries its own
     // chain, so a twin-governing principal's two same-address rows key to their
     // own chains — only the row on the page's active chain matches a visible kid
     // below; the other-chain row finds no child and is dropped. Legacy rows with

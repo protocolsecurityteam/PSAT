@@ -34,7 +34,7 @@ export function buildControlGraphIndex(companyData) {
       if (edge.relation === "external_call_target") continue;
       // controller_value_unattributed says the target's authority_provenance
       // was ABSENT — nothing proved it gates anyone. Walking it would publish
-      // an unproven governance path (Leg A's tree widening enrolled pure
+      // an unproven governance path (a widened provenance tree enrolled pure
       // constants and non-authority mappings this way).
       if (edge.relation === "controller_value_unattributed") continue;
       const from = (edge.from || "").toLowerCase();

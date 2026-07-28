@@ -374,7 +374,7 @@ def test_derivations_merge_per_function():
 
 
 # ---------------------------------------------------------------------------
-# L-17: the join meets through the canonical ``abi_selector`` when the callee's
+# The join meets through the canonical ``abi_selector`` when the callee's
 # declared signature is not the ABI form (interface/enum/struct params).
 # ---------------------------------------------------------------------------
 
@@ -394,7 +394,7 @@ def _interface_param_callee(claims: list[dict], *, stamped: bool) -> dict:
 
 
 def test_interface_param_callee_joins_via_the_canonical_key():
-    """The realised L-17 pair: AssetRecovery's record says 0x38541c00, the
+    """The realised pair: AssetRecovery's record says 0x38541c00, the
     caller's sink says 0x0aeef8c8; with the canonical stamp the join meets and
     the caller inherits flow.out at policy_derived — its OWN rank, not the
     callee's standard_exact (the tier lattice scores it as the weakest tier)."""

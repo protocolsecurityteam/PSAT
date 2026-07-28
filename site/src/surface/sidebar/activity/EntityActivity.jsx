@@ -51,7 +51,7 @@ export function EntityActivity({
   // Three states, not `Boolean(is_proxy)`. `not_determined` is a row whose two
   // proxy signals contradict each other (`is_proxy: false` with a `proxy_type` or
   // an `implementation`), and one real contract is exactly that with 14 real
-  // pre-enrollment upgrades (L-1). It must be ASKED about, never answered from
+  // pre-enrollment upgrades. It must be ASKED about, never answered from
   // the flag: `isProxy` gates what may be rendered as proven, `mayBeProxy` gates
   // whether the question gets asked at all.
   const proxyhood = proxyState(machine);
@@ -85,7 +85,7 @@ export function EntityActivity({
         // replace events a previous tick had PROVEN present with an empty list,
         // so a transient 502 turned observed activity into "none recorded" and
         // the next tick turned it back. The proven data is kept and the failure
-        // is said out loud instead (L-2).
+        // is said out loud instead.
         setEventsOutcome({ key, state: "not_determined" });
       }
     };

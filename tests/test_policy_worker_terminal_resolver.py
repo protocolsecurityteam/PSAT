@@ -1,4 +1,4 @@
-"""A4 wiring: the policy-worker contract-controller step resolver (SCORING §4)."""
+"""The policy-worker contract-controller step resolver used by the authority walk."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def test_resolver_returns_all_controller_planes(monkeypatch):
 
 def test_resolver_returns_empty_when_probed_clean_with_no_controller(monkeypatch):
     """INVERTED (was ``test_resolver_returns_none_when_no_controller``, which
-    pinned the W2-B item 12 collapse): ``[]`` from
+    pinned the proven-absence/probe-failure collapse): ``[]`` from
     ``read_contract_controllers`` means every canonical getter answered cleanly
     and named no controller — a PROVEN absence (a renounced / ownerless
     contract). Mapping it onto ``None`` here published "we could not look" over

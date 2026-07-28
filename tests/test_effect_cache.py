@@ -1,5 +1,5 @@
 """Effect-verdict cache: kernel-vs-projection scope, self-audit, state-plane
-residue, version invalidation (EFFECTS_RESOLUTION_SPEC §7 / inv. 3, 12).
+residue, version invalidation.
 
 DB-backed (real Postgres), offline-safe. Mirrors the materialization-cache test
 conventions."""
@@ -44,7 +44,7 @@ def clean_effects(db_session):
 
 
 # ---------------------------------------------------------------------------
-# kernel vs projection scoping (inv. 3)
+# kernel vs projection scoping
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +127,7 @@ def test_kernel_transfers_across_surfaces_one_row(clean_effects):
 
 
 # ---------------------------------------------------------------------------
-# self-audit (§7)
+# self-audit
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +296,7 @@ def test_stale_function_id_does_not_poison_sibling_verdicts(clean_effects):
 # ---------------------------------------------------------------------------
 # State-plane residue survives observation-less rewrites (the cache-HIT shape).
 #
-# The code-plane cache structurally carries no concrete values (inv. 3), so every
+# The code-plane cache structurally carries no concrete values, so every
 # cache-HIT resolution re-writes its verdict row with ``concrete_destination=None``.
 # An unconditional SET erased the cold first-sighting observation on every hit.
 # ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ def test_downgraded_verdict_drops_the_residue_that_justified_it(clean_effects):
 @requires_postgres
 def test_observed_residue_merges_key_wise_across_observation_less_rewrites(clean_effects):
     """``observed_residue`` is a bag of independent residue facts written by
-    different paths (§5b reach on a cold probe, re-probe bookkeeping on a hit), so
+    different paths (downstream value-reach on a cold probe, re-probe bookkeeping on a hit), so
     a write carrying only some keys must leave the others standing."""
     session = clean_effects
     _write(session, observed_residue={"observed_reach_value_usd": 42.0, "observed_reach_holders": ["0xaa"]})
@@ -497,20 +497,20 @@ def test_function_id_link_survives_an_unresolved_rewrite(clean_effects):
 
 
 # ---------------------------------------------------------------------------
-# G6-C1 — the code/deployment plane split, and the §7 audit floor
+# The code/deployment plane split, and the self-audit floor
 # ---------------------------------------------------------------------------
 
 
 @requires_postgres
 def test_a_cache_row_never_stores_a_per_deployment_observation(clean_effects):
-    """inv. 3 enforced at the WRITE. Every key in ``DEPLOYMENT_PLANE_KEYS`` is an
+    """Cache scope enforced at the WRITE. Every key in ``DEPLOYMENT_PLANE_KEYS`` is an
     observation of ONE deployment's fork state, and this row is served to every other
     deployment sharing the bytecode — so a hit used to hand deployment B deployment A's
     blast radius, A's pre-pause succeeding set and A's seeding qualifiers as B's own
     witness. Measured before the split: 74 of 150 local cache rows carried at least one
     (29 freeze_pause, 21 supply, 20 value_out, 4 more).
 
-    They are ABSENT on the served row — absent, not ``null`` and not ``false`` (R1), so a
+    They are ABSENT on the served row — absent, not ``null`` and not ``false`` — so a
     consumer reads "no observation of my own" instead of another contract's number."""
     session = clean_effects
     row = effect_cache.upsert_cached_verdict(

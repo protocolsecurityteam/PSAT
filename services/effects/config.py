@@ -2,8 +2,8 @@
 
 Kept deliberately light (no DB / worker imports) so ``policy_worker`` can read
 the transition flag without importing the effects worker itself. The flag ships
-**default-off** and gates the ``policy`` -> ``effects`` *transition* (§3a.4 /
-inv. 15), not merely worker processing: a job parked at a stage no worker drains
+**default-off** and gates the ``policy`` -> ``effects`` *transition*, not merely
+worker processing: a job parked at a stage no worker drains
 sits forever, so ``policy.next_stage`` consults this before ever routing into
 ``effects``.
 """
@@ -18,15 +18,15 @@ _TRUTHY = {"1", "true", "yes", "on"}
 def effects_stage_enabled() -> bool:
     """Whether the ``policy`` -> ``effects`` transition is armed.
 
-    Default-off (inv. 15). Unlike ``PSAT_DIFFERENTIAL_PROBE`` — which now
+    Default-off. Unlike ``PSAT_DIFFERENTIAL_PROBE`` — which now
     defaults *on* — this stays off until the worker is deployed and the
     preview cycle validates it; enabling it without an effects worker running
-    parks every job (§3a.4)."""
+    parks every job."""
     return os.getenv("PSAT_EFFECTS_STAGE", "0").strip().lower() in _TRUTHY
 
 
-# Effect classes (v1). Behavioral labels — never name-derived (inv. 1). The
-# string values are the ``effect_class`` cache-key component (inv. 12).
+# Effect classes (v1). Behavioral labels — never name-derived. The string
+# values are the ``effect_class`` cache-key component.
 EFFECT_CLASS_FREEZE_PAUSE = "freeze_pause"
 EFFECT_CLASS_VALUE_OUT = "value_out"
 EFFECT_CLASS_CODE_UPGRADE = "code_upgrade"
@@ -43,17 +43,17 @@ EFFECT_CLASSES = frozenset(
     }
 )
 
-# Cache scope discriminator (inv. 3): function-local kernels transfer on the
+# Cache scope discriminator: function-local kernels transfer on the
 # resolved-function hash; contract-scoped projections additionally key on the
 # whole-contract surface hash.
 SCOPE_KERNEL = "kernel"
 SCOPE_PROJECTION = "projection"
 
-# Destination-shape vocabulary (§4.2). Only ``immutable_fixed`` is benign; only
-# static can positively PROVE the two fixed shapes (universals, argued from the
-# source); simulation can only PROVE ``caller_arbitrary`` (an existential, via a
-# sentinel that lands). Shared vocabulary because both planes speak it: the
-# synthesizer derives a shape from static facts and the recipe adjudicates it
+# Destination-shape vocabulary for the value-out class. Only ``immutable_fixed``
+# is benign; only static can positively PROVE the two fixed shapes (universals,
+# argued from the source); simulation can only PROVE ``caller_arbitrary`` (an
+# existential, via a sentinel that lands). Shared vocabulary because both planes speak it: the
+# synthesizer derives a shape from static facts and the recipe checks it
 # against what the fork observed.
 SHAPE_CALLER_ARBITRARY = "caller_arbitrary"
 SHAPE_STORAGE_DETERMINED = "storage_determined"
@@ -90,7 +90,7 @@ OBSERVATION_REVERTED = "reverted"
 OBSERVATION_NOT_RUN = "not_run"
 
 # ``details["duration_bound_source"]`` — how a freeze latch's window was
-# established (A7). Here in the shared vocabulary for the same reason
+# established. Here in the shared vocabulary for the same reason
 # ``observation`` is: the static reader (``calldata.read_max_pause_duration``)
 # produces it and the fork recipe (``anvil.pause_recipe``) publishes it, and while
 # the answer was a bare ``int | None`` the two states ``None`` conflates were
@@ -123,9 +123,9 @@ OBSERVATION_NOT_RUN = "not_run"
 #     storage (etherfi ``PausableUntil``: ``$.pauseUntilDuration``), or no lowered
 #     leaf reads the latch at all. ``duration_bound_seconds`` is ``None`` and that
 #     ``None`` means "unknown". It must NOT be scored as indefinite and must not
-#     be scored as bounded — it is a confidence gap (inv. 2).
+#     be scored as bounded — it is a confidence gap.
 # An ABSENT key means the row predates the discriminator: those rows were written
-# under the pre-A7 contract, which read ``None`` as indefinite, and every one of
+# under the earlier contract, which read ``None`` as indefinite, and every one of
 # the four proven rows in the local corpus was a ``pauseUntil`` latch that DOES
 # expire — so treat an absent source as ``not_determined``, never as indefinite.
 DURATION_BOUND_GUARD_CONSTANT = "guard_constant"
@@ -140,19 +140,19 @@ DURATION_BOUND_NOT_DETERMINED = "not_determined"
 # is the token — so the field discriminates assets and this value is a real answer
 # rather than a parser artifact.
 #
-# It exists here because the §5b reach measurement is per ASSET: a holding is matched
-# against the emitter of the log that moved it, and native ETH has no token contract
-# to be the emitter. Without this key a native move matches no holding at all, which
-# is precisely why the "just pass ``only_asset``" fix was refuted — it would have
+# It exists here because the downstream value-reach measurement is per ASSET: a holding
+# is matched against the emitter of the log that moved it, and native ETH has no token
+# contract to be the emitter. Without this key a native move matches no holding at all,
+# which is precisely why the "just pass ``only_asset``" fix was refuted — it would have
 # under-claimed 100%.
 NATIVE_ASSET_LOG_EMITTER = "0x" + "ee" * 20
 
-# Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
-# non-observation and for the inv. 15 fail-forward exhaustion path.
+# Verdict vocabulary. ``unknown`` is the fail-closed value used for every
+# non-observation and for the fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"
 VERDICT_UNKNOWN = "unknown"
 
-# Evidence tiers (§3), cheapest/most-authoritative first.
+# Evidence tiers, cheapest/most-authoritative first.
 #
 # WARNING — these strings name the effects stage's INTERNAL evidence ladder
 # (historical index → eth_call → fork), NOT the scoring framework's Tier 1/2/3.

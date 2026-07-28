@@ -275,7 +275,7 @@ def classify_resolved_address(
 # plain ``contract`` principal. ``classify_resolved_address`` only reads
 # ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
 # generic Ownable/AccessManaged contract falls through untyped — this fills that
-# gap for the contract-principal terminal walk (SCORING plan §4). Each is a
+# gap for the contract-principal terminal walk. Each is a
 # caller-independent view getter returning a single address.
 _CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
 
@@ -289,13 +289,13 @@ def read_contract_controllers(
     not dispositively complete.
 
     Returns the FULL set, not just the first hit: Solmate/Solady ``Auth`` (the
-    §4 motivating world — a BoringVault manager is a ``RolesAuthority``, itself
+    motivating world — a BoringVault manager is a ``RolesAuthority``, itself
     an ``Auth``) exposes ``owner`` AND ``authority`` as PARALLEL live control
     planes (``requiresAuth`` accepts either). Naming one as THE key would
     over-claim a settled controller while a second live plane also governs, so
     the caller must see the whole set and fail closed on ambiguity.
 
-    **Probe-completeness (Register #3).** All three getters are probed every call
+    **Probe-completeness.** All three getters are probed every call
     (no early return). A clean ``eth_call`` that reverts / returns absent / zero
     means "this getter is genuinely not a control plane" — skipped, not an error.
     But a transient ``_PROBE_ERROR`` on ANY getter means the plane set is NOT
@@ -354,7 +354,7 @@ def _is_definitive_revert(outcome: Any) -> bool:
     """Did the EVM answer (a revert), or did the read fail to happen?
 
     This is the discriminator ``read_contract_controllers``' contract has always
-    claimed and never had (W2-B item 12): every failure came back as the single
+    claimed and never had: every failure came back as the single
     ``_PROBE_ERROR``, so a contract with NO ``authority()`` — which is most of
     them — tripped the incomplete-witness guard and the whole plane set came back
     ``None``. Measured consequence: ``terminal_principal.status`` is

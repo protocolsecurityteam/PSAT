@@ -969,7 +969,7 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# L-25: ``callee_args_digest`` is content-stable across processes/seeds.
+# ``callee_args_digest`` is content-stable across processes/seeds.
 # ---------------------------------------------------------------------------
 
 _DIGEST_SNIPPET = """
@@ -1020,7 +1020,7 @@ def test_callee_args_digest_is_seed_independent():
 
 def test_operand_tie_break_is_seed_independent():
     """Two computed Sources tied on every sort-key field before the digest
-    (the L-25 shape: same kind, no parameter/state/callee identity) must
+    (same kind, no parameter/state/callee identity) must
     resolve to the SAME published operand in every process. Before the fix the
     winner was ordered by a ``hash()``-seeded digest string; 37-46 operand
     slots flickered across 25/88 production units."""

@@ -1,4 +1,4 @@
-"""What each W0-7 corpus fixture is FOR, asserted rather than implied.
+"""What each corpus fixture is FOR, asserted rather than implied.
 
 ``tests/test_label_corpus.py`` proves the golden equals a fresh compile of every
 corpus contract. That is a change detector: it says the bytes moved, never what
@@ -104,8 +104,8 @@ def test_the_four_param_destinations_are_told_apart_by_their_guards():
 def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
     """``payCommitted``'s destination is proven through ``derived_from`` — the
     argument provenance of the ``keccak256(abi.encode(to, salt))`` the guard
-    compares. That provenance is flow-INSENSITIVE (WAVE_0 L-24: it misbinds one
-    origin on a locally reassigned name), so the verdict records the binding it
+    compares. That provenance is flow-INSENSITIVE (it misbinds one origin on a
+    locally reassigned name), so the verdict records the binding it
     used. A consumer that must not rest on a flow-insensitive proof can see that
     it did; the two direct-operand shapes say ``operand``."""
     fns = _functions(CONSTRAINED)
@@ -291,12 +291,12 @@ def test_a_destination_that_no_parameter_determines_is_not_determined():
 
 
 # ---------------------------------------------------------------------------
-# 6. G3 classes F and R — a caller gate that produces no tree
+# 6. classes F and R — a caller gate that produces no tree
 # ---------------------------------------------------------------------------
 
 
 def test_class_F_a_value_returning_forwarder_keeps_its_caller_gate():
-    """INVERTED (W1-A, commit a96b2ca3). This test previously asserted the
+    """INVERTED (commit a96b2ca3). This test previously asserted the
     defect: ``withdrawAll()`` forwards to a gated overload and, because the
     internal call's result was CONSUMED by the ``return``, the gate recursion
     was skipped and the function ended up with NO predicate tree — which every
@@ -323,7 +323,7 @@ def test_class_F_a_value_returning_forwarder_keeps_its_caller_gate():
 
 
 def test_class_R_fallback_and_receive_are_caller_gated_and_carry_a_tree():
-    """INVERTED (W1-A, commit c2a2ebe0). This test previously asserted the
+    """INVERTED (commit c2a2ebe0). This test previously asserted the
     defect: ``fallback`` and ``receive`` were excluded from the tree-building
     surface, so neither could ever carry a tree, and both of these require
     ``msg.sender == owner``. They are built for now, and the fabricated
@@ -369,7 +369,7 @@ def test_the_pause_duration_reader_tells_the_three_latch_states_apart():
     it), a latch no lowered leaf reads is ``not_determined``, and only the first may
     ever be rendered as "indefinite latch, no self-recovery".
 
-    CHANGED at Wave 4 (L-58): ``pausedUntil`` asserted ``(2592000,
+    CHANGED: ``pausedUntil`` once asserted ``(2592000,
     "guard_constant")`` here and now asserts ``not_determined``. The guard is
     ``require(block.timestamp < pausedUntil + MAX_PAUSE)`` — absorbed group
     ``{latch, constant}`` — and the harvest is now side/operator-aware, because
@@ -471,7 +471,7 @@ def test_the_golden_carries_a_policy_derived_claim():
 
 
 def test_a_callee_with_an_interface_typed_parameter_is_reached_via_the_canonical_key():
-    """INVERTED (L-17): this arm pinned the join miss as correct while the gap
+    """INVERTED: this arm pinned the join miss as correct while the gap
     was real — ``build_callee_claim_map`` keyed the callee's claims by keccak
     of the DECLARED name, ``sweepTo(IERC20,address,uint256)`` → 0x38541c00,
     while the caller's sink records the ABI selector,

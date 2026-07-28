@@ -13,7 +13,7 @@ function usdCell(row) {
     ? row.usd_value_state === "measured"
     // Pre-fix payloads carry no state key. `usd_value` is the producer's own
     // discriminator and encodes unpriced correctly as null, so fall back to it
-    // rather than treating a key-less row as either answer (L-45).
+    // rather than treating a key-less row as either answer.
     : row?.usd_value != null;
   if (!determined) return { text: "not priced", className: "ps-balance-usd unpriced" };
   const formatted = formatUsd(row.usd_value);
@@ -25,7 +25,7 @@ function usdCell(row) {
 // `holdings_coverage.state` is two-valued by construction — the backend cannot
 // prove completeness (see company_overview) — so this only ever answers
 // "cannot rule truncation out".
-// TWO INDEPENDENT FACTS, and both are disclosed when both hold (L-66). Truncation is
+// TWO INDEPENDENT FACTS, and both are disclosed when both hold. Truncation is
 // about assets that were never read; unvalued rows are about assets that were read and
 // could not be priced. Returning the first and skipping the second — which this did —
 // silently dropped the pricing disclosure for exactly the contracts where the total is

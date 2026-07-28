@@ -383,7 +383,7 @@ describe("aggregateEdges", () => {
   });
 });
 
-describe("buildControlAdjacency — chain scope (inv. 13)", () => {
+describe("buildControlAdjacency — chain scope", () => {
   const CTRL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const TWIN = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -417,7 +417,7 @@ describe("buildControlAdjacency — chain scope (inv. 13)", () => {
   });
 });
 
-describe("flowOnChain — canvas fund-flow scope (R3, inv. 13)", () => {
+describe("flowOnChain — canvas fund-flow scope", () => {
   const A = "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
   const B = "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
 
@@ -458,7 +458,7 @@ describe("flowOnChain — canvas fund-flow scope (R3, inv. 13)", () => {
   });
 });
 
-describe("buildGroupControllers — controls_detail chain keying (R4, inv. 13)", () => {
+describe("buildGroupControllers — controls_detail chain keying", () => {
   const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
   const safeAddr = RICH_ADDRESSES.SAFE;
 

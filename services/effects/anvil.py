@@ -1,4 +1,4 @@
-"""Tier-2 anvil fork transport + the §4.1 pause recipe (EFFECTS_RESOLUTION_SPEC).
+"""Tier-2 anvil fork transport + the freeze/pause recipe.
 
 Tier 2 is reserved for effects that need SEQUENCING or TIME — proving a freeze's
 blast radius and that it auto-expires at the contract's own
@@ -9,11 +9,11 @@ seam discipline as ``call_batch``/``Simulate``: exactly one place
 everything else takes the transport injected and is tested against a stub.
 
 Hard rules honored here: the hardfork is PINNED and ASSERTED and recorded per
-transcript (§8.7, inv. 14 — post-Cancun EIP-6780 is why a stale fork mints wrong
-witnesses); the anvil/foundry version is recorded per transcript; fork access is
-single-flight (inv. 16 — snapshot/revert is process-global, the worker runs
+transcript (post-Cancun EIP-6780 is why a stale fork mints wrong witnesses); the
+anvil/foundry version is recorded per transcript; fork access is single-flight
+(snapshot/revert is process-global, the worker runs
 ``PSAT_EFFECTS_JOB_CONCURRENCY=1``); ``MAX_PAUSE_DURATION`` is READ FROM SOURCE by
-the caller and passed in, never hardcoded (inv. 10). Agents NEVER run a FORKING
+the caller and passed in, never hardcoded. Agents NEVER run a FORKING
 anvil or real RPC — that is the user's preview step; the offline integration test
 uses a local NON-FORKING anvil with a checked-in fixture.
 """
@@ -55,7 +55,7 @@ from utils.rpc import EthCallResult
 logger = logging.getLogger(__name__)
 
 # Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
-# anything earlier can mint witnesses wrong for the live chain (§8.7).
+# anything earlier can mint witnesses wrong for the live chain.
 POST_CANCUN_HARDFORKS = frozenset({"cancun", "prague", "osaka"})
 
 
@@ -139,7 +139,7 @@ class AnvilTransport(Protocol):
 
 def assert_post_cancun(transport: AnvilTransport) -> str:
     """Assert the fork's hardfork carries post-Cancun semantics and return it for
-    the transcript (§8.7). Raises ``ValueError`` on a stale fork — a witness minted
+    the transcript. Raises ``ValueError`` on a stale fork — a witness minted
     on pre-Cancun semantics is unsafe, so we fail rather than record it."""
     hf = transport.hardfork().strip().lower()
     if hf not in POST_CANCUN_HARDFORKS:
@@ -164,12 +164,12 @@ def pause_recipe(
     gate_ref: str = "",
     fixtures: Sequence[ForkFixture] = (),
 ) -> ObservedEffect:
-    """§4.1 freeze/pause: snapshot → record the pre-pause SUCCEEDING entry-point
+    """Freeze/pause: snapshot → record the pre-pause SUCCEEDING entry-point
     set → impersonate principal + call F → re-probe → the newly-reverting set is
     the OBSERVED blast radius (a LOWER bound) → warp time by the source-read
     ``max_pause_duration`` → re-probe for auto-expiry. snapshot/revert isolates
-    the probe (inv. 16). The SCORED denominator is static's ``predicted_guard_set``
-    (§4.1/§8.8); simulation only upgrades observed members to witnessed tier and
+    the probe. The SCORED denominator is static's ``predicted_guard_set``;
+    simulation only upgrades observed members to witnessed tier and
     NEVER becomes the denominator — the pre-pause succeeding set is recorded so
     consumers see it."""
     hardfork = assert_post_cancun(transport)
@@ -195,14 +195,14 @@ def pause_recipe(
         _apply_fixtures(transport, [*fixtures, *(fx for ep in entry_points for fx in ep.fixtures)], tr)
         pre_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "pre_pause")
 
-        # §1 A2 probe follow-up — verify the pause can actually take effect before
+        # Verify the pause can actually take effect before
         # reading the freeze. An ``eth_call`` of the pauser from the principal runs
         # the same EVM logic a ``send`` would, so a revert here means the resolved
         # pauser cannot enact the pause on this forked state (missing authority, an
         # active per-pauser cooldown, an unmet precondition). The freeze was then
         # NEVER TESTED, so an empty blast radius would be INDETERMINATE — reported as
         # its own ``pause_ineffective`` unknown with the raw revert, never conflated
-        # with a genuine "pause froze nothing" (the §1 fallback: an empty
+        # with a genuine "pause froze nothing" (an empty
         # ``observed_blast_radius`` ≠ no-freeze). This split is what lets the live
         # cycle tell the recoverable ineffective-pause verdicts from the correct
         # no-blast ones instead of seeing one undifferentiated pile of empties.
@@ -269,7 +269,7 @@ def pause_recipe(
 
     predicted = {str(g) for g in predicted_guard_set}
     # A member observed reverting that static did NOT predict = static under-
-    # enumerated its guard set: a §9 discrepancy (vocabulary growth), not a
+    # enumerated its guard set: a discrepancy (vocabulary growth), not a
     # harness failure. The reverse (predicted-but-not-observed) is EXPECTED —
     # business preconditions hide points from the diff — so it is not flagged.
     unpredicted = observed_blast - predicted
@@ -353,7 +353,7 @@ def pause_recipe(
         details={
             "observation": OBSERVATION_EXECUTED,
             # Kernel witness (latch flip caused reverts) + projection witness
-            # (which points). The scored denominator stays static's set (§8.8);
+            # (which points). The scored denominator stays static's set;
             # the observed set is a lower bound recorded alongside it.
             "latch_flip": True,
             "pause_effective": True,
@@ -401,16 +401,16 @@ def timelock_execute_recipe(
     witness_token: str | None = None,
     witness_calldata: str | None = None,
 ) -> ObservedEffect:
-    """§9.5 Tier-2 timelock: schedule → advance time → execute, the sequence Tier-1
+    """Tier-2 timelock: schedule → advance time → execute, the sequence Tier-1
     cannot reach (``eth_simulateV1`` issues ONE block with no ``blockOverrides``, so
     it can never satisfy a delayed operation's ``block.timestamp`` gate — every
     ``execute`` reverts ``TimelockUnexpectedOperationState`` there).
 
-    Reuses ``pause_recipe``'s fork machinery: snapshot/revert isolation (inv. 16),
+    Reuses ``pause_recipe``'s fork machinery: snapshot/revert isolation,
     an impersonated principal, and ``increase_time`` to advance past the operation
     delay. The scheduled inner operation is an ERC-20 ``transfer`` to a sentinel on
     a token the timelock provably holds (synthesised upstream from measured
-    holdings, §0.0.2), so a positive sentinel-balance delta after ``execute`` proves
+    holdings), so a positive sentinel-balance delta after ``execute`` proves
     the timelock forwards value to a PROPOSER-CHOSEN destination — a
     ``caller_arbitrary`` outflow, the exact shape an arbitrary-call executor has.
 
@@ -425,7 +425,7 @@ def timelock_execute_recipe(
     rests on state this probe manufactured on the fork (the scheduled operation
     landing, ``block.timestamp`` advancing past the delay), which is not a
     code-plane structural fact a bytecode twin inherits. So each verdict carries
-    ``state_dependent=True``, which ``_is_cacheable`` refuses outright (§0.0.4)."""
+    ``state_dependent=True``, which ``_is_cacheable`` refuses outright."""
     hardfork = assert_post_cancun(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
@@ -513,7 +513,7 @@ def timelock_execute_recipe(
             # Two different facts, and a consumer must be able to tell them apart.
             # With no witness asset the timelock held NOTHING for the operation to
             # move, so "moved nothing" would be a statement about our inability to
-            # measure rather than about the contract — the §0.0.4 distinction. With
+            # measure rather than about the contract. With
             # an asset, the operation really did execute and move none of it.
             reason="no_value_observed" if witness_token is not None else "timelock_holds_no_witness_asset",
             details={

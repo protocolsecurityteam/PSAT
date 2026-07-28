@@ -65,7 +65,7 @@ class JobStage(str, enum.Enum):
     static = "static"
     resolution = "resolution"
     policy = "policy"
-    # Effect simulation (EFFECTS_RESOLUTION_SPEC §3a). Inserted between policy
+    # Behavioral effect simulation. Inserted between policy
     # and coverage; source order IS the progression, so this position makes
     # ``_satisfy_dependencies`` (relative enum order) route it correctly. The
     # policy->effects transition is feature-flagged (PSAT_EFFECTS_STAGE); with
@@ -734,7 +734,7 @@ class ControllerValue(Base):
     # ``none_as_null=True``: a Python ``None`` here means "not determined" and
     # must reach the database as SQL NULL. SQLAlchemy's default renders it as
     # the jsonb scalar ``null``, which is a DIFFERENT state that no ``IS NULL``
-    # test can see (db/jsonb.py, W0-5). The watcher clears this field on a
+    # test can see (db/jsonb.py). The watcher clears this field on a
     # controller rotation, so the distinction is load-bearing.
     details: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # How the current value was observed: 'eth_call' / 'eth_call_impl_fallback'
@@ -822,8 +822,8 @@ EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
 # ``authority_provenance`` is ABSENT supports NEITHER: the static stage answered
 # neither question, so the address appeared in a lowered predicate tree without
 # ever being shown to gate a caller or to be a call destination. Writing it
-# ``controller_value`` makes an authority claim nothing proved (Leg A's tree
-# widening minted 37 such targets at once, incl. pure constants like
+# ``controller_value`` makes an authority claim nothing proved (widening the
+# lowered tree minted 37 such targets at once, incl. pure constants like
 # HUNDRED_PERCENT_IN_BPS and non-authority mappings like _balances); writing it
 # ``external_call_target`` asserts the other unproven fact. This relation keeps
 # the edge VISIBLE and out of ``CONTROL_EDGE_RELATIONS``, so it moves no
@@ -1139,7 +1139,7 @@ class MonitoredEvent(Base):
     # On-chain log index — the scan path populates it so identity is
     # (contract, tx_hash, log_index, event_type). NULL for poll-path
     # ``state_changed_poll`` rows (tx_hash='' / block 0), which are outside the
-    # partial identity index below by design (design §2.4 Layer 2).
+    # partial identity index below by design.
     log_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     data: Mapped[dict[str, Any] | None] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -1348,7 +1348,7 @@ class DaemonLease(Base):
 
 
 class MonitoringEnrollmentQueue(Base):
-    """Dirty-flag queue driving the enrollment reconciler (design §2.3).
+    """Dirty-flag queue driving the enrollment reconciler.
 
     One row per protocol that needs its ``monitored_contracts`` (and
     controllers) reconciled. Write sites call
@@ -1509,13 +1509,12 @@ class BytecodeCache(Base):
 
 
 class EffectBehaviorCache(Base):
-    """Persistent, cross-job behavioral-verdict cache (EFFECTS_RESOLUTION_SPEC
-    §7 / inv. 11-12). Shared across jobs AND cross-chain twins — the 11
-    ``PausableUntil`` sharers are separate jobs, so a sibling (or a twin on
-    another chain, or a prior run) that already witnessed a behavior yields a
-    free, *trusted* hit.
+    """Persistent, cross-job behavioral-verdict cache. Shared across jobs AND
+    cross-chain twins — the 11 ``PausableUntil`` sharers are separate jobs, so a
+    sibling (or a twin on another chain, or a prior run) that already witnessed
+    a behavior yields a free, *trusted* hit.
 
-    Two verdict scopes (inv. 3):
+    Two verdict scopes:
 
     - ``scope='kernel'`` — function-local (latch-flip, gate-mutation, code-
       change, supply-delta sign, destination *shape*). Key = (``behavior_hash``,
@@ -1525,18 +1524,18 @@ class EffectBehaviorCache(Base):
       stripped whole-contract bytecode hash) because the same mixin kernel
       yields different blast radii on different surfaces.
 
-    The row is **code-plane only** (inv. 11): no concrete values ever enter the
-    key. Verdicts are **gate-relative** (inv. 12): ``gate_ref`` names the gate
-    *structure*, never a concrete address; principal binding happens at read
+    The row is **code-plane only**: no concrete values ever enter the key.
+    Verdicts are **gate-relative**: ``gate_ref`` names the gate *structure*,
+    never a concrete address; principal binding happens at read
     time by joining ``function_principals``. The concrete state-plane residue
     (destination address, exact impl, current-check result) lives in
     ``effect_verdicts``, never here.
 
-    ``transcript_ptr`` is an artifact-store key (§8.5), never an inline JSONB
-    blob. ``analysis_schema_version`` invalidates the row on a pipeline bump,
+    ``transcript_ptr`` is an artifact-store key, never an inline JSONB blob.
+    ``analysis_schema_version`` invalidates the row on a pipeline bump,
     mirroring ``ContractMaterialization``.
 
-    Self-audit (§7): the first time two functions share a behavioral hash, both
+    Self-audit: the first time two functions share a behavioral hash, both
     are simulated once and the *kernel* verdicts asserted equal before the cache
     is trusted; ``audit_status`` / ``audit_peer_hash`` / ``audited_at`` record
     that, and ``hit_count`` supports the optional every-Nth re-audit.
@@ -1546,9 +1545,9 @@ class EffectBehaviorCache(Base):
     ``audited_at``, ``updated_at`` (the authoritative list is
     ``db.effect_cache.REPLAY_IDENTITY_EXCLUDED_COLUMNS``, which explains why each is
     excluded). ``bump_hit`` / ``mark_audited`` run from the hit path, so two identical
-    pipeline runs over an unchanged chain leave DIFFERENT values in them — inv. 11's
-    "byte-identical recomputation" and inv. 12's "re-analysis without on-chain change is
-    a no-op" hold for this table only modulo those five. ``hit_count`` counts times the
+    pipeline runs over an unchanged chain leave DIFFERENT values in them — the guarantees
+    that recomputation is byte-identical and that re-analysis without an on-chain change
+    is a no-op hold for this table only modulo those five. ``hit_count`` counts times the
     row was SERVED (``0`` = never served); a lookup that MISSED matches no row at all and
     is counted per job as the ``cache_misses`` stage metric instead.
     """
@@ -1563,17 +1562,17 @@ class EffectBehaviorCache(Base):
     # A sentinel rather than NULL keeps the identity UniqueConstraint portable
     # (no NULLS-NOT-DISTINCT dependency).
     contract_surface_hash: Mapped[str] = mapped_column(String(80), nullable=False, server_default="")
-    # Gate *structure* descriptor (inv. 12) — never an address.
+    # Gate *structure* descriptor — never an address.
     gate_ref: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
     verdict: Mapped[str] = mapped_column(String(20), nullable=False)
     tier: Mapped[str] = mapped_column(String(20), nullable=False)
-    # Artifact-store key (§8.5) — never inline JSONB.
+    # Artifact-store key — never inline JSONB.
     transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Small, code-plane structural witness (e.g. supply-delta sign, source-read
     # duration bound). NO concrete/state-plane values.
     details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    # Self-audit bookkeeping (§7).
+    # Self-audit bookkeeping.
     audit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     audit_peer_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1595,8 +1594,8 @@ class EffectBehaviorCache(Base):
 
 
 class EffectVerdict(Base):
-    """Per contract-function **state-plane** residue (EFFECTS_RESOLUTION_SPEC §3a
-    / inv. 3). This is where the per-deployment concrete values live — the exact
+    """Per contract-function **state-plane** residue from effect simulation.
+    This is where the per-deployment concrete values live — the exact
     destination address, the exact target impl, the Tier-0 current-state check
     result — never the ``effect_behavior_cache``.
 
@@ -1622,7 +1621,7 @@ class EffectVerdict(Base):
     # State-plane concrete values — the reason this row is not the cache.
     concrete_destination: Mapped[str | None] = mapped_column(String(42), nullable=True)
     current_check_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    # The state-plane residue with no column of its own: §5b downstream value
+    # The state-plane residue with no column of its own: downstream value
     # reach (holder ADDRESSES + their USD) and the bookkeeping that bounds the
     # hit-path residue re-probe. Deliberately NOT ``witness`` — witness carries
     # the code-plane structural details a cache hit re-publishes verbatim, so

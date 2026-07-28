@@ -1,4 +1,4 @@
-"""W0-5 — the jsonb-null audit, as an enforced invariant rather than a sweep.
+"""The jsonb-null audit, as an enforced invariant rather than a one-off sweep.
 
 Two halves:
 
@@ -37,7 +37,7 @@ from db.models import Base, ContractMaterialization
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# The sweep scope from the W0-5 brief, plus ``tests`` — a fixture that asserts an
+# The audited scope, plus ``tests`` — a fixture that asserts an
 # inflated count is as wrong as production code that produces one.
 SCANNED_DIRS = ("services", "routers", "workers", "db", "scripts", "tests")
 

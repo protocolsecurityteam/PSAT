@@ -24,7 +24,7 @@ TIERS: frozenset[str] = frozenset(get_args(Tier))
 # supersedes a structural idiom, which supersedes a policy derivation. Distinct
 # claims (including sibling operations within a namespace) are never collapsed —
 # they are different sentences, not the same claim. ``behavioral_observed`` is
-# the effects plane's provenance (EFFECTS_RESOLUTION_SPEC §5.2): a state
+# the effects plane's provenance: a state
 # transition observed on real forked state is the strongest evidence an
 # existential claim can carry.
 TIER_PRECEDENCE: dict[str, int] = {

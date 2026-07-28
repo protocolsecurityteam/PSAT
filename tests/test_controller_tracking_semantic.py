@@ -1,4 +1,4 @@
-"""Wave 3 Track 2 A.1: ``build_controller_tracking`` semantic behavior.
+"""``build_controller_tracking`` semantic behavior.
 
 Validates the predicate-tree + effects-driven builder covers the old
 controller-tracking shapes and that:

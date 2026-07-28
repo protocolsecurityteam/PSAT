@@ -22,8 +22,9 @@ the subject contract at all — and the assembly route records a temporary
 (``assembly_delegatecall:TMP_1821``). A classifier reading that string resolves
 two of the three to nothing and publishes ``not_determined`` for a destination
 that is provably a storage setter. Both production rows are assembly routes and
-the corpus had none, so nothing could have caught it; W0-7 fixture 9 exists for
-exactly this and this matcher must pass it.
+the corpus had none, so nothing could have caught it; the label-corpus fixture
+covering an assembly-route delegatecall exists for exactly this and this matcher
+must pass it.
 
 So the walk descends into internal/library callees the way the sink producer
 does (``effects.py`` recurses through ``InternalCall``/``LibraryCall``), binding
@@ -306,8 +307,8 @@ def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | No
         "kind": "delegatecall_sink",
         "sink_ids": sorted(sink_ids),
         "destination": destination,
-        # The A3/A4 verdict from day one: whether a mandatory revert gate pins a
-        # caller-named destination is the same question here as on a value move.
+        # Whether a mandatory revert gate pins a caller-named destination is the
+        # same question here as it is on a value move.
         "destination_constraint": (
             _facts.param_constraint(
                 ctx, function, _parameter_index(unit, destination.get("variable")), mode="external_call"

@@ -1,6 +1,6 @@
 """Tests for ``RevertDetector``.
 
-Covers each of the 8 revert-pattern cases from v4 plan round-2 #8.
+Covers each of the 8 revert-pattern cases.
 For each, we compile a tiny Solidity contract and assert RevertDetector
 finds exactly the expected RevertGate(s) with the correct kind +
 polarity. The condition_value identity isn't pinned (Slither-version
@@ -1081,12 +1081,12 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# L-38: a modifier on an INTERNAL callee is a real gate of the entry function.
+# A modifier on an INTERNAL callee is a real gate of the entry function.
 # EigenLayer StrategyManager routes both deposit entries through
 # ``_depositIntoStrategy(...) internal onlyStrategiesWhitelistedForDeposit(strategy)``
 # whose body is a mapping-allowlist require on parameter 0; the entry's result
 # is assigned/returned, never branched on, so the cross-function recursion is
-# the ONLY path to the gate. Wave 1's a96b2ca3 restored that recursion; these
+# the ONLY path to the gate. Commit a96b2ca3 restored that recursion; these
 # arms pin the class so it cannot silently regress (the published verdict was a
 # false ``unconstrained_proven`` — a positive proof of absence over a gate that
 # exists).
@@ -1140,7 +1140,7 @@ def test_internal_callee_modifier_gate_reaches_param_constraints(tmp_path):
     """Claims arm: the published verdict for the gated entry's parameter 0 is
     ``constrained``/``mapping_allowlist`` (this exact row published
     ``{'state': 'unconstrained_proven'}`` on the two StrategyManager deposit
-    entries in the local DB — the L-38 false adverse), while the ungated
+    entries in the local DB — the false adverse), while the ungated
     sibling KEEPS its honest ``unconstrained_proven``."""
     from services.static.claims.context import ClaimContext
     from services.static.claims.matchers import _facts

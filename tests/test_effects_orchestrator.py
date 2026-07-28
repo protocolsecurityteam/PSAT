@@ -1,4 +1,4 @@
-"""Tier-0 code-upgrade current-state check (EFFECTS_RESOLUTION_SPEC §3 / inv. 13).
+"""Tier-0 code-upgrade current-state check.
 
 An indexed UpgradeEvent proves only PAST capability; a present-tense "upgradeable
 now" claim requires the current capability be present NOW — impl slot still

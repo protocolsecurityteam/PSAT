@@ -245,7 +245,7 @@ def enroll_protocol_contracts(
 
     for contract in contracts:
         contract_chain = contract.chain or chain
-        # Gate on the deployment allowlist (inv. 14): a protocol's analyzed
+        # Gate on the deployment allowlist: a protocol's analyzed
         # contracts can span chains this deployment has not enabled. Retain the
         # analysis/Contract evidence but create no monitoring state — no
         # MonitoredContract or WatchedProxy row for an off-allowlist chain.
@@ -392,7 +392,7 @@ def enroll_protocol_contracts(
     # re-includes existing controller rows from the DB, so skipping this pass
     # never deactivates controllers a prior reconciler enrolled.
     if enroll_controllers:
-        # v1 is chain-as-island (inv. 15): a controller's chain equals the chain
+        # v1 is chain-as-island: a controller's chain equals the chain
         # of the contracts it governs — control edges never cross chains. Derive
         # it from the protocol's enrolled contracts rather than the caller's
         # default so a non-mainnet protocol's controllers enroll on their own
@@ -400,9 +400,9 @@ def enroll_protocol_contracts(
         # a single one.
         contract_chains = {c.chain for c in contracts if c.chain}
         controller_chain = contract_chains.pop() if len(contract_chains) == 1 else chain
-        # Controllers enroll on a single chain (chain-as-island, inv. 15); gate
-        # that chain against the allowlist (inv. 14) so a disabled chain's
-        # controllers get no monitoring state either.
+        # Controllers enroll on a single chain (chain-as-island); gate that
+        # chain against the allowlist so a disabled chain's controllers get no
+        # monitoring state either.
         if chain_enabled(controller_chain):
             _enroll_controller_addresses(
                 session, contracts, protocol_id, controller_chain, _block_for(controller_chain)
@@ -425,7 +425,7 @@ def enroll_protocol_contracts(
     # analyzed).  We keep them (is_active=False) rather than deleting so
     # historical events are preserved.
     # Membership is per (address, chain): the same address is a distinct
-    # deployment on each chain (inv. 15), so a stale base twin must not be
+    # deployment on each chain, so a stale base twin must not be
     # shadowed by its enrolled ethereum twin — nor a live base row deactivated
     # because only its eth twin is enrolled.
     enrolled_keys = {(mc.address, mc.chain) for mc in enrolled}

@@ -199,7 +199,7 @@ describe("matchesEra: defensive handling", () => {
 
 // An ABSENT era bound is not a bound value: folding `block_introduced` to -Infinity
 // and `block_replaced` to Infinity answered the hard block constraint "yes" from the
-// absence of the data the constraint tests (L-26). A poll-detected impl publishes
+// absence of the data the constraint tests. A poll-detected impl publishes
 // `block_introduced: null`.
 describe("matchesEra: an undetermined era window cannot satisfy a block constraint", () => {
   const BOUNDED_COV = {

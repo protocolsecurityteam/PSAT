@@ -2013,7 +2013,7 @@ class TestControlGraphTypeReconciliation:
 
 
 class TestTrackingPlanNotDetermined:
-    """W0-1 / R1 at the enrollment boundary.
+    """Not-determined vs. found-nothing at the enrollment boundary.
 
     ``_load_tracking_plan_artifacts`` returns no topics in four different
     situations and exactly one of them is a finding about the contract.

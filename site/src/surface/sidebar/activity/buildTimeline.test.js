@@ -91,7 +91,7 @@ describe("buildTimeline — null enrollment_block (legacy row)", () => {
 
 // `synthesize_from_events` emits `block_number: null` for a poll-detected upgrade,
 // so an impl era can carry an unknown boundary. Folding it to 0 / Infinity is the
-// same ±infinity spread W0-9 removed server-side (L-19 / L-26).
+// same ±infinity spread that was removed server-side.
 describe("buildTimeline — an unknown era boundary is not a boundary value", () => {
   const POLL_PROXY = {
     current_implementation: CUR,

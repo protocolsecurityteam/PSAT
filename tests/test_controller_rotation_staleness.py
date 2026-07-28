@@ -1,4 +1,4 @@
-"""A rotated controller must not keep the OLD address's classification (G1-5).
+"""A rotated controller must not keep the OLD address's classification.
 
 ``_update_controller_value_rows`` wrote exactly one column — ``cv.value`` —
 leaving ``resolved_type``, ``details``, ``block_number`` and ``observed_via``
@@ -11,8 +11,8 @@ The consumer republishes that stale payload under the NEW address:
 merging ``cv.details``, and ``_principal_lookup_type`` promotes on ``details``
 alone via ``_has_timelock_delay``. So the worse half is the TIMELOCK case —
 a Timelock -> EOA rotation publishes a freshly-installed EOA as
-``resolved_type="timelock"`` carrying the old ``delay``, which inv 9 makes
-credit-bearing. That is a safety-inflating false credit, which inv 1 ranks
+``resolved_type="timelock"`` carrying the old ``delay`` — a credit-bearing
+scoring input. That is a safety-inflating false credit, which ranks
 worse than a false adverse, on top of a false statement about a named
 individual's keys. The Safe -> Safe case (owners/threshold of the wrong Safe)
 is the milder half and is covered too.
@@ -156,7 +156,7 @@ def test_event_rotation_from_timelock_to_eoa_drops_the_stale_delay(db_session, s
     # And it is SQL NULL, not the jsonb scalar ``null``. psycopg2 decodes both
     # to Python None, so the distinction is only visible from SQL — and it
     # matters because a written ``null`` is "the writer recorded an absence",
-    # which is evidence, while unset is not (db/jsonb.py, W0-5).
+    # which is evidence, while unset is not (db/jsonb.py).
     state = db_session.execute(
         select(jsonb_state(ControllerValue.details)).where(ControllerValue.id == row.id)
     ).scalar_one()

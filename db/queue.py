@@ -106,7 +106,7 @@ def record_heartbeat(process: str, *, status: str = "running", detail: dict[str,
         logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
 
 
-# Default lifetime of a daemon-pass lease. Chosen (per design §2.4) to exceed
+# Default lifetime of a daemon-pass lease. Chosen to exceed
 # ~3× the worst scan window and the RPC client timeout, so a stalled getLogs
 # rarely outlives the lease and lets a competitor steal it mid-pass.
 DEFAULT_DAEMON_LEASE_TTL_S = int(os.getenv("PSAT_DAEMON_LEASE_TTL_S", "120"))
@@ -306,7 +306,7 @@ def _job_chain_name(job: Job) -> str:
     """Canonical chain name of *job*, from the first-class ``chain_id`` column
     (falling back to the request chain; mainnet when underivable). Used to
     chain-qualify Contract lookups tied to a specific job so a same-address
-    deployment on another chain can never stand in (inv. 12)."""
+    deployment on another chain can never stand in."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         try:
@@ -318,7 +318,7 @@ def _job_chain_name(job: Job) -> str:
 
 
 def _mainnet_coalesced_chain(chain: str | None) -> str:
-    """Mainnet-coalesced dedup key (invariants 1/6/12).
+    """Mainnet-coalesced dedup key.
 
     Legacy rows persisted ``chain=NULL`` for mainnet, so coalescing
     ``NULL``→``'ethereum'`` lets a mainnet write dedup against them while a
@@ -350,9 +350,9 @@ def bulk_upsert_discovered_contracts(
     *default_chain* is the job's chain (derived from ``Job.chain_id`` via the
     registry): an entry that carries no evidence chain of its own inherits it
     so no writer persists ``chain=NULL`` and mints a duplicate against a sibling
-    writer's ``'ethereum'`` stub (NULL ≠ NULL defeats ``uq_contract_address_chain``
-    — invariants 1/6/12). The ``'unknown'`` resolve-later sentinel is a real
-    chain bucket, not absent evidence, so it is preserved, never coerced.
+    writer's ``'ethereum'`` stub (NULL ≠ NULL defeats ``uq_contract_address_chain``).
+    The ``'unknown'`` resolve-later sentinel is a real chain bucket, not absent
+    evidence, so it is preserved, never coerced.
 
     Commit is the caller's responsibility — typical use is one bulk call
     per discovery source followed by a single commit.
@@ -466,7 +466,7 @@ def upsert_discovered_contract(
     registry); an entry carrying no evidence chain inherits it so no writer
     persists ``chain=NULL`` and mints a duplicate against a sibling writer's
     ``'ethereum'`` stub. Shares the mainnet-coalesced dedup key with
-    :func:`bulk_upsert_discovered_contracts` (invariants 1/6/12).
+    :func:`bulk_upsert_discovered_contracts`.
 
     Commit is the caller's responsibility — callers usually batch many
     upserts into one transaction.
@@ -1694,7 +1694,7 @@ def find_completed_static_cache(
         )
         if chain is not None:
             # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain
-            # rows; a non-mainnet lookup stays isolated (invariants 1/6/12).
+            # rows; a non-mainnet lookup stays isolated.
             contract_stmt = contract_stmt.where(
                 func.lower(func.coalesce(Contract.chain, "ethereum"))
                 == _mainnet_coalesced_chain(canonical_chain(chain))
@@ -1772,7 +1772,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         # static tables landed; contract_analysis proves the analysis (not a
         # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
         # another chain can carry different source, so the donor job must pair
-        # with its own chain's row (inv. 12).
+        # with its own chain's row.
         donor_contract = session.execute(
             select(Contract)
             .join(ContractSummary, ContractSummary.contract_id == Contract.id)
@@ -1861,7 +1861,7 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
     )
     if chain is not None:
         # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        # a non-mainnet lookup stays isolated.
         stmt = stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(canonical_chain(chain))
         )
@@ -1910,7 +1910,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     )
     if src_chain is not None:
         # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        # a non-mainnet lookup stays isolated.
         src_contract_stmt = src_contract_stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum"))
             == _mainnet_coalesced_chain(canonical_chain(src_chain))
@@ -2042,7 +2042,7 @@ def copy_static_cache_cross_chain(
 
     # Chain-qualified on the donor job's own chain: a CREATE2 same-address
     # deployment on another chain can carry different source, and its
-    # summary/roles must never be the ones copied (inv. 12).
+    # summary/roles must never be the ones copied.
     donor_contract = session.execute(
         select(Contract)
         .join(ContractSummary, ContractSummary.contract_id == Contract.id)

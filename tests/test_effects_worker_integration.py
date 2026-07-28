@@ -1,16 +1,16 @@
-"""Effects worker end-to-end orchestration (EFFECTS_RESOLUTION_SPEC Phase 3).
+"""Effects worker end-to-end orchestration.
 
-Drives the whole stage against STUBBED seams with recorded transcripts (inv. 8):
-selection → preflight → cache lookup (kernel vs projection, inv. 3) → probes →
-self-audit (§7) → verdict persistence → §9 routing. No live RPC; the
+Drives the whole stage against STUBBED seams with recorded transcripts:
+selection → preflight → cache lookup (kernel vs projection) → probes →
+self-audit → verdict persistence → discrepancy routing. No live RPC; the
 zero-candidate path is asserted to touch no wire.
 
-Covers the Phase-3 required tests:
+Covers:
   - flag-on end-to-end with stubbed seams ⇒ persisted verdicts + transcripts
   - kernel transfers across a twin fixture ⇒ cache hit, no re-sim
   - projection does NOT transfer across different surfaces
   - self-audit catches an injected hash collision (disagreeing kernels ⇒ withhold)
-  - both §9 directions (static-pos/sim-neg → warning+discrepancy;
+  - both discrepancy directions (static-pos/sim-neg → warning+discrepancy;
     static-silent/sim-pos → witness + idiom candidate)
   - zero-candidate ⇒ no wire, no rows
 """
@@ -269,7 +269,7 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     assert verdict.verdict == VERDICT_PROVEN
     assert verdict.behavior_hash == "kernel_hash_A"
 
-    # §5.2 call site 1: the proven verdict is minted onto the function row as an
+    # Claims-bridge call site 1: the proven verdict is minted onto the function row as an
     # observable claim + legacy label (behavioral_observed tier). A mint supply
     # delta ⇒ supply.mint / "mint".
     ef_row = session.query(EffectiveFunction).filter(EffectiveFunction.id == fns[CONTRACT_A]).one()
@@ -341,7 +341,7 @@ def _twin_jobs(session, monkeypatch, addresses):
 @requires_postgres
 def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
     """Three deployments (three jobs) share one kernel hash. The first writes
-    (miss); the second re-simulates ONCE for the §7 self-audit; the third is a
+    (miss); the second re-simulates ONCE for the self-audit; the third is a
     free, trusted hit with NO probe."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
@@ -375,7 +375,7 @@ def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 3b. Tier-0 (historical) verdicts NEVER transfer across bytecode twins — each
-#     deployment's current-state check must run (inv. 13 / §7 state-plane).
+#     deployment's current-state check must run.
 # ---------------------------------------------------------------------------
 
 
@@ -495,7 +495,7 @@ def test_tier2_folds_anvil_rss_into_peak(clean_effects, monkeypatch):
     _errors, metrics = _run(worker, session, job)
 
     assert metrics["peak_anvil_rss_mb"] == 137
-    assert fake.closed  # fork still closed on the normal exit path (inv. 16)
+    assert fake.closed  # fork still closed on the normal exit path
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +539,7 @@ def test_self_audit_catches_hash_collision(clean_effects, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 6. §9 direction 1 — static-positive / sim-negative → warning + discrepancy
+# 6. Discrepancy direction 1 — static-positive / sim-negative → warning + discrepancy
 # ---------------------------------------------------------------------------
 
 
@@ -573,7 +573,7 @@ def test_section9_static_pos_sim_neg_routes_to_warning(clean_effects, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# 7. §9 direction 2 — static-silent / sim-positive → witness + idiom candidate
+# 7. Discrepancy direction 2 — static-silent / sim-positive → witness + idiom candidate
 # ---------------------------------------------------------------------------
 
 
@@ -752,7 +752,7 @@ def test_a_cached_reason_is_served_to_the_twin_that_hits_it(clean_effects, monke
 
 
 def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monkeypatch):
-    """§7 AUDIT FLOOR (G6-C1). ``authority_change`` — 49 of 150 local cache rows — carries
+    """SELF-AUDIT FLOOR. ``authority_change`` — 49 of 150 local cache rows — carries
     no structural signature key at all, so the audit compared ``('unknown', None x5)``
     with itself and passed unconditionally. A hit like that is no longer trusted on the
     signature: the re-probe must agree on the row's actual assertion (verdict + reason).
@@ -821,9 +821,9 @@ def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, 
 
 
 def test_two_identical_runs_differ_only_in_the_declared_non_identity_columns(clean_effects, monkeypatch):
-    """G6-C6, pinned rather than papered over. This cache is written on READ
+    """Pinned rather than papered over. This cache is written on READ
     (``bump_hit`` / ``mark_audited``), so two identical runs over an unchanged chain do
-    NOT leave the DB byte-identical — inv. 11/12 hold for this table only MODULO
+    NOT leave the DB byte-identical — replay determinism holds for this table only MODULO
     ``REPLAY_IDENTITY_EXCLUDED_COLUMNS``.
 
     The test states the exact size of that gap: every other column is unchanged across a

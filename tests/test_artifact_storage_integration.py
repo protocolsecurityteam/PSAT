@@ -65,7 +65,7 @@ def materialization_key(db_session):
     the assertions read are derived from the keccak (``cm._blob_key``), so randomizing
     it would stop exercising the real key shape. Nothing else in the file was
     self-cleaning, so a second run against the same database died on the primary key
-    before the test body ran (L-67) — two named tests, reproduced by accident, and
+    before the test body ran — two named tests, reproduced by accident, and
     hidden by the documented drop-and-recreate workflow. A test suite whose greenness
     depends on the DB having been dropped first cannot be trusted to be idempotent
     anywhere else either.
@@ -336,7 +336,7 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
 
 
 def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, db_session, storage_bucket):
-    """R1/R2. ``StorageKeyAbsent`` is the class that names the third state, so
+    """``StorageKeyAbsent`` is the class that names the third state, so
     the boundary must publish it as the third state.
 
     Reachable by construction on the *real* write path, which is how this test
@@ -346,7 +346,7 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
     ``StorageKeyAbsent`` for exactly that row. It answered 404
     ``{"detail":"Artifact not found"}`` with no state header — byte-identical to
     the never-produced artifact asserted below as the negative control, which is
-    the substitution W0-1 exists to remove.
+    the substitution the third state exists to remove.
     """
     import db.queue as queue_mod
     from db.models import Artifact
@@ -417,7 +417,7 @@ def test_artifact_endpoint_not_determined_still_prefers_a_real_synthesised_body(
 
 
 def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_session, storage_bucket):
-    """L-1. ``static_worker`` writes no ``upgrade_history`` row in two
+    """``static_worker`` writes no ``upgrade_history`` row in two
     indistinguishable cases — the stage found no proxies, and the stage RAISED —
     and the SPA consumes the resulting 404 as proven absence ("No activity before
     the line."). Falsified on real data: contract
@@ -445,7 +445,7 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
     assert plain.status_code == 404
     assert plain.headers.get("X-PSAT-Artifact-State") is None
 
-    # B — the L-1 row's shape: is_proxy false, proxy_type set. The row contradicts
+    # B — the ambiguous row's shape: is_proxy false, proxy_type set. The row contradicts
     # itself, so its non-proxy status cannot carry an absence.
     beacon_job = _completed_job(db_session, "uh-beacon", address="0x" + "a2" * 20)
     db_session.add(
@@ -481,12 +481,12 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
 
 
 def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, storage_bucket):
-    """The other half of L-1's producer ambiguity, read at the endpoint: a job whose
+    """The other half of that producer ambiguity, read at the endpoint: a job whose
     ``dependency_upgrade_history`` sub-phase recorded a degraded failure cannot have
     its missing artifact reported as a proven negative, even when the Contract row
     says non-proxy.
 
-    R2 statement, honestly: **0** of the 123 local ``stage_errors`` artifacts carry
+    Stated honestly: **0** of the 123 local ``stage_errors`` artifacts carry
     this phase, so this branch has zero realised rows today — the lower-bound
     statement, not a firing proof. The read itself is demonstrably live on the same
     artifacts through sibling phases (``controller_read`` 1,401 entries,
@@ -883,7 +883,7 @@ def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_ses
 
 
 # ---------------------------------------------------------------------------
-# 15. Rows written under a foreign environment prefix stay readable (W0-1)
+# 15. Rows written under a foreign environment prefix stay readable
 #
 # Every storage key is recorded in Postgres verbatim, including the writing
 # environment's ARTIFACT_STORAGE_PREFIX. Reading such a row from an environment
@@ -1038,7 +1038,7 @@ def test_a_genuinely_absent_object_is_still_reported_absent(db_session, storage_
 
 
 def test_artifact_row_with_no_key_and_no_body_is_not_reported_as_no_artifact(db_session, storage_bucket):
-    """R1. Three states must stay apart: a row that never recorded a key and
+    """Three states must stay apart: a row that never recorded a key and
     holds no inline body means *not determined*, not ``None`` — which
     ``get_artifact`` also returns when the artifact does not exist at all."""
     from db.models import Artifact
@@ -1072,7 +1072,7 @@ def test_copy_resolves_a_foreign_prefixed_source_key(db_session, storage_bucket,
 
 
 # ---------------------------------------------------------------------------
-# 16. R1 at the consumer boundary — an outage is not an empty job (W0-1)
+# 16. At the consumer boundary — an outage is not an empty job
 #
 # Measured on the working DB before this change: get_all_artifacts on the
 # largest job returned 130 artifacts healthy, 0 under a patched bucket outage,
@@ -1252,7 +1252,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
 
 
 def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_bucket, materialization_key):
-    """R1 for ``contract_materializations``. ``_hydrate`` returned ``None`` for
+    """The same three states for ``contract_materializations``. ``_hydrate`` returned ``None`` for
     all three, and ``services/resolution/recursive`` writes ``or {}`` over it —
     so a bucket outage rendered as "this contract has no analysis, no plan and
     no predicate trees" and that verdict seeded the effects probe."""

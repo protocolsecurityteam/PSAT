@@ -17,7 +17,7 @@ import pytest
 # Importing the policy-site module registers its policy-tier claim
 # (``transfer_policy.configure``) so the registry invariants below see it
 # deterministically regardless of test order.
-import services.effects.claims_bridge  # noqa: E402,F401  (registers authority.grant, minted only by the effects bridge §5.2)
+import services.effects.claims_bridge  # noqa: E402,F401  (registers authority.grant, minted only by the effects bridge)
 import services.static.cross_contract  # noqa: E402,F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
@@ -275,7 +275,7 @@ def test_consumer_referenced_ids_are_subset_of_registry():
     assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())
 
 
-# The produced-side half of the coverage invariant (spec §6.5): registry ids must
+# The produced-side half of the coverage invariant: registry ids must
 # appear in the frozen-corpus fixture output or carry a documented exemption.
 _GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "label_corpus" / "golden.json"
 
@@ -403,7 +403,7 @@ def test_precedence_output_is_deterministically_sorted():
 
 
 # ---------------------------------------------------------------------------
-# L-17: the canonical ABI selector is computed at build time and stamped at
+# The canonical ABI selector is computed at build time and stamped at
 # attach time — the value the cross-contract join keys on.
 # ---------------------------------------------------------------------------
 
@@ -418,7 +418,7 @@ def _sweep_effects() -> dict:
             # Elementary signature: canonical == declared.
             "sweep(address)": {"selector": "0x01681a62", "sinks": []},
             # No selector by construction; hashing the rendered name would
-            # manufacture one (the L-14 class).
+            # manufacture one.
             "receive()": {"selector": "", "sinks": []},
             "fallback()": {"selector": "", "sinks": []},
         },

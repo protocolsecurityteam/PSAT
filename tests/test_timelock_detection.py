@@ -3,8 +3,8 @@
 It was a stub: it ``del``ed all three arguments and returned
 ``has_timelock: False``, so the column was false on 92/92 local rows including
 ``EtherFiTimelock`` itself, whose ``getMinDelay()`` is 864000 (10 days) and
-which is the sole holder of ``UPGRADE_TIMELOCK_ROLE``. inv 9 names that delay a
-credit-bearing protective fact.
+which is the sole holder of ``UPGRADE_TIMELOCK_ROLE``. That delay is a
+credit-bearing scoring input.
 
 The proven property is structural and chain-free: some state variable is
 written with a value the clock flows into (the queue half), and some other

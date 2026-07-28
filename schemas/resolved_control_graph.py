@@ -22,9 +22,9 @@ ResolvedAnalysisState = Literal[
     # ``resolved_type not in ANALYZABLE_TYPES``. Analysis was never applicable,
     # so its absence says nothing adverse.
     "not_analyzable",
-    # (Renamed from ``not_a_contract`` at the Wave-4 closeout, L-34. The old
-    # spelling said something literally false about the largest population it
-    # covered — a Gnosis Safe IS a contract, it is just not an ANALYZABLE type.
+    # (Renamed from ``not_a_contract``. The old spelling said something literally
+    # false about the largest population it covered — a Gnosis Safe IS a
+    # contract, it is just not an ANALYZABLE type.
     # No legacy member is kept because nothing has ever persisted either token:
     # ``control_graph_nodes.analysis_state`` is SQL NULL on 2,506/2,506 local rows
     # and ABSENT on 2,531/2,531 nodes across all 107 stored

@@ -1869,7 +1869,7 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
 
 
 def test_summary_flags_are_three_state_through_the_payload(db_session):
-    """Row ABSENCE is not a proven negative (W3-E item 1 / L-30).
+    """Row ABSENCE is not a proven negative.
 
     62 of 147 company-overview entries on the local corpus have no
     ContractSummary row at all, and every one of them used to publish
@@ -1969,7 +1969,7 @@ def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
 
 def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
     """``usd_value: null`` and ``usd_value: 0`` mean opposite things and are one
-    truthiness test apart in the renderer (W3-E item 2 / G6-11 / L-45).
+    truthiness test apart in the renderer.
 
     Also pins the holdings-coverage disclosure: at-the-page-cap is the only
     positive statement available about completeness, and the other arm is
@@ -2074,7 +2074,7 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
     """The terminal-controller walk is persisted ONLY on ``principal_labels.details``,
     and ``_build_principal_lookup`` never joined the table — so
     ``claimsVocab.terminalControllerNote``, the one consumer that handles all six of
-    its statuses, could never receive the data (W3-E item 6 / G7 §2.8).
+    its statuses, could never receive the data.
 
     Measured after wiring: 229 control-graph node payloads and 6 function-principal
     payloads on the real corpus carry the record (0 before).
@@ -2184,10 +2184,10 @@ def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_
 
 
 def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_session):
-    """``principal_labels.confidence`` carries no epistemic content (W3-E item 7 /
-    G6-8): it is a naming-branch label, two-valued in practice (high 1,376 /
-    medium 180 / low 0 — ``low`` needs ``resolved_type == "unknown"`` and no such
-    row exists), ~97% a restatement of ``resolved_type``, and cannot say "I did not
+    """``principal_labels.confidence`` carries no epistemic content: it is a
+    naming-branch label, two-valued in practice (high 1,376 / medium 180 / low 0
+    — ``low`` needs ``resolved_type == "unknown"`` and no such row exists), ~97%
+    a restatement of ``resolved_type``, and cannot say "I did not
     determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
     rows, so a consumer reading both believed there were two facts.
     """
@@ -2231,7 +2231,7 @@ def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_s
 
 
 def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
-    """L-21: ``covered_to_block is None`` alone is not "this row covers the
+    """``covered_to_block is None`` alone is not "this row covers the
     currently-open impl window" — it is also what a row whose upper bound was never
     determined looks like, and this module's own ImplWindow docstring calls that
     inference invalid. ``AuditContractCoverage`` carries no ``successor`` column, so

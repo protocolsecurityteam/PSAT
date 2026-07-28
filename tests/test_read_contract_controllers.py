@@ -1,5 +1,5 @@
-"""A4 wire helper: read a plain contract's controlling addresses via canonical
-control getters (SCORING plan §4). Probes owner()/authority()/admin() every call
+"""Wire helper: read a plain contract's controlling addresses via canonical
+control getters. Probes owner()/authority()/admin() every call
 and returns the DISTINCT nonzero set so the walk can fail closed on parallel
 control planes. Stubs the eth_call layer, never the transport."""
 
@@ -111,7 +111,7 @@ def test_whole_batch_failure_returns_none(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# W2-B item 12: a REVERT is the EVM answering ("not a control plane"); a
+# A REVERT is the EVM answering ("not a control plane"); a
 # TRANSPORT failure is the read not happening. Every failure used to be the
 # single ``_PROBE_ERROR``, so a contract with no ``authority()`` — which is most
 # of them — tripped the incomplete-witness guard and the WHOLE plane set came

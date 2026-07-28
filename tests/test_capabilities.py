@@ -302,9 +302,9 @@ def test_negate_blacklist_yields_finite():
 
 
 def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
-    # ROLEGATE_FIX_SPEC §8 residual: a lower_bound cofinite ("at least these are
-    # denied") complements to a lower_bound finite set — not a provably-complete
-    # "exact" one, which would falsely claim we enumerated everyone the gate admits.
+    # A lower_bound cofinite ("at least these are denied") complements to a
+    # lower_bound finite set — not a provably-complete "exact" one, which would
+    # falsely claim we enumerated everyone the gate admits.
     bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
     out = negate(bl)
     assert out.kind == "finite_set"
@@ -407,11 +407,11 @@ def test_attach_conditions_preserves_blacklist_quality():
 
 def test_every_cofinite_states_its_denylist_quality():
     # INVERTED (was ``test_default_cofinite_serializes_identically_to_pre_field``,
-    # which pinned the emit-when-non-default rule as correct — W2-B item 10a).
+    # which pinned the emit-when-non-default rule as correct).
     # That rule made ABSENCE mean ``exact``, so a consumer that had never heard of
-    # the key read every cofinite denylist as a COMPLETE exclusion: the one place
-    # in the sweep where the default was the STRONG claim. Byte-identity with the
-    # pre-field wire shape is no longer a goal; stating the quality is.
+    # the key read every cofinite denylist as a COMPLETE exclusion — a default
+    # that made the STRONG claim. Byte-identity with the pre-field wire shape is
+    # no longer a goal; stating the quality is.
     from services.resolution.capability_resolver import capability_to_dict
 
     exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B]))

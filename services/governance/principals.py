@@ -13,8 +13,8 @@ from db.models import EffectiveFunction, FunctionPrincipal
 # (``unknown``/``None``) — is NON-terminal: a way-point whose ultimate controlling
 # key is not yet established. Marking these non-terminal is the guard against the
 # over-claim bug where a ``resolved_type=contract`` row reads as a *settled*
-# principal to a consumer when the real key is still unknown (SCORING plan §4 /
-# SCORING_INVARIANTS inv-2: absence of a proven positive is never a proven fact).
+# principal to a consumer when the real key is still unknown: the absence of a
+# proven positive is never itself a proven fact.
 TERMINAL_PRINCIPAL_TYPES = frozenset({"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"})
 
 # Depth bound for the contract-principal terminal walk. A control chain deeper
@@ -54,7 +54,7 @@ def resolve_terminal_principal(
     the planes could not be dispositively read (a probe error — not determined).
     The injected callable is the only wire this function
     touches (integration callers back it with on-chain owner reads + classify;
-    unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
+    unit tests stub it), so the walk itself is pure and deterministic.
 
     Returns a terminal record ``{terminal, resolved_type, address, chain,
     status}``. ``terminal`` is True only when a single-plane walk reached a member
@@ -65,7 +65,7 @@ def resolve_terminal_principal(
     **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
     ``depth_exceeded`` / ``no_controller`` / ``unknown_unfetched`` (record shape
     unchanged, no extra keys). ``no_controller`` and ``unknown_unfetched`` are
-    the split of one old answer (W2-B item 12): the resolver returns ``None``
+    the split of one old undifferentiated answer: the resolver returns ``None``
     when it could not dispositively read the control planes (a transient probe
     error — retryable) and an EMPTY SEQUENCE when it probed every canonical
     getter cleanly and the contract has no controlling key (renounced /
@@ -278,7 +278,7 @@ def _function_principal_payload(
         "details": details,
         # A contract (or unresolved) principal is a non-terminal way-point, not a
         # settled key — consumers must treat it as ``unknown`` terminal, never as
-        # the controlling principal (SCORING plan §4). ``terminal_principal`` is a
+        # the controlling principal. ``terminal_principal`` is a
         # forward-compat passthrough: the terminal walk currently persists its
         # record on ``principal_labels.details`` only (join by address to get the
         # chain); nothing writes it into ``function_principals.details`` yet, so
@@ -450,7 +450,7 @@ def _build_company_function_entry(
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
         "claims": list(getattr(ef, "claims", None) or []),
-        # The quotable copy of the structured planes, reconciled against them (R3)
+        # The quotable copy of the structured planes, reconciled against them
         # and labelled with which shape it is. See
         # services/aggregations/action_summary — this endpoint and analysis_detail
         # are the two public surfaces that publish the sentence.

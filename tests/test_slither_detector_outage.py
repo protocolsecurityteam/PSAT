@@ -152,8 +152,8 @@ def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
 
 
 def test_standards_absence_is_measured_not_missing(tmp_path):
-    """G6-14 proposed nulling ``standards`` on the reasoning that ``{}`` on
-    61/92 rows meant "no detector ran". Refuted by measurement: ``standards``
+    """A proposal to null ``standards`` on the reasoning that ``{}`` on
+    61/92 rows meant "no detector ran" was rejected by measurement: ``standards``
     comes from ``contract.ercs()`` plus a signature+event match off the IR, not
     from the detector pass, and it is non-empty on 31 of the 88 local contracts
     -- every real token among them. Nulling it would suppress a true negative,

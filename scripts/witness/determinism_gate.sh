@@ -1,48 +1,50 @@
 #!/usr/bin/env bash
-# W0-8 — the determinism gate, BOTH classes.
+# The determinism gate — BOTH classes.
 #
 # Two different defects wear the same word, and a gate covering one silently
 # passes the other:
 #
 #   class A  string-hash      set[str] iteration           PINNABLE by PYTHONHASHSEED
-#            (D6 / AuthorityGraph.reachable_value)
+#            (AuthorityGraph.reachable_value)
 #   class B  allocation-order object.__hash__ on Slither   NOT pinnable by ANY seed
 #            (_taint.py binding)  variables -> id()
 #
 # Each check below names the class it covers. A check that cannot name its class
 # is not evidence about determinism, it is evidence about one workload.
 #
-# MEASURED, and the reason this script is not the obvious one: the handoff's
-# prescription for class B — "3 fresh processes at a fixed seed -> byte-identical
-# output" — does not discriminate. Run against the pre-W0-3 `_taint.py`, eight
-# fresh processes at PYTHONHASHSEED=0, with and without varied preamble parses,
+# MEASURED, and the reason this script is not the obvious one: the obvious check
+# for class B — "3 fresh processes at a fixed seed -> byte-identical output" —
+# does not discriminate. Run against the pre-fix `_taint.py`, eight fresh
+# processes at PYTHONHASHSEED=0, with and without varied preamble parses,
 # produced BYTE-IDENTICAL output while the published binding was wrong on two of
 # the twelve functions (`compose` named `from`, a source, as its destination;
 # `rebalance` named `fromAsset` when the destination is a storage variable and no
-# parameter is the destination at all). Under pymalloc an object's address is a deterministic
-# function of the allocation sequence; pools are page-aligned, so the low bits
-# that decide a small set's probe order survive ASLR unchanged. `PYTHONMALLOC=malloc`
-# routes allocation through glibc, whose addresses ASLR does move, and the same
-# pre-fix code then answers differently (`compose` calldata `extra` -> `message`,
-# `rebalance` destination `fromAsset` -> `toAsset`). The allocator, not the
-# repetition, is the knob. The three plain repeats are still run — they are the
-# prescription, and they cost nothing — but they are reported as what they are.
+# parameter is the destination at all). Under pymalloc an object's address is a
+# deterministic function of the allocation sequence; pools are page-aligned, so
+# the low bits that decide a small set's probe order survive ASLR unchanged.
+# `PYTHONMALLOC=malloc` routes allocation through glibc, whose addresses ASLR does
+# move, and the same pre-fix code then answers differently (`compose` calldata
+# `extra` -> `message`, `rebalance` destination `fromAsset` -> `toAsset`). The
+# allocator, not the repetition, is the knob. The three plain repeats are still
+# run — they cost nothing — but they are reported as what they are.
 #
 # Both probes publish an `unordered_control`: the removed idiom, recomputed live
-# over the same real data. The gate requires it to VARY. This is R2 enforced
-# continuously rather than once at commit time — a sweep whose control has gone
-# constant has lost its discriminating power, and this script fails rather than
-# reporting a green it did not earn.
+# over the same real data. The gate requires it to VARY. A control is only
+# evidence while it still discriminates, so that is enforced continuously rather
+# than once at commit time — a sweep whose control has gone constant has lost its
+# discriminating power, and this script fails rather than reporting a green it
+# did not earn.
 #
 # Neither probe may be satisfied by an empty answer. Each carries an ANCHOR it
 # refuses to lose: `sweepDust` (function_id 2771, $4,024,163,604.46, inside the
 # 84-member tied cluster) for class A, `singlyAssignedLocal`'s PROVED
 # `destination_param: "a"` for class B. Suppression is the failure mode that got
-# past every test the last time — see the sweepDust precedent in
-# WITNESS_INTEGRITY_FINDINGS.md §1.3.
+# past every test the last time: a proposal that resolved every binding to
+# `not_determined` passed the whole suite while erasing the positive control. See
+# tests/test_determinism_gate.py::test_the_proved_binding_is_present_and_not_hedged.
 #
 # Usage: scripts/witness/determinism_gate.sh [--quick]
-#   --quick  4 seeds instead of 8 (local iteration only; not a wave-exit run)
+#   --quick  4 seeds instead of 8 (local iteration only; not a gating run)
 
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
@@ -62,12 +64,12 @@ fi
 FAILED=0
 say() { printf '%-42s %-6s %s\n' "$1" "$2" "${3:-}"; [ "$2" = "FAIL" ] && FAILED=1; return 0; }
 
-echo "=== determinism gate (W0-8) ==="
+echo "=== determinism gate ==="
 echo
 
 # ---------------------------------------------------------------------------
 # CLASS A -- string-hash. Pinnable by PYTHONHASHSEED, so sweep the seed.
-# Workload: the real §6 candidate queue over the corpus DB (protocol 1).
+# Workload: the real candidate queue over the corpus DB (protocol 1).
 # ---------------------------------------------------------------------------
 echo "--- class A: string-hash (set[str] iteration; PYTHONHASHSEED-pinnable) ---"
 a_ok=1
@@ -108,9 +110,9 @@ PY
     say "A1 queue identical across ${#SEEDS[@]} seeds" FAIL "$n_queue distinct payloads"
   fi
   if [ "${n_control:-0}" -gt 1 ]; then
-    say "A2 sweep still discriminates (R2)" PASS "removed float fold gives $n_control distinct payloads"
+    say "A2 sweep still discriminates" PASS "removed float fold gives $n_control distinct payloads"
   else
-    say "A2 sweep still discriminates (R2)" FAIL "control is CONSTANT across seeds -- this sweep proves nothing"
+    say "A2 sweep still discriminates" FAIL "control is CONSTANT across seeds -- this sweep proves nothing"
   fi
 fi
 echo
@@ -121,7 +123,7 @@ echo
 # The seed is held FIXED throughout: this class is not about the seed.
 # ---------------------------------------------------------------------------
 echo "--- class B: allocation-order (object.__hash__ -> id(); NO seed pins it) ---"
-# 3 plain repeats (the handoff's literal prescription) + the allocator dimension
+# 3 plain repeats (the obvious check) + the allocator dimension
 # that actually moves identity hashes + a preamble that changes heap history.
 #
 # Sizing is measured, not guessed. Consecutive runs of each column at a fixed
@@ -187,13 +189,13 @@ PY
     say "B1 binding identical across $i allocation envs" FAIL "$n_bind distinct payloads"
   fi
   if [ "${n_ctl:-0}" -gt 1 ]; then
-    say "B2 matrix still discriminates (R2)" PASS "removed next(iter(set)) pick gives $n_ctl distinct payloads"
+    say "B2 matrix still discriminates" PASS "removed next(iter(set)) pick gives $n_ctl distinct payloads"
   else
-    say "B2 matrix still discriminates (R2)" FAIL "control is CONSTANT -- this matrix cannot see class B at all"
+    say "B2 matrix still discriminates" FAIL "control is CONSTANT -- this matrix cannot see class B at all"
   fi
   # Not a pass/fail. It is the measurement that justifies the allocator column,
   # and it is printed on every run so nobody re-derives it from first principles.
-  say "B3 plain repeats alone (3x, fixed seed)" INFO "$n_plain distinct control payloads (1 in 30 consecutive runs; it does drift when __pycache__ is cold) -- this is the handoff's prescribed check, and on its own it cannot be relied on to see class B"
+  say "B3 plain repeats alone (3x, fixed seed)" INFO "$n_plain distinct control payloads (1 in 30 consecutive runs; it does drift when __pycache__ is cold) -- the obvious check, and on its own it cannot be relied on to see class B"
 fi
 echo
 

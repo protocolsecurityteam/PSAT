@@ -149,7 +149,7 @@ def build_callee_claim_map(
             # interface/enum/struct params), while the record's own
             # ``selector`` is keccak of the DECLARED signature — not a real
             # selector when a parameter is user-typed, which made every such
-            # callee invisible to this join (L-17: AssetRecovery
+            # callee invisible to this join (AssetRecovery
             # ``sweepTo(IERC20,address,uint256)`` keyed 0x38541c00, sink says
             # 0x0aeef8c8). ``abi_selector`` is the canonical value stamped by
             # ``attach_claims_to_effects``; its ABSENCE (older artifact,

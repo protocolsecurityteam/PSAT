@@ -1,4 +1,4 @@
-"""Perf: the ``cache_lookup`` N+1 batch (Impl-C item 1).
+"""Perf: the ``cache_lookup`` N+1 batch.
 
 The effects worker's ``_plan`` phase used to issue several serial single-row DB
 round-trips PER candidate (runtime bytecode, proxy ``Contract`` + ``UpgradeEvent``
@@ -88,7 +88,7 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
         code = _code(i)
         addr = "0x" + f"{i:x}{tag}".ljust(40, "0")[:40]
         # Each proxy names its OWN implementation, and that implementation's bytecode is
-        # cached below. G6-C0: a proxy row carrying function rows must never be hashed
+        # cached below. A proxy row carrying function rows must never be hashed
         # on its forwarding stub (one stub hash covers every implementation behind the
         # pattern — measured: 15 of them behind ``UUPSProxy``), so the resolver keys on
         # the implementation instead and this fixture has to supply it. Without the impl
@@ -389,7 +389,7 @@ def test_claim_latch_pairs_prefetch_matches_query(clean):
 
 
 # ---------------------------------------------------------------------------
-# G6-C0 — a proxy row's forwarding stub is never a behavioral hash
+# A proxy row's forwarding stub is never a behavioral hash
 # ---------------------------------------------------------------------------
 
 

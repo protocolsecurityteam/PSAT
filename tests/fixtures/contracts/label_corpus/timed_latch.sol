@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
-// A7: two pause latches in one contract — one timed against a declared window,
+// Two pause latches in one contract — one timed against a declared window,
 // one genuinely indefinite. The trees come from solc, not from a hand-built leaf.
 //
-// HISTORY, kept because it is the whole argument for the shape below. Before A7
-// this pair did NOT discriminate: ``read_max_pause_duration`` reported ``None``
+// HISTORY, kept because it is the whole argument for the shape below. This pair
+// originally did NOT discriminate: ``read_max_pause_duration`` reported ``None``
 // for BOTH. A Solidity comparison lowers to a leaf with exactly TWO operands, and
 // when one side is arithmetic the operand recorder kept one sub-operand and
 // DISCARDED the rest — ``block.timestamp < pausedUntil + MAX_PAUSE`` yielded
@@ -15,7 +15,7 @@ pragma solidity ^0.8.27;
 // shape reached its positive branch: a collapsed input in the operand recorder,
 // not a missing fixture. Measured over 11 compiled guard shapes: 0/11 resolved.
 //
-// A7 widened the LEAF rather than the operand list: the builder now also records
+// The fix widened the LEAF rather than the operand list: the builder now also records
 // what the comparison absorbed (``absorbed_operands``), the reader takes the union,
 // and 10/11 shapes resolve (the 11th, ``pausedUntil < block.timestamp``, carries no
 // window at all and must stay unresolved — it is etherfi's real shape).
@@ -28,7 +28,7 @@ pragma solidity ^0.8.27;
 //                                                   guard reads it, no clock does
 //   * any latch no lowered leaf reads ⇒ (None, "not_determined")
 //
-// WAVE 4 (L-58): ``pausedUntil`` read ``(2592000, "guard_constant")`` here until the
+// ``pausedUntil`` read ``(2592000, "guard_constant")`` here until the
 // harvest became side/operator-aware. Its guard is ``block.timestamp < pausedUntil +
 // MAX_PAUSE``, whose absorbed group is ``{latch, constant}`` — and the recorder sorts
 // both inner operands of an ADDITION *or* a SUBTRACTION into one list, keeping neither
@@ -84,7 +84,7 @@ contract TimedLatch {
     // ``absorbed_operands`` carries the latch and MAX_PAUSE's resolved 2592000. That
     // union is what made the constant READABLE; what it does not carry is whether
     // MAX_PAUSE was ADDED to the latch or SUBTRACTED from it, which is what would make
-    // it a window rather than a margin. See the header (L-58).
+    // it a window rather than a margin. See the header note.
     function transferTimed(address to, uint256 amount) external {
         require(block.timestamp > pausedUntil, "timed pause");
         require(block.timestamp < pausedUntil + MAX_PAUSE, "window closed");

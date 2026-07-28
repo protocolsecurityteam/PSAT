@@ -1,4 +1,4 @@
-"""W0-8 — the determinism gate, offline half.
+"""The determinism gate, offline half.
 
 Two defect classes wear the same word and a test covering one silently passes
 the other:
@@ -9,14 +9,14 @@ the other:
   ``scripts/witness/determinism_gate.sh``.
 * **allocation-order** — ``object.__hash__`` on Slither variables, so iteration
   follows ``id()``. **No seed pins it**, and before this file the offline suite
-  had no test of the shape at all: ``grep -rn PYTHONHASHSEED tests/`` returned
-  zero hits on ``main``, and no test re-ran an aggregate in a fresh interpreter.
+  had no test of the shape at all: nothing in the suite varied
+  ``PYTHONHASHSEED``, and no test re-ran an aggregate in a fresh interpreter.
 
 The tests below own the second class. They run the real static pipeline in
 child processes under different allocation environments, because that is the
 only place the class is expressible — a same-process assertion sees one heap,
 and eight fresh processes under pymalloc see the same heap eight times
-(measured: the pre-W0-3 implementation was byte-identical across 20 of 20 such
+(measured: the pre-fix implementation was byte-identical across 20 of 20 such
 runs while publishing a wrong destination on two functions).
 """
 
@@ -80,13 +80,13 @@ def test_exec_arbitrary_binding_is_identical_across_allocation_environments(matr
 
 
 def test_the_proved_binding_is_present_and_not_hedged(matrix):
-    """R4: a gate that can be satisfied by emitting nothing is not a gate.
+    """A gate that can be satisfied by emitting nothing is not a gate.
 
     ``singlyAssignedLocal`` has exactly one definition of its destination, so the
     honest answer is the parameter name — not ``not_determined``. Without this
     assertion every test in this file would stay green against an implementation
-    that resolved everything to ``not_determined``, which is how the sweepDust
-    positive control was nearly suppressed by a proposal that passed its tests.
+    that resolved everything to ``not_determined`` — which is how a positive
+    control was nearly suppressed once before, by a proposal that passed its tests.
     """
     witness = matrix[0]["binding"]["singlyAssignedLocal(address,bytes)"]
     assert witness["destination_kind"] == "param"
@@ -99,7 +99,7 @@ def test_the_proved_binding_is_present_and_not_hedged(matrix):
 
 
 def test_the_control_instrument_is_wired_and_disagrees_with_the_binding(matrix):
-    """R2 applied to the gate's own instrument.
+    """The control instrument has to keep discriminating, or it is not evidence.
 
     The probe recomputes the *removed* ``next(iter(<set intersection>))`` idiom
     beside the real answer, and the gate requires that recomputation to vary. An

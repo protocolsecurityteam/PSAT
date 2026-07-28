@@ -962,7 +962,7 @@ def _match_to_row_kwargs(match: CoverageMatch) -> dict:
 
 
 def _rpc_url(chain: str) -> str:
-    """eRPC route for bytecode-anchor reads on the contract's own chain (inv. 6).
+    """eRPC route for bytecode-anchor reads on the contract's own chain.
 
     The anchor reads the impl's runtime bytecode where it is deployed — an L2
     contract must be read on its L2, not mainnet. Raises when the chain is
@@ -1016,7 +1016,7 @@ def _apply_bytecode_anchor(
     if not matches:
         return matches
     # Chain is read alongside the address so each anchor probes the impl's own
-    # chain (inv. 6); a legacy NULL chain resolves to mainnet at the read below.
+    # chain; a legacy NULL chain resolves to mainnet at the read below.
     row_by_cid: dict[int, tuple[str, str | None]] = {
         cid: (addr, chain)
         for cid, addr, chain in session.execute(

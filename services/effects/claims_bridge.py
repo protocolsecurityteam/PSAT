@@ -1,9 +1,9 @@
-"""Effects → claims bridge (EFFECTS_RESOLUTION_SPEC §5.2).
+"""Effects → claims bridge.
 
 Turns a *proven* effect verdict into a registry claim so the frontend renders it
 through the one shared claims vocabulary (``site/src/claimsVocab.js``) with zero
-duplicated display logic. This is the Phase-5 consumption boundary: the write-
-only substrate (§3a) becomes "labels-observable, scoring-deferred".
+duplicated display logic. This is the consumption boundary where the write-only
+verdict substrate becomes "labels-observable, scoring-deferred".
 
 Design constraints this module honours verbatim:
 
@@ -11,14 +11,14 @@ Design constraints this module honours verbatim:
   :func:`services.static.claims.registry.emit_claim` and collapsed through
   :func:`resolve_claim_precedence` — never hand-built dicts. An id not in the
   registry cannot escape (the same anti-creep invariant static relies on).
-- **Fail-closed (§8).** Only ``verdict == proven`` mints. ``unknown`` / degraded
+- **Fail-closed.** Only ``verdict == proven`` mints. ``unknown`` / degraded
   mint nothing. A Tier-0 *historical* verdict mints only when its current-state
   check passed (``current_check_passed is True``); a failed current check proves
   *past* capability, and a present-tense label would overclaim.
 - **Witness is a pointer, not a payload.** The claim witness records the verdict
   identity (``effect_verdict_id`` / ``effect_class`` / ``behavior_hash`` /
   ``verdict_tier``) plus a minimal observed summary. Transcripts never enter
-  ``EffectiveFunction.claims`` — they live in the artifact store (§8.5).
+  ``EffectiveFunction.claims`` — they live in the artifact store.
 
 Pure functions, no I/O: the two call sites (``workers.effects_worker`` and
 ``services.policy.effective_permissions_writer``) do the DB reads/writes and
@@ -57,7 +57,7 @@ from services.static.claims.types import TIER_PRECEDENCE, Claim
 # every id the mapping below reaches.
 discover()
 
-# The observed-authority claim (§5.2 mapping): what the authority-change recipe
+# The observed-authority claim: what the authority-change recipe
 # actually proves is that calling F opens a permission gate to callers that
 # previously could not pass it (``recipes.authority_change`` — ≥2 random
 # identities rejected before, all accepted after). None of the existing static
@@ -147,8 +147,8 @@ def _claim_id_for(verdict: VerdictLike) -> str | None:
 
 
 def _mints(verdict: VerdictLike) -> bool:
-    """§8 fail-closed gate: only a proven verdict mints, and a Tier-0 historical
-    verdict mints only when its current-state check passed (inv. 13)."""
+    """Fail-closed gate: only a proven verdict mints, and a Tier-0 historical
+    verdict mints only when its current-state check passed."""
     if verdict.verdict != VERDICT_PROVEN:
         return False
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not True:
@@ -158,7 +158,7 @@ def _mints(verdict: VerdictLike) -> bool:
 
 def verdict_to_claim(verdict: VerdictLike) -> Claim | None:
     """Mint the registry claim for one proven verdict, or ``None`` when the
-    verdict fails the §8 gate or maps to no claim. The witness is a pointer to the
+    verdict fails the fail-closed gate or maps to no claim. The witness is a pointer to the
     verdict (never the transcript)."""
     if not _mints(verdict):
         return None
@@ -179,11 +179,11 @@ def verdict_to_claim(verdict: VerdictLike) -> Claim | None:
 
 def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     """A tiny, transcript-free summary of what was observed — enough to read the
-    witness without opening the artifact. Never the raw transcript (§8.5)."""
+    witness without opening the artifact. Never the raw transcript."""
     raw = verdict.witness if isinstance(verdict.witness, dict) else {}
     # ``observed_blast_radius`` / ``auto_expiry`` / ``duration_bound_seconds`` are the
     # freeze-severity fields the fork pause recipe records on ``effect_verdicts.witness``
-    # (§4.1, ``anvil.pause_recipe``). The dict-comp keeps only keys PRESENT on the
+    # (``anvil.pause_recipe``). The dict-comp keeps only keys PRESENT on the
     # witness, so adding them is a no-op for every non-freeze class.
     #
     # CONTRACT for the eventual scorer that reads ``claim.witness["observed"]`` — these
@@ -209,8 +209,8 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     pre-widening two-slot operand list, and a clock read through a view helper or
     #     a time oracle each hide a clock from the leaf that reads the latch — and the
     #     third hides it from a whole-tree ``block.timestamp`` walk as well;
-    #     ``not_determined`` (and
-    #     an ABSENT source, which is every row written before A7) = the window was
+    #     ``not_determined`` (and an ABSENT source, which is every row written
+    #     before ``duration_bound_source`` existed) = the window was
     #     not established — score it as a confidence gap, never as indefinite and
     #     never as bounded. The previous contract read this line as "None + None =
     #     indefinite", and it was false on all four rows that had it: every proven
@@ -218,7 +218,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     whose window lives in storage.
     #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
     #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
-    # ``backing`` (§5a) is the fork-observed mint-backing object
+    # ``backing`` is the fork-observed mint-backing object
     # ``{inflow_observed, minted, ...}`` recorded on EFFECT_CLASS_SUPPLY verdicts —
     # present only on ``supply.mint``. ``inflow_observed is False`` is a witnessed
     # dilution signal (supply rose with no asset inflow in the same call); the
@@ -240,8 +240,8 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     present treasury, and must not read its ABSENCE as "the contract is
     #     funded" — absence only means no balance override was needed.
     # ``destination_shape`` / ``shape_proved_by`` are the fork's three-valued answer to
-    # "where can this outflow go", and NO claim in the database carried either (A6 /
-    # C3-S1). The two rows that made it visible are approve-then-pull outflows whose
+    # "where can this outflow go", and NO claim in the database carried either.
+    # The two rows that made it visible are approve-then-pull outflows whose
     # transfer sink lives in the CALLEE, so the static flows matcher emitted nothing at
     # all: the merged claim carried $472M of reach and not one word about the
     # destination, indistinguishable from a destination we examined and could not
@@ -253,7 +253,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     # from the code), "simulation" (a sentinel that landed, proving caller_arbitrary),
     # or "none" (no evidence obtained). ``"none"`` means the destination contributes
     # ZERO severity in either direction: it is a confidence gap, not a fixed
-    # destination and not a theft-shaped one (inv. 2).
+    # destination and not a theft-shaped one.
     keep = (
         "supply_delta_sign",
         "destination_shape",
@@ -277,30 +277,30 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     return summary
 
 
-# §5b downstream value-reach. Read from ``effect_verdicts.observed_residue``, NOT
+# Downstream value-reach. Read from ``effect_verdicts.observed_residue``, NOT
 # from ``witness``: holder addresses and USD are per-deployment state, and while
 # they lived on the witness they were copied into the code-plane behavioral cache
 # and re-published as a DIFFERENT deployment's observation on every cache hit.
-# ``observed_residue`` is the state-plane column and is never a cache key (inv. 3).
+# ``observed_residue`` is the state-plane column and is never a cache key.
 #
 # CONTRACT for the eventual scorer, in three states with ``reach_determined`` as
-# the discriminator (D3):
+# the discriminator:
 #   * ``reach_determined is True`` — MEASURED. ``observed_reach_value_usd`` is a
 #     conservative upper bound (a holder's full on-chain balance attributed when
-#     value provably leaves it, inv. 5/7) over ``observed_reach_holders``.
+#     value provably leaves it) over ``observed_reach_holders``.
 #   * ``reach_determined is False`` (with ``reach_indeterminate: True``) — NOT
 #     measured: no holder was observed moving value, which is NOT "reach is
 #     nothing". ``observed_reach_value_usd`` is ABSENT on such a row and
 #     ``observed_reach_floor_usd`` carries the acting deployment's own balance as a
-#     floor. Until D3 the floor was published as ``observed_reach_value_usd``
+#     floor. The floor used to be published as ``observed_reach_value_usd``
 #     itself, so a scorer reading the number and ignoring the flag scored "$0
-#     reach" for a zero-balance router that can move millions — the exact
-#     "unproven read as proven-zero" shape inv. 1 forbids.
+#     reach" for a zero-balance router that can move millions — an unproven
+#     value read as a proven zero.
 #   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
 #     observed leaving a holder and its USD is NOT determined, because at least one
 #     asset that moved has no priced holding on record
 #     (``observed_reach_unvalued_assets`` names them; ``observed_reach_priced_usd``
-#     is the priced part, a partial floor). A2: reach is measured PER ASSET, and
+#     is the priced part, a partial floor). Reach is measured PER ASSET, and
 #     1001 of 1376 local balance rows are unpriced, so this state is common and must
 #     lower confidence rather than produce a small number.
 #     ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
@@ -318,8 +318,8 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     that is published rather than implied). The worst row in the DB asserted $3.489B
 #     against a protocol TVL of $3.297B with nothing checking. The ceiling bears on
 #     WHICHEVER figure the row publishes: ``observed_reach_value_usd`` on the measured
-#     branch and ``observed_reach_priced_usd`` on the partial-floor branch (L-46 — the
-#     floor branch used to return before the check, so a floor above the protocol's own
+#     branch and ``observed_reach_priced_usd`` on the partial-floor branch (the floor
+#     branch used to return before the check, so a floor above the protocol's own
 #     TVL was publishable with no ``reach_tvl_check`` at all). A refusal therefore means
 #     "the row's own USD was contradicted", and on the floor branch the unvalued-asset
 #     keys still stand beside it: the refusal is about the priced part, not about

@@ -1,4 +1,4 @@
-"""G3 class R — ``fallback`` / ``receive`` as first-class entry points.
+"""``fallback`` / ``receive`` as first-class entry points.
 
 Two defects, one shape: having no 4-byte selector was treated as having no
 caller.
@@ -84,7 +84,7 @@ def test_gated_fallback_gets_a_predicate_tree(contract):
 
 
 def test_gated_fallback_tree_carries_the_caller_authority_leaf(contract):
-    """R4 positive case. A tree that exists but lost the gate would satisfy the
+    """The positive case. A tree that exists but lost the gate would satisfy the
     test above and still publish the function as open."""
     tree = ((build_predicate_artifacts(contract) or {}).get("trees") or {})["fallback()"]
     leaves: list[dict] = []
@@ -152,15 +152,15 @@ def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signatur
 
 
 def test_no_named_function_can_receive_the_selectorless_sentinel():
-    """L-72: the ``""`` sentinel is reserved for a PROVEN absence of a selector.
+    """The ``""`` sentinel is reserved for a PROVEN absence of a selector.
 
-    The ledger recorded two named functions (``alertBatchMetadataUpdate``,
-    ``alertMetadataUpdate``) as carrying ``selector = ''`` beside well-formed ABI
+    Two named functions (``alertBatchMetadataUpdate``, ``alertMetadataUpdate``)
+    were once reported as carrying ``selector = ''`` beside well-formed ABI
     signatures. That does not reproduce — no row in any local database carries
     an empty or NULL selector, and both functions hold their real keccak — but
     the invariant it asks for was only pinned by a single unlowered example. Pin
-    it over the shapes instead, because ``''`` on a named function re-opens the
-    L-27 identity collision: ``_selector_key`` deliberately folds ``None`` onto
+    it over the shapes instead, because ``''`` on a named function re-opens an
+    identity collision: ``_selector_key`` deliberately folds ``None`` onto
     ``""``, so a named function landing there shares an identity with the
     contract's ``fallback``/``receive`` and inherits its observed claims.
 

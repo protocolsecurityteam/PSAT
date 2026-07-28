@@ -95,7 +95,7 @@ class GovernanceView:
 
 def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     """Whether ``job`` and a Contract row (its ``chain`` name) are on the same
-    chain (inv. 12). Both sides resolve to a registry chain id — the job from its
+    chain. Both sides resolve to a registry chain id — the job from its
     first-class ``chain_id`` (else derived from ``request["chain"]``), the
     contract from its name string — so aliases (``"mainnet"``≡``"ethereum"``) and
     a NULL contract chain (legacy mainnet) fold to mainnet and agree, keeping
@@ -163,7 +163,7 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
         # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
         # and a raw string compare would drop legitimate rows on alias / NULL
         # mismatch); chain agreement is enforced in Python below via the registry
-        # so a mainnet job never pairs with a same-address L2 contract (inv. 12).
+        # so a mainnet job never pairs with a same-address L2 contract.
         # On mainnet-only data every pair agrees, so output is unchanged.
         rows = session.execute(
             select(Job, Contract.chain)
@@ -281,7 +281,7 @@ def resolve_implementation_contracts(
 
     ``impl_job_by_entity`` is keyed by the composite entity token
     (:func:`_entity_key`, ``"<chain>::<addr>"``) of the impl job's OWN chain, so
-    a proxy resolves its implementation on the proxy's own chain (inv. 13). A
+    a proxy resolves its implementation on the proxy's own chain. A
     same-address impl twin on two of a protocol's chains no longer collapses
     last-wins across chains — each chain keeps its own impl job.
 
@@ -785,9 +785,9 @@ def _prefetch_child_tables(
         ``contract_id`` (chain-scoped through ``contracts.chain``) but the returned
         MAP is keyed by a bare lowercase address, which is the pre-existing shape of
         the whole ``principal_lookup`` plane — ``principal_labels`` /
-        ``control_graph_nodes`` / ``controller_values`` carry no chain column at all
-        (handoff §3), and ``_build_principal_lookup`` already merges every source
-        into one bare-address dict. So a protocol spanning two chains could in
+        ``control_graph_nodes`` / ``controller_values`` carry no chain column at all,
+        and ``_build_principal_lookup`` already merges every source into one
+        bare-address dict. So a protocol spanning two chains could in
         principle have one chain's walk annotate the other's node. Not realised: the
         control/policy plane is 100% ethereum, and 0 addresses carry differing
         records. Closing it means giving that plane a chain key, which is a
@@ -1438,7 +1438,7 @@ def build_governance_view(
                         # from "no token divisor returned" (which would make any
                         # USD figure wrong by 10^n), but neither writer persists
                         # ``decimals_reported``, so the DB cannot tell them apart
-                        # and this payload must not pretend otherwise (L-45).
+                        # and this payload must not pretend otherwise.
                         "usd_value_state": "measured" if usd is not None else "not_determined",
                         # Kept for continuity, and NOT a money fact: the producer
                         # writes 0 for "no price known" on 1,007 local rows, so a
@@ -1545,7 +1545,7 @@ def build_governance_view(
     # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
     # latter were analysed standalone in older runs). Keyed by the composite
     # entity token (a proxy's impl is on the proxy's own chain) so a same-address
-    # standalone on ANOTHER chain isn't collapsed away (inv. 13).
+    # standalone on ANOTHER chain isn't collapsed away.
     impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
@@ -1598,7 +1598,7 @@ def build_governance_view(
     # cid → the composite entity token of the contract's OWN (chain, address).
     # The whole attribution fold below stays in composite-entity space so a
     # same-address twin on another chain never merges into this chain's
-    # authority sets (inv. 13): two standalone CREATE2 twins render to distinct
+    # authority sets: two standalone CREATE2 twins render to distinct
     # ``<chain>::<address>`` keys, so ``assign_primary_controllers`` runs a
     # separate contest per chain. The per-principal OUTPUT fields (primary_for /
     # co_controls / controls_detail / other_callers) are rendered back to BARE
@@ -1884,7 +1884,7 @@ def _build_flows_and_principals(
 
     # Keyed by composite ``<chain>::<address>`` entity, not bare address: two
     # standalone twins share an address, so a bare key would resolve both to one
-    # chain's Contract row and collapse the other chain's principals (inv. 13).
+    # chain's Contract row and collapse the other chain's principals.
     lookup_contract_by_entity: dict[str, Contract | None] = {}
     for entry in contracts:
         if entry.get("address"):
@@ -2118,9 +2118,9 @@ def _coalesce_chain(chain: str | None) -> str:
 def _entity_key(chain: str | None, address: str | None) -> str:
     """Composite ``"<chain>::<address>"`` entity key, byte-identical to the
     frontend ``entityKey`` (site/src/surface/entityKey.js) so a backend-built
-    functions map aligns with the frontend's per-(chain, address) lookups
-    (multichain invariant 13). ``"::"`` appears in neither a chain name nor a
-    ``0x`` address, so the composite is collision-free."""
+    functions map aligns with the frontend's per-(chain, address) lookups.
+    ``"::"`` appears in neither a chain name nor a ``0x`` address, so the
+    composite is collision-free."""
     return f"{_coalesce_chain(chain)}::{str(address or '').lower()}"
 
 
@@ -2165,7 +2165,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     # proxy node (their functions surface there), so they get no standalone
     # entry — mirrors the canvas dedup for split-proxy admin impls. Keyed by the
     # composite entity token (the secondary is on its proxy's chain) so a
-    # same-address standalone on another chain isn't suppressed (inv. 13).
+    # same-address standalone on another chain isn't suppressed.
     secondary_impl_entities = {
         _entity_key(cr.chain, s)
         for cr in contracts_by_job_id.values()
@@ -2177,7 +2177,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     # should show — for a proxy: its EIP-1967 impl plus any split-proxy secondary
     # impls; for a plain contract: its own row. The key is the composite entity
     # token so a CREATE2 twin at the same address on two chains keeps each
-    # chain's own analysis instead of collapsing last-wins (inv. 13).
+    # chain's own analysis instead of collapsing last-wins.
     entity_key_to_ef_cids: dict[str, list[int]] = {}
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
@@ -2315,7 +2315,7 @@ def all_addresses_for_protocol(
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
     # template name. Keyed by the composite entity token (a proxy's impl is on
     # the proxy's own chain) so a same-address twin on another chain doesn't
-    # display the other chain's name (inv. 13).
+    # display the other chain's name.
     impl_name_by_entity = {
         _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }

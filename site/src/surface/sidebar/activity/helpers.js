@@ -31,7 +31,7 @@ export function subscriptionEventTypeSet(subscription) {
 // can contradict each other and one real row does: contract
 // `0x3c55986cfee455e2533f4d29006634ecf9b7c03f` is `is_proxy: false` with
 // `proxy_type: "beacon"` and has 14 `Upgraded(address)` logs at or before block
-// 25619159 (L-1). Reading `Boolean(is_proxy)` maps that contract onto the
+// 25619159. Reading `Boolean(is_proxy)` maps that contract onto the
 // "non-proxy, so there is nothing before the line by construction" path and
 // renders 14 real upgrades as proven absence.
 //

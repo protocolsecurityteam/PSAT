@@ -101,7 +101,7 @@ def test_get_many_empty_input_no_pool_spawned() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Storage-key prefix normalisation (W0-1)
+# Storage-key prefix normalisation
 #
 # Rows record the writing environment's ARTIFACT_STORAGE_PREFIX verbatim. Read
 # from an environment with a different prefix, every one of those keys names an
@@ -197,7 +197,7 @@ def test_transport_failure_is_never_reported_as_absence() -> None:
 
 
 def test_empty_key_is_a_different_fact_from_a_missing_object() -> None:
-    """R1: 'the row records no key' and 'the bucket has no object at this key'
+    """'The row records no key' and 'the bucket has no object at this key'
     are distinct states and a consumer can tell them apart."""
     client = _bare_client()
     with pytest.raises(StorageKeyAbsent):
@@ -220,10 +220,12 @@ def test_get_many_logs_a_missing_object_instead_of_dropping_it(caplog) -> None:
 
 
 def test_get_many_results_keeps_absence_and_outage_apart() -> None:
-    """R1 at the batch layer. ``get_many`` flattens both to ``None``, which is
-    why ``get_all_artifacts`` could not tell "the object is gone" from "the
-    bucket is unreachable" — and then dropped both, so its caller could not
-    tell either from "this job has no such artifact"."""
+    """Absence and outage stay apart at the batch layer too.
+
+    ``get_many`` flattens both to ``None``, which is why ``get_all_artifacts``
+    could not tell "the object is gone" from "the bucket is unreachable" — and
+    then dropped both, so its caller could not tell either from "this job has no
+    such artifact"."""
     client = _bare_client()
 
     def _fake(key: str) -> bytes:

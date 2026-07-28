@@ -1,22 +1,22 @@
-"""§6 selection cascade + transitive value-at-stake ordering.
+"""Selection cascade + transitive value-at-stake ordering.
 
 Chooses which effective functions the effects-simulation stage should probe,
 over data already persisted by the earlier pipeline stages — no RPC, no new
 facts. Two independent concerns:
 
 1. **Cascade** — the filter that produces the blank-gated simulation set
-   (Appendix A funnel: 756 → gated 406 / facts 691 / blank+facts+gated 265).
+   (measured funnel: 756 → gated 406 / facts 691 / blank+facts+gated 265).
    Every row that survives is a distinct behavior we must simulate. The "facts"
    leg of that funnel was measured when it read ``effect_targets``; it now reads
-   the W0-6 evidence plane (:func:`_has_effect_evidence`), so the number moves —
+   the state-write evidence plane (:func:`_has_effect_evidence`), so the number moves —
    on the local protocol-1 slice the cascade admits 49 more rows once that plane
    is written, and 0 fewer.
 2. **Ordering** — transitive value-at-stake sorts the survivors so the highest
-   blast-radius unknowns run first. Value ORDERS, it never GATES (inv. 4): the
+   blast-radius unknowns run first. Value ORDERS, it never GATES: the
    only thing that removes a candidate is a hard resource safety-valve, and if
    that ever fires it logs exactly what it dropped.
 
-Reach is a conservative upper bound (inv. 5): a control edge propagates the
+Reach is a conservative upper bound: a control edge propagates the
 FULL downstream value of whatever it reaches. Over-approximation is safe here
 because it only moves a candidate earlier in the queue, never out of it.
 """
@@ -60,9 +60,9 @@ logger = logging.getLogger(__name__)
 # Node IDs in ``control_graph_edges`` are stored as ``address:0x…``.
 _NODE_PREFIX = "address:"
 
-# §5c gate lift — claim families that re-enroll an already-claimed function for
-# fork probing. A ``flow.*`` claim needs the value-reach probe (§5b); a
-# ``supply.*`` claim needs the mint-backing probe (§5a). Every other claim family
+# Gate lift — claim families that re-enroll an already-claimed function for
+# fork probing. A ``flow.*`` claim needs the downstream value-reach probe; a
+# ``supply.*`` claim needs the mint-backing probe. Every other claim family
 # (``pause.*``, ``upgrade.*``, …) is already explained and is NOT re-simulated.
 _FLOW_CLAIM_PREFIX = "flow."
 _SUPPLY_CLAIM_PREFIX = "supply."
@@ -74,7 +74,7 @@ _SUPPLY_CLAIM_PREFIX = "supply."
 # function does to value. INVARIANT: a zero-weight FACT must never remove a
 # function from evidence-gathering. These ids are filtered out BEFORE
 # :func:`_enrolled_families` buckets, so a row whose only claims are transparent
-# stays the §6 blank default (``families=None`` → full synthesis) exactly as if
+# stays the blank default (``families=None`` → full synthesis) exactly as if
 # it carried no claims at all.
 _ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({"rate_limit.consume", "delegatecall.execute"})
 
@@ -86,8 +86,7 @@ _ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({"rate_limit.consume", "delegateca
 #
 # ``flow.in`` is excluded — a permissionless deposit is a wrapper's whole purpose
 # and probing it corroborates nothing — as is ``value_router``, whose entry is
-# neither source nor sink (see §G3 in the round-6 handoff: routed labels are
-# static-only by design).
+# neither source nor sink (routed labels are static-only by design).
 _PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
 
 # How many of a deployment's own holdings may stand in for a caller-supplied token
@@ -149,7 +148,7 @@ class Candidate:
     # display consumers that own it (``analysis_detail``, ``governance.principals``).
     principal_addresses: tuple[str, ...]
     # Transitive USD an exercise of this function can reach through the control
-    # graph. Upper bound; orders only (inv. 4/5). ``Decimal`` because it is a SORT
+    # graph. Upper bound; orders only. ``Decimal`` because it is a SORT
     # KEY over a set-derived sum: two candidates that reach the same money must
     # compare EQUAL so the ``function_id`` tiebreak decides them. It is never
     # published — nothing serializes a Candidate — so the exact type costs nothing
@@ -158,12 +157,12 @@ class Candidate:
     # ``effective_functions.deployment_address`` — the address that actually holds
     # the state. Empty when the row predates it / is not proxy-backed.
     deployment_address: str = ""
-    # §5c gate lift. ``None`` = a BLANK function: synthesize every effect class
-    # (the §6 default). A non-empty set = a function already carrying a
+    # Gate lift. ``None`` = a BLANK function: synthesize every effect class
+    # (the default). A non-empty set = a function already carrying a
     # flow.*/supply.* claim, re-enrolled for exactly those value/supply families
     # (never the whole class set — we don't re-simulate what's already explained).
     restrict_families: frozenset[str] | None = None
-    # §5b downstream value-reach inputs. ``value_holders`` is the protocol's
+    # Downstream value-reach inputs. ``value_holders`` is the protocol's
     # WITNESSED value-holder set from ``contract_balances`` — NOT control_graph_edges
     # (which has no fund-flow edge) — against which the fork value-reach probe
     # measures value that provably LEAVES a holder when the call runs.
@@ -172,7 +171,7 @@ class Candidate:
     # across a protocol's candidates (small, immutable), so carrying it
     # per-candidate is cheap.
     #
-    # PER ASSET, not per holder (A2). This was ``(address, usd)`` — one summed
+    # PER ASSET, not per holder. This was ``(address, usd)`` — one summed
     # figure per holder — and the reach probe matched ANY ``Transfer`` out of that
     # holder against the whole sum. The weETH proxy's $3.489B is 99.99% eETH, the
     # probe's synthetic native-ETH move matched it, and the row published $3.489B of
@@ -201,10 +200,10 @@ class Candidate:
     # identity for a caller-supplied token PARAMETER, which has no getter behind it
     # to resolve. Priced entries only (see :func:`_token_holdings_by_contract`).
     input_token_addresses: tuple[str, ...] = ()
-    # §7: the resolver marked this function's caller set an EXACT ``finite_set`` —
+    # The resolver marked this function's caller set an EXACT ``finite_set`` —
     # it claims to have enumerated exactly who may call F. If the probe, run as that
     # sole/named member, is then rejected by a canonical gate error, the
-    # enumeration named the wrong holder (an authority-plane §9 discrepancy).
+    # enumeration named the wrong holder (an authority-plane discrepancy).
     membership_exact: bool = False
 
     @property
@@ -231,7 +230,7 @@ class AuthorityGraph:
     second can be compared against a chain observation: the balances were fetched
     for the proxy (``resolution_worker`` reads ``proxy_address or address``) but
     stored on the implementation's contract row, and a ``Transfer`` log names the
-    proxy. Keying §5b value-reach on ``balance`` therefore matched no holder and
+    proxy. Keying value-reach on ``balance`` therefore matched no holder and
     floored every acting balance to zero.
 
     Both balance maps carry ``Decimal``, not ``float``: the closure sum below is
@@ -377,12 +376,12 @@ HOLDINGS_COMPLETENESS_STATES = (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMP
 
 
 class AssetHolding(NamedTuple):
-    """One (holder, asset) balance the §5b reach probe can match a moved asset to.
+    """One (holder, asset) balance the value-reach probe can match a moved asset to.
 
     ``asset`` is the address that EMITS a ``Transfer`` log for it: the token
     contract, or :data:`~services.effects.config.NATIVE_ASSET_LOG_EMITTER` for the
     native balance (``contract_balances.token_address IS NULL``). Matching is per
-    asset because the whole A2 over-claim was asset-blindness: a synthetic native
+    asset because the over-claim it replaces was asset-blindness: a synthetic native
     move out of the weETH proxy matched a holder whose USD is 99.99% eETH, and the
     row published $3.489B of "reach" for a call that moved $0 of ETH.
 
@@ -390,13 +389,13 @@ class AssetHolding(NamedTuple):
     carry ``price_usd = 0``, which the producer writes for "no price known", and
     ``usd_value`` is the column that encodes that correctly as SQL NULL. It must
     never be read as zero: that is a confident low value where the honest answer is
-    "unknown", which is inv. 1's ranking rule in its numeric form.
+    "unknown", and "unknown" must rank worse than a proven-benign value.
     """
 
     holder: str
     asset: str
     usd_value: float | None
-    # What is known about whether this holder's holdings list is WHOLE (G6-11), as one
+    # What is known about whether this holder's holdings list is WHOLE, as one
     # of :data:`HOLDINGS_COMPLETENESS_STATES`. Never ``"complete"``, and that is the
     # point: this is derived from the stored rows, and the stored rows are the fetch's
     # output AFTER ``utils.etherscan.get_token_balances`` drops every zero-balance
@@ -485,7 +484,7 @@ def _holdings_completeness(stored_token_rows: int) -> str:
     page containing any zero-balance entry stores fewer than 100 and would have read as
     proven-complete.
 
-    ARMED POPULATION, stated honestly (R2): ``at_page_cap`` is reachable by
+    ARMED POPULATION, stated honestly: ``at_page_cap`` is reachable by
     construction and test-covered, and it fires on ZERO local holders. 7 local
     contracts do sit exactly at the cap (WETH9, Dai, WstETH, Lido, LinkToken,
     DepositContract, FiatTokenV2_2, one of them holding $8.6B) — but all 7 have
@@ -497,8 +496,8 @@ def _holdings_completeness(stored_token_rows: int) -> str:
 
     The only thing that could ever return ``"complete"`` is the fetch's own page
     length, recorded at fetch time. That needs a schema column and a re-fetch of the
-    population — outside this effort's cost boundary — so it is DEFERRED with cause,
-    and until then the honest answer below the cap is "not determined".
+    whole population, so it is deferred; until then the honest answer below the cap
+    is "not determined".
     """
     if token_balances_may_be_truncated(stored_token_rows):
         return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
@@ -510,8 +509,8 @@ def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:
 
     Reads ``defillama_tvl`` and NOTHING else. ``total_usd`` and ``contract_breakdown``
     are NULL on EVERY row of this table locally, so a gate written against them cannot
-    fire and would be a mitigation that never runs (R2) — the exact shape this effort
-    exists to remove. ``None`` here means the gate is SKIPPED, and the caller says so
+    fire and would be a mitigation that never runs. ``None`` here means the gate is
+    SKIPPED, and the caller says so
     out loud rather than passing a comparison that silently always succeeds.
     """
     value = session.execute(
@@ -946,7 +945,7 @@ def _has_effect_evidence():
     """SQL predicate for cascade filter (a): is there anything here to simulate,
     or could we not determine that there is not?
 
-    Reads the W0-6 state-write evidence plane — ``state_changing`` /
+    Reads the state-write evidence plane — ``state_changing`` /
     ``state_writes`` / ``sinks``, each three-state — and NOT ``effect_targets``,
     which is a display field that concatenates state-write variable names with
     dotted external-call heads (``_effect_targets_from_sinks``). Selecting on it
@@ -958,7 +957,7 @@ def _has_effect_evidence():
     filter can infer a proven write from membership any more.
 
     Which disjunct actually admits those 156, measured on the projected plane
-    (never assumed — the shape below is not the one the narrative suggests):
+    (never assumed — the shape below is not the obvious one):
     ``state_changing IS TRUE`` for **147**, not-determined for **8**
     (``state_changing`` NULL), and the sink evidence for exactly **1**
     (``shouldSubmitReport(address)``, function_id 2344). So for 147 of them the
@@ -1000,17 +999,17 @@ def _has_effect_evidence():
     Three consequences worth naming, because they are the point:
 
     * **Not-determined admits.** A row whose evidence was never written (every
-      row written before W0-6's columns), or withheld — L-15: the view-contradiction
+      row written before those columns existed), or withheld — the view-contradiction
       rule nulls 89 legitimate ``external_call`` sinks on 14 rows — is probed, not
       dropped. Dropping it would publish "nothing to see here" from an absence of
-      measurement, which is the error this whole effort exists to remove. Where
+      measurement. Where
       the plane is entirely unwritten (1,773/1,773 rows locally) this filter is
       vacuous by design and the cascade is bounded by (b), (c) and the
       ``resource_cap``, which names everything it drops.
     * **``state_changing`` is read as a bool, not as evidence of writes.** It is
       ``TRUE`` for a selector-bearing external/public non-view function whose
-      writes may sit in inline assembly the IR never saw — the exact row W0-6
-      exists to stop losing. ``FALSE`` reaches this filter only from a named
+      writes may sit in inline assembly the IR never saw — the exact row this
+      plane exists to stop losing. ``FALSE`` reaches this filter only from a named
       function the compiler typed ``view``/``pure``: ``_mutability_fields``
       withholds it to NULL for ``fallback``/``receive`` (no selector is not a
       proof of purity — WETH9's ``fallback()`` writes ``balanceOf``).
@@ -1019,19 +1018,19 @@ def _has_effect_evidence():
       returns ``[]`` unless a ``state_write`` sink exists, so it can admit nothing
       the two columns above do not (verified: 0 rows over the 1,179 projected
       protocol-1 rows carry a non-empty ``writer_selectors`` without a proven
-      write or sink). Reading it would also drag L-14's fabricated
+      write or sink). Reading it would also drag the fabricated
       ``keccak("fallback()")[:4]`` values (15 fallback/receive rows) into a
       selection decision for no recall at all.
 
     **Why ``state_changing IS FALSE`` alone is not the exclusion.**
     ``tests/test_effective_function_mutability_columns.py``'s
-    ``test_a_state_write_only_filter_would_suppress_the_positive_control`` — W0-6's
-    own pin for whoever retargets this filter — ends "a sink-only filter is not
+    ``test_a_state_write_only_filter_would_suppress_the_positive_control`` — the
+    pin for whoever retargets this filter — ends "a sink-only filter is not
     sufficient on its own, ``state_changing`` is", and a stricter reading of it
-    would drop every compiler-typed view outright. It is not taken, for a reason
-    that is this effort's whole thesis: ``view``/``pure`` is a proof about STATE
-    MUTATION, and this filter's question is broader than that. The effects stage
-    also contradicts the AUTHORITY plane (§9 direction 3 — it is the only stage
+    would drop every compiler-typed view outright. It is not taken, because
+    ``view``/``pure`` is a proof about STATE MUTATION and this filter's question is
+    broader than that. The effects stage
+    also contradicts the AUTHORITY plane (it is the only stage
     that calls as a resolved principal), and a gated view can carry a caller-set
     claim a probe would falsify. Using a mutation proof to assert "there is
     nothing here to observe" is the same over-reach in miniature. So the
@@ -1064,16 +1063,16 @@ def _has_effect_evidence():
 
 
 def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = None):
-    """The §6 filter cascade as one query.
+    """The filter cascade as one query.
 
-    (a) has something to simulate — the W0-6 state-write evidence plane, three
+    (a) has something to simulate — the state-write evidence plane, three
         states kept apart; see :func:`_has_effect_evidence` for the input-shape
         table. NOT ``effect_targets``, which conflated a proven write with a
         call head.
     (c) gated over public — ``authority_public = false``, EXCEPT a public
         function carrying ``flow.out`` or ``supply.mint``.
 
-    That exception is the §5c gate lift applied to the permissionless case, and
+    That exception is the gate lift applied to the permissionless case, and
     it exists because the original rule read "public means no authority to
     resolve, so there is nothing to probe as". True of the principal; false of
     the effect. A permissionless payout or a permissionless mint is the shape
@@ -1089,9 +1088,9 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
 
     Filter (b) — the blank-claim gate — is applied in PYTHON on the returned
     ``claims`` column (see :func:`_enrolled_families`), because it is no longer a
-    binary keep/drop: BLANK rows still get full synthesis (the §6 default), while
+    binary keep/drop: BLANK rows still get full synthesis (the default), while
     rows already carrying a ``flow.*``/``supply.*`` claim are RE-ENROLLED for just
-    those value/supply families (§5c gate lift) so the fork value-reach and
+    those value/supply families (the gate lift) so the fork value-reach and
     mint-backing probes can run on the functions that need them. Rows carrying
     only other claims (pause/upgrade/…) are already explained and are dropped by
     :func:`select_candidates`. Widening the SQL to all gated rows keeps the whole
@@ -1139,7 +1138,7 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
 
 
 def _membership_exact(capability_expr: Any) -> bool:
-    """Whether the resolver claims an EXACT enumeration of F's caller set (§7). An
+    """Whether the resolver claims an EXACT enumeration of F's caller set. An
     ``unsupported`` / ``conditional_universal`` capability also carries
     ``membership_quality: exact``, so both the ``finite_set`` kind AND the exact
     quality are required — this is "the resolver named a finite, complete set of
@@ -1154,11 +1153,11 @@ def _membership_exact(capability_expr: Any) -> bool:
 def _enrolled_families(claims: Any) -> frozenset[str] | None:
     """Which effect families a candidate should be probed for, from its claims.
 
-    * ``None`` — the function is BLANK (no claims). It is the §6 default candidate:
+    * ``None`` — the function is BLANK (no claims). It is the default candidate:
       every effect class is synthesized. ``[]``, SQL ``NULL`` and the ORM's
       JSON-``null`` all read as blank here.
     * a **non-empty** frozenset — the function already carries a ``flow.*`` and/or
-      ``supply.*`` claim, so it is re-enrolled (§5c) for exactly ``value_out``
+      ``supply.*`` claim, so it is re-enrolled for exactly ``value_out``
       and/or ``supply``. Never the whole class set: re-simulating pause/authority/
       upgrade for an already-explained function is the waste the gate guards.
     * the **empty** frozenset — the function carries only other claims (pause,
@@ -1191,7 +1190,7 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
 def _principals_by_function(session: Session, function_ids: list[int]) -> dict[int, list[str]]:
     """``function id -> its resolved principals``, in a TOTAL order.
 
-    The ORDER BY is load-bearing, not cosmetic (ledger L-4): element ``[0]`` of
+    The ORDER BY is load-bearing, not cosmetic: element ``[0]`` of
     this list becomes the identity every fork probe impersonates
     (``candidate.principal_addresses[0]`` at ``calldata.py`` :1395, :1437, :1720,
     :2312, and the first resolved principal of the code-upgrade plan in
@@ -1207,8 +1206,8 @@ def _principals_by_function(session: Session, function_ids: list[int]) -> dict[i
     holders of the same function is unreproducible by construction. ``id`` makes
     the order total when one function records the same address twice.
 
-    A third determinism class alongside PYTHONHASHSEED (W0-2) and allocation order
-    (W0-3), invisible to both gates because both of those fix the PROCESS, not the
+    A third determinism class alongside PYTHONHASHSEED and allocation order,
+    invisible to both of those gates because they fix the PROCESS, not the query
     plan.
     """
     if not function_ids:
@@ -1235,14 +1234,14 @@ def select_candidates(
 ) -> list[Candidate]:
     """Return the blank-gated simulation set, ordered by transitive value.
 
-    ``resource_cap`` is the ONLY permissible cutoff (inv. 4): a hard
+    ``resource_cap`` is the ONLY permissible cutoff: a hard
     safety-valve for a pathological protocol. When it fires it drops the
     lowest-value candidates and ``log()``s exactly what it dropped — value
     never silently removes work.
 
     ``scope`` narrows the CANDIDATE set to the calling job's own contracts. The
     two protocol-wide inputs below are deliberately NOT narrowed: the authority
-    closure and the §5b value-holder set are properties of the whole protocol, and
+    closure and the value-holder set are properties of the whole protocol, and
     computing either from one contract's slice would understate every candidate's
     blast radius.
     """
@@ -1251,7 +1250,7 @@ def select_candidates(
     principals = _principals_by_function(session, function_ids)
     graph = build_authority_graph(session, protocol_id)
 
-    # §5b: the protocol's witnessed value-holder set (on-chain balances), built once
+    # The protocol's witnessed value-holder set (on-chain balances), built once
     # and shared by reference across every candidate, PER ASSET. Keyed on the HOLDING
     # address, which is the one a ``Transfer`` log can name.
     #
@@ -1358,7 +1357,7 @@ def record_empty_planning(
 
 
 def _log_dropped(protocol_id: int, resource_cap: int, dropped: list[Candidate]) -> None:
-    """Name every dropped candidate — no silent truncation (inv. 4)."""
+    """Name every dropped candidate — no silent truncation."""
     manifest = ", ".join(
         f"fn={c.function_id}({c.selector or c.function_name}) on {c.contract_address}"
         f" value=${c.value_at_stake_usd:,.0f}"

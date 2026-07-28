@@ -1,23 +1,23 @@
 """Per-candidate probe planning — the seam between selection and the harness.
 
 The effects worker owns the *orchestration* (cache lookup/write with kernel-vs-
-projection scope, the §7 self-audit, verdict persistence, §9 routing, metrics,
-fail-forward). It delegates *what to probe for each candidate* to a ``Prober``
-seam so the orchestration is testable end-to-end against stubs with recorded
-transcripts (inv. 8) and the production recipe wiring stays swappable.
+projection scope, the self-audit, verdict persistence, discrepancy routing,
+metrics, fail-forward). It delegates *what to probe for each candidate* to a
+``Prober`` seam so the orchestration is testable end-to-end against stubs with
+recorded transcripts and the production recipe wiring stays swappable.
 
 A :class:`ProbePlan` is one (effect-class, scope) unit of work for a candidate:
 a ``run`` closure that executes the applicable Tier-1/Tier-2 recipe against the
 injected seams and returns a tiered, transcripted
 :class:`~services.effects.harness.ObservedEffect`. The plan does NOT carry the
 behavioral hash — the worker stamps that from the candidate's resolved hashes so
-kernel/projection cache scoping (inv. 3) lives in one place.
+kernel/projection cache scoping lives in one place.
 
 The default prober drives **code-upgrade** (Tier 0 indexed history + a
-current-state check, §4.3/inv. 13) for proxy candidates, plus every class whose
-concrete probe inputs :mod:`services.effects.calldata` can synthesize from the
-static facts — value-out (§4.2), supply (§4.5), authority-change (§4.4) at Tier
-1, and freeze/pause (§4.1) at Tier 2 when a fork transport is available.
+current-state check) for proxy candidates, plus every class whose concrete probe
+inputs :mod:`services.effects.calldata` can synthesize from the static facts —
+value-out, supply, authority-change at Tier 1, and freeze/pause at Tier 2 when a
+fork transport is available.
 
 Where the synthesizer returns nothing the prober emits NO plan for that class:
 the recipes already fail closed on thin inputs, but a probe on guessed calldata
@@ -76,7 +76,7 @@ class ProbeContext:
     call_batch: CallBatch | None = None
     anvil_factory: Callable[[], AnvilTransport] | None = None
     # Called with the number of upstream requests a probe issued, for the
-    # §3-preflight sizing metric (best-effort; recipes that don't report leave 0).
+    # preflight sizing metric (best-effort; recipes that don't report leave 0).
     on_requests: Callable[[int], None] | None = None
     # Input-asset seeding seam. Left unset in production: the default is built
     # from ``simulate`` on first use and memoizes token identity + storage layout
@@ -106,7 +106,7 @@ class ProbeContext:
 class ProbePlan:
     """One (effect-class, scope) unit of probe work for a candidate. ``run``
     executes the recipe (touching the injected seams) and returns the verdict.
-    ``gate_ref`` names the gate *structure* (never an address — inv. 12)."""
+    ``gate_ref`` names the gate *structure* (never an address)."""
 
     effect_class: str
     scope: str
@@ -123,23 +123,23 @@ class ProbePlan:
 Prober = Callable[[Session, Candidate, ProbeContext], list[ProbePlan]]
 
 # Resolves (kernel_hash, surface_hash) for a candidate, or None to skip it.
-# Injected so tests control cache scoping (inv. 3) without real bytecode.
+# Injected so tests control cache scoping without real bytecode.
 HashResolver = Callable[[Session, Candidate], "tuple[str, str] | None"]
 
 
 # ---------------------------------------------------------------------------
-# Default hash resolver — §7 bytecode fallback (sound; under-dedups)
+# Default hash resolver — bytecode fallback (sound; under-dedups)
 # ---------------------------------------------------------------------------
 
 
 def make_bytecode_hash_resolver(chain_id: int) -> HashResolver:
     """Build the default (kernel_hash, surface_hash) resolver for a chain.
 
-    Uses the §7 item-2 fallback (metadata-stripped whole-runtime-bytecode +
+    Uses the bytecode fallback (metadata-stripped whole-runtime-bytecode +
     selector for the kernel; selectorless for the surface). Sound by construction —
     it can only *under*-dedup (distinct surfaces sharing a mixin kernel hash apart,
     costing extra sims), never transfer a verdict wrongly. The resolved-IR primary
-    hash (§7 item 1) is a dedup optimization requiring live Slither IR and is not
+    hash is a dedup optimization requiring live Slither IR and is not
     on the worker's cheap path; the fallback is always safe. Returns ``None`` when
     no runtime bytecode is cached for the deployment (the worker skips it,
     degraded — never guesses)."""
@@ -160,7 +160,7 @@ def make_bytecode_hash_resolver(chain_id: int) -> HashResolver:
 def _hashable_code_address(session: Session, candidate: Candidate) -> str | None:
     """The address whose runtime bytecode may key this candidate's verdict, or ``None``.
 
-    THE MISSING WITNESS (G6-C0). What makes bytecode hashing safe is the unstated
+    What makes bytecode hashing safe is the unstated
     invariant *"a proxy row never carries ``effective_functions``"* — true today (39
     proxy rows, 0 functions) and asserted by nothing: no constraint, no test, no
     comment. When it breaks, ``candidate.contract_address`` is a PROXY address and the
@@ -178,11 +178,10 @@ def _hashable_code_address(session: Session, candidate: Candidate) -> str | None
     side: probe the deployment, hash the code). Where it does not, the answer is
     ``None`` and the worker takes its existing "skip, degraded, never guess" path.
 
-    DECLARED DEVIATION from the item's literal shape ("return ``None`` for a proxy
-    row"), because that shape has a consequence the prescription did not name: the
-    code-upgrade class is planned ONLY for proxy contract rows
-    (``_code_upgrade_plans``), so a blanket refusal makes that class unplannable by
-    construction rather than merely uncached. The implementation redirect keeps the
+    Not a blanket ``None`` for every proxy row, because the code-upgrade class is
+    planned ONLY for proxy contract rows (``_code_upgrade_plans``), so a blanket
+    refusal would make that class unplannable by construction rather than merely
+    uncached. The implementation redirect keeps the
     class reachable while still never keying on a stub; the refusal remains for every
     proxy row that cannot be resolved to cached implementation code. (Local corpus: 0
     ``code_upgrade`` verdicts exist today, so neither variant changes a realised row —
@@ -244,7 +243,7 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
 
 
 # ---------------------------------------------------------------------------
-# Default prober — conservative, code-upgrade Tier-0 (§4.3 / inv. 13)
+# Default prober — conservative, code-upgrade Tier-0
 # ---------------------------------------------------------------------------
 
 
@@ -252,7 +251,7 @@ def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) ->
     """Build probe plans for one candidate: the Tier-0 code-upgrade plan plus one
     plan per class the synthesizer produced concrete inputs for.
 
-    §5c: a claim-enrolled candidate (``restrict_families`` set) is only re-probed
+    A claim-enrolled candidate (``restrict_families`` set) is only re-probed
     for its value/supply families — the code-upgrade probe is skipped so an
     already-explained flow/supply function is not re-simulated for upgradeability."""
     allow = candidate.restrict_families
@@ -263,16 +262,16 @@ def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) ->
 
 
 def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
-    """§4.3 code-upgrade for proxy candidates: an indexed upgrade (Tier 0 history)
+    """Code-upgrade for proxy candidates: an indexed upgrade (Tier 0 history)
     discharges a present-tense capability claim only in conjunction with a
-    current-state check (inv. 13). That check is a static/DB read (off the wire)
-    and, per inv. 13, requires the capability be present NOW — BOTH the impl slot
+    current-state check. That check is a static/DB read (off the wire)
+    and requires the capability be present NOW — BOTH the impl slot
     still non-zero AND a resolved, non-renounced upgrade authority. Freezing
     upgradeability does not zero the impl slot, so impl-non-zero alone would mint a
     false "upgradeable now" for a proxy whose authority was renounced; requiring a
     resolved principal closes that. A renounced/unset authority resolves to the
     zero address / empty set here (predicate_evaluator / solmate_roles), so an
-    empty resolved set WITHHOLDS (fail-closed §8), never over-claims."""
+    empty resolved set WITHHOLDS (fail-closed), never over-claims."""
     from services.effects.prefetch import get_prefetch
 
     pf = get_prefetch(session)
@@ -301,7 +300,7 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
     zero = "0x" + "0" * 40
     impl = (contract.implementation or "").strip().lower()
     current_impl_nonzero = bool(impl) and impl != zero and impl != "0x0"
-    # inv. 13 current-state check: a resolved, non-renounced upgrade authority must
+    # Current-state check: a resolved, non-renounced upgrade authority must
     # ALSO be present now. A renounced/unset authority is the zero address / empty
     # set, so drop those before deciding the capability is live.
     resolved_principals = [p for p in candidate.principal_addresses if p and p.strip().lower() != zero]
@@ -336,13 +335,13 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
 
 
 def _upgrade_gate_ref(contract: Contract) -> str:
-    """A gate-STRUCTURE descriptor (inv. 12) — the proxy pattern, never the admin
+    """A gate-STRUCTURE descriptor — the proxy pattern, never the admin
     address. Principal binding happens at read time via ``function_principals``."""
     return f"proxy:{(contract.proxy_type or 'unknown').lower()}"
 
 
 # ---------------------------------------------------------------------------
-# Synthesized plans — §4.2 / §4.4 / §4.5 (Tier 1) and §4.1 (Tier 2)
+# Synthesized plans — value-out / authority-change / supply (Tier 1) and freeze/pause (Tier 2)
 # ---------------------------------------------------------------------------
 
 
@@ -460,7 +459,7 @@ def _timelock_plan(ctx: ProbeContext, spec: calldata_synth.TimelockPlanInputs) -
         if factory is None:  # pragma: no cover - guarded at plan time
             raise RuntimeError("timelock plan requires an anvil factory")
         transport = factory()
-        # The delay belongs to the CONTRACT (§0.0.2): OZ rejects a schedule below
+        # The delay belongs to the CONTRACT: OZ rejects a schedule below
         # its own ``getMinDelay()``, and the value differs per deployment. An
         # unreadable delay is not guessed — zero goes to the contract, whose own
         # check rejects it and whose revert the recipe records verbatim.

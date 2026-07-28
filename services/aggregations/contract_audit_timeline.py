@@ -236,7 +236,7 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
     #       ``reviewed_commit/high``.
     has_proven = any(r.equivalence_status == "proven" and r.proof_kind != "cited_only" for r in current_cov)
     # ``covered_to_block is None`` alone is NOT "this row covers the currently-open
-    # impl window" (L-21) — it is also what a row whose upper bound was never
+    # impl window" — it is also what a row whose upper bound was never
     # determined looks like, and this module's own ImplWindow docstring declares
     # that inference invalid ("``to_block=None`` alone does NOT mean 'still
     # current' — ``successor`` is what says that"). ``AuditContractCoverage``

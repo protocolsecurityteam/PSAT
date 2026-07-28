@@ -1,4 +1,4 @@
-"""Per-class calldata + entry-point synthesis (EFFECTS_RESOLUTION_SPEC §4.1–§4.5).
+"""Per-class calldata + entry-point synthesis, one synthesizer per effect class.
 
 Turns the STATIC facts a candidate already carries — ABI param types, sinks,
 state writes, value-flow taint, predicate trees, resolved principals — into the
@@ -8,17 +8,18 @@ recorded fixtures.
 
 Every synthesizer returns ``None`` when the facts are too thin to build an
 honest probe. That is the load-bearing property: a recipe fed guessed calldata
-would mint a witness for a call the contract never actually performs, and §8's
+would mint a witness for a call the contract never actually performs, and the
 fail-closed discipline only holds if the inputs are real. Thin facts ⇒ no plan
 ⇒ the class stays ``unknown``.
 
 A class emitting NO plans across a whole protocol is a normal outcome, not a
 symptom. Measured on etherfi (2026-07-21): value-out and supply produced zero
 plans over all 265 candidates, because every value-moving function there already
-carries a ``flow.out`` claim and §6's cascade selects BLANK-claim functions only.
-The fact plumbing is fine — those functions do carry ``direction: "out"`` in the
-effects artifact; they are simply already explained. This is §6.2 working as
-designed: as the claims matchers grow, the simulation workload shrinks.
+carries a ``flow.out`` claim and the selection cascade selects BLANK-claim
+functions only. The fact plumbing is fine — those functions do carry
+``direction: "out"`` in the effects artifact; they are simply already explained.
+That is the cascade working as designed: as the claims matchers grow, the
+simulation workload shrinks.
 
 Decision points are deliberately concentrated and named so the live-validation
 loop can adjust them without re-deriving the module:
@@ -29,8 +30,8 @@ loop can adjust them without re-deriving the module:
 * :func:`_arg_values` — the address/uint/other substitution policy.
 * :data:`NEUTRAL_CALLER` — the identity a blast-radius probe uses when the entry
   point has no resolved principal.
-* :func:`read_max_pause_duration` — inv. 10: the bound is READ off the latch's
-  own guard leaf, never hardcoded and never scraped from source text.
+* :func:`read_max_pause_duration` — the bound is READ off the latch's own guard
+  leaf, never hardcoded and never scraped from source text.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ from services.resolution.differential_probe import (
 
 logger = logging.getLogger(__name__)
 
-# The attacker identity substituted at a taint-identified address param (§4.2).
+# The attacker identity substituted at a taint-identified address param.
 SENTINEL_ADDRESS = "0x" + "ee" * 20
 
 # Caller for a blast-radius entry point with no resolved principal — a plain
@@ -132,7 +133,7 @@ _AUTHORITY_ROLES = ("caller_authority", "delegated_authority")
 
 @dataclass(frozen=True)
 class ValueOutPlanInputs:
-    """§4.2 inputs: call F as the resolved principal, plus a sentinel variant that
+    """Value-out inputs: call F as the resolved principal, plus a sentinel variant that
     puts the attacker identity at the taint-identified address param."""
 
     contract_address: str
@@ -142,7 +143,7 @@ class ValueOutPlanInputs:
     taint_param_reaches_sink: bool = False
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
-    # §5b downstream value-reach: the protocol's witnessed value-holders the recipe
+    # Downstream value-reach: the protocol's witnessed value-holders the recipe
     # measures against, and the acting deployment's own balance floor.
     value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
@@ -173,7 +174,7 @@ class ValueOutPlanInputs:
     # and it must never enter the code-plane behaviour cache.
     inputs_vacuous: bool = False
     # ERC-20 analogue of the native ``contract_balance`` seed: assets the acting
-    # deployment PROVABLY holds (§16.6-A), so a payout the contract's live balance
+    # deployment PROVABLY holds, so a payout the contract's live balance
     # cannot cover can be reached by seeding the CONTRACT's own token balance. A
     # verdict proven under it is a CAPABILITY claim (would move IF funded) and
     # carries the same weaker ``contract_balance_seeded`` qualifier.
@@ -182,7 +183,7 @@ class ValueOutPlanInputs:
 
 @dataclass(frozen=True)
 class SupplyPlanInputs:
-    """§4.5 inputs: the recipe reads ``totalSupply`` around a call to F made as
+    """Supply inputs: the recipe reads ``totalSupply`` around a call to F made as
     the resolved principal."""
 
     token_address: str
@@ -204,7 +205,7 @@ class SupplyPlanInputs:
     # See :class:`ValueOutPlanInputs`.
     contract_holdings: tuple[str, ...] = ()
     # NO ``static_shape``. The supply recipe reads a destination shape only to
-    # collect a §9 discrepancy and discards the shape itself, and the supply
+    # collect a discrepancy and discards the shape itself, and the supply
     # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
     # the effects artifact never emits — so threading one here computed nothing
     # and then dropped it.
@@ -212,7 +213,7 @@ class SupplyPlanInputs:
 
 @dataclass(frozen=True)
 class TimelockPlanInputs:
-    """§9.5 Tier-2 inputs: schedule an operation, advance past the delay, execute
+    """Tier-2 timelock inputs: schedule an operation, advance past the delay, execute
     it — the sequence Tier 1 cannot reach, because ``eth_simulateV1`` issues one
     block with no ``blockOverrides`` and so can never satisfy a
     ``block.timestamp`` gate.
@@ -239,7 +240,7 @@ class TimelockPlanInputs:
     # honest input when the delay cannot be read: the contract's own check
     # rejects a zero delay, and the recipe records that revert verbatim.
     schedule_calldata_zero: str
-    # ``getMinDelay()`` — read, never assumed (§0.0.2).
+    # ``getMinDelay()`` — read, never assumed.
     delay_calldata: str
     gate_ref: str
     sentinel_address: str | None = None
@@ -260,7 +261,7 @@ class TimelockPlanInputs:
 
 @dataclass(frozen=True)
 class AuthorityPlanInputs:
-    """§4.4 inputs: ``probe_calldata`` exercises the gate G that F mutates;
+    """Authority-change inputs: ``probe_calldata`` exercises the gate G that F mutates;
     ``mutate_calldata`` is the call to F itself."""
 
     contract_address: str
@@ -273,7 +274,7 @@ class AuthorityPlanInputs:
 
 @dataclass(frozen=True)
 class PausePlanInputs:
-    """§4.1 inputs. ``predicted_guard_set`` is static's set — the SCORED
+    """Freeze/pause inputs. ``predicted_guard_set`` is static's set — the SCORED
     denominator; ``entry_points`` are the probes we could actually synthesize for
     it (a subset), and the observed blast radius stays a lower bound."""
 
@@ -587,8 +588,8 @@ def _declared_param_names(fn: "FunctionFacts", count: int) -> list[str]:
 
 def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None) -> set[int]:
     """Parameter slots the static flow lattice resolved as the AMOUNT of a value
-    flow — the dispositive "this argument is the quantity" fact (§4.2 mirror of
-    :func:`_lattice_taint_index`). Absent on artifacts predating the field.
+    flow — the dispositive "this argument is the quantity" fact (the value-out
+    mirror of :func:`_lattice_taint_index`). Absent on artifacts predating the field.
 
     ``param_derived`` counts alongside ``param``: its index is the slot of the
     caller input the contract converted into the amount (``transfer(receiver,
@@ -882,7 +883,7 @@ def _scalar_arg_value(
     return None
 
 
-# §4.2 executor synthesis. ``exec.arbitrary`` is the static claim for "this
+# Executor synthesis. ``exec.arbitrary`` is the static claim for "this
 # function forwards a caller-supplied destination together with a caller-supplied
 # calldata blob", proven off the IR read set of a body call op; its witness names
 # the two PARAMETERS. ``low_level_value_call`` + a ``param`` destination is the
@@ -1074,7 +1075,7 @@ def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
 
 
 def static_destination_shape(fn: "FunctionFacts", directions: frozenset[str]) -> str | None:
-    """The §4.2 destination shape static PROVES for F, or ``None``.
+    """The destination shape static PROVES for F, or ``None``.
 
     A universal, and it has to be earned across EVERY out-flow the function has:
     one site paying a caller-named address makes the function caller-redirectable
@@ -1193,7 +1194,7 @@ def _mandatory_state_pairs(tree: Any) -> set[tuple[str, str | None]]:
 
 def guarded_functions(trees: Mapping[str, Any], pairs: Iterable[tuple[str, str | None]]) -> list[str]:
     """Every function whose MANDATORY gate reads one of ``pairs`` — static's
-    predicted guard set (the §4.1 scored denominator).
+    predicted guard set (the scored denominator for the freeze/pause class).
 
     Matching is on the state-variable NAME; ``member_path`` is a refinement that
     is NOT required to agree. It cannot be: an ERC-7201 latch is recorded as a
@@ -1234,20 +1235,20 @@ def _authority_roles(tree: Any) -> set[str]:
 
 
 def _gate_ref(tree: Any) -> str:
-    """A gate STRUCTURE descriptor (inv. 12) — authority roles, never an address.
+    """A gate STRUCTURE descriptor — authority roles, never an address.
 
     ``gate:none`` is emitted for a tree-less function, which covers BOTH a
     proven-ungated one and one whose real gate the static plane could not lower
     (``guard_extraction_uncertain`` and the rest of the tree-less residue) — so
     it is not on its own a claim that no gate exists. It never has to be: the
     other half of the cache identity is the kernel ``behavior_hash``, which is
-    the whole metadata-stripped runtime bytecode (§7 item 2, immutables masked).
+    the whole metadata-stripped runtime bytecode (immutables masked).
     The gate lives inside that bytecode, so two rows can share a ``gate:none``
     only when their code — and therefore their gate — is identical, and masking
     an immutable authority erases the ADDRESS a gate compares against, never the
     comparison. ``tests/test_effects_hashing.py`` pins that.
 
-    The consumers of an absent role (the §4.4 gate-moving pick, the §4.1 pauser
+    The consumers of an absent role (the authority-change gate-moving pick, the pauser
     probe) each fail closed to a probe that is not synthesized, so a gate that
     did not lower costs recall, never a widened verdict.
     """
@@ -1256,7 +1257,7 @@ def _gate_ref(tree: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out / §4.5 supply
+# value-out / supply
 # ---------------------------------------------------------------------------
 
 _OUT_DIRECTIONS = frozenset({"out", "eth_out"})
@@ -1334,7 +1335,7 @@ def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[
 
 @dataclass(frozen=True)
 class _ProbeInputs:
-    """What §4.2 and §4.5 both need out of one synthesis pass."""
+    """What the value-out and supply synthesizers both need out of one pass."""
 
     calldata: str
     taint_param_reaches_sink: bool
@@ -1346,7 +1347,7 @@ class _ProbeInputs:
 def _value_probe_inputs(
     fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> _ProbeInputs | None:
-    """The probe inputs shared by §4.2 and §4.5."""
+    """The probe inputs shared by the value-out and supply synthesizers."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
@@ -1386,7 +1387,7 @@ def _value_probe_inputs(
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
-    """§4.2. Applicable when static says the function moves value OUT. A gated
+    """Applicable when static says the function moves value OUT. A gated
     function needs a resolved principal — a probe from the zero address only ever
     proves that the gate rejected it — but a PUBLIC function has no principal to
     resolve, so it is probed from :data:`NEUTRAL_CALLER`, an arbitrary non-zero
@@ -1425,14 +1426,14 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         native_payout=has_native_payout(fn),
         static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
         inputs_vacuous=built.inputs_vacuous,
-        # Measured holdings only (§0.0.2) — the seed derives its token from what
+        # Measured holdings only — the seed derives its token from what
         # the deployment provably holds, never a hardcoded asset.
         contract_holdings=tuple(candidate.input_token_addresses),
     )
 
 
 def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInputs | None:
-    """§4.5. Applicable when static says the function mints or burns."""
+    """Applicable when static says the function mints or burns."""
     labels = {str(lbl) for lbl in (fn.effect_info.get("effect_labels") or [])}
     if not (_flow_directions(fn) & _SUPPLY_DIRECTIONS or labels & _SUPPLY_DIRECTIONS):
         return None
@@ -1510,7 +1511,7 @@ def _dual_role_principal(session: Session, candidate: Candidate, schedule_select
     ``EXECUTOR_ROLE``), so the probe needs a principal the resolution plane put
     behind both. Preferring the intersection is what keeps this honest: the
     alternative — writing the role into storage so the gate passes — is exactly
-    what §9.3 forbids, because such a probe reverts on the gate, not on a missing
+    what a probe may not do, because it would revert on the gate, not on a missing
     asset. When the two do not intersect we still probe as the executor and let
     the contract reject the schedule, which the recipe records verbatim."""
     principals = [p.lower() for p in candidate.principal_addresses if isinstance(p, str) and p]
@@ -1532,7 +1533,7 @@ def _probe_salt(candidate: Candidate) -> bytes:
 def synthesize_timelock(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> TimelockPlanInputs | None:
-    """§9.5. Applicable when F is a proven arbitrary-call executor whose contract
+    """Applicable when F is a proven arbitrary-call executor whose contract
     also exposes the scheduling half and its own minimum delay.
 
     The operation scheduled is an ERC-20 transfer to the sentinel of an asset the
@@ -1661,7 +1662,7 @@ def _seeded_probe_calldata(
 
 
 # ---------------------------------------------------------------------------
-# §4.4 authority-change
+# authority-change
 # ---------------------------------------------------------------------------
 
 
@@ -1712,7 +1713,7 @@ def _authority_gate_target(facts: ContractFacts, fn: FunctionFacts) -> str | Non
 
 
 def synthesize_authority(candidate: Candidate, facts: ContractFacts, fn: FunctionFacts) -> AuthorityPlanInputs | None:
-    """§4.4. Applicable when F writes state that some other function reads as a
+    """Applicable when F writes state that some other function reads as a
     mandatory caller-authority gate. The mutation keeps encoder defaults — we do
     not guess a grantee; the recipe only opens on a gate that opens to ALL the
     random identities, so a guessed one could never help."""
@@ -1741,13 +1742,13 @@ def synthesize_authority(candidate: Candidate, facts: ContractFacts, fn: Functio
 
 
 # ---------------------------------------------------------------------------
-# §4.1 pause (Tier 2)
+# freeze/pause (Tier 2)
 # ---------------------------------------------------------------------------
 
 
 def _claim_latch_pairs(session: Session, function_id: int) -> set[tuple[str, str | None]]:
     """Latch ``(var, member)`` pairs from a persisted ``pause.set`` claim witness.
-    Usually empty — the §6 cascade selects BLANK-claim functions — so this is the
+    Usually empty — the selection cascade selects BLANK-claim functions — so this is the
     corroborating path, not the primary one."""
     from services.effects.prefetch import get_prefetch
 
@@ -1839,7 +1840,7 @@ def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
     A Solidity comparison holds two operands, and the pause-window question needs
     three facts (the clock, the latch, the offset) — so before
     ``absorbed_operands`` existed this reader's positive branch was unreachable
-    from any compiled source (ledger L-16, measured over 11 guard shapes).
+    from any compiled source (measured over 11 guard shapes).
     ``absorbed_operands`` is the sibling list the leaf builder now records; taking
     the union here is the whole widening.
 
@@ -1924,8 +1925,8 @@ def _absorption_recorded(tree: Any) -> bool:
       sub-expression. An operand's absence is then evidence.
     * marker ABSENT ⇒ the tree was built before the widening (every
       ``contract_materializations.predicate_trees`` row in the database is such a
-      tree, and an R5 bump does not re-run the static stage). An operand's absence
-      says nothing at all, so no conclusion may be drawn FROM it.
+      tree, and bumping the effects stage does not re-run the static stage). An
+      operand's absence says nothing at all, so no conclusion may be drawn FROM it.
 
     That distinction is load-bearing for exactly one caller: the
     ``no_time_reference`` state of :func:`_duration_from_trees` is a claim that no
@@ -1941,7 +1942,7 @@ def _absorption_recorded(tree: Any) -> bool:
 
 def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> int | None:
     """The constant this comparison PROVES is a ceiling on the clock-to-latch gap, or
-    ``None`` when the comparison's shape does not establish one (L-58 / L-60).
+    ``None`` when the comparison's shape does not establish one.
 
     The harvest used to take the max plausible constant out of
     ``operands ∪ absorbed_operands``, blind to which SIDE of the comparison it sat on
@@ -1979,7 +1980,7 @@ def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> i
     a SUBTRACTION). Two sources with opposite meanings therefore produce byte-identical
     evidence here, and the honest answer for that family is ``not_determined``. The
     recall cost is real and is stated rather than discovered later; recovering it needs
-    the static producer to stamp the additive sign, which is not this leg's surface.
+    the static producer to stamp the additive sign, which this module cannot do.
     Reading the sign out of ``leaf["expression"]`` is available and deliberately
     refused: this reader's whole history is the removal of a source-text fallback.
 
@@ -1989,7 +1990,7 @@ def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> i
       real persisted shape (560 of the 5,089 local leaves), not only a hand-built one —
       a threshold/oracle leaf can carry more. None of the 560 holds a latch, a clock
       and a plausible constant today, so this refuses nothing that was being answered.
-    * no FOREIGN clock anywhere in the leaf (L-60). A leaf whose operand union carries
+    * no FOREIGN clock anywhere in the leaf. A leaf whose operand union carries
       both a seconds clock and ``block.number`` cannot say which clock the constant is
       denominated against, and harvesting a block count as seconds understates a
       ~30-day gate as 2.5 days (216000 blocks ≈ 30 days). The outer reader already
@@ -2033,8 +2034,8 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
     clock and the latch IS that latch's window (``guard_constant``) —
     :func:`_window_ceiling_constant` is that shape test, and it is the whole of the
     harvest: taking the largest plausible constant out of the operand union instead
-    published a lead time, a cooldown offset or a minimum-elapsed as the freeze window
-    (L-58), and a block count as seconds off a mixed-clock leaf (L-60). Scoped to the
+    published a lead time, a cooldown offset or a minimum-elapsed as the freeze window,
+    and a block count as seconds off a mixed-clock leaf. Scoped to the
     latch because a contract can carry two latches with different semantics (one
     indefinite, one timed) and the wrong constant is a wrong witness, not a rounding
     error.
@@ -2043,9 +2044,9 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
     read the latch (so the gate was lowered and we are looking at it) and no leaf
     reading it touches a clock, so no passage of time can lift the freeze — a plain
     ``bool frozen`` gate. A latch no lowered leaf reads at all is
-    ``not_determined``, never indefinite: that is the tree-absent case, and it is
-    the governing rule of this whole effort — absence of a proven bound is not
-    proof that no bound exists. ``not_determined`` is likewise the honest answer
+    ``not_determined``, never indefinite: that is the tree-absent case, and the
+    governing rule is that absence of a proven bound is not proof that no bound
+    exists. ``not_determined`` is likewise the honest answer
     for the shape this reader cannot resolve: the guard DOES compare the latch
     against ``block.timestamp`` (so the latch is timed and the freeze does expire)
     but the window itself is not in the code — etherfi's ``PausableUntil`` stores
@@ -2177,9 +2178,9 @@ def _parse_int(value: Any) -> int | None:
 
 
 def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> tuple[int | None, str]:
-    """Inv. 10: the pause bound is READ, never hardcoded — and it is per-LATCH.
+    """The pause bound is READ, never hardcoded — and it is per-LATCH.
     Returns ``(seconds_or_None, source)`` where ``source`` is one of the three
-    ``DURATION_BOUND_*`` states; the pair is the whole point (R1), because
+    ``DURATION_BOUND_*`` states; the pair is the whole point, because
     ``None`` alone cannot say whether the latch has no window or whether we
     failed to find one.
 
@@ -2232,7 +2233,7 @@ def _entry_point_for(
     resolved principal is still probed, from a neutral identity: it may be public,
     and skipping it could only lose a witness.
 
-    ``caller_override`` forces a specific caller (the §1 A2 pauser-identity probe):
+    ``caller_override`` forces a specific caller (the pauser-identity probe):
     a predicted victim whose OWN principal could not be resolved is additionally
     probed from the pause principal, so a gate the neutral caller can't pass is
     still exercised by a caller that can."""
@@ -2262,9 +2263,9 @@ def _entry_point_for(
 def _pauser_identity_probes(
     facts: ContractFacts, predicted: Sequence[str], principals: Mapping[str, str], pauser: str
 ) -> list[EntryPoint]:
-    """§1 A2 follow-up (cause a): a PREDICTED pause victim whose own caller could not
-    be resolved is probed from ``NEUTRAL_CALLER`` and rejected by its auth gate
-    pre-pause, hiding any freeze from the diff (bucket B / unresolved-victim cause).
+    """A PREDICTED pause victim whose own caller could not be resolved is probed from
+    ``NEUTRAL_CALLER`` and rejected by its auth gate pre-pause, hiding any freeze
+    from the diff.
     Add a second probe of each such victim from the PAUSE principal — often the ops
     multisig, which reaches many gated functions.
 
@@ -2296,7 +2297,7 @@ def _pauser_identity_probes(
 
 
 # ---------------------------------------------------------------------------
-# Token-precondition seeding (§4.1 blast-radius honesty)
+# Token-precondition seeding (blast-radius honesty)
 # ---------------------------------------------------------------------------
 
 
@@ -2402,7 +2403,7 @@ def _token_seed_fixtures(
 
 
 # ---------------------------------------------------------------------------
-# Input-asset seeding (§4.2 / §4.5 preconditions) — Tier 1
+# Input-asset seeding (value-out / supply preconditions) — Tier 1
 # ---------------------------------------------------------------------------
 
 # Directions whose asset the ACTING PRINCIPAL must already hold for the call to
@@ -2554,7 +2555,7 @@ def seeded_calldata(
 def synthesize_pause(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> PausePlanInputs | None:
-    """§4.1. Applicable when F writes a latch-shaped state variable.
+    """Applicable when F writes a latch-shaped state variable.
 
     ``predicted_guard_set`` is static's read-set for that latch and remains the
     SCORED denominator even when empty. The entry points PROBED are a separate
@@ -2562,7 +2563,7 @@ def synthesize_pause(
     unsupported guard leaf), we fall back to probing every state-changing entry
     point rather than skipping the class. The observed radius is a lower bound
     either way, and an observed member static did not predict is routed as the
-    §9 ``observed_guard_not_predicted`` vocabulary-growth discrepancy — which is
+    ``observed_guard_not_predicted`` vocabulary-growth discrepancy — which is
     exactly what that channel is for."""
     latch = _claim_latch_pairs(session, candidate.function_id) or _latch_pairs(fn)
     if not latch:
@@ -2581,7 +2582,7 @@ def synthesize_pause(
     entry_points = [ep for ep in (_entry_point_for(facts, name, principals) for name in probe_names) if ep is not None]
     if not entry_points:
         return None
-    # cause (a) recovery: also probe each predicted victim that has no resolved
+    # Unresolved-victim recovery: also probe each predicted victim that has no resolved
     # principal from the pause principal, so a freeze a foreign caller can't reach
     # pre-pause is still witnessed. Only over the PREDICTED set (not the fallback),
     # union semantics keep the observed radius a sound lower bound.
@@ -2595,8 +2596,8 @@ def synthesize_pause(
     # getter read-back and lands on the state-bearing deployment, never the impl.
     # The seeds are visible to the pause tx itself (a pause gated on the
     # principal's token stake succeeds on the fork regardless of live holdings) —
-    # same gate-relative semantics as the ETH balance seed above (inv. 12: the
-    # verdict binds the gate structure, not the principal's current funding).
+    # same gate-relative semantics as the ETH balance seed above: the verdict binds
+    # the gate structure, not the principal's current funding.
     callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
     token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
     fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)
@@ -2632,7 +2633,7 @@ def synthesize(session: Session, candidate: Candidate) -> CandidatePlanInputs:
     fn = resolve_function(facts, candidate.selector)
     if fn is None:
         return CandidatePlanInputs()
-    # §5c: a blank candidate (restrict_families is None) is synthesized for every
+    # A blank candidate (restrict_families is None) is synthesized for every
     # class; a claim-enrolled candidate only for the value/supply families it was
     # re-enrolled for, so already-explained functions are not re-simulated whole.
     allow = candidate.restrict_families

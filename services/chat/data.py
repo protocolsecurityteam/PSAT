@@ -209,15 +209,15 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
 
-    # "The last upgrade", and the polarity has to match the words (L-20). Under
+    # "The last upgrade", and the polarity has to match the words. Under
     # ``block_number DESC NULLS LAST`` a poll-detected upgrade — ``block_number``
     # is NULL by design for the event-scan/poll writers — sorted LAST, i.e. was
     # reported as the OLDEST event, so ``last_upgrade`` named the newest
     # BLOCK-CARRYING upgrade while a more recent one sat unreported. Timestamp
-    # leads because every writer sets it (W0-9 gave the poll rows one) and it
-    # answers the question actually being asked; the block tiebreak puts NULLS
-    # FIRST under DESC for the same reason, and ``id`` makes the order total so two
-    # rows with one timestamp cannot swap between calls.
+    # leads because every writer sets it (the poll writer stamps a detection
+    # time) and it answers the question actually being asked; the block tiebreak
+    # puts NULLS FIRST under DESC for the same reason, and ``id`` makes the order
+    # total so two rows with one timestamp cannot swap between calls.
     last_event = (
         session.execute(
             select(UpgradeEvent)
@@ -653,7 +653,7 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
     def _holder(address: str, functions: list[str]) -> dict[str, Any]:
         # Classified WITH the chain of the contract whose gate named the address:
         # ``classify_address`` scopes the control-graph read by chain, and passing
-        # nothing would reopen the twin aliasing this leg just closed.
+        # nothing would reopen cross-chain twin aliasing.
         record = classify_address(session, address, chain_for_address.get(address))
         record["function_count"] = len(functions)
         record["functions"] = functions[:8]

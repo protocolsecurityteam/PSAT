@@ -1451,7 +1451,7 @@ class TestResolvedGraphEmpty:
 
 
 # ---------------------------------------------------------------------------
-# 10. The persistence boundary for the three-state columns (L-36).
+# 10. The persistence boundary for the three-state columns.
 #
 # ``authority_provenance`` / ``analysis_state`` / ``graph_max_depth`` were added
 # with in-memory assertions only: every test stopped at the artifact dict. This

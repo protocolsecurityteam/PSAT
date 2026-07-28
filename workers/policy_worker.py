@@ -78,7 +78,7 @@ def _make_principal_type_resolver(
     same path ``build_principal_labels`` uses, so FunctionPrincipal rows carry
     the same Safe/Timelock/EOA typing as principal labels.
 
-    ``cross_chain_recognizer`` (inv. 15), when supplied, takes priority: an
+    ``cross_chain_recognizer``, when supplied, takes priority: an
     aliased L1 owner / bridge predeploy is labelled ``cross_chain_authority``
     before the generic classification runs. ``None`` (mainnet and every chain
     without bridge constants) preserves the prior typing exactly."""
@@ -104,7 +104,7 @@ def _make_terminal_controller_resolver(
     rpc_url: str | None, *, chain_id: int | None = None
 ) -> Callable[[str], list[dict[str, object]] | None] | None:
     """Build the ``address -> [controller-step, ...] | None`` resolver that
-    drives the contract-principal terminal walk (A4). Reads a contract's
+    drives the contract-principal terminal walk. Reads a contract's
     controllers via canonical getters (``owner()``/``authority()``/``admin()``)
     and classifies each, so ``resolve_terminal_principal`` can chain contract ->
     ... -> Safe/EOA and fail closed on parallel control planes (Solmate/Solady
@@ -125,7 +125,7 @@ def _make_terminal_controller_resolver(
             # Every canonical getter answered cleanly and named no controller —
             # a proven absence, which the walk reports as ``no_controller``.
             # Collapsing it into ``None`` here published "we could not look"
-            # over "there is no owner" (W2-B item 12).
+            # over "there is no owner".
             return []
         steps: list[dict[str, object]] = []
         for owner in controllers:
@@ -139,7 +139,7 @@ def _make_terminal_controller_resolver(
 
 
 def _known_addresses_for_scope(resolved_control_graph: Any, target_address: str | None) -> set[str]:
-    """The run's known-address set for cross-chain alias recognition (inv. 15):
+    """The run's known-address set for cross-chain alias recognition:
     every resolved control-graph node address plus the target contract. An
     aliased L1 owner is only labelled when its implied L1 address is one of
     these — same-address L1/L2 deployments are the case this catches."""
@@ -241,7 +241,7 @@ def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str,
     # Address-keyed lookup keyed on the job's chain (the same name the resolution
     # stage materialized under); on a row miss we drop the bundle below since the
     # downstream consumers can't operate without analysis. ``chain`` is the job's
-    # resolved chain name — a chainless call is a data bug (inv. 6), so fail loud
+    # resolved chain name — a chainless call is a data bug, so fail loud
     # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
     require_chain(chain=chain, context="policy nested-artifact hydration")
     for address, bundle in bundles.items():
@@ -278,11 +278,11 @@ def _resolve_semantic_capabilities(
 
     ``chain`` (e.g. ``"ethereum"``) plumbs through to the resolver's
     ``_load_state_var_values`` so the controller-value lookup is
-    scoped by ``(job_id, chain)`` per Wave 4 C.1. The resolver also
+    scoped by ``(job_id, chain)``. The resolver also
     derives this from ``job.request['chain']`` when None is passed,
     so passing it here is belt-and-suspenders.
 
-    ``chain_id`` is required (inv. 6/7): it binds the resolver's RPC/event reads
+    ``chain_id`` is required: it binds the resolver's RPC/event reads
     to the job's real chain. Without it the predicate-eval tree would run as
     chain 1 even for an L2 job; a chainless call is now a hard error, not a
     silent mainnet default. The caller threads the job's ``chain_id``."""
@@ -416,7 +416,7 @@ class PolicyWorker(BaseWorker):
 
     @property
     def next_stage(self) -> JobStage:
-        """Flag-dynamic transition (§3a.4 / inv. 15): route into ``effects``
+        """Flag-dynamic transition: route into ``effects``
         only when ``PSAT_EFFECTS_STAGE`` is armed, else straight to
         ``coverage``. The flag gates the *transition itself* — with it off no
         job ever enters ``effects`` (a job parked at a stage no worker drains
@@ -565,7 +565,7 @@ class PolicyWorker(BaseWorker):
                 exc=RuntimeError("no Contract row for job; zero policy rows written"),
                 context={"job_id": str(job.id), "address": job.address or "0x0"},
             )
-        # Cross-chain authority recognizer (inv. 15): None on mainnet and any
+        # Cross-chain authority recognizer: None on mainnet and any
         # chain without bridge constants, so those paths stay byte-identical.
         # Uses the first-class job chain id (not the local ``chain_id``, which a
         # later block re-derives from request JSONB and can clobber to 1).
@@ -596,7 +596,7 @@ class PolicyWorker(BaseWorker):
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
             job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            # Derive the int chain id from the registry (inv. 5). Non-mainnet
+            # Derive the int chain id from the registry. Non-mainnet
             # names now map to their real ids instead of collapsing to 1 (the
             # old hand map only knew ethereum/mainnet); an unknown chain still
             # tolerantly falls back to mainnet rather than raising.
@@ -714,21 +714,21 @@ class PolicyWorker(BaseWorker):
                 # spent 14+ min here on shared-cpu-2x).
                 classify_cache=classify_cache,
                 # Rebuilt against the refreshed graph so the alias-of-known scope
-                # reflects every node the refresh added (inv. 15).
+                # reflects every node the refresh added.
                 cross_chain_recognizer=make_cross_chain_recognizer(
                     _chain_id_for_job(job), _known_addresses_for_scope(resolved_control_graph, job.address)
                 ),
-                # C1: protocol-wide exact-owner Safe registry for signer-overlap.
+                # Protocol-wide exact-owner Safe registry for signer-overlap.
                 # Only populated for protocol-scoped jobs; a bare contract analysis
                 # has no sibling Safes to compare against.
                 protocol_safe_owner_sets=(
                     load_protocol_safe_owner_sets(session, job.protocol_id) if job.protocol_id else None
                 ),
-                # §2 sub-part B: shared-deployer groups (witnessed heuristic fact).
+                # Shared-deployer groups (witnessed heuristic fact).
                 protocol_deployer_groups=(
                     load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
-                # A4: contract-principal -> ultimate Safe/EOA terminal walk.
+                # Contract-principal -> ultimate Safe/EOA terminal walk.
                 resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))

@@ -123,7 +123,7 @@ describe("BalanceTable — holdings coverage", () => {
   });
 
   it("discloses truncation AND unvalued rows when both facts hold", () => {
-    // L-66: the truncation sentence returned early, so the contract at the page cap
+    // The truncation sentence returned early, so the contract at the page cap
     // that ALSO holds unpriced assets lost the pricing disclosure — the row where the
     // total is least trustworthy. Locally all 7 at-the-cap contracts are that shape.
     render(

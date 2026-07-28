@@ -1,5 +1,5 @@
 """``action_summary`` ships on two unauthenticated endpoints and no first-party UI
-renders it, so it is the quotable copy of the structured planes (W3-E item 3b, R3).
+renders it, so it is the quotable copy of the structured planes.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def test_vacuous_summary_is_labelled_as_restating_nothing():
 
 def test_target_list_summary_discloses_the_write_conflation():
     """528 local rows. ``effect_targets`` does not separate state-write targets
-    from external-call targets (D1: 501 of 1,642 populated rows carry zero
+    from external-call targets (501 of 1,642 populated rows carry zero
     state-write evidence), so "Writes or calls into" cannot support "writes"."""
     summary, kind, note = describe_action("Writes or calls into: accountantState.", [])
     assert summary == "Writes or calls into: accountantState."
@@ -60,8 +60,8 @@ def test_proven_unconstrained_destination_keeps_the_arbitrary_sentence():
 
 
 def test_a_proven_gate_on_the_destination_narrows_the_sentence():
-    """A3 measured 7 of 20 ``exec.arbitrary`` destinations as pinned by a mandatory
-    gate. The structured claim moved in Wave 1; the sentence did not."""
+    """7 of 20 ``exec.arbitrary`` destinations measured as pinned by a mandatory
+    gate. The structured claim moved earlier; the sentence did not."""
     summary, _kind, note = describe_action(
         ARBITRARY_SUMMARY,
         [_exec_claim({"state": "constrained", "guard": "mapping_allowlist"})],
@@ -74,7 +74,7 @@ def test_a_proven_gate_on_the_destination_narrows_the_sentence():
 
 def test_an_absent_destination_verdict_does_not_publish_arbitrary():
     """Every persisted ``exec.arbitrary`` claim (20/20 rows) carries NO
-    ``destination_constraint`` key: the verdict predates A3. An absent verdict is
+    ``destination_constraint`` key: the verdict predates the key. An absent verdict is
     the question being unanswered — the same reading ``claimsVocab.constraintText``
     takes — and "arbitrary" asserts an answer."""
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim()])
@@ -92,8 +92,8 @@ def test_an_explicit_not_determined_verdict_also_hedges():
 
 
 def test_a_missing_exec_claim_contradicts_the_sentence():
-    """The claims plane ran (it produced a list) and did not raise the claim. A3
-    measured exactly this on ``LRTSquaredAdmin.rebalance`` — a pure false
+    """The claims plane ran (it produced a list) and did not raise the claim.
+    Measured exactly this way on ``LRTSquaredAdmin.rebalance`` — a pure false
     positive."""
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [], effect_labels=["arbitrary_external_call"])
     assert summary == "Executes external calldata from the contract."

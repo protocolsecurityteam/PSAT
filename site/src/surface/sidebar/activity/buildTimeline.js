@@ -3,7 +3,7 @@
 // boundary:
 //   - monitored_events: captured from the enrollment block forward, ALL kinds.
 //   - upgrade_history:   back-filled to deployment, UPGRADES only (proxy only).
-// See site/prototypes/activity-tab/HANDOFF.md §5. No React — unit-testable.
+// No React — unit-testable.
 
 import { shortenAddress } from "../../../graph.js";
 import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../monitoring/format.js";
@@ -11,7 +11,7 @@ import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
 // Dedup key for an upgrade across both stores. The upgrade_history artifact
-// carries no tx_hash/log_index (HANDOFF §5b), so a post-enrollment upgrade —
+// carries no tx_hash/log_index, so a post-enrollment upgrade —
 // which appears in BOTH stores — is matched on (block, new-implementation).
 function upgradeKey(block, implAddr) {
   return `${block == null ? "?" : block}:${String(implAddr || "").toLowerCase()}`;
@@ -22,7 +22,7 @@ function upgradeKey(block, implAddr) {
 // An unknown boundary is `null`, never a boundary VALUE. `block_introduced` folded
 // to 0 made a block-less impl's era start at genesis and swallow the impl
 // attribution of every earlier event; `block_replaced` folded to Infinity made it
-// run to now (L-19 / L-26 — the same ±infinity spread W0-9 removed server-side).
+// run to now — the same ±infinity spread that was removed server-side.
 // `synthesize_from_events` emits `block_number: null` for a poll-detected upgrade,
 // so both are reachable.
 //

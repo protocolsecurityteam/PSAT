@@ -36,7 +36,7 @@ describe("contractTypeForMachine — the pause flag is three-state", () => {
 });
 
 // `Boolean(is_proxy)` is a two-state read of a payload that carries two proxy
-// signals which can disagree — and one real row does (L-1).
+// signals which can disagree — and one real row does.
 describe("proxyState — proxyhood is three-state", () => {
   it("answers proxy on the flag", () => {
     expect(proxyState({ is_proxy: true })).toBe("proxy");

@@ -770,7 +770,7 @@ def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
 
 
 # ---------------------------------------------------------------------------
-# authority_openness on the ARTIFACT plane (L-53).
+# authority_openness on the ARTIFACT plane.
 #
 # The three-state openness split is computed twice: once here, in
 # ``build_effective_permissions``, onto the ``effective_permissions`` artifact

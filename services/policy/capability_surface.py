@@ -43,7 +43,7 @@ AUTHORITY_OPENNESS_VALUES = ("open", "restricted", "not_determined")
 
 
 def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str:
-    """The three-state authority verdict for one capability (R1).
+    """The three-state authority verdict for one capability.
 
     * ``open`` — a public path was EARNED (a ``conditional_universal`` /
       cofinite child survived the earned-public projection). Exactly
@@ -80,7 +80,7 @@ CAPABILITY_INDEX_STALE_BLOCKS = 1_000
 
 
 def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, Any]:
-    """Is this capability statement CURRENT? (inv 11/12.)
+    """Is this capability statement CURRENT?
 
     ``last_indexed_block`` is written on 240+ rows and read by nothing: a bare
     height is not a currency statement, and two capabilities in ONE job carried
@@ -135,7 +135,7 @@ def _last_indexed_blocks(cap_dict: Any) -> list[int]:
 #: Adapter trace steps that resolve a ROLE-keyed authority. ``solmate_roles_authority``
 #: names the role ids that carry the capability, so a single-role read is a witnessed
 #: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
-#: (CONTROLLER_RESOLUTION_SPEC §3.2 — it probes the gate, never a role name), so a row
+#: (it probes the gate, never a role name), so a row
 #: resolved by it is role-gated with the role NOT determined.
 _ROLE_WITNESSING_TRACE_STEP = "solmate_roles_authority"
 _ROLE_DISSOLVING_TRACE_STEPS = frozenset({"enumerable_role_store"})
@@ -143,7 +143,7 @@ _ROLE_DISSOLVING_TRACE_STEPS = frozenset({"enumerable_role_store"})
 
 def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Witnessed ``(role, principals)`` grants for one capability — the role half
-    of inv 3's ``(capability, principal)`` scoring unit, which did not exist in
+    of the ``(capability, principal)`` scoring unit, which did not exist in
     the persisted plane (``effective_functions.authority_roles`` was the literal
     ``[]`` on 1773/1773 rows).
 
@@ -327,7 +327,7 @@ def _project_node(
         # informational only — every cofinite is "open modulo a finite/condition filter",
         # so the openness verdict never branches on it.
         #
-        # It does change the CONDITION TEXT (W2-B item 10a): a ``lower_bound``
+        # It does change the CONDITION TEXT: a ``lower_bound``
         # denylist is not enumerated, so "N known excluded" alone reads as the
         # complete exclusion set. The quality is now always present on a cofinite
         # (never inferred from absence), so absence here means a pre-fix persisted
@@ -666,7 +666,7 @@ def _row_with_conditions(row: dict[str, Any], conditions: list[dict[str, Any]]) 
 
 
 def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
-    """Which resolver path produced this capability's members (W2-B item 9).
+    """Which resolver path produced this capability's members.
 
     ``function_principals.origin`` and ``principal_type`` are single constants —
     ``semantic_capability:finite_set`` / ``controller`` on 1132/1132 rows — so the

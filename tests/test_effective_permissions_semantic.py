@@ -1,10 +1,10 @@
-"""Wave 3 Track B.1 — per-kind row representation tests for the semantic
+"""Per-kind row representation tests for the semantic
 ``build_effective_permissions`` + ``write_effective_function_rows``
 pipeline.
 
 Each test fabricates a ``CapabilityExpr`` directly and asserts the
 resulting ``EffectiveFunction`` columns and ``FunctionPrincipal`` row
-counts match the Option A table:
+counts match the table below:
 
 | kind                          | EF columns                       | FP rows |
 |-------------------------------|----------------------------------|---------|
@@ -784,7 +784,7 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
 
 # ---------------------------------------------------------------------------
 # authority_openness — the three-state split of the authority_public bool
-# (W2-B item 3). ``authority_public=False`` reported a WITNESSED caller
+# ``authority_public=False`` reported a WITNESSED caller
 # restriction and "the authority could not be determined" with one value.
 # ---------------------------------------------------------------------------
 
@@ -881,7 +881,7 @@ def test_openness_null_when_no_producer_said(db_session) -> None:
 
 
 def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
-    """W2-B item 8: the column stops being the literal [] — a single-role
+    """The column stops being the literal [] — a single-role
     Solmate capability persists a real (role, principals) grant."""
     cap = {
         "kind": "finite_set",

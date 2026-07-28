@@ -26,7 +26,7 @@ import ast
 from pathlib import Path
 
 # Pipeline workers (BaseWorker subclasses that drive the jobs queue).
-# Narrowed per the handoff: these are where degradation tracking matters
+# Deliberately narrow: these are where degradation tracking matters
 # most. Audit-row workers + monitoring loops are intentionally excluded —
 # they don't bind ``degraded_errors_var`` so ``record_degraded`` is a no-op
 # there and the contract doesn't apply.
@@ -43,6 +43,9 @@ PIPELINE_WORKERS: tuple[str, ...] = (
 # Sites where WARNING in a swallowed except is *intentionally* not paired
 # with record_degraded. Each entry needs justification — when in doubt,
 # prefer adding record_degraded to silence the test.
+# The keys are LINE-PINNED, so any edit above a listed call site shifts them and
+# this file must be re-pinned in the same commit. ``test_allow_list_is_current``
+# below fails loudly when an entry stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
@@ -50,10 +53,6 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        # Line moved 880 -> 889 by W2-B item 12 (nine lines added to
-        # _make_terminal_controller_resolver above it). Same call site,
-        # verified byte-identical against fix/witness-integrity; the
-        # allow-list is line-pinned so it drifts with any edit upstream.
         889: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
@@ -61,8 +60,6 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # side-effect (port/memory), not a degradation of the stage's verdict
         # output. record_degraded would mislead /monitor into flagging a healthy
         # job's effects stage as degraded.
-        # Line number moved 501 -> 531 in Wave 2 Leg D (the file grew above it); same
-        # call site, same exemption.
         531: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
 }

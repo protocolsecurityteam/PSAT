@@ -164,8 +164,8 @@ function collectPrincipals(fn) {
 function classifyAction(fn) {
   // Claims (Plane 1) drive severity when present; the name-substring arms below
   // stay a fallback only for claim-less (stale) rows. The score defers the
-  // effects bridge's behavioral_observed tier (§5.2): score over the pre-observed
-  // view so verdicts never move the score until SCORING_INVARIANTS.md.
+  // effects bridge's behavioral_observed tier: score over the pre-observed view,
+  // so verdicts never move the score while their consumption stays unspecified.
   fn = scoreClaimsView(fn);
   if (hasClaims(fn)) {
     return scoreForClaims(fn) || { kind: "other", severity: 0 };
@@ -216,7 +216,7 @@ function collectActions(contracts) {
   return actions;
 }
 
-// RECORDED, NOT FIXED (L-57 / W3-E item 12). A function whose open arm is
+// RECORDED, NOT FIXED. A function whose open arm is
 // SELF-KEYED — `DelegationManager.undelegate(address)`, where `msg.sender == staker`
 // needs no authority but `msg.sender != staker` requires an operator or the
 // delegation approver — scores here as a plain public action, at the same 0.1 an
@@ -256,7 +256,7 @@ function auditBriefScore(audit) {
 function coverageMaps(auditCoverage) {
   // Keyed by the composite (chain, address) entity token, not bare address: a
   // CREATE2 twin on two chains has one coverage row each, and bare keying would
-  // let one overwrite the other (inv. 13).
+  // let one overwrite the other.
   const byEntity = new Map();
   for (const row of asArray(auditCoverage?.coverage)) {
     if (row.address) byEntity.set(entityKey(row.chain, row.address), row);
@@ -308,7 +308,7 @@ function safeguardScore(actions) {
 
 function upgradeScore(contracts, actions, coverageByAddress) {
   // Keyed by the composite (chain, address) entity token so a cross-chain twin's
-  // upgrade actions don't fold into each other (inv. 13).
+  // upgrade actions don't fold into each other.
   const byContract = new Map();
   for (const action of actions) {
     if (action.kind !== "upgrade") continue;
@@ -341,7 +341,7 @@ function upgradeScore(contracts, actions, coverageByAddress) {
 
 function pauseScore(contracts, actions) {
   // Keyed by the composite (chain, address) entity token so a cross-chain twin's
-  // pause/unpause actions stay attributed to their own chain (inv. 13).
+  // pause/unpause actions stay attributed to their own chain.
   const byContract = new Map();
   for (const action of actions) {
     if (!action.contract?.address) continue;

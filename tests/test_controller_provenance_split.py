@@ -208,7 +208,7 @@ def test_marked_uncertain_guard_unanswers_the_names_that_function_reads(tmp_path
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
 
 
-# The reviewer-confirmed corpus shape: EtherFi PriorityWithdrawalQueue gates
+# The confirmed corpus shape: EtherFi PriorityWithdrawalQueue gates
 # ``receive()`` on ``msg.sender == address(liquidityPool)``. The predicate
 # builder never lowered ``receive()``, so that gate is invisible to
 # ``caller_gate_vars`` and ``liquidityPool`` fell through to ``call_target``.
@@ -305,8 +305,8 @@ def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
     shape. The failure is therefore constructed directly: the tree the builder
     produced for ``receive()`` is removed from the artifact, which is exactly
     the shape a raised or degraded tree stage persists. Reachable by
-    construction, fixture-covered; realised rows are a lower bound, per the
-    R2 convention this suite already uses for the entry-point arm.
+    construction, fixture-covered; realised rows are a lower bound, the same
+    convention this suite already uses for the entry-point arm.
     """
     predicate_trees, _ = _unlowered_targets(tmp_path)
     degraded = dict(predicate_trees)
@@ -377,7 +377,7 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
 
 @pytest.mark.parametrize("failing_accessor", ["all_state_variables_read", "all_solidity_variables_read"])
 def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, failing_accessor):
-    """L-35: when a recursive Slither accessor RAISES, the blind-spot answer must
+    """When a recursive Slither accessor RAISES, the blind-spot answer must
     go not-determined — never fall back to the non-recursive attribute.
 
     The non-recursive attribute is a strictly narrower set: this function's own
@@ -397,7 +397,7 @@ def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, 
     because Vault's entry points are all lowered and never reach the accessor at
     all — a fixture where the raise cannot fire proves nothing.
 
-    R2: reachable by construction only. Slither's accessors raise on no contract
+    Reachable by construction only. Slither's accessors raise on no contract
     in the local corpus; realised rows are 0 and this is a lower bound, the same
     convention the entry-point arm in this file already uses.
     """

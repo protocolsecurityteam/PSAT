@@ -90,9 +90,9 @@ def _upgrade_history_absence_reason(session: Any, job: Job, contract: Contract |
     * **``is_proxy`` true** — the artifact SHOULD have existed and does not.
     * **``is_proxy`` false while ``proxy_type`` or ``implementation`` is set** —
       the row contradicts itself, so its proxyhood is not evidence either way.
-      This is the L-1 falsification: ``0x3c55986c…`` is ``is_proxy=False`` with
-      ``proxy_type='beacon'`` and has 14 ``Upgraded(address)`` logs at or before
-      block 25619159 that the absence prose denied. 1 realised row locally.
+      A real counterexample: ``0x3c55986c…`` is ``is_proxy=False`` with
+      ``proxy_type='beacon'`` yet has 14 ``Upgraded(address)`` logs at or before
+      block 25619159, so reading it as a proven non-proxy denies a real history.
 
     What it cannot see, stated rather than implied: a real proxy the classifier
     missed entirely (``is_proxy`` false, ``proxy_type`` and ``implementation``
@@ -125,7 +125,7 @@ def analyses(response: Response) -> list[dict]:
 
         jobs_by_id = {str(job.id): job for job in jobs}
         # Keyed by (coalesced-chain, address) so a CREATE2 twin's per-chain
-        # jobs stay distinct (inv. 12): the same address on ethereum and base
+        # jobs stay distinct: the same address on ethereum and base
         # is two entities, and impl-hiding must find the impl on the proxy's
         # own chain — an impl completed only on the other chain must not
         # un-hide this chain's proxy.
@@ -287,7 +287,7 @@ def analysis_artifact(
                 session.rollback()
         if job is None:
             # ``run_name`` is an address here. Two chains can share an address, so
-            # chain-qualify by Job.chain_id when a chain is supplied (inv. 12);
+            # chain-qualify by Job.chain_id when a chain is supplied;
             # absent a chain we keep the mainnet-preserving address-only lookup
             # (every prod row is chain 1 today, so output is unchanged).
             stmt = (
@@ -343,7 +343,7 @@ def analysis_artifact(
             if contract is not None:
                 artifact = synthesize_from_events(session, contract)
             if artifact is None and not_determined is None:
-                # L-1. The writer stores no upgrade_history row in two
+                # The writer stores no upgrade_history row in two
                 # indistinguishable cases — the stage found no proxies, and the
                 # stage RAISED (``uh_pre = None``, logged via
                 # ``record_degraded(phase="dependency_upgrade_history")``) — and a

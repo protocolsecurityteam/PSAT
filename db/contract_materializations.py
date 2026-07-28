@@ -12,8 +12,8 @@ The module is deliberately small and stateless — every entry point opens
 its own short-lived session so the caller doesn't have to share its DB
 connection with potentially blocking advisory locks.
 
-The ``chain`` key is the canonical decimal-string chain id (``"1"``,
-``"8453"``) per invariant 11: callers may pass a chain name, alias, id,
+The ``chain`` key is always the canonical decimal-string chain id (``"1"``,
+``"8453"``): callers may pass a chain name, alias, id,
 or ``None``, and :func:`utils.chains.chain_cache_token` collapses them all
 onto the id token so a name-keyed writer and an id-keyed reader hit the
 same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
@@ -92,7 +92,7 @@ logger = logging.getLogger(__name__)
 # commits, and the fix never reaches any deployment already in the cache.
 # v4: ``view_call`` / ``external_call`` operands now carry ``derived_from`` too,
 # and an un-lowerable single-address-param SELF gate is emitted as an
-# ``external_set`` descriptor instead of a bare-bool leaf (A1). A v3 tree records
+# ``external_set`` descriptor instead of a bare-bool leaf. A v3 tree records
 # neither, so its caller-tainted role gate still reads PUBLIC — the fix would
 # never reach a deployment already in the cache. v4 also pins provenance frame
 # purity: a parameter's origin set never unions other call sites' arguments
@@ -100,7 +100,7 @@ logger = logging.getLogger(__name__)
 # Both landed within the unreleased v4 window — no v4 row was ever
 # materialized under the pre-purity shape (verified: local DB carries only
 # v2/v3 rows; production runs pre-v4 code).
-# Also in the same unreleased v4 window (Wave 4 Leg B, L-25): operand
+# Also in the same unreleased v4 window: operand
 # tie-breaking is now cross-process stable — ``provenance._digest`` derives
 # ``callee_args_digest`` from content instead of ``hash()``, so the operand
 # slots that previously flickered with PYTHONHASHSEED settle to one canonical

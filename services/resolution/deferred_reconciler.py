@@ -50,7 +50,7 @@ Safety properties
   for its address is skipped.
 * **Reachable.** ``contracts.job_id`` is ``ON DELETE SET NULL`` and every stage
   finds its contract through it, so deleting a job strands that contract's rows
-  outside the reconciler's reach permanently (L-12). Orphaned contracts are
+  outside the reconciler's reach permanently. Orphaned contracts are
   selected on their own ``(address, chain)`` identity and their linkage is
   REPAIRED before the re-enqueue, because the policy stage writes rows for
   ``Contract.job_id == job.id`` and would otherwise re-run and write nothing.
@@ -138,7 +138,7 @@ def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
 
     The pair is keyed on the system's own contract identity — ``(address,
     chain)``, the ``uq_contract_address_chain`` unique key — never on the bare
-    address (handoff §3): a twin deployment of the same address on another chain
+    address: a twin deployment of the same address on another chain
     is a different contract and must not be re-enqueued by this chain's pass.
 
     ``NOT EXISTS`` on the job's own contract is what keeps this to exactly the
@@ -451,7 +451,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
     ``fold_frontier``, so the same row never re-selects the job (the frontier is
     monotonic under the indexer). Gated on ``backfill_complete`` so a re-run lands
     a warm fold rather than bouncing straight back to a cold deferral. Reuses the
-    reconciler's requeue machinery; does not touch the monitoring pipeline (§5).
+    reconciler's requeue machinery; does not touch the monitoring pipeline.
     """
     rows = session.execute(
         select(Job.id, Job.address, EffectiveFunction.capability_expr)

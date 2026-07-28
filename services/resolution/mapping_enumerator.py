@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _mainnet_hypersync_url() -> str:
-    """Mainnet HyperSync endpoint from the registry (inv. 5), not a hardcoded
+    """Mainnet HyperSync endpoint from the registry, not a hardcoded
     literal. The signature default for the enumerators below; callers thread the
     per-chain URL for non-mainnet scans."""
     from utils.chains import chain_by_id
@@ -128,7 +128,7 @@ def _chain_key(chain: str | None) -> str:
 
 
 def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
-    """The HyperSync scan endpoint for *chain* (inv. 6).
+    """The HyperSync scan endpoint for *chain*.
 
     ``chain`` is the same name / decimal-id token the cache key uses. A chainless
     call fails loud (``require_chain`` raises) rather than defaulting the scan to
@@ -416,8 +416,8 @@ async def enumerate_mapping_allowlist(
     if not topic0_to_specs:
         # Every writer event was ambiguous: the fold KNOWS it scanned nothing.
         # Reporting "complete" here published exactly the same value as a real
-        # exhaustive empty scan (G2 HIT 2 — it fired in production with
-        # pages_fetched=0 below the first real log). The consumers already
+        # exhaustive empty scan (observed in production with pages_fetched=0
+        # below the first real log). The consumers already
         # handle any non-"complete" status as a truncated enumeration.
         return EnumerationResult(
             principals=[],
@@ -648,7 +648,7 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
-    # Per-chain scan URL (inv. 6): derive from ``chain`` unless the caller pinned
+    # Per-chain scan URL: derive from ``chain`` unless the caller pinned
     # an explicit URL or injected a client (tests). Mainnet is byte-identical to
     # the old default; an unknown/missing chain fails loud; a no-coverage chain
     # returns unavailable rather than silently scanning mainnet.
@@ -883,7 +883,7 @@ def enumerate_mapping_values_sync(
                 return result
             del _VALUE_CACHE[cache_key]
 
-    # Per-chain scan URL (inv. 6): see ``enumerate_mapping_allowlist_sync``.
+    # Per-chain scan URL: see ``enumerate_mapping_allowlist_sync``.
     if not kwargs.get("client") and not kwargs.get("hypersync_url"):
         scan_url = _scan_hypersync_url_for_chain(chain)
         if scan_url is None:

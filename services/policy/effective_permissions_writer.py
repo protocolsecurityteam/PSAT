@@ -133,7 +133,7 @@ def _authority_roles_for(cap_dict: dict[str, Any] | None) -> list[dict[str, Any]
 def _selector_key(selector: str | None, function_name: str | None = None) -> tuple[str, str]:
     """Identity for carrying observed-effect state across the row replace.
 
-    Keyed on ``(selector, function_name)``, not selector alone (L-27): a
+    Keyed on ``(selector, function_name)``, not selector alone: a
     selector-less entry point carries the documented ``""`` sentinel, and BOTH
     ``fallback`` and ``receive`` are selector-less — so a contract declaring both
     produced two rows under one key and the carry cross-assigned one's observed
@@ -143,9 +143,9 @@ def _selector_key(selector: str | None, function_name: str | None = None) -> tup
     where the pair is as unique as the selector was.
 
     Armed population: 0 realised on the local corpus (no analysed contract
-    declares both, and every persisted selector-less row still carries the
-    pre-Leg-A fabricated selector) — structural on the first contract that
-    declares both after Leg A's sentinel landed."""
+    declares both, and every persisted selector-less row predates the ``""``
+    sentinel and still carries a fabricated selector) — structural on the first
+    contract that declares both once the sentinel is in use."""
     return ((selector or "").lower(), (function_name or "").lower())
 
 
@@ -154,7 +154,7 @@ def _capture_observed_before(
     contract_id: int,
     deployment_address: str | None,
 ) -> dict[tuple[str, str], tuple[list[Any], list[Any]]]:
-    """§5.2 call site 2, capture phase. Read this deployment's *outgoing*
+    """Observed-effect carry, capture phase. Read this deployment's *outgoing*
     observed-effect state BEFORE the wholesale row replace deletes it, keyed by
     selector, so the re-created rows can carry it forward.
 
@@ -164,7 +164,7 @@ def _capture_observed_before(
       the effects stage). These are the durable carrier: without carrying the
       claims themselves, any policy-only re-run (one that does not re-run
       effects) would blank the observed labels, which is exactly the regression
-      §5.2 exists to kill.
+      this carry exists to kill.
     - Proven ``effect_verdicts`` for those rows, re-merged as the authoritative
       source. The verdict rows survive the replace (FK is ``ON DELETE SET
       NULL``) but come out unlinked; the carry phase relinks them to the
@@ -263,7 +263,7 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
-    # §5.2 call site 2: snapshot the outgoing rows' observed-effect state before
+    # Snapshot the outgoing rows' observed-effect state before
     # the replace destroys it, so the re-created rows carry it forward.
     observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
@@ -354,13 +354,13 @@ def write_effective_function_rows(
             "effect_targets": fn.get("effect_targets", []),
             "action_summary": fn.get("action_summary"),
             "authority_public": cap_columns["authority_public"],
-            # The role half of inv 3's (capability, principal) unit. Three
+            # The role half of the (capability, principal) unit. Three
             # states: a non-empty list is witnessed, ``None`` is role-gated with
             # the role not determined, ``[]`` is proven not role-gated. A record
             # that already carries a NON-EMPTY list wins (an upstream caller
             # resolved it); the historical literal ``[]`` every record ships is
-            # NOT treated as an answer — it is exactly the constant this item
-            # exists to remove, so the capability's own verdict replaces it:
+            # NOT treated as an answer — it is the uninformative constant this
+            # column carried everywhere, so the capability's own verdict wins:
             # the resolver capability when there is one, otherwise the
             # capability the record itself publishes (the policy-minted
             # shapes), so the proven-absent ``[]`` is reachable on the
@@ -391,7 +391,7 @@ def write_effective_function_rows(
         session.add(ef)
         session.flush()
 
-        # §5.2 call site 2, carry phase: fold the outgoing row's observed claims
+        # Observed-effect carry phase: fold the outgoing row's observed claims
         # (and any surviving proven verdicts) back onto this re-created row so a
         # policy-only rewrite never blanks observed labels. Only touches rows that
         # had observed state — claim-free functions stay byte-identical.

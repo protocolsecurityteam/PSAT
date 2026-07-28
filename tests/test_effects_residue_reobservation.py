@@ -3,8 +3,8 @@
 Two residual gaps in the effects stage, both about a write that leaves no trace:
 
 1. A verdict row whose FIRST write is a cache hit never gets state-plane residue.
-   The hit is the right answer for the code plane (inv. 3 — the behavioral cache
-   holds no concrete values), but ``concrete_destination`` /
+   The hit is the right answer for the code plane (the behavioral cache holds no
+   concrete values), but ``concrete_destination`` /
    ``current_check_passed`` describe THIS deployment and a hit carries neither,
    so the row is blank and every later hit keeps it blank.
 
@@ -193,7 +193,7 @@ class _CountingProber:
 def _seed_cache(session, *, effect_class, verdict=VERDICT_PROVEN, tier=TIER_CALL, gate_ref="role:X", details=None):
     """A pre-existing, already-audited cache row: the second deployment of a
     behavior another contract cached. ``audit_status`` set ⇒ a PLAIN hit, not the
-    §7 audit re-simulation."""
+    self-audit re-simulation."""
     row = upsert_cached_verdict(
         session,
         behavior_hash=BEHAVIOR_HASH,
@@ -255,7 +255,7 @@ def test_first_write_is_a_hit_and_still_acquires_residue(clean_effects, monkeypa
 
 @requires_postgres
 def test_residue_observation_never_writes_to_the_behavior_cache(clean_effects, monkeypatch):
-    """inv. 3: the observation is per-deployment state. Nothing it saw may enter
+    """The observation is per-deployment state. Nothing it saw may enter
     the code-plane cache, and the hit must not be recounted as a miss."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
@@ -375,7 +375,7 @@ def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkey
 
 def test_code_upgrade_residue_branch_is_unreachable_and_gone():
     """``_residue_observable``'s ``code_upgrade`` arm required ``TIER_HISTORICAL``,
-    but ``_is_cacheable`` refuses to cache Tier-0 verdicts at all (inv. 13) — so no
+    but ``_is_cacheable`` refuses to cache Tier-0 verdicts at all — so no
     cached row could ever satisfy it. The arm was dead code and was REMOVED; this
     pins the premise so a change to either side is caught."""
     historical = proven(
@@ -399,7 +399,7 @@ def test_code_upgrade_residue_branch_is_unreachable_and_gone():
 
 
 def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effects):
-    """G6-3 consumer half. The recipe now WITHHOLDS ``concrete_destination`` on a
+    """Consumer half of the withheld-destination rule. The recipe WITHHOLDS ``concrete_destination`` on a
     ``caller_arbitrary`` shape — whatever a probe sees there is the recipient
     argument the prober supplied. A NULL that is deliberate must not read as "no
     residue yet": otherwise every such deployment spends its whole re-probe budget
@@ -542,7 +542,7 @@ def test_observation_that_yields_nothing_leaves_the_verdict_untouched(clean_effe
 
 @requires_postgres
 def test_failed_residue_observation_does_not_disturb_the_cached_verdict(clean_effects, monkeypatch):
-    """Fail-forward (inv. 15): the observation is best-effort. A raising probe is
+    """Fail-forward: the observation is best-effort. A raising probe is
     recorded degraded and the cached verdict persists exactly as it would have."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
@@ -590,14 +590,14 @@ def test_kill_valve_restores_the_previous_behavior(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_audit_path_residue_is_taken_for_free(clean_effects, monkeypatch):
-    """A §7 self-audit hit already re-simulated this deployment, so its residue
+    """A self-audit hit already re-simulated this deployment, so its residue
     costs nothing extra — and the verdict still comes from the cache."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-audit")
     cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    # audit_status left None ⇒ this hit triggers the §7 re-simulation.
+    # audit_status left None ⇒ this hit triggers the self-audit re-simulation.
     cached = upsert_cached_verdict(
         session,
         behavior_hash=BEHAVIOR_HASH,

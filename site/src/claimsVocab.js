@@ -5,7 +5,7 @@
 // that maps a claim_id onto the presentation facts consumers need — family,
 // lane, tone, chip sentence, ordering priority, legacy projection, and the
 // protocol-score kind/severity. Keeping it in one map is the frontend half of
-// spec §6.6 ("single vocabulary module per side"): lane.js, protocolScore.js,
+// the rule "one vocabulary module per side": lane.js, protocolScore.js,
 // graph.js and PermissionsTab all read from here so the five sites cannot drift.
 //
 // Precedence rule for a function with several claims: the *primary* claim is the
@@ -20,7 +20,7 @@
 // control — user operations sit in a flow lane or ops, never top.
 
 // Concise display phrases ("changes owner") deliberately survive as the chip
-// text — spec §7 keeps the familiar legacy words, now backed by a checkable
+// text — the familiar legacy words are kept, now backed by a checkable
 // claim rather than a name heuristic. The full registry sentence lives on the
 // backend; here we render the glanceable form.
 const CLAIM_VOCAB = {
@@ -156,7 +156,7 @@ const CLAIM_VOCAB = {
   // Minted only by the effects claims bridge (behavioral_observed): a simulated
   // call opened a permission gate to previously-rejected callers. Scoreable like
   // the other control-plane authority claims, but the observed tier is
-  // neutralised in protocolScore.js until SCORING_INVARIANTS.md designs consumption.
+  // neutralised in protocolScore.js while verdict consumption stays unspecified.
   "authority.grant": {
     family: "control_plane",
     lane: "top",
@@ -417,7 +417,7 @@ const TIER_LABEL = {
 
 // behavioral_observed (effects plane) outranks every static tier: a witnessed
 // state transition on real forked state is the strongest provenance a claim can
-// carry (EFFECTS_RESOLUTION_SPEC §5.2). Mirrors services/static/claims/types.py.
+// carry. Mirrors services/static/claims/types.py.
 const TIER_RANK = {
   behavioral_observed: 4,
   standard_exact: 3,
@@ -444,7 +444,7 @@ export const OBSERVED_TIER = "behavioral_observed";
 // Provenance weighting for the SCORE path, in one place.
 //
 // `behavioral_observed` is EXCLUDED by `scoreClaimsView` below — a deferral, not
-// a weighting (EFFECTS_RESOLUTION_SPEC §5.2 / §3a amendment).
+// a weighting.
 //
 // Among the static tiers the line that matters is single-contract evidence.
 // `standard_exact` (an exact ABI-selector match) and `idiom_structural` (a
@@ -463,17 +463,16 @@ export const OBSERVED_TIER = "behavioral_observed";
 //
 // Realised effect on the local corpus: ZERO. `policy_derived` is 0 of 679 claims
 // because the producer has never fired (`workers/policy_worker` wires the whole
-// path; the one plausible silent-swallow was checked and ruled out). W0-7 fixture
-// 10 is the gate that exists precisely because no corpus row can be one.
+// path; the one plausible silent-swallow was checked and ruled out). The golden
+// fixture-10 row is the gate that exists precisely because no corpus row can be one.
 function tierSeverityFactor(tier) {
   if (tier !== "policy_derived") return 1;
   return TIER_RANK.policy_derived / TIER_RANK.standard_exact;
 }
 
 // Score-facing view of a function: the effects bridge mints observable labels at
-// the `behavioral_observed` tier, but the score must NOT consume verdicts yet
-// (EFFECTS_RESOLUTION_SPEC §5.2 / §3a amendment — deferred to
-// SCORING_INVARIANTS.md). This strips the observed claims and the legacy
+// the `behavioral_observed` tier, but the score must NOT consume verdicts while
+// their consumption stays unspecified. This strips the observed claims and the legacy
 // effect_labels they alone projected, so a function scores exactly as it did
 // before the bridge labeled it (byte-identical). Display consumers keep the full
 // claim set; only the score path uses this view.
@@ -546,7 +545,7 @@ export function laneForClaims(fn) {
   return null;
 }
 
-// Hazard / calm tone tints (§7.4). Colour obeys the same honesty rule as the chip
+// Hazard / calm tone tints. Colour obeys the same honesty rule as the chip
 // text: a PROVEN-POSITIVE theft-shaped witness (caller-chosen destination,
 // witnessed dilution) reads more hazardous than the neutral base; a PROVEN-NEGATIVE
 // witness (immutable destination) reads calmer. Absent / indeterminate / unknown
@@ -566,10 +565,9 @@ export function toneForClaims(fn) {
     // The hazard tint covers the proven caller-chosen case, the guard whose
     // pinning is not proven, AND the param whose constraint was never analysed
     // (absent field / not_determined): dropping the tint on any of them would
-    // read absence of a proof as the proof itself (round-2 R3: all four real
-    // "constrained" rows are blacklists and had lost the tint; round-4 R1:
-    // every legacy payload and every `several`-fold param member has NO
-    // verdict, and had lost it too).
+    // read absence of a proof as the proof itself: all four real "constrained"
+    // rows are blacklists and had lost the tint, and every legacy payload and
+    // every `several`-fold param member has NO verdict, and had lost it too.
     if (s.sawCaller || s.sawUnprovenPin || s.sawUnknownParam) return TONE_FLOW_OUT_CALLER;
     // Calm-tint only a purely-fixed out-flow (mirrors flowOutQualifier's "fixed"
     // gate): any admin-settable, indeterminate, self or unclassified path blocks it.
@@ -669,9 +667,10 @@ export function claimSummaryLine(fn) {
   };
 }
 
-// ── Witness qualifiers (SCORING plan §7) ─────────────────────────────────────
+// ── Witness qualifiers ───────────────────────────────────────────────────────
 //
-// The honesty rule (mirror of the backend witness bar, SCORING_INVARIANTS inv-2):
+// The honesty rule (mirror of the backend witness bar) — a confidence gap is
+// reported as a gap, never rounded into a favourable answer:
 // a qualifier renders ONLY when its witness field is present and at the bar.
 // unknown / absent / indeterminate always falls through to the plain phrase —
 // never a guessed qualifier, never a reassurance laundered from absence. That is
@@ -816,7 +815,7 @@ function flowOutTargetSummary(claims) {
             // Only a guard PROVEN to pin may soften the reading. A proven
             // non-pinning guard (denylist) IS the caller-chosen fact; a guard
             // whose pinning is not determined keeps the hazard reading under
-            // its own wording — three states, none conflated (R3, round 2).
+            // its own wording — three states, none conflated.
             const pins = constraintPins(f.target_constraint);
             if (pins === true) sawGuardedParam = true;
             else if (pins === false) sawCaller = true;
@@ -852,7 +851,7 @@ function flowOutTargetSummary(claims) {
 function flowOutQualifier(claims) {
   const s = flowOutTargetSummary(claims);
   if (!s.total) {
-    // No static flow lattice at all (the approve-then-pull shape, A6). If the fork
+    // No static flow lattice at all (the approve-then-pull shape). If the fork
     // PROVED the caller picks the destination, that is the finding — the chip stayed
     // unqualified only because the static side had nothing to say.
     for (const c of claims) {
@@ -869,7 +868,7 @@ function flowOutQualifier(claims) {
   // every softer reading: the caller provably names the destination, and with
   // no verdict at all — legacy payload, `several`-fold member, producer not yet
   // run — nothing is known that the unconstrained case doesn't also satisfy.
-  // Knowing strictly less must never read strictly safer (round-4 R1); the
+  // Knowing strictly less must never read strictly safer; the
   // wording keeps the caller-chosen claim and notes the unanswered question.
   if (s.sawUnknownParam) return "(caller-chosen destination; gate not analysed)";
   // A real guard whose pinning is NOT proven sits at the hazard end with the
@@ -934,7 +933,7 @@ function execTargetConstraint(claims) {
       // sentence. A proven non-pinning guard (pins: false, a denylist) leaves
       // the sentence standing unqualified — that is the honest reading, not a
       // gap. Pinning not determined gets its own wording; it never reads as
-      // "gated" (round-2 R3).
+      // "gated".
       const pins = constraintPins(k);
       if (pins === true) guarded = k;
       else if (pins !== false) unprovenPin = true;
@@ -968,7 +967,7 @@ function formatDuration(seconds) {
   return `${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
-// A7: duration_bound_seconds === null is TWO facts, and duration_bound_source is
+// `duration_bound_seconds === null` is TWO facts, and duration_bound_source is
 // the only thing that separates them. "no_time_reference" is a PROVEN indefinite
 // latch: no leaf ANYWHERE in the guard tree that reads the latch touches a clock,
 // and nothing anywhere in that tree is an operand whose contents were never read
@@ -980,9 +979,10 @@ function formatDuration(seconds) {
 // `!frozen || _clock() > unpauseAt` — the Uniswap-V3 / OZ-Governor idiom of
 // reading time through a helper — the same way again.
 // "not_determined" — and an ABSENT source, which is every verdict written before
-// A7 — means the window was not established; the four rows in production that
-// carry it are all `pauseUntil`, a latch that DOES expire, so rendering them
-// "(indefinite)" asserted the most severe reading from an extraction failure.
+// the source field existed — means the window was not established; the four rows
+// in production that carry it are all `pauseUntil`, a latch that DOES expire, so
+// rendering them "(indefinite)" asserted the most severe reading from an
+// extraction failure.
 const PAUSE_BOUND_PROVEN_INDEFINITE = "no_time_reference";
 
 function pauseQualifier(claims) {
@@ -1075,7 +1075,7 @@ export function qualifierForClaims(fn) {
   }
 }
 
-// ── Inspector verbose facts (SCORING plan §7.3) ──────────────────────────────
+// ── Inspector verbose facts ──────────────────────────────────────────────────
 
 const TARGET_KIND_WORD = {
   immutable: "immutable address",
@@ -1154,7 +1154,7 @@ function kindTierRowText(folded, sites, wordMap) {
   return kindTierText(folded, wordMap);
 }
 
-// Conservative UPPER-BOUND USD phrasing — never render as exact (inv. 5/7).
+// Conservative UPPER-BOUND USD phrasing — never render as exact.
 function formatUsdUpperBound(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
     return null;
@@ -1236,9 +1236,9 @@ function destinationConstraintText(claims) {
 // same honesty rule as the chip; an unwitnessed destination shows nothing rather
 // than a reassuring default).
 // The fork-observed destination answer for an outflow claim, as prose, or null.
-// Reads `destination_shape` + `shape_proved_by` off the behavioral witness (A6 /
-// C3-S1): the fork proved `caller_arbitrary` on 35 rows and no consumer had ever seen
-// it, because the bridge did not forward either key.
+// Reads `destination_shape` + `shape_proved_by` off the behavioral witness: the
+// fork proved `caller_arbitrary` on 35 rows and no consumer had ever seen it,
+// because the bridge did not forward either key.
 const OBSERVED_SHAPE_WORD = {
   caller_arbitrary: "caller-chosen (a sentinel address received the outflow)",
   immutable_fixed: "fixed — an immutable address static proved",
@@ -1254,7 +1254,7 @@ function observedDestinationShape(claims) {
     const provedBy = observed.shape_proved_by;
     if (typeof shape !== "string") continue;
     if (shape === "unknown" || provedBy === "none") {
-      // The honest sentence for the A6 rows: nothing was established, and no attempt
+      // The honest sentence for these rows: nothing was established, and no attempt
       // is hidden. NOT silence — silence beside a large reach figure reads as "fine".
       return "not determined (no static classification, no sentinel landed)";
     }
@@ -1307,21 +1307,22 @@ export function claimWitnessFacts(fn) {
     if (observed) {
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
-      // D3's discriminator, read HERE and not only in the branches below: it is the
-      // one key that separates a MEASURED reach from a never-attempted one, and a
-      // measured reach of exactly $0 is otherwise indistinguishable from silence
-      // (`formatUsdUpperBound(0)` is falsy). Absent on a pre-D3 payload, which is
+      // The measured-reach discriminator, read HERE and not only in the branches
+      // below: it is the one key that separates a MEASURED reach from a
+      // never-attempted one, and a measured reach of exactly $0 is otherwise
+      // indistinguishable from silence (`formatUsdUpperBound(0)` is falsy).
+      // Absent on an older payload, which is
       // its own third value — see the render branch.
       if (typeof observed.reach_determined === "boolean")
         reachDetermined = observed.reach_determined;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
-      // D3: on a not-measured row the acting deployment's own balance is a FLOOR
+      // On a not-measured row the acting deployment's own balance is a FLOOR
       // and now arrives under its own key. Rendered as a floor, never as the reach:
       // the producer used to publish it AS observed_reach_value_usd, so a
       // zero-balance router read "$0 reach" for a function that can move millions.
       if (typeof observed.observed_reach_floor_usd === "number")
         reachFloor = observed.observed_reach_floor_usd;
-      // A2: value WAS observed leaving a holder, in an asset whose USD we do not
+      // Value WAS observed leaving a holder, in an asset whose USD we do not
       // have (unpriced, or no balance row for it at all). Its own state: neither a
       // reach figure nor a floor on the acting contract.
       if (Array.isArray(observed.observed_reach_unvalued_assets))
@@ -1336,7 +1337,7 @@ export function claimWitnessFacts(fn) {
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
   else {
-    // A6: the static flows matcher produces nothing for an approve-then-pull outflow
+    // The static flows matcher produces nothing for an approve-then-pull outflow
     // (the transfer sink lives in the callee), so the inspector used to show a
     // half-billion-dollar reach with NO statement about the destination at all —
     // indistinguishable from a destination examined and found unclassifiable. The
@@ -1353,8 +1354,8 @@ export function claimWitnessFacts(fn) {
     // The corroborating ceiling refused this row's USD. When the row is ALSO the
     // partial-floor shape (assets moved whose value is unknown), that is an
     // independent fact and the refusal must not swallow it — one early-returning
-    // sentence hiding a second disclosure is the defect L-66 records in the balance
-    // table. Compose both.
+    // sentence hiding a second disclosure is the same defect the balance table
+    // had. Compose both.
     facts.push({
       label: "Reach",
       value:
@@ -1387,7 +1388,7 @@ export function claimWitnessFacts(fn) {
   } else if (reachDetermined === true) {
     // MEASURED. A zero here is a measurement — every asset that moved had a priced
     // holding and the total came out at nothing — and it used to render as silence,
-    // which is what "nothing was attempted" renders as (L-47). The backend payload
+    // which is what "nothing was attempted" renders as. The backend payload
     // is already pinned correct by
     // `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only this
     // renderer was blind.
@@ -1398,11 +1399,11 @@ export function claimWitnessFacts(fn) {
         : { label: "Reach", value: "$0 — measured, no priced value reachable" },
     );
   } else {
-    // `reach_determined` absent: a pre-D3 payload, where a 0 may be the acting
+    // `reach_determined` absent: an older payload, where a 0 may be the acting
     // deployment's own (zero) balance published as the reach rather than a
     // measurement. Left exactly as it was — asserting a measured zero here would
-    // re-mint the "$0 reach for a function that may move millions" sentence D3
-    // removed. A never-attempted reach stays silent, as before.
+    // re-mint the "$0 reach for a function that may move millions" sentence the
+    // floor key removed. A never-attempted reach stays silent, as before.
     const reach = formatUsdUpperBound(reachValue);
     if (reach) facts.push({ label: "Reach (upper bound)", value: reach });
   }
@@ -1442,7 +1443,7 @@ export function claimWitnessFacts(fn) {
       observed.auto_expiry === null &&
       observed.duration_bound_seconds === null
     ) {
-      // not_determined, or an absent source on a pre-A7 verdict. The freeze window
+      // not_determined, or an absent source on an older verdict. The freeze window
       // was NOT established — say so, rather than borrowing the proven-indefinite
       // sentence (which is the most severe statement this inspector makes).
       facts.push({
@@ -1471,7 +1472,7 @@ export function claimWitnessFacts(fn) {
   return facts;
 }
 
-// A resolved-principal's terminal-controller note (SCORING plan §4 / §7.3). Reads
+// A resolved-principal's terminal-controller note. Reads
 // the non-terminal marking + terminal walk so the inspector NEVER implies a
 // settled key where the control chain didn't terminate. Returns null for a
 // principal that is itself terminal (a settled Safe/EOA/timelock), or when there
@@ -1535,7 +1536,7 @@ export function terminalControllerNote(principal) {
   return null;
 }
 
-// Signer-overlap attribution CONTEXT for a Safe principal (SCORING plan §2 / C1).
+// Signer-overlap attribution CONTEXT for a Safe principal.
 // Tier 1 (on-chain owner reads). NB the honesty boundary baked into the copy this
 // feeds: shared signers is attribution context, NOT proof of shared org identity.
 // Returns {selfOwnerCount, strongest: {address, sharedCount, otherOwnerCount,
@@ -1565,7 +1566,7 @@ export function signerOverlapNote(principal) {
   };
 }
 
-// Shared-deployer attribution HINT for a principal (SCORING plan §2 sub-part B).
+// Shared-deployer attribution HINT for a principal.
 // A Tier-1 on-chain read (`provenance:"deployer_read"`) but a HEURISTIC for
 // attribution — factories, shared deployer EOAs and vanity-deployer services all
 // defeat "same deployer ⇒ same org". The fact is honest; the conclusion is not.

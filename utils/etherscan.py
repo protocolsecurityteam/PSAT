@@ -273,7 +273,7 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 def get(module: str, action: str, chain_id: int, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
 
-    *chain_id* is required (invariant 6): the v2 endpoint is chain-scoped via the
+    *chain_id* is required: the v2 endpoint is chain-scoped via the
     ``chainid`` query param, so a call with no chain can no longer silently hit
     mainnet. Callers thread the job/contract chain explicitly.
     """
@@ -615,7 +615,7 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
     Returns a list of dicts with ``token_address``, ``token_name``,
     ``token_symbol``, ``decimals``, ``balance``, ``price_usd`` and ``usd_value``.
 
-    WHAT AN EMPTY LIST DOES NOT MEAN (G6-11). It conflates three states — "holds no
+    WHAT AN EMPTY LIST DOES NOT MEAN. It conflates three states — "holds no
     tokens", "the fetch failed", and (with the cap above) "we saw only the first
     page". The failure path is now recorded as degraded rather than returning ``[]``
     in silence, so at least the second is visible in the operational record; a
@@ -666,7 +666,7 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
                 decimals = None
             price_usd = float(entry.get("TokenPriceUSD", "0") or "0")
             # No money from a guessed scale: with no divisor the USD figure would be
-            # wrong by a factor of 10^n, and inv. 7 weights on it. The column is NOT
+            # wrong by a factor of 10^n, and scoring weights on that figure. The column is NOT
             # NULL so the conventional 18 is still stored, but the value fields say
             # unknown rather than asserting a number derived from the guess.
             if decimals is None or price_usd <= 0:

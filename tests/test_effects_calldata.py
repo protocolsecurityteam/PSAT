@@ -1,5 +1,4 @@
-"""Per-class calldata / entry-point synthesis + the prober wiring
-(EFFECTS_RESOLUTION_SPEC Phase 4).
+"""Per-class calldata / entry-point synthesis + the prober wiring.
 
 Recorded static facts in → concrete probe inputs out. Everything here is offline:
 the pure synthesizers take hand-built artifact shapes, the DB-backed cases use the
@@ -63,14 +62,14 @@ def _leaf(
     if operator is not None:
         # ``operands`` is the comparison's two slots in IR left-right order and the
         # operator says which side the constant bounds — both are load-bearing for the
-        # pause-window harvest (L-58). Every leaf the production builder emits carries
+        # pause-window harvest. Every leaf the production builder emits carries
         # an operator (5,089/5,089 persisted leaves locally); set it wherever a test
         # asserts a resolved window, and leave it off to exercise the undecidable case.
         leaf["operator"] = operator
     if absorbed is not None:
         # The sub-operands a two-slot comparison discarded (``absorbed_operands``,
         # stamped by the predicate builder). Only set where a test exercises them,
-        # so every other leaf here stays byte-identical to a pre-A7 tree.
+        # so every other leaf here stays byte-identical to a pre-widening tree.
         leaf["absorbed_operands"] = absorbed
     return {"op": "LEAF", "leaf": leaf}
 
@@ -88,7 +87,7 @@ def _built_by_current_builder(tree: dict[str, Any]) -> dict[str, Any]:
 
     Default for every hand-built tree here BECAUSE it is what solc-built trees carry:
     it says the absorbed-operand recorder ran, so a leaf with no ``absorbed_operands``
-    read no additive sub-expression. Trees WITHOUT it are the persisted pre-A7 shape,
+    read no additive sub-expression. Trees WITHOUT it are the persisted pre-widening shape,
     where the same missing key means "unknown", and
     ``test_a_pre_widening_tree_can_never_prove_an_indefinite_latch`` is the arm that
     builds one deliberately."""
@@ -231,7 +230,7 @@ def test_encode_calldata_fails_closed_on_bad_signature():
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out
+# Value-out
 # ---------------------------------------------------------------------------
 
 
@@ -298,7 +297,7 @@ def _decode(calldata: str, signature: str) -> tuple[Any, ...]:
 
 
 def test_a_batch_function_is_probed_with_a_non_empty_array():
-    """G6-B. The encoder's default for a dynamic array is empty, and an empty
+    """The encoder's default for a dynamic array is empty, and an empty
     array is a loop body that never runs — so the probe executed, moved nothing,
     and that non-observation was published and cached as a structural fact about
     a function whose body it never entered."""
@@ -323,7 +322,7 @@ def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
 
 
 # ---------------------------------------------------------------------------
-# G6-A vacuous inputs
+# Vacuous inputs
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +362,7 @@ def test_an_array_whose_element_is_filler_is_vacuous():
 
 
 def test_the_supply_plan_carries_the_same_fact():
-    """G6-A spans both classes — ``no_supply_delta`` is cached on the same
+    """The vacuous-input fact spans both classes — ``no_supply_delta`` is cached on the same
     argument."""
     spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
     assert spec is not None
@@ -371,7 +370,7 @@ def test_the_supply_plan_carries_the_same_fact():
 
 
 # ---------------------------------------------------------------------------
-# §16.6-A executor inner-call synthesis
+# Executor inner-call synthesis
 # ---------------------------------------------------------------------------
 
 HELD_TOKEN = "0x" + "ab" * 20
@@ -767,7 +766,7 @@ def test_param_derived_index_still_needs_an_integer_slot():
 
 
 # ---------------------------------------------------------------------------
-# §4.5 supply
+# Supply
 # ---------------------------------------------------------------------------
 
 
@@ -852,7 +851,7 @@ def test_supply_gated_without_principal_stays_none():
 
 
 # ---------------------------------------------------------------------------
-# §4.4 authority-change
+# Authority-change
 # ---------------------------------------------------------------------------
 
 
@@ -878,7 +877,7 @@ def test_authority_targets_the_gate_the_function_writes():
 
 
 def test_guard_origin_normal_write_is_not_a_gate_target_basis():
-    """The §4.4 analogue of the pause reader/writer split: a guard-origin ``normal``
+    """The authority-change analogue of the pause reader/writer split: a guard-origin ``normal``
     write is the modifier's own bookkeeping on F's gate, not an effect F causes, so
     it must not be read as "the state F mutates" when picking a gate target.
 
@@ -943,7 +942,7 @@ def _const(value: str) -> dict[str, Any]:
 
 
 def test_max_pause_duration_needs_a_comparison_SHAPE_not_three_facts_in_one_leaf():
-    """INVERTED at Wave 4 (L-58). It used to assert ``(2592000, "guard_constant")``
+    """INVERTED. It used to assert ``(2592000, "guard_constant")``
     for a leaf holding the latch, the clock and the constant as three DIRECT operands
     — an arrangement no Solidity comparison produces (two slots) and one in which
     "which side is the constant on" has no answer at all. Since the harvest is now
@@ -1066,7 +1065,7 @@ def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
 
 
 def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
-    """L-60: a leaf whose operand union carries BOTH a seconds clock and
+    """A leaf whose operand union carries BOTH a seconds clock and
     ``block.number`` cannot say which clock its constant is denominated against, and
     the seconds clock alone used to be enough to enter the harvest — so 216000 blocks
     (~30 days) would publish as 216000 seconds (2.5 days), the fabricated mitigating
@@ -1093,8 +1092,8 @@ def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
 
 
 def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
-    """THE POSITIVE CASE ON REAL COMPILER OUTPUT (A7 / L-16, R4), narrowed at Wave 4
-    to the shape it can actually PROVE (L-58).
+    """THE POSITIVE CASE ON REAL COMPILER OUTPUT, narrowed to the shape it can
+    actually PROVE.
 
     A Solidity comparison lowers to a leaf with two operands and the reader needs
     three facts, so ``absorbed_operands`` is the sibling list that recovers the third.
@@ -1267,8 +1266,8 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
     ``operands`` are ``{pausedUntil, 2592000}`` — the clock is absorbed into the
     subtraction and dropped. Read with the absorbed list, that is
     ``(2592000, "guard_constant")``. Read WITHOUT it — the shape of every
-    ``contract_materializations.predicate_trees`` row written before A7, and an R5
-    bump does not re-run the static stage — the clock is simply not there, and the
+    ``contract_materializations.predicate_trees`` row written before the widening, and
+    re-running effects does not re-run the static stage — the clock is simply not there, and the
     leaf-local reader called it PROVEN INDEFINITE: the same source, the opposite
     answer, in the severe direction.
 
@@ -1287,7 +1286,7 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
     post = _token_facts(trees={"transfer(address,uint256)": _and(leaf)})
     assert cd.read_max_pause_duration(post, {"pausedUntil"}) == (2592000, "guard_constant")
 
-    # The persisted pre-A7 shape: the sibling key never existed, so the clock is gone.
+    # The persisted pre-widening shape: the sibling key never existed, so the clock is gone.
     stripped = copy.deepcopy(post.trees["transfer(address,uint256)"])
     for stripped_leaf in cd._all_leaves(stripped):
         stripped_leaf.pop("absorbed_operands", None)
@@ -1373,7 +1372,7 @@ def test_an_unread_operand_in_a_sibling_leaf_denies_the_proven_indefinite_state(
 
 
 # ---------------------------------------------------------------------------
-# §4.1 pause (DB-backed: claims / principals / entry points)
+# Pause (DB-backed: claims / principals / entry points)
 # ---------------------------------------------------------------------------
 
 
@@ -1433,8 +1432,8 @@ def test_synthesize_pause_entry_points_fixtures_and_denominator(db_session):
 @requires_postgres
 def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
     """No tree predicts a reader (static under-enumerated) ⇒ probe every
-    state-changing entry point, keep the empty denominator, let §9 file the
-    vocabulary-growth discrepancy for anything the diff witnesses."""
+    state-changing entry point, keep the empty denominator, let the discrepancy
+    router file the vocabulary-growth discrepancy for anything the diff witnesses."""
     contract, ids = _pause_contract(db_session)
     facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
     fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
@@ -1462,7 +1461,7 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
 
 @requires_postgres
 def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_session):
-    """§1 A2 follow-up (cause a): a PREDICTED victim with no resolved principal is
+    """A PREDICTED victim with no resolved principal is
     additionally probed from the PAUSE principal, so a freeze the neutral caller
     can't reach pre-pause is still witnessed. Union semantics via a shared key."""
     proto = Protocol(name=f"pauser-probe-{uuid.uuid4().hex[:8]}")
@@ -1775,7 +1774,7 @@ def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_sessi
     source, and that is still not enough: nothing here proves the latch's guard
     reads it. No bound is the conservative output — never a scraped constant.
 
-    INVERTED (A7, R4). This test previously asserted only ``is None`` and called
+    INVERTED. This test previously asserted only ``is None`` and called
     that "conservative", but ``None`` was consumed as *proven indefinite latch, the
     most severe freeze*: ``claimsVocab`` rendered "(indefinite)" and "indefinite
     latch (no self-recovery bound)" from it. The etherfi shape reaching this
@@ -1870,7 +1869,7 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
 
 
 # ---------------------------------------------------------------------------
-# §9.5 Tier-2 timelock synthesis
+# Tier-2 timelock synthesis
 # ---------------------------------------------------------------------------
 
 EXECUTE_SIG = "execute(address,uint256,bytes,bytes32,bytes32)"
@@ -2007,7 +2006,7 @@ def test_no_timelock_plan_without_the_contracts_own_delay():
 def test_the_timelock_plan_prefers_a_principal_behind_both_gates():
     """Scheduling and executing are separately gated. Picking the address the
     resolution plane put behind BOTH is what keeps the probe from having to grant
-    itself a role — which §9.3 forbids outright."""
+    itself a role — which a read-only probe must never do."""
     spec = _timelock_spec(session=_timelock_session(schedule_principal=PRINCIPAL))
     assert spec is not None
     assert spec.principal == PRINCIPAL.lower()

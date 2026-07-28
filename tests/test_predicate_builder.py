@@ -294,8 +294,8 @@ def test_caller_keyed_time_check_stays_caller_authority(tmp_path):
 def test_logical_or_splits_into_or_subtree(tmp_path):
     """``require(msg.sender == owner || amount > threshold)`` should
     produce an OR root with two leaves: a caller_authority equality
-    and a comparison/business. Codex round-3 blocker #2 fix:
-    business preserved under OR so admission is correct."""
+    and a comparison/business. The business leaf is preserved under
+    OR so admission is correct."""
     sl = _compile(
         tmp_path,
         """
@@ -801,7 +801,7 @@ def test_confidence_low_for_unsupported(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# AuthorityClassifier rule expansion (v6 round-5 #1)
+# AuthorityClassifier rule expansion
 # ---------------------------------------------------------------------------
 
 
@@ -1164,7 +1164,7 @@ def test_issue120_mixed_allow_then_deny_then_tail(tmp_path):
 
 
 def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
-    """#120 round-2 point 1 — a revert-IF guard is a CFG sink, not a leak.
+    """#120 — a revert-IF guard is a CFG sink, not a leak.
     ``if (!auth[src]) revert(); if (b[src]) return false; return true;`` — the
     revert son of the first IF keeps a structural fall-through edge to the
     ENDIF merge, so without terminator-as-sink the ``!auth`` guard leaks into
@@ -1200,7 +1200,7 @@ def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_standalone_require_not_projected_public(tmp_path):
-    """#120 round-2 point 2 — a standalone ``require(cond)`` is a dominating
+    """#120 — a standalone ``require(cond)`` is a dominating
     positive guard, not an ignorable non-IF statement.
     ``require(wl[src]); if(bl[src]) return false; return true;`` — the builder
     only inspects IF nodes, so the ``require(wl)`` guard was dropped and the
@@ -1234,7 +1234,7 @@ def test_issue120_standalone_require_not_projected_public(tmp_path):
 
 
 def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
-    """#120 round-2 points 1+3c — a multi-revert guard chain must AND EVERY
+    """#120 — a multi-revert guard chain must AND EVERY
     guard. ``if(!authA[src]) revert(); if(!authB[src]) revert(); return true;``
     — both reverts leak their fall-through son to ENDIF, so pre-fix the tail
     dropped both guards (→ unattributable ``unsupported``, safe but lossy).
@@ -1270,7 +1270,7 @@ def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
 
 
 def test_issue120_single_revert_guard_is_positive_membership(tmp_path):
-    """#120 round-2 point 1 — the ``_branch_value_is_only_true`` sink change.
+    """#120 — the ``_branch_value_is_only_true`` sink change.
     ``if (!auth[src]) revert(); return true;`` — without treating the revert
     as a sink, the revert branch reaches the downstream ``return true`` and is
     misread as an *allow* branch, so its else-guard is skipped and the tail
@@ -1311,7 +1311,7 @@ def _assert_no_lone_falsy(tree):
 
 
 def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120 round-3 point 1 — a deny expressed as an internal helper call
+    """#120 — a deny expressed as an internal helper call
     (not an inline ``revert``) is still a CFG sink. ``if (!auth[src]) _deny();
     if (b[src]) return false; return true;`` where ``_deny`` always reverts.
     The ``_deny()`` EXPRESSION node keeps a structural fall-through edge to
@@ -1344,14 +1344,14 @@ def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
         ("auth", "truthy"),
         ("b", "falsy"),
     }, leaves
-    # The invariant the reviewer requires: no ``membership:falsy`` without a
-    # co-required ``truthy[auth]``.
+    # The invariant: no ``membership:falsy`` without a co-required
+    # ``truthy[auth]``.
     assert any(le["operator"] == "truthy" and _membership_var(le) == "auth" for le in leaves), leaves
     _assert_no_lone_falsy(tree)
 
 
 def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120 round-3 point 1, library variant — a ``LibraryCall`` to an
+    """#120, library variant — a ``LibraryCall`` to an
     always-reverting library function (``Guard.enforce()``) sinks control
     identically to the internal-call and inline-``revert`` forms. Same shape
     (``if (!auth[src]) Guard.enforce(); if (b[src]) return false; return
@@ -1386,7 +1386,7 @@ def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
-    """#120 round-3 point 2 backstop — a deny routed through a call whose
+    """#120 backstop — a deny routed through a call whose
     revert can't be PROVEN (an external call) must fail closed, not leak.
     ``if (!auth[src]) g.enforce(src); if (b[src]) return false; return true;``
     where ``g.enforce`` is an external interface call: ``_callee_always_reverts``
@@ -1509,13 +1509,13 @@ def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# guard_extraction_uncertain — the producer half (W2-B item 1).
+# guard_extraction_uncertain — the producer half.
 #
-# Re-measured at Wave-2 HEAD over the full 88-contract replay: every tree-less
-# predicate target has ZERO revert gates (Leg A's class-F/R widening lowered
-# every gated function that G3 counted), so the marker has zero realised rows
+# Re-measured over the full 88-contract replay: every tree-less predicate
+# target has ZERO revert gates (the class-F/R widening lowered every gated
+# function the earlier count covered), so the marker has zero realised rows
 # on this corpus — a lower bound, not a proof of unreachability. These tests
-# are the R2 fallback: the sentinel is reachable by construction (a caller-eq
+# are the fallback: the sentinel is reachable by construction (a caller-eq
 # gate whose subtree lowering fails) and the discriminator is precise in both
 # directions (a genuinely ungated / value-gated function is never flagged).
 # ---------------------------------------------------------------------------

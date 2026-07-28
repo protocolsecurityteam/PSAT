@@ -208,9 +208,9 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
                     "resolved_type": "contract",
                     "details": {"address": authority_address},
                     # A real gating authority carries this from the static stage
-                    # (Leg F's provenance split). The fixture predates it and was
-                    # relying on the old absent-means-controller_value default,
-                    # which W2-B item 11 replaced with the honest
+                    # (the gate/callee provenance split). The fixture predates it
+                    # and was relying on the old absent-means-controller_value
+                    # default, since replaced by the honest
                     # ``controller_value_unattributed`` — so the gate this test
                     # is about now has to say it is a gate. The recursion the
                     # test exercises is relation-independent
@@ -1063,7 +1063,8 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
 
 
 def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatch):
-    """W0-1 / R1, at ``_materialize_with_cross_process_cache``.
+    """Not-determined must never be recorded as proven-absent, at
+    ``_materialize_with_cross_process_cache``.
 
     ``hydrate_*`` returning ``None`` for an unreadable blob met ``or {}``
     here, so a bucket outage produced a contract with no functions, no plan and
@@ -1121,7 +1122,8 @@ def _two_child_root_bundle(root_address, first_addr, second_addr):
 
 @pytest.mark.parametrize("fanout", ["1", "8"])
 def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanout):
-    """W0-1 / R2, at the altitude where the BFS actually handles it.
+    """The unreadable-materialization failure must escape the BFS, at the
+    altitude where the BFS actually handles it.
 
     ``_materialize_for_pending`` wraps every failure into ``(None, exc)``, and
     the caller turns that into a node stamped ``analyzed=False`` and walks on —
@@ -1181,7 +1183,7 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
 
 
 def test_storage_not_determined_from_resolution_is_retryable():
-    """W0-1 / R2, the other half. Escaping the BFS only helps if the worker
+    """The other half. Escaping the BFS only helps if the worker
     then re-runs the stage — ``classify`` fell through to ``terminal``, so
     ``BaseWorker`` computed ``will_retry=False`` and the job died on attempt
     one with the same 'we could not read it' state it started with.
@@ -1281,12 +1283,12 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     Positive control (``roleRegistry``, ``caller_gate``) must stay a control
     edge; negative control (``eETH``, ``call_target``) must not.
 
-    THIRD ARM AMENDED by W2-B item 11 (declared): a value with NO provenance
+    THIRD ARM AMENDED: a value with NO provenance
     used to stay ``controller_value``, on the reading that not-determined must
     not demote a real authority. That rule protects a proven authority from
     being relabelled a mere callee — it does not license an authority CLAIM over
-    a target for which neither question was answered. Leg A's tree widening
-    minted 37 such targets in one merge (pure constants like
+    a target for which neither question was answered. Widening the predicate-tree
+    surface minted 37 such targets in one merge (pure constants like
     HUNDRED_PERCENT_IN_BPS, non-authority mappings like ``_balances``), and each
     would have persisted as a control edge feeding the authority closure. The
     not-determined input now reaches the not-determined relation
@@ -1475,7 +1477,7 @@ def test_generic_type_never_overwrites_a_specific_one():
 def test_analysis_state_splits_the_analyzed_bool():
     """``analyzed=False`` is four populations; ``analysis_state`` names which.
 
-    R2, corrected at the Wave-4 closeout (L-34). The counts quoted for this field
+    The counts quoted for this field
     — 1,183 analyzed / 1,236 not_analyzable / 28 attempt_failed / 29
     beyond_depth_horizon / 55 not-determined — are a RECOMPUTATION of
     ``_analysis_state`` over the node dicts in the 107 stored
@@ -1506,7 +1508,7 @@ def test_analysis_state_splits_the_analyzed_bool():
 
     assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
     # Not an ANALYZABLE type — analysis was never applicable, so its absence
-    # says nothing adverse. L-34: the token is ``not_analyzable``, never
+    # says nothing adverse. The token is ``not_analyzable``, never
     # ``not_a_contract``. A ``safe`` is the discriminating case, because a Safe
     # IS a contract (230 of the local corpus) — the old spelling asserted
     # something literally false about it.
@@ -1530,7 +1532,7 @@ def test_analysis_state_splits_the_analyzed_bool():
         recursive._analysis_state(node(depth=7, details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
     )
 
-    # L-34 pin, stated as the negation so a revert of the rename is caught even
+    # Stated as the negation so a revert of the rename is caught even
     # if some future arm re-introduces the spelling elsewhere: the producer must
     # not mint the old token for ANY resolved_type outside ANALYZABLE_TYPES.
     for outside in ("eoa", "zero", "safe", "off_chain_witness"):

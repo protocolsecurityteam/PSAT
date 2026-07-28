@@ -58,8 +58,8 @@ _CALLEE_SIG = "onlyOperatingMultisig(address)"
 _CALLEE_SELECTOR = "0x" + keccak(text=_CALLEE_SIG).hex()[:8]
 
 
-# The adapter itself does not branch on earned-public, but the handoff asks every
-# behavior-bearing test to run under both flag states; this makes that explicit.
+# The adapter itself does not branch on earned-public, but every behavior-bearing
+# test runs under both flag states; this makes that explicit.
 @pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
 def both_flags(request, monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
@@ -222,7 +222,7 @@ def _install_probe_stub(
 
     def _stub(rpc_url, method, params=None, **kwargs):
         if method == "eth_blockNumber":
-            # Pin-once height read for the ctx.block-None path (§A1).
+            # Pin-once height read for the ctx.block-None path.
             if blocknumber_fail:
                 raise RuntimeError("stubbed eth_blockNumber failure")
             return hex(head_block)
@@ -412,7 +412,7 @@ def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeyp
 
 @requires_postgres
 def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
-    # The drift arm (§Stage 4) keys on fold_frontier == the folded cursor height.
+    # The drift arm keys on fold_frontier == the folded cursor height.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -427,7 +427,7 @@ def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
-    # Spec §4 acceptance: the enumerated controllers render principal_type="controller"
+    # Acceptance: the enumerated controllers render principal_type="controller"
     # THROUGH project_capability_surface, carrying the trace for auditability.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -690,7 +690,7 @@ def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flag
 
 
 # ---------------------------------------------------------------------------
-# W2-B items 4+5: unwitnessed empties decline; registry context is chain-scoped
+# Unwitnessed empties decline; registry context is chain-scoped
 # and an error there is never "no candidates".
 # ---------------------------------------------------------------------------
 
@@ -716,7 +716,7 @@ def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(sessio
 
 @requires_postgres
 def test_registry_context_db_error_declines_not_empty_candidates(session, monkeypatch, both_flags):
-    # R1: a DB error while reading the registry's own controllers must never
+    # A DB error while reading the registry's own controllers must never
     # shrink the candidate universe into a (possibly empty) member set.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)

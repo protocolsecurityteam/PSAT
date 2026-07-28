@@ -20,7 +20,7 @@ pragma solidity ^0.8.27;
 // ``sweepTo(IERC20,address,uint256)`` → 0x38541c00 — while the caller's sink
 // records the ABI selector of the same function,
 // ``sweepTo(address,address,uint256)`` → 0x0aeef8c8; the join meets only via
-// the ``abi_selector`` the claims pass stamps on the callee record (L-17).
+// the ``abi_selector`` the claims pass stamps on the callee record.
 // This row is the interface-typed-parameter discriminator: it was pinned
 // EMPTY while the gap was real, and it goes empty again the moment the
 // canonical key stops being stamped or read — so a regression in either half

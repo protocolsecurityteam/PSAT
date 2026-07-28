@@ -1,4 +1,4 @@
-"""End-to-end proof of the §4.2 value-out and §4.5 supply recipes on a real EVM.
+"""End-to-end proof of the value-out and supply recipes on a real EVM.
 
 Every other test of these two recipes scripts the simulate seam: a ``_Recorder``
 replays hand-written ``SimResult``s, so the arithmetic and the log parsing are
@@ -121,7 +121,7 @@ def _seeded_holder(address: str, holder: str, shares: int, supply: int) -> dict[
 
 
 # ---------------------------------------------------------------------------
-# §4.5 supply — the burn that wraps
+# Supply — the burn that wraps
 # ---------------------------------------------------------------------------
 
 
@@ -170,7 +170,7 @@ def test_a_burn_whose_supply_wraps_is_published_as_a_burn(deployed):
 
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "burn"
-    # §5a dilution belongs to mints alone; a burn must never carry it.
+    # Backing/dilution belongs to mints alone; a burn must never carry it.
     assert "backing" not in eff.details
 
 
@@ -198,7 +198,7 @@ def test_a_real_mint_is_published_as_a_mint(deployed):
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out — a guarded payout that cannot execute
+# Value-out — a guarded payout that cannot execute
 # ---------------------------------------------------------------------------
 
 
@@ -257,7 +257,7 @@ def test_a_funded_payout_to_the_immutable_treasury_is_proven_fixed(deployed):
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out — a body that only runs for a non-empty array (G6-B)
+# Value-out — a body that only runs for a non-empty array
 # ---------------------------------------------------------------------------
 
 
@@ -393,7 +393,7 @@ def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(
 
 
 def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
-    """G6-B end to end: PRODUCTION synthesis builds the calldata, and the same
+    """The non-empty-array probe end to end: PRODUCTION synthesis builds the calldata, and the same
     function that moved nothing above now moves value on a real EVM."""
     address, owner, simulate, fx, ctx = batch_vault
     signature = "batchPay(uint256[],address[])"
@@ -422,7 +422,7 @@ def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out — an arbitrary-call executor (§16.6-A)
+# Value-out — an arbitrary-call executor
 # ---------------------------------------------------------------------------
 
 
@@ -467,7 +467,7 @@ def test_an_executor_probed_without_an_inner_call_witnesses_nothing(batch_vault,
 
 @pytest.mark.parametrize("signature", ["forward(address,bytes,uint256)", "forward(address[],bytes[],uint256[])"])
 def test_an_executor_moves_a_held_asset_to_a_destination_the_caller_named(batch_vault, held_token, signature):
-    """§16.6-A end to end, both arities. The synthesis forwards an ERC-20
+    """The executor inner-call synthesis end to end, both arities. It forwards an ERC-20
     transfer of an asset the deployment provably holds, and the sentinel variant
     puts the attacker identity in the payload's recipient — so the caller
     redirecting the funds is an OBSERVATION, not an inference."""

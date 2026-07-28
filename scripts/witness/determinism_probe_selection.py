@@ -1,6 +1,6 @@
-"""String-hash determinism probe (W0-8, class A).
+"""String-hash determinism probe (class A).
 
-Runs the real §6 candidate selection over the local corpus database and prints a
+Runs the real candidate selection over the local corpus database and prints a
 canonical serialization of the whole emitted queue. Under every
 ``PYTHONHASHSEED`` the bytes must be identical: the queue's ORDER decides which
 candidates a ``resource_cap`` run reaches at all, so a seed-dependent order is a
@@ -22,12 +22,13 @@ Serialization rules, both deliberate:
 
 Alongside the queue the probe publishes ``unordered_control``: the *removed*
 arithmetic — ``sum(self.balance.get(a, 0.0) for a in seen)``, copied verbatim
-from ``services/effects/selection.py`` as it stood on ``main`` before W0-2 —
+from ``services/effects/selection.py`` as it stood before the fix —
 recomputed over the same real graph. It is an instrument, never a product: the
 gate requires it to **vary** across the seed sweep. If it stops varying, this
 corpus no longer contains a closure whose float fold is order-sensitive, the
 sweep has lost its discriminating power, and the gate must say so rather than
-report a green it has not earned (R2).
+report a green it has not earned: a control is only evidence while it still
+discriminates.
 
 Needs ``DATABASE_URL`` pointed at the corpus database (protocol 1). It is not
 optional and there is no synthetic fallback: a gate that quietly degrades to a
@@ -48,7 +49,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-# The row this gate refuses to lose (W0-2's positive control, carried forward).
+# The row this gate refuses to lose — the positive control, carried forward.
 # `sweepDust` sits inside the largest tied value cluster in the queue — 84
 # members at $4,024,163,604.46 — so it is the row a wrong tiebreak moves first,
 # and a payload that no longer contains it cannot testify about ordering at all.
@@ -73,7 +74,7 @@ def canonical(value: Any) -> Any:
 
 
 def _prefix_float_fold(graph: Any, seeds: set[str]) -> float:
-    """``AuthorityGraph.reachable_value`` as it stood on ``main`` before W0-2.
+    """``AuthorityGraph.reachable_value`` as it stood before the fix.
 
     Verbatim, including the unsorted ``seen`` and the binary-float ``sum`` — that
     is the whole point.
@@ -122,7 +123,7 @@ def main() -> int:
     # aborting. Exit 3 means "there is nothing here to compare"; exit 4 means
     # "compare it, and also know the anchor moved". Aborting would throw away the
     # seed sweep's own testimony in exactly the runs where it is most
-    # interesting — the pre-W0-2 code moves this anchor on 3 of 8 seeds, which IS
+    # interesting — the pre-fix code moves this anchor on 3 of 8 seeds, which IS
     # the seed-dependence, not a separate problem.
     anchor = [
         (i, c)
@@ -137,7 +138,7 @@ def main() -> int:
         rank, candidate = anchor[0]
         # `Decimal(str(...))` rather than a bare `!=` on purpose: the anchor's job
         # is "this row is still here and still holds this money", not "this field
-        # is a Decimal" — W0-2's own tests pin the type.
+        # is a Decimal" — the type is pinned by the selection module's own tests.
         if Decimal(str(candidate.value_at_stake_usd)) != ANCHOR_VALUE:
             violation = (
                 f"ANCHOR MOVED: {ANCHOR_NAME} value_at_stake_usd = {candidate.value_at_stake_usd!r}, "

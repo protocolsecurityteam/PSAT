@@ -28,7 +28,7 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
         "kind": "cofinite_blacklist",
         "blacklist": [ADDR_A, ADDR_B],
         "membership_quality": "exact",
-        # The producer now ALWAYS states this on a cofinite (W2-B item 10a); a
+        # The producer now ALWAYS states this on a cofinite; a
         # dict without it is a pre-fix persisted row, covered by its own case in
         # ``test_cofinite_denylist_quality_is_stated_never_inferred_from_absence``.
         "blacklist_quality": "exact",
@@ -39,7 +39,7 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
     assert surface.authority_public is True
     assert len(surface.public_paths) == 1
     path = surface.public_paths[0]
-    # The count AND the completeness verdict (W2-B item 10a): an exhaustive
+    # The count AND the completeness verdict: an exhaustive
     # exclusion and an un-enumerated one are different filters.
     assert any(c["kind"] == "denylist" and "2 excluded, exhaustive" in c["description"] for c in path), path
 
@@ -148,8 +148,8 @@ def test_openness_is_total_and_three_valued():
 
 
 # ---------------------------------------------------------------------------
-# authority_roles — the role half of inv 3's (capability, principal) unit
-# (W2-B item 8). It was the literal [] on 1773/1773 persisted rows.
+# authority_roles — the role half of the (capability, principal) unit.
+# It was the literal [] on 1773/1773 persisted rows.
 # ---------------------------------------------------------------------------
 
 
@@ -195,8 +195,8 @@ def test_role_grants_not_determined_for_multi_role_capability():
 
 
 def test_role_grants_not_determined_when_role_identity_is_dissolved():
-    """The enumerable role-store probes the gate and never a role name
-    (CONTROLLER_RESOLUTION_SPEC §3.2): role-gated, role unknown."""
+    """The enumerable role-store probes the gate and never a role name:
+    role-gated, role unknown."""
     from services.policy.capability_surface import capability_role_grants
 
     cap = {
@@ -221,7 +221,7 @@ def test_role_grants_not_determined_on_unsupported():
     """``[]`` is "the gate was lowered and no role appeared in it" — proven
     absent. An ``unsupported`` capability means the gate was NEVER lowered, so
     nothing (including "not role-keyed") was read: that is the not-determined
-    ``None``, anywhere in the tree. (Inverts the round-1 pin that read an
+    ``None``, anywhere in the tree. (Inverts the earlier pin that read an
     unsupported gate as proven not role-gated — the chronic not-determined→
     proven route.)"""
     from services.policy.capability_surface import capability_role_grants
@@ -271,12 +271,12 @@ def test_role_grants_walk_composites_and_fail_closed_on_roleless_node():
 
 
 # ---------------------------------------------------------------------------
-# W2-B item 10: the two capability_expr keys nobody could read correctly.
+# The two capability_expr keys nobody could read correctly.
 # ---------------------------------------------------------------------------
 
 
 def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
-    """10a: the DEFECT was the default. Emit-when-non-default meant absence =>
+    """The DEFECT was the default. Emit-when-non-default meant absence =>
     'exact', so a consumer that never heard of ``blacklist_quality`` read every
     cofinite denylist as a COMPLETE exclusion — the strong claim by default."""
     from services.resolution.capabilities import CapabilityExpr
@@ -298,8 +298,9 @@ def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
 
 
 def test_capability_currency_three_states():
-    """10b: ``last_indexed_block`` was present on 240 rows and read by nothing.
-    inv 11/12 need exactly "is this statement current?"."""
+    """``last_indexed_block`` was present on 240 rows and read by nothing.
+    Deciding whether a persisted verdict still holds needs exactly
+    "is this statement current?"."""
     from services.policy.capability_surface import CAPABILITY_INDEX_STALE_BLOCKS, capability_currency
 
     fresh = {"kind": "finite_set", "members": [ADDR_A], "last_indexed_block": 25_619_235}
@@ -338,7 +339,7 @@ def test_capability_currency_composite_takes_the_least_current_conjunct():
 
 
 def test_resolver_path_is_recorded_on_every_principal_row_shape():
-    """W2-B item 9: ``function_principals.origin`` / ``principal_type`` are
+    """``function_principals.origin`` / ``principal_type`` are
     single constants (``semantic_capability:finite_set`` / ``controller`` on
     1132/1132 rows), so the columns asserting "here is the provenance of this
     attribution" prove only "this row exists". Neither can be repurposed

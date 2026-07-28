@@ -309,8 +309,7 @@ def _build_subtree_from_gate(
 
     # If gate is in a cross-fn helper, walk the call chain to build
     # parameter bindings for the helper, then run provenance on the
-    # helper with those bindings. Full caller-side
-    # ParameterBindingEnv per v4 plan §predicates (round-2 #2 fix).
+    # helper with those bindings — a full caller-side ParameterBindingEnv.
     operating_fn = gate.containing_function or function
     if operating_fn is not function:
         # Pass the caller's already-computed provenance down so
@@ -625,9 +624,9 @@ def _build_internal_call_leaf(
         # The callee's return is not lowerable to a typed leaf (a named return
         # assigned inside ``assembly`` — Solady ``EnumerableRoles``). The leaf
         # is built in the CALLEE's frame, where the caller the CALL SITE passed
-        # in is not represented at all: that is how A1's caller vanished.
-        # Re-attach the call-site argument origins (A1 Part B) so the
-        # caller-taint default can see them.
+        # in is not represented at all, which is how the caller vanishes.
+        # Re-attach the call-site argument origins so the caller-taint
+        # default can see them.
         leaf = _build_truthy_leaf(return_value, sub_prov, gate)
         return _attach_call_site_arg_origins(leaf, ir, prov)
     return _classify_leaf_from_ir(inner, sub_prov, gate, callee)
@@ -660,13 +659,13 @@ def _attach_call_site_arg_origins_to_tree(tree: PredicateTree, ir: Any, caller_p
 
 def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: ProvenanceMap) -> LeafPredicate:
     """Union the CALL-SITE argument origins into the leaf's operand
-    ``derived_from`` (A1 Part B).
+    ``derived_from``.
 
     Only touches operands that already publish ``derived_from`` (``computed`` /
     ``view_call`` / ``external_call``), so it neither invents the field on an
     operand where absence means "does not apply" nor changes an operand's
     identity — a state-var attribution stays a state-var attribution. Sorted
-    by the published key for cross-process determinism (inv 11/12).
+    by the published key for cross-process determinism.
 
     ``references_msg_sender`` is deliberately NOT set: the caller reached the
     gate through a call argument, not as a direct operand, and the static flag
@@ -797,9 +796,9 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
     if op_name is None or not children:
         return None
     # Every child above was built in the CALLEE's frame, where the caller the
-    # call site passed in has no representation — A1's loss. Re-attach the
-    # call-site argument origins onto the children's collapsing operands
-    # (A1 Part B) so the caller-taint default can see them.
+    # call site passed in has no representation — that is where it is lost.
+    # Re-attach the call-site argument origins onto the children's collapsing
+    # operands so the caller-taint default can see them.
     children = [_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children]
     # Polarity propagates the same way as the inline AND/OR case in
     # _build_subtree_from_value's main path.
@@ -1555,7 +1554,7 @@ def _stamp_absorbed_operands(
     ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None, leaf: LeafPredicate
 ) -> None:
     """Record the operands an ADDITIVE sub-expression contributed and the leaf could
-    not hold (A7 / ledger L-16).
+    not hold.
 
     A Solidity comparison lowers to a leaf with exactly TWO operands, and when one
     side is arithmetic the operand recorder keeps ONE sub-operand and discards the
@@ -2211,8 +2210,8 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
 
 
 def _self_gate_or_truthy_leaf(cond: Any, prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate:
-    """The bare-bool fallback leaf, upgraded to a SELF-GATE descriptor (A1 Part
-    A) only when the fallback carries nothing an authority resolver could use.
+    """The bare-bool fallback leaf, upgraded to a SELF-GATE descriptor only
+    when the fallback carries nothing an authority resolver could use.
 
     Order matters. ``_build_truthy_leaf``'s operand resolution recovers the
     underlying state variable for the common shapes — an inlined
@@ -2234,7 +2233,7 @@ def _self_gate_or_truthy_leaf(cond: Any, prov: ProvenanceMap, gate: RevertGate, 
 
 
 def _build_self_gate_leaf(prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate | None:
-    """A1 Part A — the SELF-gate descriptor for an un-lowerable caller gate.
+    """The SELF-gate descriptor for an un-lowerable caller gate.
 
     Emitted only when leaf lowering has already FAILED (the classify fallback)
     and the gate lives in a function the resolver can probe directly:
@@ -2556,7 +2555,7 @@ def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
     if source.kind in ("computed", "view_call", "external_call") and not nested:
         # Always emitted on a computed / view_call / external_call operand, and
         # only there, so absence is "the question does not apply" rather than a
-        # silent third meaning. (view_call/external_call added by A1 Part B:
+        # silent third meaning. (view_call/external_call are included because
         # the call's argument provenance — the caller, in the RoleRegistry
         # shape — must survive onto the operand; the digest alone is opaque.)
         # ``null`` is not-determined; a list (possibly empty) is determined.

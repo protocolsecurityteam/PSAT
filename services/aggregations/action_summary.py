@@ -6,8 +6,8 @@ public endpoints that publish it.
 but it ships on two unauthenticated endpoints — ``GET /api/analyses/{run_name}``
 (``analysis_detail``) and ``GET /api/company/{name}/functions``
 (``governance.principals._build_company_function_entry``) — so it is the quotable
-copy of whatever the structured planes say, and R3 applies to it: a narrowing in
-the structured claim that leaves the sentence alone leaves the over-claim intact.
+copy of whatever the structured planes say: a narrowing in the structured claim
+that leaves the sentence alone leaves the over-claim intact.
 
 Measured on the local corpus (1,773 rows):
 
@@ -15,16 +15,17 @@ Measured on the local corpus (1,773 rows):
   labels and no targets. It asserts nothing, and a consumer cannot tell it from a
   sentence that was derived from evidence.
 * **528** rows say *"Writes or calls into: <targets>"*, read straight off
-  ``effect_targets`` — the list D1 conflates: 501 of 1,642 populated rows carry
-  zero state-write evidence, so "writes" is not something this sentence can
-  support.
+  ``effect_targets`` — a list that conflates writes with plain calls: 501 of
+  1,642 populated rows carry zero state-write evidence, so "writes" is not
+  something this sentence can support.
 * **20** rows say *"Executes arbitrary external calldata from the contract."*
-  That is the sentence A3 narrowed in Wave 1 — the ``exec.arbitrary`` claim now
-  carries a three-state ``destination_constraint``, 7 of 20 destinations are
-  pinned by a mandatory gate, and one row (``LRTSquaredAdmin.rebalance``) lost the
-  claim entirely as a false positive. Every persisted claim still predates that
-  verdict, so on today's rows the honest reading is *not determined* — which is
-  exactly what the frontend's own ``constraintText`` does with an absent verdict.
+  The structured ``exec.arbitrary`` claim was narrowed while this sentence was
+  not: the claim now carries a three-state ``destination_constraint``, 7 of 20
+  destinations are pinned by a mandatory gate, and one row
+  (``LRTSquaredAdmin.rebalance``) lost the claim entirely as a false positive.
+  Every persisted claim still predates that narrowing, so on today's rows the
+  honest reading is *not determined* — which is exactly what the frontend's own
+  ``constraintText`` does with an absent verdict.
 
 ``summary_kind`` names which of the three shapes a sentence is, and
 ``summary_note`` carries the reconciliation when the structured plane disagrees
@@ -111,8 +112,8 @@ def describe_action(
 
 
 def _reconcile_arbitrary(claims: Any, effect_labels: Any) -> tuple[str, str | None]:
-    """The A3 half: the word "arbitrary" is a claim about the DESTINATION, and the
-    structured plane now has a three-state verdict on it.
+    """The word "arbitrary" is a claim about the DESTINATION, and the structured
+    plane now has a three-state verdict on it.
 
     Kept deliberately narrow. The sentence is only replaced when the claims plane
     has something to say — never on the strength of the claim list being missing,
@@ -132,7 +133,7 @@ def _reconcile_arbitrary(claims: Any, effect_labels: Any) -> tuple[str, str | No
             else "the label is also absent"
         )
         # The claims plane ran on this row (it produced a list) and did NOT raise
-        # exec.arbitrary. A3 measured one such row as a pure false positive.
+        # exec.arbitrary. One such row was measured as a pure false positive.
         return (
             "Executes external calldata from the contract.",
             f"The claims plane records no exec.arbitrary claim for this function ({detail}), "
@@ -154,7 +155,7 @@ def _reconcile_arbitrary(claims: Any, effect_labels: Any) -> tuple[str, str | No
             f"Narrowed by the exec.arbitrary witness: destination_constraint={state}.",
         )
 
-    # Absent verdict (every persisted claim predates A3) or an explicit
+    # Absent verdict (every persisted claim predates the verdict) or an explicit
     # not_determined. Neither proves the destination is freely chosen, and
     # 'arbitrary' asserts that it is.
     return (

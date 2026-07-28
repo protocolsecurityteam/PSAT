@@ -352,7 +352,7 @@ def resolve_contract_capabilities(
         if isinstance(candidate_job.request.get("rpc_url"), str):
             explicit_rpc_url = candidate_job.request["rpc_url"]
             break
-    # inv. 7: resolve the RPC URL *from* ``chain_id`` via a single ChainContext so
+    # Resolve the RPC URL *from* ``chain_id`` via a single ChainContext so
     # the (chain_id, rpc_url) pair can never disagree. They used to come from
     # independent sources — the request's ``chain_id`` for the URL and the
     # caller's ``chain_id`` argument for the event/bytecode reads — which let the
@@ -402,11 +402,11 @@ def resolve_contract_capabilities(
     # within-pass dedup, never a cross-run/persistent cache, so it cannot serve stale data across runs.
     live_read_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
-    # Differential probe (DIFFERENTIAL_PROBE_PLAN, default OFF). Pin ONE block for
-    # the whole pass so every probed function is observed at the same height (replay
-    # + caching consistency, §6.2). A None block (non-archive node / blocknum read
-    # failure) disables probing for the pass — the probe is strictly additive (§7.1),
-    # so its absence is exactly the current behavior.
+    # Differential probe (default OFF). Pin ONE block for the whole pass so every
+    # probed function is observed at the same height (replay + caching
+    # consistency). A None block (non-archive node / blocknum read failure)
+    # disables probing for the pass — the probe is strictly additive, so its
+    # absence is exactly the current behavior.
     # Pin a finalized head for the WHOLE pass (#119). An unpinned ``block=None``
     # evaluates "at live head", which a durable event index structurally lags, so
     # every event-indexed allowlist would demote to ``lower_bound``. Pin a height
@@ -541,12 +541,12 @@ def _selector_for_signature(
 
 
 # ---------------------------------------------------------------------------
-# Differential probe wiring (DIFFERENTIAL_PROBE_PLAN §3.6). Gated behind
+# Differential probe wiring. Gated behind
 # ``PSAT_DIFFERENTIAL_PROBE`` (default OFF) in the resolution loop above; these
 # helpers run only when the flag is on, so flag-off resolution is byte-identical.
 # ---------------------------------------------------------------------------
 
-# Process-level probe cache (§4): a probe is deterministic given
+# Process-level probe cache: a probe is deterministic given
 # ``(chain, address, selector, block)`` — the random identities are derived from
 # (selector, address) and the block is pinned — so cache the result and skip the
 # wire when the same gated-unknown function is re-resolved in-process. Bounded;
@@ -608,7 +608,7 @@ def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_i
 
 
 def _should_differential_probe(cap: CapabilityExpr) -> bool:
-    """True only for the gated-unknown population the probe targets (§2): a
+    """True only for the gated-unknown population the probe targets: a
     top-level ``external_check_only`` carrying a caller-gate basis tag — exactly
     ``_is_root_authority_blocker``'s external-check arm. A cold-index self-heal
     deferral is NEVER probed: overwriting its marker would freeze the cold result
@@ -624,11 +624,11 @@ def _should_differential_probe(cap: CapabilityExpr) -> bool:
 
 
 def _apply_probe_result(cap: CapabilityExpr, result: ProbeResult) -> CapabilityExpr:
-    """Land a probe verdict on the capability (§3.6). Only a confirmed-public
+    """Land a probe verdict on the capability. Only a confirmed-public
     verdict CHANGES the static verdict (→ ``conditional_universal``); a gated
     confirmation/observation and an inconclusive/indeterminate probe keep the
     static ``external_check_only`` and merely attach the transcript so the verdict
-    is reproducible (§6.1)."""
+    is reproducible."""
     transcript_step = {"step": "differential_probe", **result.transcript}
     if result.verdict == "public":
         opened = CapabilityExpr.conditional_universal(
@@ -657,7 +657,7 @@ def _maybe_differential_probe(
     block: int,
     call_batch: Any = None,
 ) -> CapabilityExpr:
-    """Probe one resolved capability when it is gated-unknown, applying §3.6.
+    """Probe one resolved capability when it is gated-unknown.
     Wrapped in a blanket try/except: a probe failure must never break resolution
     (strictly additive) — on any error the static verdict stands. ``call_batch`` is
     injectable for hermetic tests; defaults to the real ``eth_call_batch`` wire."""
@@ -1060,11 +1060,11 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     # their existing wire shape; ``bound`` marks an inlined downstream-call subject.
     if cap.subject != "root":
         out["subject"] = cap.subject
-    # ALWAYS emitted on a cofinite, never elsewhere (W2-B item 10a). The old
+    # ALWAYS emitted on a cofinite, never elsewhere. The old
     # emit-when-non-default rule made ABSENCE mean ``exact``: a consumer that has
     # never heard of this key read every cofinite denylist as a COMPLETE
-    # exclusion, which is the strong claim — the one place in the whole sweep
-    # where a hedge's default was the assertion rather than the caution. Absence
+    # exclusion, which is the strong claim — the one place where a hedge's
+    # default was the assertion rather than the caution. Absence
     # now means "this capability is not a denylist", so the question of denylist
     # completeness simply does not arise; a present ``lower_bound`` says at least
     # these are excluded, so the complement is an upper bound on who may call.

@@ -28,10 +28,10 @@ from utils.logging import record_stage_metric
 logger = logging.getLogger(__name__)
 
 
-# --- C1: signer-overlap attribution fact -------------------------------------
+# --- signer-overlap attribution fact -----------------------------------------
 def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
     """The protocol's dispositively-enumerated Safe owner sets, keyed by lowercased
-    Safe address, for signer-overlap comparison (SCORING plan §2 / C1).
+    Safe address, for signer-overlap comparison.
 
     Sources ``function_principals`` (the authoritative owner store with the
     ``membership_quality`` witness). Only ``resolved_type='safe'`` rows whose
@@ -39,7 +39,7 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
     admitted — the on-chain owner set was dispositively read, not a lower-bound
     guess. A Safe appears on many function rows; identical exact rows dedup by
     address. If two exact rows DISAGREE on the owner set, that Safe is a witness
-    conflict and is OMITTED (Register #4 — no recency column to arbitrate, so we
+    conflict and is OMITTED (no recency column to arbitrate, so we
     never silently pick one contradictory enumeration). The set is only as
     complete as the protocol contracts analyzed so far, which is correct: the
     comparison pool grows monotonically as more contracts resolve (inv-6), never
@@ -56,7 +56,7 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
     # conflict flag. ``function_principals`` has no recency column (no
     # updated_at/probe-block on the row — see db/models.py), so two exact rows
     # that DISAGREE on the owner set are contradictory witnesses with no
-    # dispositive way to pick between them: fail closed (Register #4). Identical
+    # dispositive way to pick between them: fail closed. Identical
     # duplicate exact rows agree and are kept.
     accum: dict[str, dict[str, Any]] = {}
     for address, details in rows:
@@ -145,10 +145,10 @@ def _compute_signer_overlap(
     }
 
 
-# --- shared-deployer attribution fact (§2 sub-part B) -------------------------
+# --- shared-deployer attribution fact ----------------------------------------
 def load_protocol_deployer_groups(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
     """Per-address shared-deployer groups for a protocol, keyed by lowercased
-    contract address (SCORING plan §2 sub-part B).
+    contract address.
 
     Groups the protocol's ``contracts`` by ``deployer`` (lowercased); a group of
     ≥2 contracts sharing one deployer yields, for each member, ``{"deployer",
@@ -189,8 +189,8 @@ def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[st
     on-chain read, but ``heuristic=True`` flags that same-deployer does NOT prove
     same organization (factories, shared deployer EOAs, and vanity-deployer
     services all defeat it). Routes to confidence/warnings, never a grade
-    deduction, and MUST NOT mint an org-identity label. Mirrors the C1 bucket
-    honesty: fact yes, org conclusion no.
+    deduction, and MUST NOT mint an org-identity label — same honesty as the
+    signer-overlap fact: fact yes, org conclusion no.
     """
     entry = deployer_groups.get(address)
     if entry is None:
@@ -584,24 +584,24 @@ def build_principal_labels(
     the same dict — so a caller threading the same cache through the whole
     job sees fan-out of 6-10 RPCs per address collapse to one lookup.
 
-    ``cross_chain_recognizer`` (inv. 15) is an ``address -> (resolved_type,
+    ``cross_chain_recognizer`` is an ``address -> (resolved_type,
     details) | None`` classifier that takes priority over the generic
     EOA/contract typing: an aliased L1 owner reads as a codeless EOA and a
     bridge predeploy as a generic contract, yet both are cross-chain
     authorities, never anonymous principals. ``None`` (the mainnet path, and
     every chain without bridge constants) leaves classification byte-identical.
 
-    ``protocol_safe_owner_sets`` (C1, SCORING plan §2) — the protocol's
+    ``protocol_safe_owner_sets`` — the protocol's
     exact-owner Safe registry (``load_protocol_safe_owner_sets``). When present,
     each Safe principal gains a ``details.signer_overlap`` attribution fact
     against every other protocol Safe. ``None`` omits the fact (no guessing).
 
-    ``protocol_deployer_groups`` (§2 sub-part B) — the protocol's shared-deployer
+    ``protocol_deployer_groups`` — the protocol's shared-deployer
     groups (``load_protocol_deployer_groups``). When present, a principal whose
     address co-shares a deployer with other protocol contracts gains a witnessed
     (heuristic-tagged) ``details.shared_deployer`` fact. ``None`` omits it.
 
-    ``resolve_controllers`` (A4, SCORING plan §4) — an
+    ``resolve_controllers`` — an
     ``address -> [{"address","resolved_type","details"}, ...] | None`` step
     function (backed by on-chain owner reads). When present, each
     ``resolved_type=contract`` principal is walked to its ultimate Safe/EOA and
@@ -640,7 +640,7 @@ def build_principal_labels(
         resolved_type = str(node.get("resolved_type", "unknown")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
 
-        # Cross-chain authority (inv. 15) is recognised from the registry +
+        # Cross-chain authority is recognised from the registry +
         # run scope with no RPC, and overrides the generic classification an
         # aliased owner / bridge predeploy would otherwise receive.
         if cross_chain_recognizer is not None:
@@ -707,7 +707,7 @@ def build_principal_labels(
             if role:
                 labels.add(role)
 
-        # Non-terminal marking (A4): a contract/unresolved principal is a
+        # Non-terminal marking: a contract/unresolved principal is a
         # way-point, never a settled controlling key. Stamped on every principal
         # so a consumer never mistakes a ``contract`` row for a resolved key.
         details["terminal"] = is_terminal_principal_type(resolved_type)
@@ -719,12 +719,12 @@ def build_principal_labels(
             details["terminal_principal"] = resolve_terminal_principal(
                 address, resolved_type, resolve_controllers=resolve_controllers
             )
-        # Signer-overlap attribution fact (C1) for dispositively-enumerated Safes.
+        # Signer-overlap attribution fact for dispositively-enumerated Safes.
         if resolved_type == "safe" and protocol_safe_owner_sets:
             overlap = _compute_signer_overlap(address, protocol_safe_owner_sets)
             if overlap is not None:
                 details["signer_overlap"] = overlap
-        # Shared-deployer attribution fact (§2 sub-part B) — witnessed, heuristic,
+        # Shared-deployer attribution fact — witnessed, heuristic,
         # never an org-identity deduction. Applies to any principal that is itself
         # a protocol contract co-sharing a deployer.
         if protocol_deployer_groups:

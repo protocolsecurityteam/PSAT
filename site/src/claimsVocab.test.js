@@ -43,7 +43,7 @@ function claim(claim_id, tier = "standard_exact") {
 
 // Every registered backend claim_id the frontend renders. A new backend claim
 // that lands without a vocab entry is caught here — the JS half of the
-// consumer-coverage invariant (spec §6.5).
+// consumer-coverage invariant.
 const EXPECTED_CLAIM_IDS = [
   "authority.grant",
   "authority.replace",
@@ -283,9 +283,9 @@ describe("scoreForClaims — the tier lattice reaches the score", () => {
     expect(scoreForClaims({ claims: [claim("flow.out")] }).provenance_tier).toBeUndefined();
   });
 
-  it("attenuates the W0-7 fixture-10 golden row's own claim shape", () => {
+  it("attenuates the golden fixture-10 row's own claim shape", () => {
     // The corpus gate for this defect: `policy_derived` is 0 of 679 real claims, so
-    // no corpus row could catch a consumer that mishandles the weakest tier — W0-7
+    // no corpus row could catch a consumer that mishandles the weakest tier —
     // fixture 10 exists to be that row. This is its claim verbatim from
     // tests/fixtures/label_corpus/golden.json (contract 0x…0100, depositTo).
     const golden = {
@@ -317,7 +317,7 @@ describe("scoreForClaims — the tier lattice reaches the score", () => {
 
 describe("claimSummaryLine — chip line + provenance tier", () => {
   it("names BOTH tiers when the weakest differs from the strongest", () => {
-    // INVERTED (W3-E item 5). This asserted `label` ended at "· standard": the
+    // INVERTED. This asserted `label` ended at "· standard": the
     // headline tier hid the policy_derived claim on the same line, and
     // policy_derived is defined as having no single-contract evidence at all.
     // Surfacing only the strongest tier is what made the provenance disappear
@@ -366,10 +366,10 @@ describe("claimSummaryLine — chip line + provenance tier", () => {
   });
 });
 
-// ── SCORING plan §7: witness qualifiers (the honesty rule) ───────────────────
+// ── Witness qualifiers (the honesty rule) ────────────────────────────────────
 
 // A static flow.out claim carrying a target_kind / amount_kind on one flow entry.
-// `constraint` is the A3/A4 destination verdict the producer attaches to every
+// `constraint` is the destination verdict the producer attaches to every
 // `param` destination. It defaults to the proven-free state so the existing
 // caller-chosen assertions keep testing what they were written to test — the
 // constrained and not-determined arms get their own cases below.
@@ -455,7 +455,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     // setter. This is the MINTABLE shape: the producer never attaches
     // `target_constraint` to a fold, so the param member reads as
     // caller-chosen with the gate question noted, never demoted below the
-    // admin-settable member (round-4 R1).
+    // admin-settable member.
     const oneOf = flowOut(
       { kind: "several", tier: "dispositive_ast" },
       {
@@ -478,8 +478,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
     // member is a PROVEN fact (the caller names one of the destinations); the
     // missing verdict answers only a secondary question, so it must render the
     // same tone chip as before the verdict field existed, never slide below
-    // the tint threshold (round-4 R1: knowing strictly less must not read
-    // strictly safer).
+    // the tint threshold — knowing strictly less must not read strictly safer.
     const fold = flowOut(
       { kind: "several", tier: "static_trace" },
       {
@@ -495,7 +494,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("stops calling a GATED param destination caller-chosen, and names the guard", () => {
-    // The A4 narrowing. `param` still means the caller NAMES the destination —
+    // The gate narrowing. `param` still means the caller NAMES the destination —
     // what changed is that a mandatory revert gate pinning that parameter is now
     // published, and the theft-shaped wording is reserved for the case where no
     // such gate exists. This is not reassurance: the qualifier says a guard was
@@ -522,7 +521,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("renders a legacy claim (no target_constraint key) with the pre-verdict tone chip", () => {
-    // Round-4 R1 regression pin. 82/82 persisted param flow destinations carry
+    // Regression pin. 82/82 persisted param flow destinations carry
     // no `target_constraint` today; before the verdict field existed (bf240fe9)
     // every one of them read "(caller-chosen destination)" with the hazard tint
     // #a8746a. The absent field must keep exactly that tone path — a payload
@@ -569,7 +568,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   it("drops the hazard tint only for a PROVEN pinning guard — an undetermined one keeps it", () => {
     // The one state that softens: a present `constrained` verdict whose guard
     // provably pins. `not_determined` proves nothing and keeps the hazard tint
-    // (round-4 R1) — the calm tint stays off in both cases: neither is
+    // — the calm tint stays off in both cases: neither is
     // proven-fixed.
     const base = CLAIM_VOCAB["flow.out"].tone;
     const gated = flowOut(
@@ -584,7 +583,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("keeps the caller-chosen wording AND the hazard tint for a proven non-pinning guard (denylist)", () => {
-    // R3, round 2. The producer proved a guard exists and proved it does NOT
+    // The producer proved a guard exists and proved it does NOT
     // pin (pins: false): the destination is freely chosen outside an excluded
     // set. That IS the theft-shaped fact — the chip and the tint must read
     // exactly like the unguarded case, with the guard spelled out in the
@@ -619,7 +618,7 @@ describe("qualifierForClaims — flow.out destination (theft vs routing)", () =>
   });
 
   it("keeps the hazard tint for a guard bound through flow-insensitive provenance (derived_from)", () => {
-    // WAVE_0 L-24: `derived_from` is a union over branches — `address t =
+    // `derived_from` is a union over branches — `address t =
     // defaultTo; if (cond) t = to;` binds `to` on one branch only, and the
     // artifact cannot tell the branches apart. The producer therefore mints
     // pins: null on every derived_from binding, and the chip must read
@@ -776,7 +775,7 @@ describe("qualifierForClaims — pause freeze specifics", () => {
   });
 
   it("renders (indefinite) only when static PROVED the latch reads no clock", () => {
-    // INVERTED (A7). This used to assert "(indefinite)" for null/null alone, which
+    // INVERTED. This used to assert "(indefinite)" for null/null alone, which
     // made the most severe freeze statement the DEFAULT for an unread window. All
     // four proven freeze_pause verdicts in production are `pauseUntil` — a latch
     // that expires — and every one of them rendered "(indefinite)".
@@ -799,7 +798,7 @@ describe("qualifierForClaims — pause freeze specifics", () => {
       })],
     };
     expect(qualifierForClaims(notDetermined)).toBeNull();
-    // ...and the same for a pre-A7 verdict, whose witness carries no source at all.
+    // ...and the same for an older verdict, whose witness carries no source at all.
     const legacy = {
       claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
     };
@@ -817,8 +816,8 @@ describe("qualifierForClaims — pause freeze specifics", () => {
     expect(qualifierForClaims({ claims: [observedClaim("pause.set", { gate_mutation: "x" })] })).toBeNull();
   });
 
-  // L-58's CONTAINMENT PIN, prose half. `duration_bound_seconds` is a STATIC read of a
-  // guard constant, and until Wave 4 the harvest that produced it was side- and
+  // CONTAINMENT PIN, prose half. `duration_bound_seconds` is a STATIC read of a
+  // guard constant, and the harvest that produced it was once side- and
   // operator-blind: `require(block.timestamp + 3600 < pausedUntil)` published 3600 —
   // a lead time — as the freeze window. What kept that number off every rendered
   // surface is the fork cross-check: BOTH prose copies show a bound only when
@@ -1028,12 +1027,12 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
   });
 
   it("labels an unread freeze window as not determined, not as indefinite", () => {
-    // INVERTED (A7): the sentence above is the most severe statement this inspector
+    // INVERTED: the sentence above is the most severe statement this inspector
     // makes and it was being produced from an extraction failure. The etherfi shape
     // (a timestamp latch whose window is a storage value) is this case.
     for (const observed of [
       { auto_expiry: null, duration_bound_seconds: null, duration_bound_source: "not_determined" },
-      { auto_expiry: null, duration_bound_seconds: null }, // pre-A7 verdict: no source key
+      { auto_expiry: null, duration_bound_seconds: null }, // older verdict: no source key
     ]) {
       const facts = claimWitnessFacts({ claims: [observedClaim("pause.set", observed)] });
       expect(facts).toContainEqual({ label: "Auto-expiry", value: "not determined (no freeze window read)" });
@@ -1063,7 +1062,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
   });
 
   it("names an unmeasured reach as not determined and the balance as a floor", () => {
-    // INVERTED (D3). The producer used to publish the acting contract's own balance
+    // INVERTED. The producer used to publish the acting contract's own balance
     // as `observed_reach_value_usd` on this branch, so the row read as a measured
     // reach with a flag beside it; on a zero-balance router that is "$0 reach" for a
     // function that may move millions. The number now arrives as a FLOOR under its
@@ -1088,7 +1087,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     });
   });
 
-  it("states the destination even when the static matcher produced no flows (A6)", () => {
+  it("states the destination even when the static matcher produced no flows", () => {
     // The approve-then-pull shape: reach renders, `flows` is empty, and the inspector
     // used to say NOTHING about the destination — the worst combination available
     // beside a $472M figure.
@@ -1177,10 +1176,10 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
   });
 
   it("keeps the unvalued-asset disclosure when the ceiling refuses the priced floor", () => {
-    // L-46's payload shape: the producer now applies the ceiling to the PARTIAL-FLOOR
-    // branch, so a row can carry both facts at once — assets moved whose value is
-    // unknown, AND a priced part the protocol's own TVL contradicts. They are
-    // independent, and the refusal must not swallow the disclosure (L-66's shape).
+    // The producer now applies the ceiling to the PARTIAL-FLOOR branch, so a row
+    // can carry both facts at once — assets moved whose value is unknown, AND a
+    // priced part the protocol's own TVL contradicts. They are independent, and
+    // the refusal must not swallow the disclosure.
     const fn = {
       claims: [{
         claim_id: "flow.out",
@@ -1206,11 +1205,11 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(reach[0].value).not.toContain("3.5B");
   });
 
-  it("names a witnessed-but-unvalued reach as its own state (A2)", () => {
+  it("names a witnessed-but-unvalued reach as its own state", () => {
     // Value WAS observed leaving a holder, in an asset whose USD we do not have —
     // the weETH recoverETH shape (a synthetic native move out of a deployment with
     // no native balance row). Neither a reach figure nor a floor on own balance:
-    // before A2 this row published the holder's whole sheet, $3.489B, as the reach.
+    // this row used to publish the holder's whole sheet, $3.489B, as the reach.
     const fn = {
       claims: [{
         claim_id: "flow.out",
@@ -1273,7 +1272,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
   });
 
   it("renders a MEASURED $0 reach as a measured zero, not as silence", () => {
-    // L-47. `formatUsdUpperBound(0)` is falsy, so a reach D3 measured at exactly $0
+    // `formatUsdUpperBound(0)` is falsy, so a reach measured at exactly $0
     // — every asset that moved had a priced holding and the total came out at
     // nothing — emitted no Reach row at all, which is what a never-attempted reach
     // emits. The backend payload is already pinned correct by
@@ -1310,10 +1309,11 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
   });
 
-  it("stays silent on a PRE-D3 payload whose reach figure is zero", () => {
+  it("stays silent on an OLDER payload whose reach figure is zero", () => {
     // NEGATIVE CONTROL. Without `reach_determined` a 0 may be the acting
     // deployment's own (zero) balance published as the reach — the exact
-    // "$0 reach for a function that may move millions" sentence D3 removed — so
+    // "$0 reach for a function that may move millions" sentence the floor key
+    // removed — so
     // this renderer must not assert a measurement it cannot see.
     const fn = {
       claims: [{
@@ -1560,7 +1560,7 @@ describe("sharedDeployerNote — heuristic hint, never an org-identity claim", (
   });
 });
 
-describe("toneForClaims — §7.4 hazard/calm tinting (proven positives vs negatives)", () => {
+describe("toneForClaims — hazard/calm tinting (proven positives vs negatives)", () => {
   const flowOutTone = (targetKind) => toneForClaims({ claims: [flowOut({ kind: targetKind, tier: "dispositive_ast" })] });
 
   it("tints a caller-chosen out-flow more hazardous than a proven-fixed one", () => {
@@ -1680,7 +1680,7 @@ describe("buildMachines carries claims into lane placement + ordering", () => {
   });
 });
 
-describe("qualifierForClaims — exec.arbitrary target constraint (A3)", () => {
+describe("qualifierForClaims — exec.arbitrary target constraint", () => {
   const execArb = (destination_constraint) => ({
     claim_id: "exec.arbitrary",
     tier: "idiom_structural",
@@ -1788,7 +1788,7 @@ describe("claimWitnessFacts — destination constraint row", () => {
   it("never renders 'gated by' for a constrained verdict whose pins is absent", () => {
     // A payload minted before `pins` existed carries a real guard whose set
     // semantics are unknown here. Absence of the pinning proof must not become
-    // the proof (round-2 R3): the row reads "checked by", with the caveat.
+    // the proof: the row reads "checked by", with the caveat.
     const fn = {
       claims: [{
         claim_id: "flow.out",

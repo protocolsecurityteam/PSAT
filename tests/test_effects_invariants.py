@@ -1,9 +1,9 @@
-"""§10 implementation-invariant sweep (EFFECTS_RESOLUTION_SPEC).
+"""Implementation-invariant sweep for the effects stage.
 
-One explicit test per invariant 1–16, each CLOSING the invariant with an
-assertion or recorded evidence — mirroring the MULTICHAIN_INVARIANTS inv-test
-precedent (``tests/test_multichain_*``). Offline/hermetic; the DB-touching cases
-carry ``@requires_postgres``.
+One explicit test per invariant, each CLOSING the invariant with an assertion or
+recorded evidence — the same one-test-per-rule pattern the multichain suite uses
+(``tests/test_multichain_*``). Each section header below states the rule its test
+pins. Offline/hermetic; the DB-touching cases carry ``@requires_postgres``.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def clean_effects(db_session):
 
 
 # ---------------------------------------------------------------------------
-# inv. 1 — no name drives an effect; every verdict traces to a witness.
+# No name drives an effect; every verdict traces to a witness.
 # ---------------------------------------------------------------------------
 
 
@@ -103,7 +103,7 @@ def test_inv1_no_name_drives_effect():
 
 
 # ---------------------------------------------------------------------------
-# inv. 2 — dedup key is the RESOLVED function, never a name/file hash.
+# The dedup key is the RESOLVED function, never a name/file hash.
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ def test_inv2_override_and_mixin_hash_apart():
 
 
 # ---------------------------------------------------------------------------
-# inv. 3 — cache scope matches verdict scope; concrete values never keys.
+# Cache scope matches verdict scope; concrete values are never keys.
 # ---------------------------------------------------------------------------
 
 
@@ -159,7 +159,7 @@ def test_inv3_cache_scope_matches_verdict_scope(clean_effects):
 
 
 # ---------------------------------------------------------------------------
-# inv. 4 — value ORDERS, never gates; a resource cap logs what it drops.
+# Value ORDERS, never gates; a resource cap logs what it drops.
 # ---------------------------------------------------------------------------
 
 
@@ -186,7 +186,7 @@ def test_inv4_value_never_gates_cap_logs_drops(clean_effects, caplog):
 
     # No value gate: all three blank+gated+facts functions survive (value 0).
     assert len(select_candidates(session, proto.id)) == 3
-    # The ONLY cutoff — a resource cap — logs exactly what it dropped (inv. 4).
+    # The ONLY cutoff — a resource cap — logs exactly what it dropped.
     import logging as _logging
 
     with caplog.at_level(_logging.WARNING):
@@ -196,7 +196,7 @@ def test_inv4_value_never_gates_cap_logs_drops(clean_effects, caplog):
 
 
 # ---------------------------------------------------------------------------
-# inv. 5 — transitive reach, not direct balance, drives ordering.
+# Transitive reach, not direct balance, drives ordering.
 # ---------------------------------------------------------------------------
 
 
@@ -216,7 +216,7 @@ def test_inv5_transitive_reach_beats_direct_balance():
 
 
 # ---------------------------------------------------------------------------
-# inv. 6 — fail-closed both sides.
+# Fail-closed both sides: a non-observation is unknown, never proven-absent.
 # ---------------------------------------------------------------------------
 
 
@@ -236,7 +236,7 @@ def test_inv6_nonobservation_is_unknown_not_proven_absent():
 
 
 # ---------------------------------------------------------------------------
-# inv. 7 — read-only, keyless: no mainnet writes.
+# Read-only and keyless: no mainnet writes.
 # ---------------------------------------------------------------------------
 
 
@@ -264,7 +264,7 @@ def test_inv7_readonly_keyless():
 
 
 # ---------------------------------------------------------------------------
-# inv. 8 — every verdict tiered and replayable from its transcript.
+# Every verdict is tiered and replayable from its transcript.
 # ---------------------------------------------------------------------------
 
 
@@ -295,12 +295,12 @@ def test_inv8_verdict_tiered_and_replayable():
 
 
 # ---------------------------------------------------------------------------
-# inv. 9 — both planes retained (static universals + simulation existentials).
+# Both planes retained (static universals + simulation existentials).
 # ---------------------------------------------------------------------------
 
 
 def test_inv9_both_planes_retained():
-    # Simulation adds an existential witness; static's §9 disagreement routing
+    # Simulation adds an existential witness; static's disagreement routing
     # (both directions) exists so static's vocabulary can grow WITHOUT retiring it.
     assert callable(route_discrepancy) and callable(file_new_idiom_candidate)
     # Selection is driven by STATIC facts (blank-claim set), not simulation.
@@ -310,7 +310,7 @@ def test_inv9_both_planes_retained():
 
 
 # ---------------------------------------------------------------------------
-# inv. 10 — duration/bound facts read from source constants, never hardcoded.
+# Duration/bound facts are read from source constants, never hardcoded.
 # ---------------------------------------------------------------------------
 
 
@@ -373,14 +373,14 @@ def test_inv10_duration_bound_from_source_constant():
     # The bound in the witness is exactly the source-read value — not a constant.
     assert eff.details["duration_bound_seconds"] == src_read_duration
     # ...and it names the evidence that produced it, so a consumer can tell a read
-    # bound from an unread one (inv. 10 + R1).
+    # bound from an unread one.
     assert eff.details["duration_bound_source"] == "guard_constant"
     # No hardcoded duration literal lives in the recipe.
     assert "MAX_PAUSE_DURATION =" not in inspect.getsource(anvil)
 
 
 # ---------------------------------------------------------------------------
-# inv. 11 — own stage between policy and coverage; cache is code-plane only.
+# Own stage between policy and coverage; the cache is code-plane only.
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_inv11_stage_placement_and_codeplane_cache():
 
 
 # ---------------------------------------------------------------------------
-# inv. 12 — verdicts are gate-relative; gate_ref names structure, not an address.
+# Verdicts are gate-relative; gate_ref names structure, not an address.
 # ---------------------------------------------------------------------------
 
 
@@ -417,7 +417,7 @@ def test_inv12_verdicts_gate_relative(clean_effects):
 
 
 # ---------------------------------------------------------------------------
-# inv. 13 — Tier 0 is historical: indexed event needs a current-state check.
+# Tier 0 is historical: an indexed event needs a current-state check.
 # ---------------------------------------------------------------------------
 
 
@@ -453,7 +453,7 @@ def test_inv13_tier0_needs_current_state_check():
 
 
 # ---------------------------------------------------------------------------
-# inv. 14 — capabilities are probed, not assumed.
+# Capabilities are probed, not assumed.
 # ---------------------------------------------------------------------------
 
 
@@ -468,7 +468,7 @@ def test_inv14_capabilities_probed_not_assumed():
 
 
 # ---------------------------------------------------------------------------
-# inv. 15 — fail-forward stage, transition-gated flag.
+# Fail-forward stage, transition-gated flag.
 # ---------------------------------------------------------------------------
 
 
@@ -485,7 +485,7 @@ def test_inv15_fail_forward_and_flag_gates_transition(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# inv. 16 — single-flight fork: PSAT_EFFECTS_JOB_CONCURRENCY defaults to 1.
+# Single-flight fork: PSAT_EFFECTS_JOB_CONCURRENCY defaults to 1.
 # ---------------------------------------------------------------------------
 
 
@@ -495,8 +495,8 @@ def test_inv16_single_flight_fork_default(monkeypatch):
     assert _resolve_job_concurrency("effects") == 1
 
 
-# The self-audit helper closes inv. 3's "first shared-hash pair self-audited"
-# clause with a pure comparison (the worker path is covered in
+# The self-audit helper closes the cache-scope rule's "first shared-hash pair
+# self-audited" clause with a pure comparison (the worker path is covered in
 # test_effects_worker_integration).
 def test_inv3_self_audit_helper_catches_collision():
     assert kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "mint"})

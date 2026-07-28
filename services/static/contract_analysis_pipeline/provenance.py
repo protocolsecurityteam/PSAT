@@ -130,7 +130,7 @@ class Source:
     # (already flattened) origins in rather than nesting them, so the projection
     # is transitively complete without making the dataclass recursive.
     #
-    # Also populated on ``view_call`` / ``external_call`` Sources (A1 Part B):
+    # Also populated on ``view_call`` / ``external_call`` Sources:
     # the call collapses its arguments into ``callee_args_digest`` — an opaque
     # hash — so without this the fact that a gate's un-lowerable role read
     # CONSUMED THE CALLER was unrepresentable by the time a leaf was built,
@@ -617,7 +617,7 @@ class ProvenanceEngine:
                         kind="computed",
                         computed_kind=str(getattr(ir, "type", "unary")),
                         callee_args_digest=_digest(operand_sources),
-                        # The negated value's own origins (A1 Part B): a
+                        # The negated value's own origins: a
                         # ``!hasRole(msg.sender, …)`` gate renders as this
                         # computed tag (it sorts first in the operand pick),
                         # and without the readable origins the caller-taint
@@ -755,7 +755,7 @@ class ProvenanceEngine:
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
                     callee_selector=_selector_for_signature(callee_signature),
-                    # The caller-visible argument provenance (A1 Part B): the
+                    # The caller-visible argument provenance: the
                     # digest above is an opaque hash, so this is the only
                     # readable record that e.g. msg.sender was consumed.
                     derived_from=arg_origins(args_union),
@@ -835,7 +835,7 @@ class ProvenanceEngine:
         accessor_slot = _constant_storage_slot_for_accessor(callee)
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         # Cycle / depth guard. ``derived_from`` carries the readable argument
-        # provenance next to the opaque digest (A1 Part B): the un-lowerable
+        # provenance next to the opaque digest: the un-lowerable
         # assembly-backed role read consumed the caller, and without this the
         # fact was gone by the time a leaf was built.
         call_tag = Source(
@@ -1143,8 +1143,8 @@ def _digest(s: SourceSet) -> str:
     ``hash()``-of-frozenset form was PYTHONHASHSEED-dependent, and
     ``predicates._source_sort_key`` orders competing sources by this string
     BEFORE ``computed_kind`` — so which of two otherwise-tied computed
-    sources became the published operand flickered run to run (the L-25
-    noise bucket: e.g. a Teller deposit operand flipping between
+    sources became the published operand flickered run to run (e.g. a
+    Teller deposit operand flipping between
     ``call(uint256,...)`` and ``UnaryType.BANG``). Same 8-hex width as
     before; the value is never published, only compared and ordered.
 

@@ -43,7 +43,8 @@ def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
     ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
     ``resolved_type == "unknown"`` and no such row exists, so the field is
     two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
-    express "I did not determine this" on a column inv 6 makes first-class.
+    express "I did not determine this" — a state an evidence column has to keep
+    distinct from a determined answer.
     Published as ``naming_rule``, which is what it measures. A real per-principal
     confidence has to come from whether the identity was verified on-chain (Safe
     ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
@@ -87,7 +88,7 @@ def _artifacts_or_degrade(
     consumed as evidence about the contract, and the two shortfalls are not the
     same evidence — one may resolve itself, the other never will.
 
-    NO ``site/`` CONSUMER, and this is why (L-3, W3-E item 12). Nothing in the SPA
+    NO ``site/`` CONSUMER, and this is why. Nothing in the SPA
     fetches this merged payload at all: ``grep`` over ``site/src`` finds
     ``/api/analyses`` only as the LISTING (``App.jsx``) plus two per-artifact reads
     (``EntityActivity`` → ``upgrade_history``, ``layout/dependencies`` →
@@ -205,7 +206,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             # back to job.request['chain'].
             req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
-            # chain_id is required (inv. 6): bind the resolver's live reads to the
+            # chain_id is required: bind the resolver's live reads to the
             # job's first-class chain_id, falling back to the registry-backed
             # derivation from the job's chain string (mirrors the M0.2 backfill).
             from db.models import derive_job_chain_id
@@ -403,10 +404,10 @@ def _serialize_effective_functions(
             "effect_targets": list(ef.effect_targets or []),
             "claims": list(getattr(ef, "claims", None) or []),
             # The quotable copy of the structured planes, reconciled against them
-            # (R3) and labelled with which shape it is: 130 local rows say
+            # and labelled with which shape it is: 130 local rows say
             # "Performs a contract action." (no evidence at all), 528 restate
-            # effect_targets as a "write", and the 20 arbitrary-execution rows are
-            # the sentence A3 narrowed in Wave 1. See
+            # effect_targets as a "write", and the 20 arbitrary-execution rows
+            # outlived the narrowing of the structured exec.arbitrary claim. See
             # services/aggregations/action_summary.
             "action_summary": _action_summary_text,
             "action_summary_kind": _action_summary_kind,

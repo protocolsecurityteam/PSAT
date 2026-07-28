@@ -878,9 +878,9 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
 def test_callee_edge_does_not_mint_controller_labels():
     """``principal_labels`` inherits the gate/callee split from the edge relation.
 
-    G6-9: the same conflation surfaced here, labelling the Ethereum 2 deposit
+    The conflation surfaced here as well, labelling the Ethereum 2 deposit
     contract a *controller* of StakingManager and the Curve stETH/ETH pool a
-    controller of Liquifier. Both are callees. Leg F makes the split once, at
+    controller of Liquifier. Both are callees. The split is made once, at
     ``control_graph_edges.relation``; this file's producer switches on that
     field, so the fix reaches this plane without a second provenance rule.
 
@@ -946,7 +946,7 @@ def test_callee_edge_does_not_mint_controller_labels():
 
 
 def test_unattributed_edge_does_not_mint_controller_labels():
-    """L-52: ``controller_value_unattributed`` must mint NO ``controller_*`` label.
+    """``controller_value_unattributed`` must mint NO ``controller_*`` label.
 
     The relation means the tracked controller's ``authority_provenance`` was
     ABSENT — neither "gates callers" nor "is merely called" was answered. The
@@ -956,7 +956,7 @@ def test_unattributed_edge_does_not_mint_controller_labels():
     Today that holds by *fall-through*: ``_graph_labels_for_node`` has no arm for
     the relation. This test is the pin — a future arm added to that dispatch
     (however reasonable-looking) silently re-admits an unattributed edge to the
-    controller vocabulary, which is the pre-Wave-2 over-claim this relation was
+    controller vocabulary, which is the over-claim this relation was
     introduced to remove. Positive control: the sibling ``controller_value``
     edge on the same graph still earns the full controller label set, so a
     regression in the dispatch itself cannot pass by minting nothing at all.
@@ -1025,7 +1025,7 @@ def test_unattributed_edge_does_not_mint_controller_labels():
 
 
 def test_authority_roles_present_with_none_does_not_crash_enrichment():
-    """W2-B item 8 consumer guard: ``authority_roles`` is now PRESENT with value
+    """Consumer guard: ``authority_roles`` is now PRESENT with value
     ``None`` on a role-gated function whose role identity is not determined, and
     ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
     plain default iterated ``None`` and raised. Not-determined must contribute no
@@ -1053,11 +1053,11 @@ def test_authority_roles_present_with_none_does_not_crash_enrichment():
 
 
 def test_enriched_role_grant_keeps_the_classified_quorum_witness():
-    """R3 round-2: ``_enriched_role_grant`` exists so a role-granted principal
+    """``_enriched_role_grant`` exists so a role-granted principal
     reads as resolved as the same address under ``controllers`` — but the
     grant's ``details`` is ALWAYS the non-None ``{"source": ...}`` marker, so
-    the round-1 blanket "grant's non-null fields override" replaced the
-    classified ``details`` wholesale and erased the recorded quorum/delay.
+    a blanket "grant's non-null fields override" replaced the classified
+    ``details`` wholesale and erased the recorded quorum/delay.
     ``protocolScore.collectPrincipals`` dedups by address keeping the FIRST
     record (role grants before controllers), so the erased record is the one
     the scorer and ``principalLabel`` read: a recorded 2/3 Safe fell to the

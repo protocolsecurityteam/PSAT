@@ -1,4 +1,4 @@
-"""A7 round 3: the ``no_time_reference`` proof, gated against the PRODUCTION builder.
+"""The ``no_time_reference`` proof, gated against the PRODUCTION builder.
 
 ``duration_bound_source = "no_time_reference"`` is documented as PROVEN indefinite —
 "the most severe freeze there is" (``effects/config.py``), "the MOST severe freeze"
@@ -7,12 +7,12 @@
 bound)"``). It is a proof BY ABSENCE, so every precondition it rests on has to hold
 against real compiler output, not against a hand-built leaf.
 
-Rounds 1 and 2 were both tested with hand-built leaves only, and both times the
+Two earlier attempts were tested with hand-built leaves only, and both times the
 defect was a shape the compiler produces and the hand-built fixture did not:
 
-* round 1 read one leaf, so a lowered ``||`` that split the latch from the clock read
-  as proven-indefinite;
-* round 2 walked the whole tree for a ``block_context`` clock but kept the
+* the first read one leaf, so a lowered ``||`` that split the latch from the clock
+  read as proven-indefinite;
+* the second walked the whole tree for a ``block_context`` clock but kept the
   OPACITY test leaf-local and its opaque-source set at ``{computed, top}`` — so
   ``require(!frozen || _clock() > unpauseAt)``, where ``_clock()`` is an internal view
   returning ``block.timestamp`` (Uniswap V3's ``_blockTimestamp()``, OZ Governor's
@@ -131,7 +131,7 @@ SOURCE = """
         }
     }
 
-    // L-58 / L-60. Every contract below puts a latch, a seconds clock and a
+    // Every contract below puts a latch, a seconds clock and a
     // plausible constant in ONE leaf's `operands ∪ absorbed_operands` — the union the
     // harvest used to read blind — and in none of them is the constant the freeze
     // window. Compiled, not hand-built, because the arrangement of the union is
@@ -274,7 +274,7 @@ def test_a_clock_behind_a_callee_denies_the_proven_indefinite_state(compiled, co
     The freeze expires at ``unpauseAt`` and time alone lifts it, so the only honest
     answers are a resolved window or ``not_determined``.
 
-    Both preconditions round 2 relied on are shown INERT on this shape first, which
+    Both preconditions the whole-tree walk relies on are shown INERT here first, which
     is why it was a false proof rather than a near miss: there is no
     ``block_context`` operand anywhere in the tree (so the whole-tree clock walk
     cannot see it), and the clock hides behind an operand that only NAMES a callee
@@ -346,8 +346,8 @@ def test_a_window_the_recorder_did_read_is_unaffected_by_either_precondition(com
 
 @pytest.mark.parametrize("contract_name", ["WindowLeft", "RemainingWindow"])
 def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name):
-    """POSITIVE CONTROLS for the side/operator awareness added at Wave 4 (L-58): the
-    harvest is narrowed to a shape, not to one spelling of it. ``2592000 >
+    """POSITIVE CONTROLS for the side/operator awareness in the harvest: it is
+    narrowed to a shape, not to one spelling of it. ``2592000 >
     block.timestamp - pausedUntil`` puts the constant on the LEFT under ``gt``, and
     ``pausedUntil - block.timestamp < 2592000`` reverses the subtraction — both bound
     the clock-to-latch gap by the same magnitude, and both must keep resolving."""
@@ -357,7 +357,7 @@ def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name
 @pytest.mark.parametrize(
     ("contract_name", "fabricated"),
     [
-        # L-58's two shapes, verbatim from the ledger entry.
+        # The two shapes that motivated narrowing the harvest.
         ("LeadTime", 3600),
         ("Cooldown", 300),
         # The same operand union as the resolving window, operator flipped.
@@ -369,8 +369,8 @@ def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name
     ],
 )
 def test_a_constant_the_comparison_shape_does_not_make_a_window_is_not_published(compiled, contract_name, fabricated):
-    """L-58 on compiled source. Each of these guards puts a latch, a seconds clock and
-    a plausible constant into one leaf's ``operands ∪ absorbed_operands``, and the
+    """On compiled source. Each of these guards puts a latch, a seconds clock and a
+    plausible constant into one leaf's ``operands ∪ absorbed_operands``, and the
     side/operator-blind harvest published the constant as ``duration_bound_seconds``
     — a lead time, a cooldown offset, a minimum-elapsed or a safety margin read as the
     freeze window, in the severity-REDUCING direction (the bound is consumed as a

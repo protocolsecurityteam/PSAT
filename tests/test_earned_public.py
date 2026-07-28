@@ -5,7 +5,7 @@ authority recognition: a caller-tainted gate that matches no known
 permissionless shape fails CLOSED (external_check_only), and "public" is
 earned by either no caller gate at all or a permissionless shape. Every
 exclusion shape is tested in BOTH polarities (the authority variant gates,
-the permissionless variant stays open), with the §4 canaries pinned.
+the permissionless variant stays open), with the canary shapes pinned.
 
 Real compiled contracts (the `_compile` + `_build_pipeline` pattern) —
 dict-leaf fakes hide provenance bugs; they are used only for the pure
@@ -121,7 +121,7 @@ def test_view_external_acl_opens_without_flag(tmp_path, legacy_path):
 
 
 def test_value_movement_transfer_from_stays_open(tmp_path, earned_public):
-    """§4 canary: ``require(token.transferFrom(msg.sender, …))`` taints from
+    """Canary: ``require(token.transferFrom(msg.sender, …))`` taints from
     the caller but is permissionless — the callee is effectful (non-view),
     the structural value-movement discriminator. Same chained-target shape
     as the ACL test, differing ONLY in callee mutability."""
@@ -151,7 +151,7 @@ def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
     EarlyAdopterPool claim/withdraw token transfers). Under the flag the
     value-movement exclusion opens it: an effectful external call required
     to succeed moves the caller's own assets. This is the one deliberate
-    legacy-gated→open class of the refactor — adjudicated against the
+    legacy-gated→open class of the refactor — checked against the
     labeled corpus, not an accident."""
     src = """
         pragma solidity ^0.8.19;
@@ -271,7 +271,7 @@ def test_assembly_wrapper_library_value_movement_stays_open(tmp_path, earned_pub
     """Solmate's SafeTransferLib makes the external call in inline assembly —
     Slither lifts the Yul ``call`` as a SolidityCall builtin, with no
     LowLevelCall IR at all. The external-reach walk must still see it
-    (the BoringVault §4 canary)."""
+    (the BoringVault canary)."""
     sl = _compile(
         tmp_path,
         """
@@ -386,7 +386,7 @@ def test_caller_allowlist_membership_gates_under_flag(tmp_path, earned_public):
 
 
 def test_claim_once_denylist_stays_open_under_flag(tmp_path, earned_public):
-    """§4 canary: falsy claim-once — the default-state caller is allowed."""
+    """Canary: falsy claim-once — the default-state caller is allowed."""
     sl = _compile(
         tmp_path,
         """
@@ -458,7 +458,7 @@ def test_caller_equals_untyped_computed_stays_open(tmp_path, earned_public):
 
 
 def test_renounce_style_self_service_stays_open_under_flag(tmp_path, earned_public):
-    """§4 canary: ``account == msg.sender`` (renounceRole) — self-service."""
+    """Canary: ``account == msg.sender`` (renounceRole) — self-service."""
     sl = _compile(
         tmp_path,
         """
@@ -915,11 +915,11 @@ def test_self_service_threshold_stays_public_when_cold(tmp_path, earned_public):
 
 
 # ---------------------------------------------------------------------------
-# A1 (W2-B item 2) — the Solady EnumerableRoles shape: an assembly-backed,
+# The Solady EnumerableRoles shape: an assembly-backed,
 # named-return role read the static lifter cannot lower, after which the
 # caller taint was hashed into ``callee_args_digest`` and a hardcoded
 # ``authority_role="business"`` default published the gate as PUBLIC.
-# (§11: the "callee parameter binding" hypothesis is REFUTED — the binding
+# (The "callee parameter binding" hypothesis is REFUTED — the binding
 # works; the loss is downstream of it.)
 # ---------------------------------------------------------------------------
 
@@ -1003,7 +1003,7 @@ def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_
     assert is_permissionless_caller_shape(gate) is False
 
     cap = evaluate_tree(trees["f()"])
-    assert cap.kind != "conditional_universal", "the A1 fail-open"
+    assert cap.kind != "conditional_universal", "the unlowered-role fail-open"
     assert capability_to_dict(cap)["kind"] != "conditional_universal"
 
 
@@ -1061,7 +1061,7 @@ _SIBLING_CHECKERS = """
 
 def test_sibling_checkers_get_the_same_verdict_regardless_of_callers(tmp_path, earned_public):
     """Byte-identical checkers must not diverge because only one of them is
-    ever called with ``msg.sender`` — the reviewer's cid-568 falsification
+    ever called with ``msg.sender`` — the cid-568 falsification
     (onlyUpgradeTimelock flipped while its eight identical siblings stayed
     public). Frame purity: each checker's own frame sees its parameter as a
     parameter, and each ``hasRole`` sub-frame sees only ITS call site's role

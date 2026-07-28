@@ -1,4 +1,4 @@
-"""``UpgradeEvent`` write-path integrity (W0-9).
+"""``UpgradeEvent`` write-path integrity.
 
 Three writers fill ``upgrade_events``: the upgrade-history artifact
 projection, the log scanner, and the storage-slot poller. Two properties are

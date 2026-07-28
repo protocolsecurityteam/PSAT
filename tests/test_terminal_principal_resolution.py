@@ -1,8 +1,8 @@
-"""A4: contract-principal terminal resolution + non-terminal marking.
+"""Contract-principal terminal resolution + non-terminal marking.
 
 Covers the pure bounded/cycle-safe walk (``resolve_terminal_principal``) and the
 governance-view non-terminal marking (``_function_principal_payload`` /
-``_build_company_function_entry``) — SCORING plan §4. The walk's only wire is the
+``_build_company_function_entry``). The walk's only wire is the
 injected ``resolve_controllers`` callable, so every case here stubs it.
 """
 
@@ -307,7 +307,7 @@ def test_terminal_principal_chain_surfaced_from_details():
 
 def test_lzcompose_style_permissionless_stays_blank_without_failure():
     """A permissionless function (authority_public, zero principals) must not be
-    flagged as a resolution failure — blank is correct here (SCORING plan §4)."""
+    flagged as a resolution failure — blank is correct here."""
     ef = SimpleNamespace(
         abi_signature="lzCompose(address,bytes32,bytes,address,bytes)",
         function_name="lzCompose",
@@ -329,9 +329,9 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
 
 
 # ---------------------------------------------------------------------------
-# W2-B item 12 — the producer half: "no such controller" and "the read failed"
-# were one answer. 5 of the 6 statuses never fired; 1,556 rows were written.
-# (Consumer wiring is Wave 3 Leg E and is deliberately NOT done here.)
+# The producer half: "no such controller" and "the read failed" were one
+# answer. 5 of the 6 statuses never fired; 1,556 rows were written.
+# (Consumer wiring lives elsewhere and is deliberately NOT covered here.)
 # ---------------------------------------------------------------------------
 
 

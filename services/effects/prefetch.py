@@ -88,8 +88,8 @@ def install_prefetch(session: Session, chain_id: int, candidates: list[Any]) -> 
     pf = EffectsPrefetch(chain_id=chain_id, addresses=set(addresses))
 
     # Contracts FIRST: a proxy row carrying function rows is hashed on its
-    # IMPLEMENTATION's bytecode rather than its forwarding stub (G6-C0,
-    # ``orchestrator._hashable_code_address``), and that address is only known from the
+    # IMPLEMENTATION's bytecode rather than its forwarding stub
+    # (``orchestrator._hashable_code_address``), and that address is only known from the
     # row. Loading bytecode before the rows would leave the redirect issuing one
     # single-row query per proxy candidate — the exact N+1 this module removes, and the
     # parity test's query budget catches it.

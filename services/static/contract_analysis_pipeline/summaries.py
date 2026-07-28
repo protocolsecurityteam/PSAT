@@ -1429,11 +1429,11 @@ def _detect_timelock(
     published ``TimelockController`` ABI, ``custom`` when only the structure
     (including the arbitrary-execution requirement) is there.
 
-    **THE DELAY VALUE IS NOT READ HERE, AND MUST NOT BE DEFAULTED.** inv 9
-    makes the delay the credit-bearing fact (EtherFiTimelock's is 10 days), and
+    **THE DELAY VALUE IS NOT READ HERE, AND MUST NOT BE DEFAULTED.** The delay
+    is the credit-bearing scoring input (EtherFiTimelock's is 10 days), and
     reading it needs ``getMinDelay()`` on chain. This module has no chain, no
     ``chain_id`` and no RPC handle, and inventing one -- or defaulting the
-    delay -- would fabricate a protective credit, which inv 1 ranks worse than
+    delay -- would fabricate a protective credit, which is a worse failure than
     a false adverse. So ``delay`` is ``None`` and ``delay_source`` is
     ``"not_read"`` until a chain is threaded here. ``delay_variables`` names
     WHERE the value lives, which is the part source can prove.

@@ -5,8 +5,8 @@ lattice.** Every member of that lattice describes the MAGNITUDE that can leave
 (``whole_balance``, ``capped_by_balance``, ``fixed_constant``), and a refilling
 bucket is not a magnitude: it bounds throughput per window, not total loss. Over
 N windows the extractable total under a refilling limiter is unbounded, so
-crediting it as a ceiling would invent the kind of discount
-``SCORING_INVARIANTS.md`` §7 forbids. The honest move is to publish the fact and
+crediting it as a ceiling would invent a discount out of nothing: a loss bound
+must stay a conservative upper bound, never an imputed one. Publish the fact and
 let it contribute nothing to severity — which is what ``consumer_family="fact"``
 means structurally, not merely by convention.
 

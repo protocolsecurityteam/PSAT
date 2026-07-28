@@ -1,8 +1,10 @@
-"""Tier-1 effect harness tests (EFFECTS_RESOLUTION_SPEC §4.2–§4.5, §8).
+"""Tier-1 effect harness tests: the value-out, code-upgrade, authority-change and
+supply recipes.
 
 Every recipe is exercised against a stubbed ``Simulate`` wire with recorded
-transcripts — no live RPC (inv. 8 / §8.6). The §8 soundness rules each carry an
-explicit NEGATIVE fail-closed test; the mapping is in ``test_section8_*`` below.
+transcripts — no live RPC, and every verdict is replayable from its transcript.
+The soundness rules each carry an explicit NEGATIVE fail-closed test; the mapping
+is in ``test_section8_*`` below.
 """
 
 from __future__ import annotations
@@ -120,7 +122,7 @@ def test_transfers_out_extracts_only_source_sends():
 
 
 def test_transfers_in_extracts_only_dest_receives():
-    # Mirror of transfers_out: value ARRIVING at dest_address (the §5a backing check).
+    # Mirror of transfers_out: value ARRIVING at dest_address (the backing check).
     call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(TOKEN, PRINCIPAL, CONTRACT, 9)])
     from services.effects.simulate import transfers_in
 
@@ -153,7 +155,7 @@ def test_transfers_out_can_pin_the_emitting_asset():
 
 
 # ---------------------------------------------------------------------------
-# preflight (inv. 14)
+# preflight
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +182,7 @@ def test_preflight_records_unsupported_and_routes_to_fallback():
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out — recorded-transcript recipe test
+# Value-out — recorded-transcript recipe test
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +206,7 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # INVERTED (G6-3). This used to assert the BASE probe's recipient
+    # INVERTED. This used to assert the BASE probe's recipient
     # ("0xabab…ab") as the concrete destination. That address is the recipient
     # argument the prober itself supplied — measured on 35 of 35 caller_arbitrary
     # rows in the local DB — so publishing it in the column that means "where the
@@ -218,7 +220,7 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
 
 
 def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destination():
-    """G6-3, the second invented identity. ``SENTINEL_ADDRESS`` was already excluded
+    """The second invented identity. ``SENTINEL_ADDRESS`` was already excluded
     by construction (the destination is read off the BASE probe); ``NEUTRAL_CALLER``
     was not, and it is BOTH the caller a public/unresolved-principal probe runs as
     AND the filler substituted into every address argument of the synthesized call
@@ -442,7 +444,7 @@ def test_value_out_static_fixed_shape_from_static_plane():
 
 
 # ---------------------------------------------------------------------------
-# §4.3 code-upgrade — recorded-transcript recipe test
+# Code-upgrade — recorded-transcript recipe test
 # ---------------------------------------------------------------------------
 
 
@@ -486,7 +488,7 @@ def test_code_upgrade_tier0_indexed_plus_current_state_proven():
 
 
 # ---------------------------------------------------------------------------
-# §4.4 authority-change kernel — recorded-transcript recipe test
+# Authority-change kernel — recorded-transcript recipe test
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +513,7 @@ def test_authority_change_kernel_gate_opened_proven():
 
 
 # ---------------------------------------------------------------------------
-# §4.5 supply — recorded-transcript recipe test
+# Supply — recorded-transcript recipe test
 # ---------------------------------------------------------------------------
 
 
@@ -540,7 +542,7 @@ def test_supply_mint_delta_sign_proven():
 
 
 def test_supply_mint_unbacked_emits_backing_inflow_false():
-    # §5a: supply rises but the mint call's COMPLETE Transfer set carries no asset
+    # Backing: supply rises but the mint call's COMPLETE Transfer set carries no asset
     # into the vault → witnessed dilution (inflow_observed False), never "backed".
     zero = "0x" + "00" * 20
     res = SimResult(
@@ -652,7 +654,7 @@ def test_supply_mint_counts_only_the_measured_token_as_minted():
 
 
 def test_supply_mint_backed_emits_backing_inflow_true():
-    # §5a: a proportional asset Transfer INTO the vault co-occurs with the mint
+    # Backing: a proportional asset Transfer INTO the vault co-occurs with the mint
     # (deposit-backed conversion) → inflow_observed True.
     zero = "0x" + "00" * 20
     asset = "0x" + "44" * 20
@@ -709,7 +711,7 @@ def test_supply_burn_emits_no_backing():
 
 
 def test_supply_mint_reverted_fails_closed_no_backing():
-    # §5a fallback: a reverted mint is unknown, never "backed" — no backing field.
+    # Backing fallback: a reverted mint is unknown, never "backed" — no backing field.
     res = SimResult(calls=(ok(uint_ret(10)), rv(), ok(uint_ret(10))))
     eff = recipes.supply(
         simulate=ScriptedSimulate(res),
@@ -725,7 +727,7 @@ def test_supply_mint_reverted_fails_closed_no_backing():
 
 
 def test_supply_unsupported_downgrades_no_backing():
-    # §5a fallback: simulate_unsupported → Tier-2 downgrade unknown, never backed.
+    # Backing fallback: simulate_unsupported → Tier-2 downgrade unknown, never backed.
     eff = recipes.supply(
         simulate=ScriptedSimulate(SimResult(calls=(ok(),))),
         store=RecordingStore(),
@@ -740,7 +742,7 @@ def test_supply_unsupported_downgrades_no_backing():
 
 
 # ---------------------------------------------------------------------------
-# §5b downstream value-reach — fork-observed, over the value_out recipe
+# Downstream value-reach — fork-observed, over the value_out recipe
 # ---------------------------------------------------------------------------
 
 
@@ -774,7 +776,7 @@ def test_value_out_reach_measures_downstream_holder_loss():
     assert eff.verdict == VERDICT_PROVEN
     # Reach is STATE-plane (holder addresses + this protocol's USD), so it rides
     # ``concrete`` — ``details`` is what the cross-deployment behavioral cache
-    # stores and re-publishes to every twin of this bytecode (inv. 3).
+    # stores and re-publishes to every twin of this bytecode.
     assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
     assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
     assert eff.concrete["reach_determined"] is True
@@ -802,7 +804,7 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    # D3: the floor is published as a FLOOR. The key that means "measured reach" is
+    # The floor is published as a FLOOR. The key that means "measured reach" is
     # absent, because nothing was measured — publishing the acting balance as
     # ``observed_reach_value_usd`` is what let a zero-balance router read "$0 reach".
     assert eff.concrete["reach_determined"] is False
@@ -838,7 +840,7 @@ def test_value_out_reach_absent_without_holder_set():
 
 
 # ===========================================================================
-# §8 soundness rules — one NEGATIVE fail-closed test per rule
+# Soundness rules — one NEGATIVE fail-closed test per rule
 # ===========================================================================
 
 
@@ -1010,7 +1012,7 @@ def test_section8_rule14_simulate_unsupported_declares_tier2_fallback():
 
 def test_registry_param_sentinel_negative_is_unknown_not_fixed():
     # taint says the addr param reaches the sink, but the sentinel (an index into
-    # registry[param], not the raw address) moves nothing → unknown + §9 discrepancy.
+    # registry[param], not the raw address) moves nothing → unknown + a routed discrepancy.
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "77" * 20, 4)]),))
     sentinel = SimResult(calls=(ok(),))  # sentinel probe moves nothing
     eff = recipes.value_out(
@@ -1086,7 +1088,7 @@ def test_code_upgrade_tier0_historical_only_current_fails_is_unknown():
 
 
 # ---------------------------------------------------------------------------
-# §5a backing — the WITHHOLDING branches (W0-7 fixture 7)
+# Backing — the WITHHOLDING branches
 #
 # ``inflow_observed`` was ``true`` on 11/11 rows and ``backing_withheld`` on
 # zero, anywhere. Every one of the four branches below the ASYMMETRIC BURDEN

@@ -719,7 +719,7 @@ def test_get_api_key_raises_without_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# search_source must not report an unreadable corpus as an absent pattern (W0-1b)
+# search_source must not report an unreadable corpus as an absent pattern
 # ---------------------------------------------------------------------------
 
 
@@ -824,7 +824,7 @@ def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, see
 
 def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_protocol):  # noqa: PLR0915
     """``control_graph_nodes`` has no chain column, so the chain predicate has to
-    ride the ``contract_id`` join (W3-E item 4 / G7 §2.7).
+    ride the ``contract_id`` join.
 
     Three real cross-chain twins already exist in ``contracts``; the aliasing is
     unrealised only because no analysis job has ever run on a second chain.
@@ -909,7 +909,7 @@ def test_classify_address_prefers_a_classified_row_deterministically(db_session,
 
 
 def test_last_upgrade_reports_the_newest_not_the_newest_with_a_block(db_session, seeded_protocol):
-    """L-20: under ``block_number DESC NULLS LAST`` a poll-detected upgrade (block
+    """Under ``block_number DESC NULLS LAST`` a poll-detected upgrade (block
     NULL by design) sorted LAST and was reported as the OLDEST, so
     ``last_upgrade`` named a stale block-carrying event."""
     from datetime import datetime, timezone
@@ -939,7 +939,7 @@ def test_last_upgrade_reports_the_newest_not_the_newest_with_a_block(db_session,
 
 def test_role_holders_reads_roles_from_grants_not_from_origin(db_session, seeded_protocol):
     """``function_principals.origin`` is a resolver-source constant, not a role
-    name (W3-E item 3).
+    name.
 
     Measured before the fix on the real local corpus: ``role_holders`` published
     exactly ONE "role", named ``semantic_capability:finite_set`` after the
