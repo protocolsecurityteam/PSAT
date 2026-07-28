@@ -979,7 +979,12 @@ def _build_principal_lookup(
             continue
         seen_contract_ids.add(contract.id)
         summary = contract.summary
-        contract_type = "timelock" if summary and summary.has_timelock else "contract"
+        # ``is True``: the column is three-state, and only a proven timelock earns
+        # the strong ``timelock`` type (priority 3, a settled key for
+        # ``terminalControllerNote``). A NULL or a missing row falls to
+        # ``contract`` — the WEAK, non-terminal way-point type — so the
+        # not-determined case cannot be promoted into a settled controller.
+        contract_type = "timelock" if summary is not None and summary.has_timelock is True else "contract"
         _record_principal_lookup(
             lookup,
             address=contract.address,
@@ -1249,7 +1254,13 @@ def build_governance_view(
         # a pause_toggle EffectiveFunction surfacing).
         if is_proxy:
             caps_set.add("upgradeable")
-        if summary_row and summary_row.is_pausable:
+        # ``is True``, not truthiness: the column is three-state and a ``None``
+        # means the pause detector did not answer (or there is no summary row at
+        # all). A capability chip is a positive claim — "this contract can be
+        # paused" — so only a proven ``True`` earns one. Absence of the chip is
+        # NOT published as proof of the opposite; the three-state flag below is
+        # where a consumer reads that.
+        if summary_row is not None and summary_row.is_pausable is True:
             caps_set.add("pause")
         capabilities: list[str] = sorted(caps_set)
 
@@ -1262,9 +1273,19 @@ def build_governance_view(
         if not contract_name:
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
-        is_factory = summary_row.is_factory if summary_row else False
-        has_timelock = summary_row.has_timelock if summary_row else False
-        is_pausable = summary_row.is_pausable if summary_row else False
+        # Three states through the payload. ``False`` used to be published for a
+        # contract that HAS NO SUMMARY ROW — 62 of 147 entries on the local
+        # corpus — so "this contract cannot be paused / has no timelock / is not
+        # a factory" was asserted on the strength of never having looked. The
+        # producer's own columns are three-state (``bool | None``), and a row
+        # whose column is NULL means the detector ran and could not tell; both
+        # routes to "nobody answered" publish ``None`` here, and
+        # ``summary_evidence`` below names WHICH route it was — the two are
+        # different questions for whoever wants to fix it (re-run the stage vs
+        # improve the detector), and the same answer for anyone reading the flag.
+        is_factory = summary_row.is_factory if summary_row else None
+        has_timelock = summary_row.has_timelock if summary_row else None
+        is_pausable = summary_row.is_pausable if summary_row else None
         control_model = summary_row.control_model if summary_row else None
 
         name_lower = contract_name.lower()
@@ -1274,12 +1295,26 @@ def build_governance_view(
             role = "value_handler"
         elif any(s in standards for s in ("ERC20", "ERC721", "ERC1155")):
             role = "token"
-        elif has_timelock or control_model == "governance":
+        elif has_timelock is True or control_model == "governance":
             role = "governance"
-        elif is_factory:
+        elif is_factory is True:
             role = "factory"
         else:
             role = "utility"
+
+        # ``role`` has no not-determined member and every consumer needs one:
+        # each branch above except the last fires on a POSITIVE fact (a name, an
+        # observed value effect, a declared standard, a proven timelock/factory),
+        # so only the ``utility`` fall-through can be reached by a chain of
+        # not-determined inputs. Published as its own key rather than folded into
+        # ``role`` so the existing role vocabulary — read by the canvas, the
+        # layout bands and ``protocolScore`` — keeps its meaning, and a consumer
+        # that cares can refuse to treat this row's ``utility`` as evidence.
+        role_evidence = (
+            "witnessed"
+            if role != "utility" or (summary_row is not None and has_timelock is not None and is_factory is not None)
+            else "not_determined"
+        )
 
         balance_contract = lookup_contract or contract_row
         balances_list = []
@@ -1328,10 +1363,18 @@ def build_governance_view(
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
             "role": role,
+            "role_evidence": role_evidence,
             "standards": standards,
             "value_effects": value_effects,
             "is_pausable": is_pausable,
             "has_timelock": has_timelock,
+            "is_factory": is_factory,
+            # Which route a ``None`` on the three flags above took: ``absent``
+            # means no ContractSummary row exists for this entry (nor for its
+            # implementation), ``present`` means the row exists and the column
+            # itself is NULL. Never omitted, so key-absence marks a pre-fix
+            # payload rather than either state.
+            "summary_evidence": "present" if summary_row is not None else "absent",
             "capabilities": capabilities,
             "balances": balances_list,
             "total_usd": round(total_usd, 2) if total_usd > 0 else None,

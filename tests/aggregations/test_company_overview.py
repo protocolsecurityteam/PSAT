@@ -21,6 +21,7 @@ from sqlalchemy import select  # noqa: E402
 from db.models import (  # noqa: E402
     Contract,
     ContractBalance,
+    ContractSummary,
     ControlGraphEdge,
     ControlGraphNode,
     ControllerValue,
@@ -1849,3 +1850,102 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
         "the Safe must have one controls_detail row per governed twin, each tagged with its own "
         f"chain; got rows={rows_for_vault}"
     )
+
+
+def test_summary_flags_are_three_state_through_the_payload(db_session):
+    """Row ABSENCE is not a proven negative (W3-E item 1 / L-30).
+
+    62 of 147 company-overview entries on the local corpus have no
+    ContractSummary row at all, and every one of them used to publish
+    ``is_pausable: false`` / ``has_timelock: false`` / ``is_factory: false`` —
+    three proven negatives derived from never having looked. The three shapes
+    below are the three states, and the payload has to keep them apart.
+    """
+    p = _add_protocol(db_session, f"e2e-3state-{uuid.uuid4().hex[:8]}")
+
+    # 1. No summary row at all — nobody answered, and the reason is row absence.
+    a_absent = _addr("3sA")
+    job_a = _add_job(db_session, address=a_absent, protocol_id=p.id, name="NoSummary")
+    _add_contract(db_session, address=a_absent, job=job_a, protocol_id=p.id, contract_name="NoSummary")
+
+    # 2. Summary row present, every flag NULL — the detectors ran and declined.
+    a_null = _addr("3sB")
+    job_b = _add_job(db_session, address=a_null, protocol_id=p.id, name="NullFlags")
+    c_null = _add_contract(db_session, address=a_null, job=job_b, protocol_id=p.id, contract_name="NullFlags")
+    db_session.add(ContractSummary(contract_id=c_null.id, is_pausable=None, has_timelock=None, is_factory=None))
+
+    # 3. Summary row present, every flag proven False — a real negative.
+    a_false = _addr("3sC")
+    job_c = _add_job(db_session, address=a_false, protocol_id=p.id, name="ProvenPlain")
+    c_false = _add_contract(db_session, address=a_false, job=job_c, protocol_id=p.id, contract_name="ProvenPlain")
+    db_session.add(ContractSummary(contract_id=c_false.id, is_pausable=False, has_timelock=False, is_factory=False))
+
+    # 4. Summary row present, proven pausable + proven timelock — the positive
+    #    control for every hedge above.
+    a_true = _addr("3sD")
+    job_d = _add_job(db_session, address=a_true, protocol_id=p.id, name="ProvenPausable")
+    c_true = _add_contract(db_session, address=a_true, job=job_d, protocol_id=p.id, contract_name="ProvenPausable")
+    db_session.add(ContractSummary(contract_id=c_true.id, is_pausable=True, has_timelock=True, is_factory=True))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    by_addr = {c["address"]: c for c in payload["contracts"]}
+
+    absent = by_addr[a_absent]
+    assert absent["is_pausable"] is None
+    assert absent["has_timelock"] is None
+    assert absent["is_factory"] is None
+    assert absent["summary_evidence"] == "absent"
+    # The derived fields must not launder the absence into a positive claim.
+    assert "pause" not in absent["capabilities"]
+    assert absent["role_evidence"] == "not_determined"
+
+    nulls = by_addr[a_null]
+    assert nulls["is_pausable"] is None
+    assert nulls["has_timelock"] is None
+    assert nulls["is_factory"] is None
+    # Same answer about the contract, different answer about why — a consumer
+    # deciding whether to re-run the stage or fix the detector needs both.
+    assert nulls["summary_evidence"] == "present"
+    assert "pause" not in nulls["capabilities"]
+    assert nulls["role_evidence"] == "not_determined"
+
+    proven_false = by_addr[a_false]
+    assert proven_false["is_pausable"] is False
+    assert proven_false["has_timelock"] is False
+    assert proven_false["is_factory"] is False
+    assert proven_false["summary_evidence"] == "present"
+    # POSITIVE CONTROL for role_evidence: a role derived from ANSWERED flags is
+    # evidence even when the answer is "no" and the role lands on ``utility``.
+    assert proven_false["role"] == "utility"
+    assert proven_false["role_evidence"] == "witnessed"
+
+    proven_true = by_addr[a_true]
+    assert proven_true["is_pausable"] is True
+    assert proven_true["has_timelock"] is True
+    assert proven_true["is_factory"] is True
+    # POSITIVE CONTROL: the pause chip and the governance role still fire on a
+    # proven flag — the ``is True`` narrowing must not have removed them.
+    assert "pause" in proven_true["capabilities"]
+    assert proven_true["role"] == "governance"
+    assert proven_true["role_evidence"] == "witnessed"
+
+
+def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
+    """``_build_principal_lookup`` types a contract ``timelock`` only on a proven
+    flag: ``timelock`` is a SETTLED key (priority 3) for the terminal-controller
+    renderer, and a NULL flag must leave the address a non-terminal way-point."""
+    p = _add_protocol(db_session, f"e2e-pltl-{uuid.uuid4().hex[:8]}")
+    proven_addr = _addr("pltlA")
+    unknown_addr = _addr("pltlB")
+    job_p = _add_job(db_session, address=proven_addr, protocol_id=p.id, name="Timelock")
+    job_u = _add_job(db_session, address=unknown_addr, protocol_id=p.id, name="Unknown")
+    c_p = _add_contract(db_session, address=proven_addr, job=job_p, protocol_id=p.id, contract_name="Timelock")
+    c_u = _add_contract(db_session, address=unknown_addr, job=job_u, protocol_id=p.id, contract_name="Unknown")
+    db_session.add(ContractSummary(contract_id=c_p.id, has_timelock=True))
+    db_session.add(ContractSummary(contract_id=c_u.id, has_timelock=None))
+    db_session.commit()
+
+    lookup = _build_principal_lookup({job_p.id: c_p, job_u.id: c_u}, {}, {})
+    assert lookup[proven_addr.lower()]["resolved_type"] == "timelock"
+    assert lookup[unknown_addr.lower()]["resolved_type"] == "contract"
