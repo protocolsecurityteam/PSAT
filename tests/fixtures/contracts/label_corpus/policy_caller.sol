@@ -14,15 +14,17 @@ pragma solidity ^0.8.27;
 // tier minted by the production code path, not written into a golden by hand.
 //
 // ``recoverVia`` resolves onto AssetRecovery at 0x…0070, whose ``sweepTo``
-// carries a standard_exact ``flow.out``, and derives NOTHING today. The join
-// keys the callee's claims by the selector on its own effects record, which is
-// keccak of the DECLARED name — ``sweepTo(IERC20,address,uint256)`` →
-// 0x38541c00 — while the caller records the ABI selector of the same function,
-// ``sweepTo(address,address,uint256)`` → 0x0aeef8c8. Any callee taking an
-// interface- or contract-typed parameter is therefore unreachable across the
-// join. This row is pinned EMPTY on purpose: it is the shape that must gain a
-// claim when that canonicalisation is fixed, and until then it is the corpus's
-// record that the gap is real rather than hypothetical.
+// carries a standard_exact ``flow.out``, and derives it here at
+// ``policy_derived`` THROUGH THE CANONICAL KEY. The callee's own effects
+// ``selector`` is keccak of the DECLARED name —
+// ``sweepTo(IERC20,address,uint256)`` → 0x38541c00 — while the caller's sink
+// records the ABI selector of the same function,
+// ``sweepTo(address,address,uint256)`` → 0x0aeef8c8; the join meets only via
+// the ``abi_selector`` the claims pass stamps on the callee record (L-17).
+// This row is the interface-typed-parameter discriminator: it was pinned
+// EMPTY while the gap was real, and it goes empty again the moment the
+// canonical key stops being stamped or read — so a regression in either half
+// of the join is a golden diff, not a silent recall loss.
 //
 // The callee selectors are deliberately NOT standard ones. A call to
 // ``mint(address,uint256)`` or ``transfer(address,uint256)`` is recognised by

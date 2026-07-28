@@ -4959,7 +4959,19 @@
           "effect_labels": [
             "external_contract_call"
           ],
-          "claims": [],
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "policy_derived",
+              "witness": {
+                "callee": "0x0000000000000000000000000000000000000070",
+                "kind": "cross_contract_join",
+                "selector": "0x0aeef8c8",
+                "sink_id": "recoverVia(address,address,uint256):sink0:external_call:recovery.sweepTo",
+                "source_tier": "standard_exact"
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [
             {

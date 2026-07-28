@@ -57,17 +57,44 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
 
+    # The canonical ABI selector per function — the value a caller puts in
+    # ``msg.sig``. The effects record's own ``selector`` is keccak of the
+    # DECLARED signature, which is NOT a real selector when a parameter is
+    # interface/enum/struct-typed (``sweepTo(IERC20,address,uint256)`` →
+    # 0x38541c00 vs the dispatched 0x0aeef8c8), and the cross-contract join
+    # missed every such callee (L-17). Computed here because this is the one
+    # pass that holds the canonical-signature map and the Slither fallback
+    # (``ctx.canonical_selector``). A signature that cannot be lowered is
+    # OMITTED — absence is not-determined, never a proof. ``fallback()`` /
+    # ``receive()`` are excluded: they have no selector, and hashing their
+    # rendered names manufactures one (the L-14 class).
+    abi_selectors = {
+        signature: selector
+        for signature in signatures
+        if signature not in ("fallback()", "receive()")
+        and (selector := ctx.canonical_selector(signature)) is not None
+    }
+
     return {
         "schema_version": SCHEMA_VERSION,
         "contract_name": ctx.contract_name,
         "functions": functions,
+        "abi_selectors": abi_selectors,
     }
 
 
 def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
     """Write each function's claims onto its ``effects`` record (in place), so
     the existing effects transport carries them downstream. No-op if either
-    artifact is degraded."""
+    artifact is degraded.
+
+    Also stamps ``abi_selector`` — the canonical dispatch selector from the
+    claims artifact — beside the record's declared-signature ``selector``, so
+    a consumer that must join on the REAL ``msg.sig`` (the cross-contract
+    callee map) has it in the artifact it already reads. Absence of the key
+    means not-determined (unlowerable signature, fallback/receive, or an
+    artifact minted before the field existed) — consumers must fall back, not
+    infer."""
     if not isinstance(effects, dict):
         return
     functions = effects.get("functions")
@@ -76,9 +103,15 @@ def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
     by_function = claims_artifact.get("functions") if isinstance(claims_artifact, dict) else None
     if not isinstance(by_function, dict):
         by_function = {}
+    abi_selectors = claims_artifact.get("abi_selectors") if isinstance(claims_artifact, dict) else None
+    if not isinstance(abi_selectors, dict):
+        abi_selectors = {}
     for signature, record in functions.items():
         if isinstance(record, dict):
             record["claims"] = list(by_function.get(signature) or [])
+            abi_selector = abi_selectors.get(signature)
+            if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
+                record["abi_selector"] = abi_selector
 
 
 def project_effect_labels(effects: Any) -> None:
