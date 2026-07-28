@@ -1060,11 +1060,19 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     # their existing wire shape; ``bound`` marks an inlined downstream-call subject.
     if cap.subject != "root":
         out["subject"] = cap.subject
-    # Same emit-when-non-default discipline: every cofinite produced today is ``exact``,
-    # so this key is absent and the wire shape is byte-identical to before this field
-    # existed. ``lower_bound`` marks an un-enumerated denylist; carried so the projector
-    # can surface it once Part 2 produces such cofinites.
-    if cap.blacklist_quality != "exact":
+    # ALWAYS emitted on a cofinite, never elsewhere (W2-B item 10a). The old
+    # emit-when-non-default rule made ABSENCE mean ``exact``: a consumer that has
+    # never heard of this key read every cofinite denylist as a COMPLETE
+    # exclusion, which is the strong claim — the one place in the whole sweep
+    # where a hedge's default was the assertion rather than the caution. Absence
+    # now means "this capability is not a denylist", so the question of denylist
+    # completeness simply does not arise; a present ``lower_bound`` says at least
+    # these are excluded, so the complement is an upper bound on who may call.
+    if cap.kind == "cofinite_blacklist":
+        out["blacklist_quality"] = cap.blacklist_quality
+    elif cap.blacklist_quality != "exact":
+        # A non-cofinite carrying a non-default blacklist quality would be a
+        # producer bug; emit it rather than silently dropping the anomaly.
         out["blacklist_quality"] = cap.blacklist_quality
     # Emit-when-non-default: only labeled empties carry a reason, so populated
     # sets and pre-existing empties keep their wire shape. Carries the

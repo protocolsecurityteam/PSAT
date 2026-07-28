@@ -44,11 +44,19 @@ def test_resolver_returns_all_controller_planes(monkeypatch):
     assert [s["address"] for s in steps] == [OWNER, AUTHORITY]
 
 
-def test_resolver_returns_none_when_no_controller(monkeypatch):
+def test_resolver_returns_empty_when_probed_clean_with_no_controller(monkeypatch):
+    """INVERTED (was ``test_resolver_returns_none_when_no_controller``, which
+    pinned the W2-B item 12 collapse): ``[]`` from
+    ``read_contract_controllers`` means every canonical getter answered cleanly
+    and named no controller — a PROVEN absence (a renounced / ownerless
+    contract). Mapping it onto ``None`` here published "we could not look" over
+    "there is no owner", which is why ``terminal_principal.status`` was
+    ``unknown_unfetched`` on 180/180 armed rows. It now propagates as ``[]`` so
+    the walk reports ``no_controller``."""
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: [])
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None
-    assert resolver(CONTRACT) is None
+    assert resolver(CONTRACT) == []
 
 
 def test_resolver_returns_none_on_probe_incomplete(monkeypatch):

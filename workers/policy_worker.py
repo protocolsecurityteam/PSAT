@@ -116,8 +116,17 @@ def _make_terminal_controller_resolver(
 
     def _resolve(address: str) -> list[dict[str, object]] | None:
         controllers = read_contract_controllers(rpc_url, address, chain_id=chain_id)
-        if not controllers:
+        if controllers is None:
+            # A probe error: the plane set is NOT dispositively known this round
+            # (see read_contract_controllers). ``None`` propagates that to the
+            # walk as ``unknown_unfetched``.
             return None
+        if not controllers:
+            # Every canonical getter answered cleanly and named no controller —
+            # a proven absence, which the walk reports as ``no_controller``.
+            # Collapsing it into ``None`` here published "we could not look"
+            # over "there is no owner" (W2-B item 12).
+            return []
         steps: list[dict[str, object]] = []
         for owner in controllers:
             resolved_type, details, _cacheable = classify_resolved_address_with_status(

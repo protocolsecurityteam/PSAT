@@ -36,6 +36,193 @@ class CapabilitySurface:
         return _unique_conditions(out)
 
 
+#: Three-state authority verdict persisted alongside ``authority_public``
+#: (``effective_functions.authority_openness``). See
+#: ``capability_surface_openness``.
+AUTHORITY_OPENNESS_VALUES = ("open", "restricted", "not_determined")
+
+
+def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str:
+    """The three-state authority verdict for one capability (R1).
+
+    * ``open`` — a public path was EARNED (a ``conditional_universal`` /
+      cofinite child survived the earned-public projection). Exactly
+      ``authority_public``.
+    * ``restricted`` — a caller restriction was WITNESSED: the surface carries
+      principal rows (the callers), or the capability is a witnessed-empty set
+      (``resolved_empty`` — a complete enumeration that admits nobody).
+    * ``not_determined`` — neither. ``unsupported`` (extraction fail-closed,
+      guard seen but not lowered), ``external_check_only`` (a probe interface,
+      no enumeration), an irreducible AND/OR residual — everything the bool
+      column reported with the same ``False`` a fully resolved gated function
+      gets.
+
+    Total over every capability shape; never raises. A caller must not read
+    ``restricted`` as "these are all the callers" — that is what
+    ``membership_quality`` says — only as "a restriction exists and we saw it".
+    """
+    if surface.authority_public:
+        return "open"
+    if surface.principal_rows:
+        return "restricted"
+    if _is_resolved_empty_capability(cap_dict):
+        return "restricted"
+    return "not_determined"
+
+
+#: A capability whose event fold covered a height this many blocks or more behind
+#: the durable index's own frontier is reported ``stale``. Floor chosen from the
+#: measured within-one-job spread of ``last_indexed_block`` (25619032 → 25619235 =
+#: 203 blocks, ~40 min of mainnet, presented as equally current): the threshold
+#: must be ABOVE that so ordinary per-address cursor skew is not called stale,
+#: and far below the ~2-week backfill-stall signature ``fleet`` alarms on.
+CAPABILITY_INDEX_STALE_BLOCKS = 1_000
+
+
+def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, Any]:
+    """Is this capability statement CURRENT? (inv 11/12.)
+
+    ``last_indexed_block`` is written on 240+ rows and read by nothing: a bare
+    height is not a currency statement, and two capabilities in ONE job carried
+    heights 203 blocks apart while being presented as equally current. This turns
+    the height into a three-state verdict against the durable index's own
+    frontier (``index_head``, a local read — no wire):
+
+    * ``current``        — the fold covered a height within
+      ``CAPABILITY_INDEX_STALE_BLOCKS`` of the frontier.
+    * ``stale``          — it covered a height further behind than that: members
+      granted or revoked since are not in the set.
+    * ``not_determined`` — the capability records no ``last_indexed_block`` (it
+      was not resolved from an event fold at all, or was resolved before the
+      field existed), or no index frontier is available to compare against.
+      **This is what a consumer sees when the fact is absent**, and it must not
+      be rendered as ``current``.
+
+    ``lag_blocks`` is ``None`` in the not-determined case, never 0 — a zero lag
+    is the strongest currency claim available and must be earned.
+    """
+    heights = _last_indexed_blocks(cap_dict)
+    lowest = min(heights) if heights else None
+    if lowest is None or index_head is None:
+        return {"verdict": "not_determined", "last_indexed_block": lowest, "index_head": index_head, "lag_blocks": None}
+    lag = max(0, int(index_head) - int(lowest))
+    return {
+        "verdict": "stale" if lag >= CAPABILITY_INDEX_STALE_BLOCKS else "current",
+        "last_indexed_block": lowest,
+        "index_head": int(index_head),
+        "lag_blocks": lag,
+    }
+
+
+def _last_indexed_blocks(cap_dict: Any) -> list[int]:
+    """Every ``last_indexed_block`` in a capability tree. The LOWEST governs the
+    whole statement: an AND/OR over folds is only as current as its least-current
+    conjunct."""
+    out: list[int] = []
+    if not isinstance(cap_dict, dict):
+        return out
+    height = cap_dict.get("last_indexed_block")
+    if isinstance(height, int) and not isinstance(height, bool):
+        out.append(height)
+    for child in _child_dicts(cap_dict):
+        out.extend(_last_indexed_blocks(child))
+    signer = cap_dict.get("signer")
+    if isinstance(signer, dict):
+        out.extend(_last_indexed_blocks(signer))
+    return out
+
+
+#: Adapter trace steps that resolve a ROLE-keyed authority. ``solmate_roles_authority``
+#: names the role ids that carry the capability, so a single-role read is a witnessed
+#: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
+#: (CONTROLLER_RESOLUTION_SPEC §3.2 — it probes the gate, never a role name), so a row
+#: resolved by it is role-gated with the role NOT determined.
+_ROLE_WITNESSING_TRACE_STEP = "solmate_roles_authority"
+_ROLE_DISSOLVING_TRACE_STEPS = frozenset({"enumerable_role_store"})
+
+
+def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Witnessed ``(role, principals)`` grants for one capability — the role half
+    of inv 3's ``(capability, principal)`` scoring unit, which did not exist in
+    the persisted plane (``effective_functions.authority_roles`` was the literal
+    ``[]`` on 1773/1773 rows).
+
+    Three states, and a consumer must tell them apart:
+
+    * **non-empty list** — proven present. Emitted only where an adapter trace
+      names exactly ONE role id for the enumerated set: every member of that set
+      then holds that role, because it is the only role carrying the capability.
+    * ``None`` — **not determined**. A role-keyed authority whose role identity
+      the adapter dissolves by design (``enumerable_role_store``); a multi-role
+      capability (``roles: [1, 2]``) where WHICH role each member holds is not
+      recoverable — attributing every member to every role would be the
+      over-claim; or an ``unsupported`` node anywhere in the tree — extraction
+      failed, so nothing about the gate (including whether it is role-keyed)
+      was read, and "proven absent" is not available from a gate that was
+      never lowered.
+    * ``[]`` — proven absent: the gate WAS lowered and no role-keyed authority
+      appeared in it (a plain owner equality, a public path).
+
+    Reads only the persisted capability shape — no wire, no DB.
+    """
+    grants: dict[int, list[str]] = {}
+    not_determined = False
+
+    def visit(node: Any) -> None:
+        nonlocal not_determined
+        if not isinstance(node, dict):
+            return
+        if node.get("kind") == "unsupported":
+            not_determined = True
+        for step in node.get("trace") or []:
+            if not isinstance(step, dict):
+                continue
+            name = step.get("step")
+            if name in _ROLE_DISSOLVING_TRACE_STEPS:
+                not_determined = True
+                continue
+            if name != _ROLE_WITNESSING_TRACE_STEP:
+                continue
+            roles = [r for r in (step.get("roles") or []) if isinstance(r, int)]
+            if not roles:
+                # A public Solmate capability (no role carries it) is not a role
+                # gate — nothing witnessed, nothing undetermined.
+                continue
+            members = node.get("members")
+            if node.get("kind") != "finite_set" or not isinstance(members, list) or not members:
+                not_determined = True
+                continue
+            if len(roles) > 1:
+                not_determined = True
+                continue
+            grants.setdefault(roles[0], [])
+            for member in members:
+                if isinstance(member, str) and member.startswith("0x") and len(member) == 42:
+                    lowered = member.lower()
+                    if lowered not in grants[roles[0]]:
+                        grants[roles[0]].append(lowered)
+        for child in _child_dicts(node):
+            visit(child)
+        signer = node.get("signer")
+        if isinstance(signer, dict):
+            visit(signer)
+
+    visit(cap_dict)
+    if not_determined:
+        return None
+    return [
+        {
+            "role": role,
+            "principals": [
+                {"address": address, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+                for address in members
+            ],
+        }
+        for role, members in sorted(grants.items())
+        if members
+    ]
+
+
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
     if surface.authority_public:
         return "public"
@@ -139,10 +326,21 @@ def _project_node(
         # time-lock) ride along in ``node_conditions``. Quality (exact vs lower_bound) is
         # informational only — every cofinite is "open modulo a finite/condition filter",
         # so the openness verdict never branches on it.
-        denial = {
-            "kind": "denylist",
-            "description": f"denylist exclusion ({len(cap_dict.get('blacklist') or [])} known excluded)",
-        }
+        #
+        # It does change the CONDITION TEXT (W2-B item 10a): a ``lower_bound``
+        # denylist is not enumerated, so "N known excluded" alone reads as the
+        # complete exclusion set. The quality is now always present on a cofinite
+        # (never inferred from absence), so absence here means a pre-fix persisted
+        # row and is rendered as the unknown it is.
+        quality = cap_dict.get("blacklist_quality")
+        excluded = len(cap_dict.get("blacklist") or [])
+        if quality == "exact":
+            description = f"denylist exclusion ({excluded} excluded, exhaustive)"
+        elif quality is None:
+            description = f"denylist exclusion ({excluded} known excluded; completeness not recorded)"
+        else:
+            description = f"denylist exclusion (at least {excluded} excluded; not exhaustive)"
+        denial = {"kind": "denylist", "description": description}
         return CapabilitySurface(public_paths=[node_conditions + [denial]])
     return CapabilitySurface(residual=[dict(cap_dict)])
 
@@ -376,6 +574,7 @@ def _rows_for_finite_set(cap_dict: dict[str, Any], conditions: list[dict[str, An
                 "details": _details_with_conditions(
                     {
                         "source": "semantic_predicate_capability_resolver",
+                        "resolver_path": resolver_path(cap_dict),
                         "membership_quality": cap_dict.get("membership_quality"),
                         "confidence": cap_dict.get("confidence"),
                         "trace": cap_dict.get("trace") or [],
@@ -422,6 +621,7 @@ def _rows_for_threshold_group(
                     "owners": owners,
                     "total_signers": len(owners),
                     "source": "semantic_predicate_capability_resolver",
+                    "resolver_path": resolver_path(cap_dict),
                 },
                 conditions,
             ),
@@ -448,6 +648,8 @@ def _rows_for_signature_witness(cap_dict: dict[str, Any], conditions: list[dict[
                     {
                         "signer_kind": "finite_set",
                         "source": "semantic_predicate_capability_resolver",
+                        # The signer set's own path, not the wrapper's.
+                        "resolver_path": resolver_path(signer),
                     },
                     conditions + signer_conditions,
                 ),
@@ -461,6 +663,31 @@ def _row_with_conditions(row: dict[str, Any], conditions: list[dict[str, Any]]) 
     details = dict(out.get("details") or {})
     out["details"] = _details_with_conditions(details, conditions)
     return out
+
+
+def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
+    """Which resolver path produced this capability's members (W2-B item 9).
+
+    ``function_principals.origin`` and ``principal_type`` are single constants —
+    ``semantic_capability:finite_set`` / ``controller`` on 1132/1132 rows — so the
+    columns that assert "here is the provenance of this principal attribution"
+    prove only "this row exists": a Safe threshold read, a Solmate ``canCall``
+    enumeration and an event fold are the same six words. Neither column can be
+    repurposed (``origin`` is read as a role name by ``services/chat/data.py`` and
+    as a controller label by the governance payload), so the path is recorded
+    beside them.
+
+    Three states: a non-empty list of adapter trace steps in order (proven), and
+    ``None`` when the capability carries no trace at all — resolved, path NOT
+    recorded, which is a third of the local rows and must not be read as any
+    particular resolver. Absence of the key entirely means the row predates this
+    field.
+    """
+    trace = cap_dict.get("trace")
+    if not isinstance(trace, list):
+        return None
+    steps = [str(step["step"]) for step in trace if isinstance(step, dict) and step.get("step")]
+    return steps or None
 
 
 def _details_with_conditions(details: dict[str, Any], conditions: list[dict[str, Any]]) -> dict[str, Any]:

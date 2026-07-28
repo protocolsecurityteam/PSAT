@@ -90,7 +90,17 @@ logger = logging.getLogger(__name__)
 # predicate-tree output shape changed. Without this bump a materialized row keeps
 # serving trees in which a hash-commitment gate is unbound from the parameters it
 # commits, and the fix never reaches any deployment already in the cache.
-ANALYSIS_SCHEMA_VERSION = 3
+# v4: ``view_call`` / ``external_call`` operands now carry ``derived_from`` too,
+# and an un-lowerable single-address-param SELF gate is emitted as an
+# ``external_set`` descriptor instead of a bare-bool leaf (A1). A v3 tree records
+# neither, so its caller-tainted role gate still reads PUBLIC — the fix would
+# never reach a deployment already in the cache. v4 also pins provenance frame
+# purity: a parameter's origin set never unions other call sites' arguments
+# (the entry-parameter Phi is excluded), so ``derived_from`` is frame-local.
+# Both landed within the unreleased v4 window — no v4 row was ever
+# materialized under the pre-purity shape (verified: local DB carries only
+# v2/v3 rows; production runs pre-v4 code).
+ANALYSIS_SCHEMA_VERSION = 4
 
 
 def _builder_staleness_s() -> float:

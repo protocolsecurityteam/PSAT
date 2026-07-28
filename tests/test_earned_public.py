@@ -912,3 +912,267 @@ def test_self_service_threshold_stays_public_when_cold(tmp_path, earned_public):
     assert role == "business"
     assert gate_cap.kind == "conditional_universal", f"self-service threshold must stay open, got {gate_cap.kind}"
     assert surface.authority_public
+
+
+# ---------------------------------------------------------------------------
+# A1 (W2-B item 2) — the Solady EnumerableRoles shape: an assembly-backed,
+# named-return role read the static lifter cannot lower, after which the
+# caller taint was hashed into ``callee_args_digest`` and a hardcoded
+# ``authority_role="business"`` default published the gate as PUBLIC.
+# (§11: the "callee parameter binding" hypothesis is REFUTED — the binding
+# works; the loss is downstream of it.)
+# ---------------------------------------------------------------------------
+
+_SOLADY_SELF_GATE = """
+    pragma solidity ^0.8.19;
+    contract C {
+        uint256 public constant UPGRADE_TIMELOCK_ROLE_ID = 1;
+        function hasRole(address holder, uint256 role) public view returns (bool result) {
+            assembly {
+                mstore(0x00, holder)
+                mstore(0x20, role)
+                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
+            }
+        }
+        function hasRole2(bytes32 role, address account) public view returns (bool) {
+            return hasRole(account, uint256(role));
+        }
+        function onlyUpgradeTimelock(address account) public view {
+            if (!hasRole2(bytes32(UPGRADE_TIMELOCK_ROLE_ID), account)) revert();
+        }
+        function f() external {
+            _authorizeUpgrade();
+        }
+        function _authorizeUpgrade() internal view {
+            onlyUpgradeTimelock(msg.sender);
+        }
+    }
+"""
+
+_SOLADY_MODIFIER_GATE = """
+    pragma solidity ^0.8.19;
+    contract C {
+        function hasRole(address holder, uint256 role) internal view returns (bool result) {
+            assembly {
+                mstore(0x00, holder)
+                mstore(0x20, role)
+                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
+            }
+        }
+        modifier onlyTL() {
+            if (!hasRole(msg.sender, 1)) revert();
+            _;
+        }
+        function f() external onlyTL {}
+    }
+"""
+
+
+def _leaves(tree):
+    if not isinstance(tree, dict):
+        return []
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        return [leaf] if leaf else []
+    out = []
+    for child in tree.get("children") or []:
+        out.extend(_leaves(child))
+    return out
+
+
+def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_public):
+    """Part A: the un-lowerable gate lives in a public single-address-param view
+    ON the analyzed contract, so it is emitted as the same ``external_set``
+    shape the identical gate takes when it is an EXTERNAL call (weETH's
+    modifier) — handing it to the role-store adapter that already answers it
+    correctly for every other contract. It must NOT read as public."""
+    sl = _compile(tmp_path, _SOLADY_SELF_GATE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    leaves = _leaves(trees["f()"])
+    gate = next(leaf for leaf in leaves if leaf.get("set_descriptor"))
+    descriptor = gate["set_descriptor"]
+    assert descriptor["kind"] == "external_set"
+    assert descriptor["callee_signature"] == "onlyUpgradeTimelock(address)"
+    # The authority is the analyzed deployment itself (the self-gate case), and
+    # the caller is the descriptor's key so the adapter probes the real gate.
+    assert descriptor["authority_contract"]["address_source"] == {"source": "self_address"}
+    assert descriptor["key_sources"] == [{"source": "msg_sender"}]
+    assert gate["authority_role"] == "delegated_authority"
+    assert leaf_is_caller_tainted(gate) is True
+    assert is_permissionless_caller_shape(gate) is False
+
+    cap = evaluate_tree(trees["f()"])
+    assert cap.kind != "conditional_universal", "the A1 fail-open"
+    assert capability_to_dict(cap)["kind"] != "conditional_universal"
+
+
+def _tree_verdict(tree):
+    dd = capability_to_dict(evaluate_tree(tree))
+    return dd.get("kind")
+
+
+def test_self_gate_checker_own_entry_point_stays_public(tmp_path, earned_public):
+    """The un-hedged direction of Part A: the CHECKER's own entry point
+    constrains its ARGUMENT, not its caller — anyone may call
+    ``onlyUpgradeTimelock(anyAddress)``. Its own tree must stay
+    ``conditional_universal`` (public) with no fabricated caller witness: no
+    self-gate descriptor keyed on ``msg_sender``, no ``msg_sender`` in any
+    operand's ``derived_from``, even though ``_authorizeUpgrade`` elsewhere in
+    the contract calls it with ``msg.sender``. (The round-1 regression: the
+    entry-parameter Phi unioned the call-site argument into the checker's own
+    frame, so the verdict for a function was decided by what an unrelated
+    function does.)"""
+    sl = _compile(tmp_path, _SOLADY_SELF_GATE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    checker = trees["onlyUpgradeTimelock(address)"]
+    assert _tree_verdict(checker) == "conditional_universal"
+    for leaf in _leaves(checker):
+        descriptor = leaf.get("set_descriptor") or {}
+        assert descriptor.get("key_sources") != [{"source": "msg_sender"}]
+        assert leaf.get("references_msg_sender") is not True
+        for op in leaf.get("operands") or []:
+            origins = [o.get("source") for o in (op.get("derived_from") or [])]
+            assert "msg_sender" not in origins
+    # The hedged direction is unchanged: reached THROUGH a call that binds the
+    # parameter to msg.sender, the same gate still gates.
+    assert _tree_verdict(trees["f()"]) != "conditional_universal"
+
+
+_SIBLING_CHECKERS = """
+    pragma solidity ^0.8.19;
+    contract C {
+        uint256 public constant ROLE_A = 1;
+        uint256 public constant ROLE_B = 2;
+        function hasRole(address holder, uint256 role) public view returns (bool result) {
+            assembly {
+                mstore(0x00, holder)
+                mstore(0x20, role)
+                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
+            }
+        }
+        function onlyA(address account) public view { if (!hasRole(account, ROLE_A)) revert(); }
+        function onlyB(address account) public view { if (!hasRole(account, ROLE_B)) revert(); }
+        function guarded() external { onlyA(msg.sender); }
+    }
+"""
+
+
+def test_sibling_checkers_get_the_same_verdict_regardless_of_callers(tmp_path, earned_public):
+    """Byte-identical checkers must not diverge because only one of them is
+    ever called with ``msg.sender`` — the reviewer's cid-568 falsification
+    (onlyUpgradeTimelock flipped while its eight identical siblings stayed
+    public). Frame purity: each checker's own frame sees its parameter as a
+    parameter, and each ``hasRole`` sub-frame sees only ITS call site's role
+    constant, not the union of every sibling's."""
+    sl = _compile(tmp_path, _SIBLING_CHECKERS)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    assert _tree_verdict(trees["onlyA(address)"]) == "conditional_universal"
+    assert _tree_verdict(trees["onlyB(address)"]) == "conditional_universal"
+    # The caller that binds msg.sender still gates.
+    assert _tree_verdict(trees["guarded()"]) != "conditional_universal"
+    # Frame purity of the sub-frame: onlyA's leaf never carries onlyB's role
+    # constant (the cross-call-site union listed every sibling's constant).
+    for leaf in _leaves(trees["onlyA(address)"]):
+        for op in leaf.get("operands") or []:
+            names = {o.get("state_variable_name") for o in (op.get("derived_from") or [])}
+            assert "ROLE_B" not in names
+
+
+def test_solady_modifier_gate_caller_taint_survives_the_digest(tmp_path, earned_public):
+    """Part B: the gate is in a MODIFIER (not a probe-able view), so no
+    descriptor is possible — but the caller was passed as an ARGUMENT of the
+    un-lowerable read, and ``derived_from`` now carries that. The bare-bool
+    leaf is therefore caller-tainted and, because the comparison it performs
+    was never lowered, is never classified permissionless."""
+    sl = _compile(tmp_path, _SOLADY_MODIFIER_GATE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    gate = next(leaf for leaf in _leaves(trees["f()"]) if leaf.get("operator") in ("truthy", "falsy"))
+    origins = [o.get("source") for o in (gate["operands"][0].get("derived_from") or [])]
+    assert "msg_sender" in origins
+    assert leaf_is_caller_tainted(gate) is True
+    assert is_permissionless_caller_shape(gate) is False
+    assert evaluate_tree(trees["f()"]).kind != "conditional_universal"
+
+
+def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_checks():
+    """The over-fire guard, and the reason the rule is shape-narrow.
+    ``derived_from`` is TRANSITIVE, so any value computed from a
+    caller-parameterized call carries the caller's origin. Measured on the
+    88-contract corpus, the broad form tainted 25 leaves of which 23 were
+    false. Each shape below is one of those false positives and must stay
+    untainted by the collapsed rule."""
+    from typing import cast
+
+    from services.resolution.permissionless_shapes import leaf_caller_taint_is_collapsed as _collapsed
+    from services.static.contract_analysis_pipeline.predicate_types import LeafPredicate
+
+    def leaf_caller_taint_is_collapsed(leaf: dict) -> bool:
+        return _collapsed(cast(LeafPredicate, leaf))
+
+    caller_origin = [{"source": "msg_sender"}]
+    computed = {"source": "computed", "computed_kind": "binary", "derived_from": caller_origin}
+
+    # ``sharesBridged > type(uint96).max`` / ``shares < minimumMint`` — value bounds.
+    assert not leaf_caller_taint_is_collapsed({"kind": "comparison", "operator": "lte", "operands": [computed]})
+    # ``require(addr != address(0), "Create2: Failed on deploy")`` — a deploy check.
+    assert not leaf_caller_taint_is_collapsed({"kind": "equality", "operator": "ne", "operands": [computed]})
+    # ``require(signer.isValidSignatureNow(...))`` — self-auth, an ``eq`` equality.
+    assert not leaf_caller_taint_is_collapsed({"kind": "equality", "operator": "eq", "operands": [computed]})
+    # The Veda ``enter(...)`` vault call — external_bool carries its own
+    # mutability, which the value-movement canary rule governs.
+    assert not leaf_caller_taint_is_collapsed({"kind": "external_bool", "operator": "truthy", "operands": [computed]})
+    # A two-operand comparison is a readable shape, classified on that shape.
+    assert not leaf_caller_taint_is_collapsed(
+        {"kind": "equality", "operator": "truthy", "operands": [computed, {"source": "state_variable"}]}
+    )
+    # An external_call operand: mutability unknown at operand level.
+    assert not leaf_caller_taint_is_collapsed(
+        {
+            "kind": "equality",
+            "operator": "truthy",
+            "operands": [{"source": "external_call", "derived_from": caller_origin}],
+        }
+    )
+    # ...and the shape that DOES fire: the un-lowered bare-bool predicate.
+    assert leaf_caller_taint_is_collapsed({"kind": "equality", "operator": "truthy", "operands": [computed]})
+    # Absent derived_from stays not-determined — no taint claim from absence.
+    assert not leaf_caller_taint_is_collapsed(
+        {"kind": "equality", "operator": "truthy", "operands": [{"source": "computed", "derived_from": None}]}
+    )
+
+
+def test_self_gate_never_replaces_a_named_state_variable_attribution(tmp_path, earned_public):
+    """Part A is subordinate to the operand resolution it would overwrite: a
+    fallback leaf that recovered the underlying state VARIABLE keeps it (that
+    name is what controller enrollment and the pause/reentrancy passes key on).
+    Trading a named authority variable for a selector would be strictly less."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) private allowed;
+            function check(address who) public view returns (bool) {
+                return allowed[who];
+            }
+            function f() external {
+                if (!check(msg.sender)) revert();
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    leaves = _leaves(trees["f()"])
+    names = {
+        op.get("state_variable_name")
+        for leaf in leaves
+        for op in leaf.get("operands") or []
+        if op.get("source") == "state_variable"
+    }
+    descriptor_vars = {(leaf.get("set_descriptor") or {}).get("storage_var") for leaf in leaves}
+    assert "allowed" in names or "allowed" in descriptor_vars

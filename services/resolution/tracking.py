@@ -17,6 +17,9 @@ from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, Track
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
 from utils.rpc import (
+    eth_call_batch as _eth_call_batch,
+)
+from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
 from utils.rpc import (
@@ -306,14 +309,31 @@ def read_contract_controllers(
     controllers: list[str] = []
     seen: set[str] = set()
     had_probe_error = False
-    for signature in _CONTROLLER_GETTER_SIGS:
-        result = _try_eth_call_decoded(rpc_url, address, signature, "address", block_tag, chain_id=chain_id)
-        if result is _PROBE_ERROR:
+    calls = [{"to": address, "data": _selector(signature)} for signature in _CONTROLLER_GETTER_SIGS]
+    try:
+        results = _eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
+    except Exception:
+        return None
+    if len(results) != len(calls):
+        return None
+    for outcome in results:
+        if not outcome.success:
+            if _is_definitive_revert(outcome):
+                # The getter is genuinely not a control plane on this contract.
+                continue
             had_probe_error = True
             continue
-        if result is None:
+        raw = outcome.return_data
+        if _normalize_hex(raw) in {"0x", "0x0"}:
+            # A clean empty return: no such getter / no value. Not an error.
             continue
-        owner = str(result).lower()
+        try:
+            decoded = _decode_abi_value(raw, "address")
+        except Exception:
+            # A value that will not decode as an address is not a control plane
+            # and not a transport failure — the read succeeded.
+            continue
+        owner = str(decoded).lower()
         if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"} and owner not in seen:
             seen.add(owner)
             controllers.append(owner)
@@ -321,6 +341,37 @@ def read_contract_controllers(
         # Incomplete witness — do not proceed on a possibly-partial plane set.
         return None
     return controllers
+
+
+# A node's message for a contract-level revert. ``eth_call_batch`` preserves the
+# revert payload, so a revert WITH data is unambiguous; a bare
+# ``"execution reverted"`` carries no data but is still a definitive answer from
+# the EVM, unlike a transport/OOG failure.
+_REVERT_MESSAGE_MARKERS = ("execution reverted", "revert")
+
+
+def _is_definitive_revert(outcome: Any) -> bool:
+    """Did the EVM answer (a revert), or did the read fail to happen?
+
+    This is the discriminator ``read_contract_controllers``' contract has always
+    claimed and never had (W2-B item 12): every failure came back as the single
+    ``_PROBE_ERROR``, so a contract with NO ``authority()`` — which is most of
+    them — tripped the incomplete-witness guard and the whole plane set came back
+    ``None``. Measured consequence: ``terminal_principal.status`` is
+    ``unknown_unfetched`` on 180/180 armed rows and 5 of the 6 statuses have
+    never fired. Verified against mainnet (see the commit message): both the
+    ownerless Beacon DepositContract AND a contract that demonstrably HAS an
+    owner returned ``None`` before this split.
+
+    A revert with data is definitive. A bare ``execution reverted`` with no data
+    is also the EVM answering — it is how a missing function selector fails —
+    whereas a transport error, timeout or OOG produces neither. Anything
+    unrecognised stays indeterminate (fail closed).
+    """
+    if getattr(outcome, "revert_data", None) is not None:
+        return True
+    message = str(getattr(outcome, "error_message", "") or "").lower()
+    return any(marker in message for marker in _REVERT_MESSAGE_MARKERS)
 
 
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.

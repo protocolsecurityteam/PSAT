@@ -1506,3 +1506,154 @@ def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
     operands = [o for le in leaves for o in le["operands"]]
     assert operands
     assert all("derived_from" not in o for o in operands if o["source"] != "computed")
+
+
+# ---------------------------------------------------------------------------
+# guard_extraction_uncertain — the producer half (W2-B item 1).
+#
+# Re-measured at Wave-2 HEAD over the full 88-contract replay: every tree-less
+# predicate target has ZERO revert gates (Leg A's class-F/R widening lowered
+# every gated function that G3 counted), so the marker has zero realised rows
+# on this corpus — a lower bound, not a proof of unreachability. These tests
+# are the R2 fallback: the sentinel is reachable by construction (a caller-eq
+# gate whose subtree lowering fails) and the discriminator is precise in both
+# directions (a genuinely ungated / value-gated function is never flagged).
+# ---------------------------------------------------------------------------
+
+
+_CALLER_EQ_GATED = """
+    pragma solidity ^0.8.19;
+    contract C {
+        address public ownerVar;
+        function sweep(address to) external {
+            if (msg.sender != ownerVar) revert();
+            payable(to).transfer(address(this).balance);
+        }
+    }
+"""
+
+_VALUE_GATED = """
+    pragma solidity ^0.8.19;
+    contract C {
+        function sweep(uint256 amount) external {
+            require(amount > 0);
+            payable(msg.sender).transfer(amount);
+        }
+    }
+"""
+
+
+def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypatch):
+    """Constructed lowering failure: when no subtree can be built for a
+    function whose gate IS a direct caller EQ/NEQ compare, the builder must
+    flag the full_name instead of silently returning None (which the policy
+    would then read as 'unguarded')."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+
+    sl = _compile(tmp_path, _CALLER_EQ_GATED)
+    fn = _function(sl, "sweep")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    uncertain: set[str] = set()
+    tree = predicates_mod.build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is None
+    assert uncertain == {"sweep(address)"}
+
+
+def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, monkeypatch):
+    """Discriminator, adverse direction: the SAME constructed lowering failure
+    on a value-check gate (``require(amount > 0)``) must NOT flag the function
+    — a fail-closed sweep that marks real public functions unsupported is an
+    over-hedge the spec forbids."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+
+    sl = _compile(tmp_path, _VALUE_GATED)
+    fn = _function(sl, "sweep")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    uncertain: set[str] = set()
+    tree = predicates_mod.build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is None
+    assert uncertain == set()
+
+
+def test_uncertain_marker_not_fired_when_gate_lowers(tmp_path):
+    """Production path (no constructed failure): the caller-eq gate lowers into
+    a tree, so nothing is flagged — the marker only ever names functions whose
+    guard was seen AND lost."""
+    sl = _compile(tmp_path, _CALLER_EQ_GATED)
+    fn = _function(sl, "sweep")
+    uncertain: set[str] = set()
+    tree = build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is not None
+    assert uncertain == set()
+
+
+def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_path, monkeypatch):
+    """End-to-end (compiled source -> artifact -> policy): the flagged
+    signature is carried as ``guard_extraction_uncertain`` on the predicate
+    artifact and build_effective_permissions routes it to ``unsupported`` with
+    the truthful reason, while a genuinely gate-less public function on the
+    same contract stays public."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+    from services.policy.effective_permissions import build_effective_permissions
+    from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public counter;
+            function sweep(address to) external {
+                if (msg.sender != ownerVar) revert();
+                payable(to).transfer(address(this).balance);
+            }
+            function ping() external {
+                counter += 1;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    artifact = build_predicate_artifacts(contract)
+    assert artifact.get("guard_extraction_uncertain") == ["sweep(address)"]
+    assert "sweep(address)" not in (artifact.get("trees") or {})
+
+    target = {"subject": {"address": "0x" + "ab" * 20, "name": "C"}}
+    effects = {
+        "functions": {
+            "sweep(address)": {
+                "function": "sweep(address)",
+                "state_changing": True,
+                "state_writes": [],
+                "sinks": [],
+                "writer_selectors": [],
+            },
+            "ping()": {
+                "function": "ping()",
+                "state_changing": True,
+                "state_writes": ["counter"],
+                "sinks": [{"kind": "external_call", "target": "hook"}],
+                "writer_selectors": [],
+            },
+        }
+    }
+    payload = build_effective_permissions(
+        target,
+        capability_resolver_output={},
+        effects=effects,
+        predicate_trees=artifact,
+    )
+    sweep = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
+    assert sweep.get("status") == "unsupported"
+    assert sweep.get("capability_expr", {}).get("unsupported_reason") == "guard_extraction_uncertain"
+    assert sweep.get("authority_public") is not True
+    # The unmarked sink-bearing sibling keeps the historical fall-through:
+    # genuinely ungated functions must stay public (no over-hedge).
+    ping = next(f for f in payload["functions"] if f["function"] == "ping()")
+    assert ping.get("status") == "public"
+    assert ping["authority_public"] is True

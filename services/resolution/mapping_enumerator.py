@@ -56,7 +56,12 @@ class EnumerationResult(TypedDict):
     """Principal list + status; complete vs. truncated scans (silent [] would drop authorized addresses)."""
 
     principals: list[EnumeratedPrincipal]
-    status: str  # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
+    # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
+    # | "incomplete_ambiguous_writer_event" (an add/remove-conflicted event was
+    #   dropped: the fold is structurally missing that event's members)
+    # | "incomplete_no_writer_specs" (nothing was observed at all)
+    # | "incomplete_no_hypersync_coverage"
+    status: str
     pages_fetched: int
     last_block_scanned: int
     error: str | None
@@ -378,14 +383,22 @@ async def enumerate_mapping_allowlist(
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
 
     if not writer_specs:
+        # No writer specs means nothing was observed, not that the mapping
+        # provably has no members — "complete" here would publish a vacuous
+        # scan as an exhaustive one.
         return EnumerationResult(
-            principals=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
+            principals=[],
+            status="incomplete_no_writer_specs",
+            pages_fetched=0,
+            last_block_scanned=from_block,
+            error=None,
         )
 
     topic0_to_specs: dict[str, list[WriterEventSpec]] = {}
     for spec in writer_specs:
         topic0 = _event_topic0(spec["event_signature"])
         topic0_to_specs.setdefault(topic0, []).append(spec)
+    ambiguous_dropped = False
     for topic0, specs in list(topic0_to_specs.items()):
         directions = {spec["direction"] for spec in specs}
         if len(directions) <= 1:
@@ -398,10 +411,20 @@ async def enumerate_mapping_allowlist(
                 "specs": [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
             },
         )
+        ambiguous_dropped = True
         del topic0_to_specs[topic0]
     if not topic0_to_specs:
+        # Every writer event was ambiguous: the fold KNOWS it scanned nothing.
+        # Reporting "complete" here published exactly the same value as a real
+        # exhaustive empty scan (G2 HIT 2 — it fired in production with
+        # pages_fetched=0 below the first real log). The consumers already
+        # handle any non-"complete" status as a truncated enumeration.
         return EnumerationResult(
-            principals=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
+            principals=[],
+            status="incomplete_ambiguous_writer_event",
+            pages_fetched=0,
+            last_block_scanned=from_block,
+            error=None,
         )
 
     if hypersync_module is None:
@@ -434,7 +457,11 @@ async def enumerate_mapping_allowlist(
     current_from = from_block
     page_count = 0
     started = time.monotonic()
-    status: str = "complete"
+    # A fold that dropped an ambiguous writer event is incomplete BY
+    # CONSTRUCTION, whatever the scan does: members written only through the
+    # dropped event are invisible. Timeout/page-cap/error below may overwrite
+    # with their own (also non-"complete") status.
+    status: str = "incomplete_ambiguous_writer_event" if ambiguous_dropped else "complete"
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:

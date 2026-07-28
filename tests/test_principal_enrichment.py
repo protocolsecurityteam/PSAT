@@ -939,3 +939,88 @@ def test_callee_edge_does_not_mint_controller_labels():
     assert "stakingmanager_calls_depositcontracteth2" in callee_labels
     assert "controller_value" not in callee_labels
     assert not any(label.startswith("controller_") for label in callee_labels)
+
+
+def test_authority_roles_present_with_none_does_not_crash_enrichment():
+    """W2-B item 8 consumer guard: ``authority_roles`` is now PRESENT with value
+    ``None`` on a role-gated function whose role identity is not determined, and
+    ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
+    plain default iterated ``None`` and raised. Not-determined must contribute no
+    role principals, exactly as ``[]`` did."""
+    from services.policy.principal_enrichment import _collect_permissions
+
+    permissions, labels = _collect_permissions(
+        {
+            "contract_name": "Target",
+            "contract_address": "0x" + "ab" * 20,
+            "functions": [
+                {
+                    "function": "f()",
+                    "effect_labels": [],
+                    "authority_public": False,
+                    "authority_roles": None,
+                    "controllers": [],
+                    "direct_owner": None,
+                }
+            ],
+        }
+    )
+    assert permissions == {}
+    assert labels == {}
+
+
+def test_enriched_role_grant_keeps_the_classified_quorum_witness():
+    """R3 round-2: ``_enriched_role_grant`` exists so a role-granted principal
+    reads as resolved as the same address under ``controllers`` — but the
+    grant's ``details`` is ALWAYS the non-None ``{"source": ...}`` marker, so
+    the round-1 blanket "grant's non-null fields override" replaced the
+    classified ``details`` wholesale and erased the recorded quorum/delay.
+    ``protocolScore.collectPrincipals`` dedups by address keeping the FIRST
+    record (role grants before controllers), so the erased record is the one
+    the scorer and ``principalLabel`` read: a recorded 2/3 Safe fell to the
+    0.55 unknown floor and rendered without its "m/n". Details merge KEY-WISE,
+    classified keys on top, grant-only keys (the source marker) surviving."""
+    from services.governance.principals import _enriched_role_grant
+
+    classified = {
+        "0xaaa": {
+            "address": "0xaaa",
+            "resolved_type": "safe",
+            "label": "Ops Safe",
+            "details": {"owners": ["0x1", "0x2", "0x3"], "threshold": 2},
+        }
+    }
+    grant = {
+        "role": 8,
+        "principals": [
+            {"address": "0xaaa", "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+        ],
+    }
+    merged = _enriched_role_grant(grant, classified)["principals"][0]
+    assert merged["resolved_type"] == "safe"
+    assert merged["label"] == "Ops Safe"
+    # The quorum witness survives AND the grant's provenance marker survives.
+    assert merged["details"]["owners"] == ["0x1", "0x2", "0x3"]
+    assert merged["details"]["threshold"] == 2
+    assert merged["details"]["source"] == "semantic_capability:role_grant"
+
+
+def test_enriched_role_grant_details_fallbacks():
+    """The two one-sided shapes: a classified record with no ``details`` keeps
+    the grant's marker; a grant principal with no ``details`` keeps the
+    classified witness untouched."""
+    from services.governance.principals import _enriched_role_grant
+
+    no_details_classified = {"0xaaa": {"address": "0xaaa", "resolved_type": "eoa"}}
+    grant = {
+        "role": 1,
+        "principals": [{"address": "0xaaa", "details": {"source": "semantic_capability:role_grant"}}],
+    }
+    merged = _enriched_role_grant(grant, no_details_classified)["principals"][0]
+    assert merged["details"] == {"source": "semantic_capability:role_grant"}
+    assert merged["resolved_type"] == "eoa"
+
+    classified = {"0xbbb": {"address": "0xbbb", "resolved_type": "timelock", "details": {"delay": 864000}}}
+    bare_grant = {"role": 2, "principals": [{"address": "0xbbb", "details": None}]}
+    merged = _enriched_role_grant(bare_grant, classified)["principals"][0]
+    assert merged["details"] == {"delay": 864000}

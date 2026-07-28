@@ -815,6 +815,19 @@ class ControlGraphEdge(Base):
 # "B controls A" at once.
 EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
 EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
+# The third state. ``controller_value`` asserts "the to-node has authority over
+# the from-node"; ``external_call_target`` asserts the opposite positive fact
+# ("merely called, confers nothing"). A tracked controller whose
+# ``authority_provenance`` is ABSENT supports NEITHER: the static stage answered
+# neither question, so the address appeared in a lowered predicate tree without
+# ever being shown to gate a caller or to be a call destination. Writing it
+# ``controller_value`` makes an authority claim nothing proved (Leg A's tree
+# widening minted 37 such targets at once, incl. pure constants like
+# HUNDRED_PERCENT_IN_BPS and non-authority mappings like _balances); writing it
+# ``external_call_target`` asserts the other unproven fact. This relation keeps
+# the edge VISIBLE and out of ``CONTROL_EDGE_RELATIONS``, so it moves no
+# authority and no value through the closure.
+EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
 
 # Allowlist, not a denylist: a relation this set does not name contributes no
 # authority. A new relation therefore has to be classified deliberately before
@@ -891,6 +904,11 @@ class EffectiveFunction(Base):
     effect_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)), nullable=True)
     action_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     authority_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Three-state counterpart to ``authority_public`` (whose ``False`` merges a
+    # witnessed caller restriction with "we could not determine the authority"):
+    # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
+    # this row predates the column and cannot be read as any of the three.
+    authority_openness: Mapped[str | None] = mapped_column(String(20), nullable=True)
     authority_roles: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)

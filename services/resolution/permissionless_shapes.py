@@ -69,6 +69,13 @@ def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:
     caller), while the static flag is stamped pre-inlining and would
     over-taint bound frames.
     """
+    return _leaf_has_direct_caller_source(leaf) or leaf_caller_taint_is_collapsed(leaf)
+
+
+def _leaf_has_direct_caller_source(leaf: LeafPredicate) -> bool:
+    """Caller taint the leaf states DIRECTLY: a caller-sourced operand or
+    membership key. The shape of such a gate is readable, so
+    ``is_permissionless_caller_shape`` may classify it."""
     for op in leaf.get("operands") or []:
         if (op or {}).get("source") in _CALLER_TAINT_SOURCES:
             return True
@@ -79,11 +86,72 @@ def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:
     return False
 
 
+def leaf_caller_taint_is_collapsed(leaf: LeafPredicate) -> bool:
+    """True iff this leaf is an UN-LOWERED BARE-BOOL GATE whose only evidence of
+    caller-dependence is an origin recorded under its collapsing operand's
+    ``derived_from`` (A1 Part B).
+
+    A ``view_call`` / ``computed`` operand collapses its inputs;
+    ``derived_from`` is the readable record of what reached it (the digest
+    beside it is an opaque hash). This is the taint an assembly-backed role read
+    (Solady ``hasRole(address,uint256)``) hashed away, letting the
+    earned-public arm publish ``RoleRegistry.upgradeTo`` as public over a real
+    10-day-timelock gate.
+
+    **The shape gate is the whole safety argument, and it is narrow on purpose.**
+    ``derived_from`` is transitive: any value computed from a
+    caller-parameterized call carries the caller's origin, so a bare
+    "an operand's derived_from mentions msg.sender" rule fires on values that
+    are not gates at all. Measured over the 88-contract corpus, that broad form
+    tainted 25 leaves of which 23 were false — ``sharesBridged >
+    type(uint96).max`` and ``shares < minimumMint`` (value bounds),
+    ``require(addr != address(0), "Create2: Failed on deploy")`` (a deploy
+    success check), ``require(signer.isValidSignatureNow(…))`` (self-auth), and
+    the Veda ``enter(...)`` vault call (value movement). So the rule requires
+    the leaf to BE the un-lowered predicate rather than merely contain a tainted
+    value:
+
+    * exactly ONE operand, of source ``view_call`` / ``computed`` — the whole
+      condition collapsed into one opaque value (a bare-bool gate);
+    * operator ``truthy`` / ``falsy`` — a comparison (``comparison`` kind, or
+      ``eq``/``ne`` equality) states its own readable shape and is classified on
+      that shape, never here;
+    * kind ``equality`` — the bare-bool leaf kind. ``external_bool`` carries its
+      callee's mutability, which the value-movement canary rule already governs.
+
+    ``None``/absent ``derived_from`` stays not-determined (no taint claim). An
+    inlined bound frame yields ``subject="bound"`` downstream and never blocks a
+    root public path, so this cannot over-gate an intermediate's side condition.
+    """
+    if _leaf_has_direct_caller_source(leaf):
+        return False
+    if leaf.get("kind") != "equality" or leaf.get("operator") not in ("truthy", "falsy"):
+        return False
+    operands = leaf.get("operands") or []
+    if len(operands) != 1:
+        return False
+    operand = operands[0] or {}
+    if operand.get("source") not in ("view_call", "computed"):
+        return False
+    return any((origin or {}).get("source") in _CALLER_TAINT_SOURCES for origin in operand.get("derived_from") or [])
+
+
 def is_permissionless_caller_shape(leaf: LeafPredicate) -> bool:
     """True iff a caller-tainted gate matches a known permissionless shape
     (so it may open to ``conditional_universal``). See the module docstring
     for the shape-by-shape rationale. Callers must already have established
-    caller-taint; this function only discriminates the shape."""
+    caller-taint; this function only discriminates the shape.
+
+    A leaf whose caller-dependence is visible ONLY through a collapsing
+    operand's ``derived_from`` is never classified permissionless: every arm
+    below is a positive judgement about a shape (which operator, against
+    what), and there the comparison the gate performs was never lowered — the
+    operand is the opaque result of a read the lifter could not model.
+    Claiming a permissionless shape over an unread comparison is the
+    absence-as-proof error itself, so it fails closed (A1 Part B).
+    """
+    if leaf_caller_taint_is_collapsed(leaf):
+        return False
     operator = leaf.get("operator")
     kind = leaf.get("kind")
 

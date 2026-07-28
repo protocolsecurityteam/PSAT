@@ -15,7 +15,11 @@ from typing import Any, TypedDict, cast
 
 from typing_extensions import NotRequired
 
-from db.models import EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_EXTERNAL_CALL_TARGET
+from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+    EDGE_RELATION_EXTERNAL_CALL_TARGET,
+)
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
@@ -644,7 +648,12 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
         if not isinstance(function, dict):
             continue
         function_signature = str(function.get("function", ""))
-        for role_grant in function.get("authority_roles", []):
+        # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
+        # ``None`` on a role-gated function whose role identity is not
+        # determined (W2-B item 8), and a dict default only fires on an
+        # ABSENT key — so the plain default would iterate None and raise.
+        # Not-determined contributes no role principals, exactly as [] did.
+        for role_grant in function.get("authority_roles") or []:
             if not isinstance(role_grant, dict):
                 continue
             role = _safe_role_int(role_grant.get("role"))
@@ -1258,16 +1267,28 @@ def resolve_control_graph(
                     details=details,
                 )
                 # A slot the contract only CALLS is not a controller of it.
-                # Provenance absent (a pre-split analysis artifact, or a target
-                # for which neither question was answered) stays
-                # ``controller_value``: not-determined must not silently
-                # demote a real authority.
+                # Provenance ABSENT is the third state and gets the third
+                # relation: neither question was answered, so the address was
+                # enrolled from a predicate tree without ever being shown to
+                # gate a caller. ``controller_value`` would assert an authority
+                # nothing proved (Leg A's tree widening minted 37 such targets
+                # in one merge — pure constants like HUNDRED_PERCENT_IN_BPS,
+                # non-authority mappings like _balances, 28 of them surviving
+                # the primitive-scalar skip); ``external_call_target`` would
+                # assert the opposite unproven fact. The unattributed relation
+                # keeps the edge visible and moves no authority.
+                #
+                # This is NOT the demotion Leg F's rule forbids: that rule
+                # protects a real authority from being relabelled a mere
+                # callee. Here the not-determined input reaches a
+                # not-determined relation.
                 provenance = controller_value.get("authority_provenance")
-                relation = (
-                    EDGE_RELATION_EXTERNAL_CALL_TARGET
-                    if provenance == "call_target"
-                    else EDGE_RELATION_CONTROLLER_VALUE
-                )
+                if provenance == "call_target":
+                    relation = EDGE_RELATION_EXTERNAL_CALL_TARGET
+                elif provenance == "caller_gate":
+                    relation = EDGE_RELATION_CONTROLLER_VALUE
+                else:
+                    relation = EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED
                 _add_edge(
                     edges,
                     {

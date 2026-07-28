@@ -21,6 +21,8 @@ from .event_logs_pg import (
     _event_hints_by_topic,
     _event_keys,
     _note_partial_reason,
+    _payload_membership,
+    _topic_fold_modes,
     _word_to_address,
 )
 
@@ -259,6 +261,14 @@ class HyperSyncEventLogRepo:
         if not hints_by_topic:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
+        # Same rule as the durable repo (``event_logs_pg.fold_event_history``):
+        # a same-topic0 add/remove conflict folds from the event payload, and a
+        # conflict with no payload position fails the whole fold closed.
+        fold_modes, ambiguous = _topic_fold_modes(hints_by_topic)
+        if ambiguous:
+            _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="hypersync")
+            return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
+
         try:
             import hypersync  # type: ignore
 
@@ -320,15 +330,22 @@ class HyperSyncEventLogRepo:
 
             page_count += 1
             logs = _logs_from_response(response)
+            undecidable_row = False
             for log in logs:
                 topics = _topics_from_log(log)
                 if not topics:
                     continue
                 topic0 = topics[0].lower()
-                for hint in hints_by_topic.get(topic0, []):
+                mode = fold_modes.get(topic0)
+                if mode is None:
+                    continue
+                mode_kind, value_hint = mode
+                data_words = _data_words_from_log(log)
+                row_hints = [value_hint] if mode_kind == "payload" else hints_by_topic.get(topic0, [])
+                for hint in row_hints:
                     event_keys = _event_keys(
                         topics,
-                        _data_words_from_log(log),
+                        data_words,
                         hint.get("topics_to_keys") or {},
                         hint.get("data_to_keys") or {},
                     )
@@ -337,10 +354,22 @@ class HyperSyncEventLogRepo:
                     member = _word_to_address(event_keys.get(member_key))
                     if member is None:
                         continue
-                    state[member] = hint["direction"] == "add"
+                    if mode_kind == "payload":
+                        present = _payload_membership(topics, data_words, hint)
+                        if present is None:
+                            undecidable_row = True
+                            break
+                    else:
+                        present = hint["direction"] == "add"
+                    state[member] = present
                     block_number = getattr(log, "block_number", None)
                     if isinstance(block_number, int):
                         last_block = max(last_block, block_number)
+                if undecidable_row:
+                    break
+            if undecidable_row:
+                _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="hypersync")
+                return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
             next_block = getattr(response, "next_block", None)
             if next_block is None or next_block <= current_from:

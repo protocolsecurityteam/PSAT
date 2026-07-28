@@ -761,6 +761,15 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
     where = [
         Contract.protocol_id == protocol_id,
         func.array_length(EffectiveFunction.effect_targets, 1) > 0,
+        # Deliberately still keyed on the BOOL, not the new three-state
+        # ``authority_openness``: this predicate selects the *candidate* set, so
+        # a not-determined authority must be admitted exactly as a witnessed
+        # restriction is (both are "not proven open"), which is precisely what
+        # ``authority_public IS FALSE`` already does. Switching to
+        # ``authority_openness = 'restricted'`` would DROP every
+        # not-determined row from probing — the fail-open direction. The three
+        # states matter to a consumer *reporting* the authority, not to this
+        # filter; see ``capability_surface_openness``.
         or_(EffectiveFunction.authority_public.is_(False), _carries_public_admission_claim()),
     ]
     if scope is not None:

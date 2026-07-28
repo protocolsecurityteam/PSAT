@@ -486,6 +486,20 @@ def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     quality = _intersect_quality(a.membership_quality, b.membership_quality)
     if quality is None:
         return CapabilityExpr.structural_and([a, b])
+    if not common and am and bm:
+        # Emptiness CREATED by the intersection of two independently-resolved,
+        # NON-empty caller sets is never a witnessed "provably nobody": on a
+        # deployed function it is proof that one conjunct is wrong (a leaf
+        # mis-attributed to this function, or an under-enumerated set), not
+        # proof the function is unreachable. Publishing it as an exact-empty
+        # finite_set minted false ``resolved_empty`` on live withdrawal paths
+        # ({liquidityPool} ∩ {upgradeTimelock} = ∅ on
+        # WithdrawRequestNFT.requestWithdraw). Keep the full AND so both
+        # conjuncts stay visible and the policy layer reads not-determined.
+        # Emptiness INHERITED from an already-empty input (all-revoked role
+        # store, empty-by-design ceiling) keeps its own witness and still
+        # resolves below.
+        return CapabilityExpr.structural_and([a, b])
     confidence = _meet_confidence(a.confidence, b.confidence)
     conditions = list(a.conditions) + list(b.conditions)
     # Reached only for same-subject pairs (cross-subject diverts before the kind

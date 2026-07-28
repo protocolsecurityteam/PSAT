@@ -37,6 +37,11 @@ ResolvedEdgeRelation = Literal[
     # NOT a control relation: the from-node calls the to-node. Kept out of
     # ``db.models.CONTROL_EDGE_RELATIONS`` so it moves no authority.
     "external_call_target",
+    # NOT a control relation, and NOT a claim that the target is merely called:
+    # the tracked controller's ``authority_provenance`` was ABSENT, so neither
+    # question was answered. The edge is published so the address stays visible;
+    # it moves no authority. See ``db.models``.
+    "controller_value_unattributed",
 ]
 
 

@@ -49,8 +49,10 @@ def resolve_terminal_principal(
 
     ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
     a sequence of already-classified ``{"address", "resolved_type", "details"}``
-    mappings (owner/authority/admin order) — or ``None``/empty when none is
-    fetched/verified. The injected callable is the only wire this function
+    mappings (owner/authority/admin order), ``[]`` when every control-plane
+    getter answered cleanly and named none (a PROVEN absence), or ``None`` when
+    the planes could not be dispositively read (a probe error — not determined).
+    The injected callable is the only wire this function
     touches (integration callers back it with on-chain owner reads + classify;
     unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
 
@@ -61,8 +63,18 @@ def resolve_terminal_principal(
     unknown`` fallback the witness bar requires, never a guessed key.
 
     **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
-    ``depth_exceeded`` / ``unknown_unfetched`` (record shape unchanged, no extra
-    keys). When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
+    ``depth_exceeded`` / ``no_controller`` / ``unknown_unfetched`` (record shape
+    unchanged, no extra keys). ``no_controller`` and ``unknown_unfetched`` are
+    the split of one old answer (W2-B item 12): the resolver returns ``None``
+    when it could not dispositively read the control planes (a transient probe
+    error — retryable) and an EMPTY SEQUENCE when it probed every canonical
+    getter cleanly and the contract has no controlling key (renounced /
+    unowned — a proven absence, and a FACT about the contract). Both fail closed
+    to ``terminal=False`` / ``resolved_type="unknown"``, so nothing downstream
+    can read either as a key; a consumer that must not present "no owner" as
+    "we could not look" now has the distinction.
+
+    When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
     ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
     walk does NOT name one as THE key; instead it walks EACH plane to its own
     terminal and returns ``status="multi_plane"``, ``terminal=False``, a flat
@@ -142,11 +154,18 @@ def _walk_terminal(
             return _unknown("depth_exceeded")
         budget[0] -= 1
         steps = resolve_controllers(current)
-        if not steps:
-            # No controller fetched/verified -> unknown terminal.
+        if steps is None:
+            # The control planes could not be dispositively read (probe error) —
+            # not-determined, retryable next run.
             return _unknown("unknown_unfetched")
+        if not steps:
+            # Every canonical getter answered cleanly and named no controller:
+            # a PROVEN absence of a controlling key, not a failure to look.
+            return _unknown("no_controller")
         distinct = _distinct_controllers(steps)
         if not distinct:
+            # Steps were returned but none carried a usable address — fetched,
+            # unusable: not-determined, never a proven absence.
             return _unknown("unknown_unfetched")
         if len(distinct) > 1:
             controllers = list(distinct.keys())
@@ -295,6 +314,52 @@ def _role_value_from_origin(origin: str | None) -> int | str:
     return origin
 
 
+def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mapping[str, Mapping[str, Any]]) -> dict:
+    """One ``authority_roles`` grant from the COLUMN, with each principal filled
+    in from this row's own classified ``FunctionPrincipal`` payload.
+
+    The column's grants carry the role plus bare member ADDRESSES — the capability
+    surface knows who holds the role, not what those addresses are (Safe / EOA /
+    timelock). The same addresses are published under ``controllers`` fully
+    classified, and every consumer that merges the two dedups by address keeping
+    the FIRST record it sees (``protocolScore.collectPrincipals`` reads role
+    grants before controllers). Publishing the bare record first would therefore
+    make a role-granted principal read LESS resolved than the identical address
+    under ``controllers`` — an unresolved-controller reading of an address whose
+    type is known. Classified fields win.
+
+    ``details`` is merged KEY-WISE with the classified keys on top, never
+    replaced wholesale: the grant's ``details`` is always the non-None
+    ``{"source": "semantic_capability:role_grant"}`` marker, so a blanket
+    "grant's non-null fields override" erased the classified quorum/delay
+    witness (a Safe's ``owners``/``threshold``, a timelock's ``delay``) from
+    the exact record ``protocolScore.safeScore`` / ``principalLabel`` read
+    first — publishing a recorded threshold as "not recorded" and dropping the
+    principal to the 0.55 unknown floor.
+    """
+    principals: list[Any] = []
+    for principal in grant.get("principals") or []:
+        if not isinstance(principal, dict):
+            principals.append(principal)
+            continue
+        classified = classified_by_address.get(str(principal.get("address", "")).lower())
+        if not classified:
+            principals.append(dict(principal))
+            continue
+        merged = dict(classified)
+        merged.update({key: value for key, value in principal.items() if value is not None and key != "details"})
+        grant_details = principal.get("details")
+        classified_details = classified.get("details")
+        if isinstance(grant_details, dict) and isinstance(classified_details, dict):
+            merged["details"] = {**grant_details, **classified_details}
+        elif classified_details is not None:
+            merged["details"] = classified_details
+        elif grant_details is not None:
+            merged["details"] = grant_details
+        principals.append(merged)
+    return {**dict(grant), "principals": principals}
+
+
 def _build_company_function_entry(
     ef: EffectiveFunction,
     principals: list[FunctionPrincipal],
@@ -343,7 +408,17 @@ def _build_company_function_entry(
 
     authority_roles = list(authority_roles_by_key.values())
     if not authority_roles and ef.authority_roles:
-        authority_roles = list(ef.authority_roles)
+        classified_by_address: dict[str, dict[str, Any]] = {}
+        for controller_entry in controllers_by_label.values():
+            for principal in controller_entry.get("principals", []):
+                address = str((principal or {}).get("address", "")).lower()
+                if address:
+                    classified_by_address.setdefault(address, principal)
+        authority_roles = [
+            _enriched_role_grant(grant, classified_by_address)
+            for grant in ef.authority_roles
+            if isinstance(grant, dict)
+        ]
 
     controllers = list(controllers_by_label.values())
     has_more_specific_controller = any(
@@ -366,6 +441,9 @@ def _build_company_function_entry(
         "claims": list(getattr(ef, "claims", None) or []),
         "action_summary": ef.action_summary,
         "authority_public": ef.authority_public,
+        # See analysis_detail: the three-state verdict rides alongside the bool,
+        # null when the row predates the column.
+        "authority_openness": getattr(ef, "authority_openness", None),
         "controllers": controllers,
         "authority_roles": authority_roles,
         "direct_owner": direct_owner,

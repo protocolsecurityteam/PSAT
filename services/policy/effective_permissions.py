@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import (
+    AuthorityRoleGrant,
     EffectiveFunctionPermission,
     EffectivePermissions,
     PrincipalResolution,
@@ -26,7 +27,12 @@ from schemas.effective_permissions import (
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import (
+    capability_role_grants,
+    capability_surface_openness,
+    capability_surface_status,
+    project_capability_surface,
+)
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
     has_no_selector,
@@ -608,14 +614,18 @@ def _function_records_from_semantic_artifacts(
             if signature in predicate_trees_by_function:
                 record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
                 record["status"] = "unsupported"
-            elif signature in abi_only_signatures or signature in assembly_only_signatures:
-                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
-                record["status"] = "unsupported"
             elif signature in guard_uncertain_signatures:
                 # The static stage found a caller-authority (msg.sender EQ/NEQ)
                 # guard it could not lower into a tree. Absence here is "guard
                 # not extracted", not "unguarded" — fail closed, never public.
+                # Checked BEFORE the abi/assembly-only arms: a marked signature
+                # is usually also state-changing, and the specific evidence ("a
+                # caller guard was SEEN") must not be shadowed by the generic
+                # "authority not extracted" reason.
                 record["capability_expr"] = _unsupported_capability("guard_extraction_uncertain")
+                record["status"] = "unsupported"
+            elif signature in abi_only_signatures or signature in assembly_only_signatures:
+                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
                 record["status"] = "unsupported"
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
@@ -639,6 +649,7 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
         "conditions": conditions or None,
         "status": capability_surface_status(cap_dict, surface),
         "authority_public": surface.authority_public,
+        "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
 
@@ -722,13 +733,35 @@ def build_effective_permissions(
             else function_record.get("action_summary", "Performs a contract action.")
         )
 
+        # Three-state role half (see ``capability_role_grants``): the
+        # capability's own verdict replaces the historical literal ``[]`` that
+        # every one of 1,773 persisted rows carried. The verdict is read from
+        # whichever capability THIS record actually carries — the resolver's
+        # when it produced one, otherwise the policy-minted shape
+        # (``_public_capability`` / ``_unsupported_capability``): those rows
+        # are published with a capability_expr, so their role half must be the
+        # projection of that same dict, not a blanket ``None``. ``None`` is
+        # reserved for a record carrying no capability at all ("nothing was
+        # read").
+        resolved_capability = capability_dicts.get(fn_signature)
+        minted_capability = function_record.get("capability_expr")
+        role_source_capability = (
+            resolved_capability
+            if resolved_capability is not None
+            else (minted_capability if isinstance(minted_capability, dict) else None)
+        )
+        authority_roles_out = cast(
+            "list[AuthorityRoleGrant] | None",
+            capability_role_grants(role_source_capability) if role_source_capability is not None else None,
+        )
+
         function_permission: EffectiveFunctionPermission = {
             "function": fn_signature,
             "abi_signature": abi_signature,
             "selector": selector,
             "direct_owner": direct_owner,
             "authority_public": False,
-            "authority_roles": [],
+            "authority_roles": authority_roles_out,
             "controllers": controller_grants,
             "effect_targets": effect_targets_out,
             "effect_labels": effect_labels_out,
@@ -760,6 +793,12 @@ def build_effective_permissions(
             # conditional_universal short-circuits authority_public.
             if cap_columns["authority_public"]:
                 function_permission["authority_public"] = True
+            # The three-state verdict travels WITH the record: the writer's
+            # ``cap_dict is None`` branch reads ``fn.get("authority_openness")``,
+            # so dropping it here left the column NULL on every row the policy
+            # layer minted — and NULL is documented as "written before the
+            # column existed", which is false for a fresh row.
+            function_permission["authority_openness"] = cap_columns["authority_openness"]
         else:
             if function_record.get("capability_expr") is not None:
                 function_permission["capability_expr"] = function_record["capability_expr"]
@@ -769,6 +808,19 @@ def build_effective_permissions(
                 function_permission["status"] = function_record["status"]
             if function_record.get("authority_public") is True:
                 function_permission["authority_public"] = True
+            # Policy-minted capabilities (``_public_capability`` /
+            # ``_unsupported_capability``) get the SAME openness projection a
+            # resolver capability gets: ``open`` for the earned-public
+            # fall-through, ``not_determined`` for every fail-closed reroute
+            # (guard_extraction_uncertain / assembly_only / resolver-missing).
+            # The answer was already computable from the dict this record
+            # publishes; leaving the key absent published NULL with a meaning
+            # ("pre-column legacy row") the row does not have.
+            if isinstance(minted_capability, dict):
+                minted_surface = project_capability_surface(minted_capability)
+                function_permission["authority_openness"] = capability_surface_openness(
+                    minted_capability, minted_surface
+                )
 
         functions.append(function_permission)
 
