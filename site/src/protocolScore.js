@@ -216,6 +216,20 @@ function collectActions(contracts) {
   return actions;
 }
 
+// RECORDED, NOT FIXED (L-57 / W3-E item 12). A function whose open arm is
+// SELF-KEYED — `DelegationManager.undelegate(address)`, where `msg.sender == staker`
+// needs no authority but `msg.sender != staker` requires an operator or the
+// delegation approver — scores here as a plain public action, at the same 0.1 an
+// unconditionally permissionless one gets. The distinction that is lost is real (a
+// third party can be force-undelegated only through the gated arm) and it is worth
+// scoring, but nothing in the persisted plane carries it: `authority_public` and
+// `authority_openness` are whole-function verdicts, and `capability_expr` records
+// the resolved caller set, not a per-arm split with a self-keyed marker. Deriving
+// one here would mean re-deciding the earned-public algebra from prose, which is
+// the producer's job and a scoring-vocabulary extension, not a consumer-side
+// split. Verified not to be a laundering-safety gap in the meantime: the current
+// score is the SEVERE reading of both arms, so the missing distinction can only
+// make a protocol read better than it does today, never worse.
 function actionProtectionScore(action) {
   if (action.principals.length === 0) {
     // A consumed one-shot initializer is inert — the open path can never be

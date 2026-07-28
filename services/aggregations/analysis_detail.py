@@ -86,6 +86,17 @@ def _artifacts_or_degrade(
     key nothing is stored under). Every artifact this payload carries is
     consumed as evidence about the contract, and the two shortfalls are not the
     same evidence — one may resolve itself, the other never will.
+
+    NO ``site/`` CONSUMER, and this is why (L-3, W3-E item 12). Nothing in the SPA
+    fetches this merged payload at all: ``grep`` over ``site/src`` finds
+    ``/api/analyses`` only as the LISTING (``App.jsx``) plus two per-artifact reads
+    (``EntityActivity`` → ``upgrade_history``, ``layout/dependencies`` →
+    ``dependency_graph_viz``), both of which go through
+    ``routers/analyses``'s artifact endpoint and already receive the same three
+    answers on the wire via ``X-PSAT-Artifact-State``. So wiring a consumer for
+    these two maps means building a page that reads the multi-MB payload, which is
+    a feature and not a consumer-side split. The maps stay published for API
+    consumers; the SPA's equivalent distinction is served by the header.
     """
     try:
         return deps.get_all_artifacts(session, job_id)
