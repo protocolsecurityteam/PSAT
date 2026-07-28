@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "description": "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow facts for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended changes — and justify each hunk of the diff, since a diff here is a change in what the pipeline publishes about real contracts.",
   "contracts": [
     {
@@ -12,6 +12,7 @@
           "full_name": "allowance(address,address)",
           "selector": "0xdd62ed3e",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -25,6 +26,7 @@
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -56,6 +58,7 @@
           "full_name": "balanceOf(address)",
           "selector": "0x70a08231",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -71,6 +74,7 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
@@ -105,6 +109,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.set",
@@ -144,6 +149,7 @@
           "full_name": "totalSupply()",
           "selector": "0x18160ddd",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -157,6 +163,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
@@ -188,6 +195,7 @@
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
@@ -221,6 +229,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.unset",
@@ -268,6 +277,7 @@
           "full_name": "owner()",
           "selector": "0x8da5cb5b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OwnableStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -285,6 +295,7 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.renounce",
@@ -320,6 +331,7 @@
           "full_name": "setTokenOut(address)",
           "selector": "0xc158910d",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: tokenOut.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -346,6 +358,7 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.transfer",
@@ -389,6 +402,7 @@
           "full_name": "canCall(address,address,bytes4)",
           "selector": "0xb7009613",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -404,6 +418,7 @@
           "effect_labels": [
             "authority_update"
           ],
+          "action_summary": "Updates the authority contract used for permission checks.",
           "claims": [
             {
               "claim_id": "authority.replace",
@@ -452,6 +467,7 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
@@ -496,6 +512,7 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
@@ -540,6 +557,7 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
@@ -584,6 +602,7 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.transfer",
@@ -635,6 +654,7 @@
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance.",
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -661,6 +681,7 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
@@ -697,6 +718,7 @@
           "effect_labels": [
             "burn"
           ],
+          "action_summary": "Burns contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.burn",
@@ -733,6 +755,7 @@
           "effect_labels": [
             "hook_update"
           ],
+          "action_summary": "Updates hook configuration that can affect later contract behavior.",
           "claims": [
             {
               "claim_id": "callee_pointer.rotate",
@@ -773,6 +796,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
@@ -815,6 +839,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
@@ -864,6 +889,7 @@
           "full_name": "peers(uint32)",
           "selector": "0xbb0b6a53",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -879,6 +905,7 @@
           "full_name": "setDelegate(address)",
           "selector": "0xca5eb5e1",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [
             {
               "claim_id": "lz_oapp.set_delegate",
@@ -912,6 +939,7 @@
           "full_name": "setLockBox(address)",
           "selector": "0x2d8c8039",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -936,6 +964,7 @@
           "full_name": "setPeer(uint32,bytes32)",
           "selector": "0x3400288b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [
             {
               "claim_id": "lz_oapp.set_peer",
@@ -977,6 +1006,7 @@
           "full_name": "approveSelf(uint256)",
           "selector": "0x9c9457ff",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -994,6 +1024,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.set",
@@ -1034,6 +1065,7 @@
           "full_name": "paused()",
           "selector": "0x5c975abb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: PAUSABLE_STORAGE_SLOT.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -1049,6 +1081,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -1075,6 +1108,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.unset",
@@ -1125,6 +1159,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -1163,6 +1198,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
@@ -1255,6 +1291,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
@@ -1329,6 +1366,7 @@
           "effect_labels": [
             "asset_pull"
           ],
+          "action_summary": "Pulls assets into the contract.",
           "claims": [
             {
               "claim_id": "flow.in",
@@ -1416,6 +1454,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -1496,6 +1535,7 @@
           "full_name": "setFeeRecipient(address)",
           "selector": "0xe74b981b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: feeRecipient.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -1522,6 +1562,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -1627,6 +1668,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -1718,6 +1760,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -1818,6 +1861,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -1850,6 +1894,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
@@ -1929,6 +1974,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
@@ -2010,6 +2056,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
@@ -2114,6 +2161,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2194,6 +2242,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2271,6 +2320,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2351,6 +2401,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2428,6 +2479,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2505,6 +2557,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2582,6 +2635,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2657,6 +2711,7 @@
           "full_name": "setCap(uint256)",
           "selector": "0x47786d37",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: cap.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -2672,6 +2727,7 @@
           "full_name": "setGovernor(address)",
           "selector": "0xc42cf535",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: governor.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -2697,6 +2753,7 @@
           "effect_labels": [
             "asset_pull"
           ],
+          "action_summary": "Pulls assets into the contract.",
           "claims": [
             {
               "claim_id": "flow.in",
@@ -2781,6 +2838,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -2834,6 +2892,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -2865,6 +2924,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -2955,6 +3015,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -3037,6 +3098,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -3126,6 +3188,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -3213,6 +3276,7 @@
           "full_name": "setAllowed(address,bool)",
           "selector": "0x4697f05d",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowedPayee.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3237,6 +3301,7 @@
           "full_name": "setCommitment(bytes32)",
           "selector": "0xabe20032",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: payoutCommitment.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3261,6 +3326,7 @@
           "full_name": "setTreasury(address)",
           "selector": "0xf0f44260",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: treasury.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3295,6 +3361,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3356,6 +3423,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3404,6 +3472,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3455,6 +3524,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3514,6 +3584,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3561,6 +3632,7 @@
           "effect_labels": [
             "delegatecall_execution"
           ],
+          "action_summary": "Executes delegatecall-controlled logic.",
           "claims": [
             {
               "claim_id": "delegatecall.execute",
@@ -3609,6 +3681,7 @@
           "full_name": "setAdminImpl(address)",
           "selector": "0xfc0cfeee",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: assembly_storage:slot.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3633,6 +3706,7 @@
           "full_name": "setModule(address)",
           "selector": "0x47f543bc",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: module.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3657,6 +3731,7 @@
           "full_name": "setSideModule(address)",
           "selector": "0x5fcce199",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: sideModule.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3672,6 +3747,7 @@
           "full_name": "setUserModule(address)",
           "selector": "0xe47baf09",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: userModule.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -3697,6 +3773,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -3746,6 +3823,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -3795,6 +3873,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -3847,6 +3926,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -3907,6 +3987,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -3967,6 +4048,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4026,6 +4108,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4079,6 +4162,7 @@
             "arbitrary_external_call",
             "asset_send"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4187,6 +4271,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4243,6 +4328,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4292,6 +4378,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4341,6 +4428,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -4373,6 +4461,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4425,6 +4514,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4481,6 +4571,7 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
@@ -4531,6 +4622,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -4575,6 +4667,7 @@
           "full_name": "fallback()",
           "selector": "",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4599,6 +4692,7 @@
           "full_name": "pokeAll()",
           "selector": "0x59992dc2",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4623,6 +4717,7 @@
           "full_name": "pokeTo(uint256)",
           "selector": "0x5560e628",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4647,6 +4742,7 @@
           "full_name": "receive()",
           "selector": "",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4669,6 +4765,7 @@
           "full_name": "withdrawAll()",
           "selector": "0x853828b6",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: lastAmount.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4693,6 +4790,7 @@
           "full_name": "withdrawTo(uint256)",
           "selector": "0x93bc96fa",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: lastAmount.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4727,6 +4825,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.set",
@@ -4766,6 +4865,7 @@
           "full_name": "pauseTimed()",
           "selector": "0x24a3f499",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: pausedUntil.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4790,6 +4890,7 @@
           "full_name": "transferFreezable(address,uint256)",
           "selector": "0x6eac583f",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4814,6 +4915,7 @@
           "full_name": "transferTimed(address,uint256)",
           "selector": "0x88897a74",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4840,6 +4942,7 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.unset",
@@ -4879,6 +4982,7 @@
           "full_name": "unpauseTimed()",
           "selector": "0xbb912b8b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: pausedUntil.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -4913,6 +5017,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "flow.in",
@@ -4959,6 +5064,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -4991,6 +5097,7 @@
           "full_name": "setRecovery(address)",
           "selector": "0xf0d85c89",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: recovery.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -5015,6 +5122,7 @@
           "full_name": "setVault(address)",
           "selector": "0x6817031b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: vault.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
@@ -5049,6 +5157,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -5139,6 +5248,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -5267,6 +5377,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -5395,6 +5506,7 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
@@ -5483,6 +5595,7 @@
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance.",
           "claims": [
             {
               "claim_id": "erc20.approve",
@@ -5509,6 +5622,7 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
@@ -5544,6 +5658,7 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
@@ -5569,6 +5684,7 @@
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance, balanceOf.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
@@ -5603,6 +5719,7 @@
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance, balanceOf.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
@@ -5640,6 +5757,7 @@
             "asset_send",
             "burn"
           ],
+          "action_summary": "Burns contract balances or shares and sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
