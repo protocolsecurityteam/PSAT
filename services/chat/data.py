@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from db.models import (
     AuditContractCoverage,
@@ -41,6 +41,18 @@ def _canonical_chain(c: str | None) -> str | None:
     if not c:
         return None
     return _CHAIN_ALIASES.get(c.lower(), c.lower())
+
+
+def _chain_match_values(canonical: str) -> list[str]:
+    """Every stored spelling that canonicalizes to *canonical*.
+
+    ``_canonical_chain`` folds aliases in Python; a SQL predicate needs the fold
+    expanded, or a row tagged ``mainnet`` is invisible to a ``chain="ethereum"``
+    query and the caller silently sees "no such node" instead of the node.
+    """
+    values = {canonical}
+    values.update(stored for stored, folded in _CHAIN_ALIASES.items() if folded == canonical)
+    return sorted(values)
 
 
 def classify_address(session, address: str, chain: str | None = None) -> dict[str, Any]:
@@ -69,9 +81,36 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
         return {"address": address, "kind": "unknown", "is_eoa": False, "note": ""}
     addr_lc = address.lower()
 
-    cg_node = session.execute(
-        select(ControlGraphNode).where(func.lower(ControlGraphNode.address) == addr_lc).limit(1)
-    ).scalar_one_or_none()
+    # ``control_graph_nodes`` has no chain column at all — ``contract_id`` (which
+    # is chain-scoped through ``contracts.chain``) is the only scoping key — so the
+    # chain predicate goes through the join, not onto the node. Without it this
+    # lookup keys on a BARE ADDRESS while ``chain`` is a parameter of this function
+    # and is used on the very next line: three real cross-chain twins already exist
+    # in ``contracts`` (``0x5bdd4b0d…`` ``TopUp`` on ethereum AND scroll, both
+    # protocol_id=1 — the canonical deterministic-deploy aliasing case), and the
+    # aliasing is unrealised today for exactly one reason: no analysis job has ever
+    # run on a second chain, so every control-graph row is ethereum. That number
+    # measures analysis coverage, not the hazard.
+    #
+    # A caller that supplies no chain keeps the address-only lookup (there is no
+    # chain to scope to, and inventing mainnet would turn a missing hint into false
+    # confidence — the same reason ``_canonical_chain`` keeps NULL its own bucket).
+    stmt = select(ControlGraphNode).join(Contract, ControlGraphNode.contract_id == Contract.id)
+    stmt = stmt.where(func.lower(ControlGraphNode.address) == addr_lc)
+    canonical = _canonical_chain(chain)
+    if canonical is not None:
+        stmt = stmt.where(func.lower(Contract.chain).in_(_chain_match_values(canonical)))
+    # An unordered LIMIT 1 over a multi-row set is a query-plan coin flip, and it is
+    # not hypothetical here: 10 local addresses carry differing ``details`` across
+    # their rows and 2 disagree on ``resolved_type`` between ``contract`` (a
+    # non-terminal way-point) and ``timelock`` (a settled key with a delay). The
+    # order is a total one AND prefers a classified row, so the answer is both
+    # reproducible and never the less-resolved of two rows about the same address.
+    stmt = stmt.order_by(
+        case((ControlGraphNode.resolved_type.is_(None), 1), (ControlGraphNode.resolved_type == "unknown", 1), else_=0),
+        ControlGraphNode.id.asc(),
+    ).limit(1)
+    cg_node = session.execute(stmt).scalars().first()
     contract = _resolve_contract(session, address, chain)
 
     details = (cg_node.details if cg_node else None) or {}
@@ -169,12 +208,29 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
 
-    last_event = session.execute(
-        select(UpgradeEvent)
-        .where(UpgradeEvent.contract_id == contract.id)
-        .order_by(UpgradeEvent.block_number.desc().nullslast())
-        .limit(1)
-    ).scalar_one_or_none()
+    # "The last upgrade", and the polarity has to match the words (L-20). Under
+    # ``block_number DESC NULLS LAST`` a poll-detected upgrade — ``block_number``
+    # is NULL by design for the event-scan/poll writers — sorted LAST, i.e. was
+    # reported as the OLDEST event, so ``last_upgrade`` named the newest
+    # BLOCK-CARRYING upgrade while a more recent one sat unreported. Timestamp
+    # leads because every writer sets it (W0-9 gave the poll rows one) and it
+    # answers the question actually being asked; the block tiebreak puts NULLS
+    # FIRST under DESC for the same reason, and ``id`` makes the order total so two
+    # rows with one timestamp cannot swap between calls.
+    last_event = (
+        session.execute(
+            select(UpgradeEvent)
+            .where(UpgradeEvent.contract_id == contract.id)
+            .order_by(
+                UpgradeEvent.timestamp.desc().nullslast(),
+                UpgradeEvent.block_number.desc().nullsfirst(),
+                UpgradeEvent.id.desc(),
+            )
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
 
     # Classify each controller value (often the address that holds a
     # role like ``owner`` or ``DEFAULT_ADMIN_ROLE``). Without this the
@@ -215,6 +271,11 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
                 "timestamp": last_event.timestamp.isoformat() if last_event.timestamp else None,
                 "new_impl": last_event.new_impl,
                 "tx_hash": last_event.tx_hash,
+                # This result is read by an LLM, which cannot be relied on to
+                # interpret ``"block": null`` as "the block is unknown" rather than
+                # "block zero" or "no upgrade". Name the detection route instead:
+                # a poll-detected upgrade has no block and no tx hash by design.
+                "detection": ("log_indexed" if last_event.block_number is not None else "poll_detected"),
             }
             if last_event
             else None
