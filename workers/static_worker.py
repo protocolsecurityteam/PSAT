@@ -1978,7 +1978,6 @@ class StaticWorker(BaseWorker):
                 is_upgradeable=summary.get("is_upgradeable"),
                 is_pausable=summary.get("is_pausable"),
                 has_timelock=summary.get("has_timelock"),
-                risk_level=summary.get("static_risk_level"),
                 is_factory=summary.get("is_factory"),
                 is_nft=summary.get("is_nft"),
                 standards=summary.get("standards", []),

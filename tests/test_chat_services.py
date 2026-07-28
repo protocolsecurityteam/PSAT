@@ -153,7 +153,7 @@ def seeded_protocol(db_session: Session):
     db_session.add_all([proxy, impl, plain, timelock])
     db_session.flush()
 
-    db_session.add(ContractSummary(contract_id=proxy.id, control_model="proxy", risk_level="medium"))
+    db_session.add(ContractSummary(contract_id=proxy.id, control_model="proxy"))
 
     # Source file the agent can grep.
     db_session.add(

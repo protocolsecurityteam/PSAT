@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-SEVERITY_ORDER = {"High": 0, "Medium": 1, "Low": 2, "Informational": 3, "Optimization": 4}
 STANDARD_SIGNATURES = {
     "ERC20": {
         "totalSupply()",

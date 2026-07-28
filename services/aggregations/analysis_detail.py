@@ -581,7 +581,6 @@ def _inherit_from_impl(
                 "is_upgradeable": impl_c.summary.is_upgradeable,
                 "is_pausable": impl_c.summary.is_pausable,
                 "has_timelock": impl_c.summary.has_timelock,
-                "static_risk_level": impl_c.summary.risk_level,
                 "standards": list(impl_c.summary.standards or []),
             }
 

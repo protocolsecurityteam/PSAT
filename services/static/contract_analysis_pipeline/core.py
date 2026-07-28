@@ -28,13 +28,11 @@ from .shared import _load_json, _select_subject_contract
 from .summaries import (
     _build_semantic_control_summary,
     _build_tracking_hints,
-    _derive_static_risk_level,
     _detect_contract_classification,
     _detect_pausability,
     _detect_timelock,
     _detect_upgradeability,
     _determine_control_model,
-    _summarize_slither,
 )
 from .tracking import build_controller_tracking
 
@@ -186,7 +184,6 @@ def collect_contract_analysis_with_artifacts(
 
     with _phase("slither_parse", durations_ms):
         slither = Slither(_slither_target(project_dir, meta))
-    slither_output = _load_json(project_dir / "slither_results.json", {})
 
     subject_contract = _select_subject_contract(slither, meta.get("contract_name"))
     if subject_contract is None:
@@ -297,32 +294,6 @@ def collect_contract_analysis_with_artifacts(
             record_degraded(phase="secondary_impl_slot", exc=exc, context={"project_dir": str(project_dir)})
             secondary_impl_pointers = []
     record_stage_metric("secondary_impl_pointers", len(secondary_impl_pointers))
-    slither_summary = _summarize_slither(slither_output)
-    detector_output = slither_summary["detector_output"]
-    analysis_errors: list[str] = []
-    if detector_output == "absent":
-        # LOUD. This was `errors: []` on 75/75 artifacts, published next to
-        # `static_analysis_completed: true` and a zero-filled `detector_counts`
-        # -- a reader has every reason to take that as "analysed, nothing
-        # found". The detector pass has in fact never run in this pipeline
-        # since its writer was removed, and a total outage that reports no
-        # errors is its own defect.
-        message = (
-            "slither detector pass produced no output (no slither_results.json in the project "
-            "directory): detector_counts and static_risk_level are NOT DETERMINED, not clean. "
-            "The IR-derived analysis (predicates, effects, claims, classification) is unaffected."
-        )
-        analysis_errors.append(message)
-        logger.error(
-            "slither detector output absent for %s",
-            project_dir,
-            extra={"phase": "slither_detectors", "project_dir": str(project_dir)},
-        )
-        record_degraded(
-            phase="slither_detectors",
-            exc=RuntimeError(message),
-            context={"project_dir": str(project_dir), "contract_name": subject_name},
-        )
     audit_alignment: AuditAlignment = {
         "status": "not_checked",
         "bytecode_match": "not_checked",
@@ -334,7 +305,6 @@ def collect_contract_analysis_with_artifacts(
         "is_upgradeable": upgradeability["is_upgradeable"],
         "is_pausable": pausability["is_pausable"],
         "has_timelock": timelock["has_timelock"],
-        "static_risk_level": _derive_static_risk_level(slither_summary["detector_counts"]),
         "standards": classification["standards"],
         "is_factory": classification["is_factory"],
         "is_nft": classification["is_nft"],
@@ -350,9 +320,7 @@ def collect_contract_analysis_with_artifacts(
         },
         "analysis_status": {
             "static_analysis_completed": True,
-            "slither_completed": detector_output == "present",
-            "detector_output": detector_output,
-            "errors": analysis_errors,
+            "errors": [],
         },
         "summary": summary,
         "contract_classification": classification,
@@ -361,7 +329,6 @@ def collect_contract_analysis_with_artifacts(
         "pausability": pausability,
         "timelock": timelock,
         "audit_alignment": audit_alignment,
-        "slither": slither_summary,
         "tracking_hints": _build_tracking_hints(semantic_control, upgradeability, pausability, timelock),
         "controller_tracking": controller_tracking,
         "secondary_impl_pointers": secondary_impl_pointers,

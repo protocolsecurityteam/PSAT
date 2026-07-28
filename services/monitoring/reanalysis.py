@@ -217,7 +217,6 @@ def _build_snapshot(session: Session, mc: MonitoredContract) -> dict[str, Any]:
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
     if summary:
-        snap["risk_level"] = summary.risk_level
         snap["control_model"] = summary.control_model
         snap["is_pausable"] = summary.is_pausable
 
@@ -293,10 +292,6 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
     if summary:
-        old_risk = snapshot.get("risk_level")
-        if old_risk and summary.risk_level and old_risk != summary.risk_level:
-            changes.append(f"Risk level: {old_risk} → {summary.risk_level}")
-
         old_model = snapshot.get("control_model")
         if old_model and summary.control_model and old_model != summary.control_model:
             changes.append(f"Control model: {old_model} → {summary.control_model}")

@@ -264,7 +264,6 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
         "is_pausable": summary.is_pausable if summary else None,
         "has_timelock": summary.has_timelock if summary else None,
         "control_model": summary.control_model if summary else None,
-        "risk_level": summary.risk_level if summary else None,
         "controllers": controllers,
         "last_upgrade": (
             {

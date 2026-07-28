@@ -115,7 +115,6 @@ def _write_project(tmp_path: Path, contract_name: str, source: str) -> Path:
         )
         + "\n"
     )
-    (project_dir / "slither_results.json").write_text(json.dumps({"results": {"detectors": []}}) + "\n")
     return project_dir
 
 

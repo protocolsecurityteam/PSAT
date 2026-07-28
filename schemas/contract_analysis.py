@@ -7,10 +7,6 @@ from typing import Literal, TypedDict
 from typing_extensions import NotRequired
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
-# ``clean`` = the detector pass ran and reported nothing. ``unknown`` is
-# retained only for rows written before the split; the producer no longer emits
-# it, and ``None`` (SQL NULL) is what "the pass did not run" now means.
-RiskLevel = Literal["low", "medium", "high", "clean", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
 TimelockPattern = Literal["oz_timelock", "governor_timelock", "custom", "none", "unknown"]
 CurrentHoldersStatus = Literal["unknown_static_only"]
@@ -68,13 +64,9 @@ class Subject(TypedDict):
 
 
 class AnalysisStatus(TypedDict):
+    # The IR-derived analysis (predicates, effects, claims, classification) is
+    # the whole of the static stage; there is no detector pass behind this flag.
     static_analysis_completed: bool
-    slither_completed: bool
-    # ``absent`` means the Slither DETECTOR pass produced no result document.
-    # ``static_analysis_completed`` stays true because the IR-derived analysis
-    # (predicates, effects, claims, classification) did complete -- the two are
-    # different passes and were being reported as one.
-    detector_output: Literal["present", "absent"]
     errors: list[str]
 
 
@@ -92,7 +84,6 @@ class Summary(TypedDict):
     is_upgradeable: bool
     is_pausable: bool | None
     has_timelock: bool | None
-    static_risk_level: RiskLevel | None
     standards: list[str] | None
     is_factory: bool | None
     is_nft: bool | None
@@ -196,21 +187,6 @@ class AuditAlignment(TypedDict):
     status: str
     bytecode_match: str
     notes: list[str]
-
-
-class SlitherFinding(TypedDict):
-    check: str
-    impact: str
-    confidence: str
-    description: str
-
-
-class SlitherSummary(TypedDict):
-    # ``None`` on both when ``detector_output`` is ``absent``. A zero-filled
-    # count map is a clean bill of health; a pass that never ran is not.
-    detector_output: Literal["present", "absent"]
-    detector_counts: dict[str, int] | None
-    key_findings: list[SlitherFinding] | None
 
 
 class TrackingHint(TypedDict):
@@ -328,7 +304,6 @@ class ContractAnalysis(TypedDict):
     pausability: PausabilityAnalysis
     timelock: TimelockAnalysis
     audit_alignment: AuditAlignment
-    slither: SlitherSummary
     tracking_hints: list[TrackingHint]
     controller_tracking: list[ControllerTrackingTarget]
     # Split-proxy secondary-impl pointers detected on the primary impl. Optional

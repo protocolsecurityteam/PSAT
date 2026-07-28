@@ -14,7 +14,7 @@ from services.static import collect_contract_analysis
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
 
 
-def _write_project(tmp_path: Path, contract_name: str, source_code: str, slither_output: dict | None = None) -> Path:
+def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
     project_dir = tmp_path / contract_name
     (project_dir / "src").mkdir(parents=True)
     (project_dir / "foundry.toml").write_text(
@@ -30,9 +30,6 @@ def _write_project(tmp_path: Path, contract_name: str, source_code: str, slither
             }
         )
         + "\n"
-    )
-    (project_dir / "slither_results.json").write_text(
-        json.dumps(slither_output or {"results": {"detectors": []}}) + "\n"
     )
     return project_dir
 

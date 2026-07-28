@@ -1156,7 +1156,6 @@ def test_company_overview_basic(db_session, api_client):
             is_upgradeable=False,
             is_pausable=True,
             has_timelock=False,
-            risk_level="medium",
             is_factory=False,
             standards=["ERC20"],
             source_verified=True,
@@ -1511,7 +1510,6 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
     impl_contract.summary.is_upgradeable = True
     impl_contract.summary.is_pausable = False
     impl_contract.summary.has_timelock = False
-    impl_contract.summary.risk_level = "high"
     impl_contract.summary.standards = ["ERC20"]
 
     ef = MagicMock()
@@ -1741,7 +1739,6 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
             is_upgradeable=True,
             is_pausable=True,
             has_timelock=True,
-            risk_level="high",
             is_factory=False,
             standards=[],
             source_verified=True,

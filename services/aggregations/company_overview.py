@@ -1488,7 +1488,6 @@ def build_governance_view(
             "owner": owner,
             "controllers": controllers,
             "control_model": control_model,
-            "risk_level": summary_row.risk_level if summary_row else None,
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
             "upgrade_count": upgrade_count,

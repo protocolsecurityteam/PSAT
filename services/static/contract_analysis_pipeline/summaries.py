@@ -12,18 +12,14 @@ from schemas.contract_analysis import (
     ContractClassification,
     ControlModel,
     PausabilityAnalysis,
-    RiskLevel,
     RoleDefinition,
     SemanticControlAnalysis,
-    SlitherFinding,
-    SlitherSummary,
     TimelockAnalysis,
     TrackingHint,
     UpgradeabilityAnalysis,
 )
 
 from .constants import (
-    SEVERITY_ORDER,
     STANDARD_EVENTS,
     STANDARD_SIGNATURES,
 )
@@ -1534,70 +1530,6 @@ def _detect_timelock(
         "authorized_roles": sorted({role["role"] for role in role_definitions}) if has_timelock else [],
         "evidence": evidence,
     }
-
-
-def _slither_detector_output_present(slither_output: Any) -> bool:
-    """Did the detector pass produce a result document at all?
-
-    ``slither_results.json`` is read with a ``{}`` default, and ``{}`` used to
-    flow straight into ``detector_counts = {High: 0, Medium: 0, ...}`` -- a
-    positive assertion of zero findings for a pass that never ran. It has never
-    run: the writer (``StaticWorker._run_slither_phase``) was removed when
-    vulnerability-detector triage was split out, and the file is absent on
-    75/75 production artifacts."""
-    return isinstance(slither_output, Mapping) and isinstance(slither_output.get("results"), Mapping)
-
-
-def _summarize_slither(slither_output: dict) -> SlitherSummary:
-    if not _slither_detector_output_present(slither_output):
-        # NOT ``{impact: 0}``. Absent counts and zero counts are different
-        # facts and only one of them is a clean bill of health.
-        return {
-            "detector_output": "absent",
-            "detector_counts": None,
-            "key_findings": None,
-        }
-
-    detectors = slither_output.get("results", {}).get("detectors", [])
-    counts = {impact: 0 for impact in SEVERITY_ORDER}
-    for detector in detectors:
-        impact = detector.get("impact", "Informational")
-        counts.setdefault(impact, 0)
-        counts[impact] += 1
-
-    key_findings: list[SlitherFinding] = []
-    for detector in sorted(detectors, key=lambda item: SEVERITY_ORDER.get(item.get("impact", ""), 99))[:10]:
-        description = str(detector.get("description", "")).strip().split("\n")[0]
-        key_findings.append(
-            {
-                "check": detector.get("check", "unknown"),
-                "impact": detector.get("impact", "Unknown"),
-                "confidence": detector.get("confidence", "Unknown"),
-                "description": description,
-            }
-        )
-
-    return {
-        "detector_output": "present",
-        "detector_counts": counts,
-        "key_findings": key_findings,
-    }
-
-
-def _derive_static_risk_level(detector_counts: dict[str, int] | None) -> RiskLevel | None:
-    """``None`` = the detector pass did not run. ``"clean"`` = it ran and found
-    nothing. The old code answered ``"unknown"`` for both, which is why
-    ``risk_level`` reads ``unknown`` on 92/92 local rows -- indistinguishable
-    from a contract Slither had cleared."""
-    if detector_counts is None:
-        return None
-    if detector_counts.get("High", 0) > 0:
-        return "high"
-    if detector_counts.get("Medium", 0) > 0:
-        return "medium"
-    if sum(detector_counts.values()) > 0:
-        return "low"
-    return "clean"
 
 
 def _determine_control_model(

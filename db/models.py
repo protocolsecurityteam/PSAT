@@ -703,7 +703,6 @@ class ContractSummary(Base):
     is_upgradeable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_pausable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     has_timelock: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_factory: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_nft: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     standards: Mapped[list[str] | None] = mapped_column(ARRAY(String(50)), nullable=True)

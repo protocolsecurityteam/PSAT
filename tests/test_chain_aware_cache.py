@@ -67,7 +67,6 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
             is_upgradeable=False,
             is_pausable=True,
             has_timelock=False,
-            risk_level="medium",
         )
     )
     session.add(

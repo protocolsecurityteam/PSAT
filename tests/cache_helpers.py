@@ -341,7 +341,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
             is_upgradeable=False,
             is_pausable=True,
             has_timelock=False,
-            risk_level="medium",
         )
     )
 

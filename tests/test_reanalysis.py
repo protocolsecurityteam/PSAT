@@ -1217,7 +1217,6 @@ class TestSnapshotAndDiff:
 
         summary = ContractSummary(
             contract_id=contract.id,
-            risk_level="medium",
             control_model="owner",
             is_pausable=True,
         )
@@ -1231,7 +1230,6 @@ class TestSnapshotAndDiff:
         snap = _build_snapshot(db_session, mc)
         assert snap["implementation"] == "0x" + "b2" * 20
         assert snap["admin"] == "0x" + "c3" * 20
-        assert snap["risk_level"] == "medium"
         assert snap["control_model"] == "owner"
         assert snap["is_pausable"] is True
 

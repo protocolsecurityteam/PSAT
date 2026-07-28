@@ -87,14 +87,6 @@ def _stub_analysis_phases(monkeypatch):
     monkeypatch.setattr(core, "_detect_upgradeability", lambda *_a, **_k: {"is_upgradeable": False})
     monkeypatch.setattr(core, "_detect_pausability", lambda *_a, **_k: {"is_pausable": False})
     monkeypatch.setattr(core, "_detect_timelock", lambda *_a, **_k: {"has_timelock": False})
-    # The stub mirrors the real "detector pass ran" shape: this test is about
-    # the predicate-emit failure path, not the detector-outage one.
-    monkeypatch.setattr(
-        core,
-        "_summarize_slither",
-        lambda *_a, **_k: {"detector_output": "present", "detector_counts": {}, "key_findings": []},
-    )
-    monkeypatch.setattr(core, "_derive_static_risk_level", lambda *_a, **_k: "low")
     monkeypatch.setattr(core, "_determine_control_model", lambda *_a, **_k: "unknown")
     monkeypatch.setattr(core, "_build_tracking_hints", lambda *_a, **_k: {})
     return subject
