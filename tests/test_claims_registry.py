@@ -430,7 +430,8 @@ _SWEEP_TREES = {"canonical_signatures": {"sweepTo(IERC20,address,uint256)": "swe
 
 def test_build_claims_records_the_canonical_abi_selector():
     artifact = build_claims(None, _sweep_effects(), _SWEEP_TREES)
-    selectors = artifact["abi_selectors"]
+    assert "abi_selectors" in artifact
+    selectors = artifact.get("abi_selectors") or {}
     assert selectors["sweepTo(IERC20,address,uint256)"] == "0x0aeef8c8"
     assert selectors["sweep(address)"] == "0x01681a62"
 
@@ -441,7 +442,8 @@ def test_build_claims_never_fabricates_a_selector():
     fallback/receive (no selector exists), and a user-typed signature with no
     canonical mapping and no Slither subject to lower it."""
     artifact = build_claims(None, _sweep_effects(), {})  # no canonical map
-    selectors = artifact["abi_selectors"]
+    assert "abi_selectors" in artifact
+    selectors = artifact.get("abi_selectors") or {}
     assert "receive()" not in selectors
     assert "fallback()" not in selectors
     assert "sweepTo(IERC20,address,uint256)" not in selectors
