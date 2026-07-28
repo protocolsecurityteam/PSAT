@@ -1078,3 +1078,88 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
     assert any(g.kind in ("if_revert", "custom_revert") for g in gates), _gate_kinds(gates)
     cap = _cap_for(sl, "setRole(address,uint256,bool)")
     assert cap.kind == "external_check_only", f"Solady owner-gated setRole must fail closed, got {cap.kind}"
+
+
+# ---------------------------------------------------------------------------
+# L-38: a modifier on an INTERNAL callee is a real gate of the entry function.
+# EigenLayer StrategyManager routes both deposit entries through
+# ``_depositIntoStrategy(...) internal onlyStrategiesWhitelistedForDeposit(strategy)``
+# whose body is a mapping-allowlist require on parameter 0; the entry's result
+# is assigned/returned, never branched on, so the cross-function recursion is
+# the ONLY path to the gate. Wave 1's a96b2ca3 restored that recursion; these
+# arms pin the class so it cannot silently regress (the published verdict was a
+# false ``unconstrained_proven`` — a positive proof of absence over a gate that
+# exists).
+# ---------------------------------------------------------------------------
+
+_L38_SOURCE = """
+    pragma solidity ^0.8.19;
+    contract C {
+        mapping(address => bool) public strategyWhitelist;
+        uint256 public totalShares;
+        modifier onlyWhitelisted(address strategy) {
+            require(strategyWhitelist[strategy], "strategy not whitelisted");
+            _;
+        }
+        function deposit(address strategy, uint256 amount) external returns (uint256 shares) {
+            shares = _deposit(strategy, amount);
+        }
+        // Negative control (the sweepDust discipline): same topology, a real
+        // tree (the amount guard), and NO gate on ``strategy``. The fix must
+        // not manufacture a constraint here.
+        function sweep(address strategy, uint256 amount) external returns (uint256 shares) {
+            require(amount > 0, "zero amount");
+            shares = _sweepInner(strategy, amount);
+        }
+        function _deposit(address strategy, uint256 amount) internal onlyWhitelisted(strategy) returns (uint256) {
+            totalShares += amount;
+            return amount;
+        }
+        function _sweepInner(address strategy, uint256 amount) internal returns (uint256) {
+            totalShares += amount;
+            return amount;
+        }
+    }
+"""
+
+
+def test_internal_callee_modifier_gate_is_lifted(tmp_path):
+    """Detector arm: the whitelist require inside the internal callee's
+    modifier is found from the entry function."""
+    sl = _compile(tmp_path, _L38_SOURCE)
+    gates = RevertDetector(_function(sl, "deposit")).run()
+    requires = [g for g in gates if g.kind == "require" and "strategyWhitelist" in (g.expression_text or "")]
+    assert requires, f"internal-callee-modifier gate must be lifted, got {_gate_kinds(gates)}"
+    control_gates = RevertDetector(_function(sl, "sweep")).run()
+    assert not any("strategyWhitelist" in (g.expression_text or "") for g in control_gates), (
+        "the ungated sibling must not inherit the gate"
+    )
+
+
+def test_internal_callee_modifier_gate_reaches_param_constraints(tmp_path):
+    """Claims arm: the published verdict for the gated entry's parameter 0 is
+    ``constrained``/``mapping_allowlist`` (this exact row published
+    ``{'state': 'unconstrained_proven'}`` on the two StrategyManager deposit
+    entries in the local DB — the L-38 false adverse), while the ungated
+    sibling KEEPS its honest ``unconstrained_proven``."""
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers import _facts
+
+    sl = _compile(tmp_path, _L38_SOURCE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = {fn.full_name: build_predicate_tree(fn) for fn in contract.functions if not fn.is_constructor}
+    effects = {
+        "contract_name": "C",
+        "functions": {
+            sig: {"sinks": [], "value_flows": [], "parameter_names": ["strategy", "amount"]}
+            for sig in ("deposit(address,uint256)", "sweep(address,uint256)")
+        },
+    }
+    ctx = ClaimContext(None, effects, {"trees": trees})
+    gated = _facts.param_constraint(ctx, "deposit(address,uint256)", 0)
+    assert gated["state"] == "constrained", f"expected constrained, got {gated}"
+    assert gated.get("guard") == "mapping_allowlist", f"expected mapping_allowlist, got {gated}"
+    control = _facts.param_constraint(ctx, "sweep(address,uint256)", 0)
+    assert control == {"state": "unconstrained_proven"}, (
+        f"the ungated sibling must keep its proven-unconstrained state, got {control}"
+    )
