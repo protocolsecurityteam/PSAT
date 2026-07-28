@@ -25,6 +25,12 @@ export function EntityActivity({
   now,
 }) {
   const [events, setEvents] = useState([]);
+  // The settled outcome of the per-contract event read, carried with the
+  // (address, chain) it was earned by — same reasoning as `historyOutcome` below:
+  // this component is reused across selections, so identity is what turns the
+  // window between a new selection and its effect into "pending" instead of into
+  // the previous entity's answer about a different contract.
+  const [eventsOutcome, setEventsOutcome] = useState(null);
   const [history, setHistory] = useState(null);
   // The settled outcome of the upgrade-history read, as `{ jobId, state }` with
   // state in present | absent | not_determined. There is no "pending" member
@@ -60,15 +66,27 @@ export function EntityActivity({
     // contract's events under the new one — a positive claim about the wrong
     // subject, which is worse than the empty rail it replaces.
     setEvents([]);
+    setEventsOutcome(null);
     if (!address) { return undefined; }
     let cancelled = false;
+    const key = `${address}|${chain}`;
     const load = async () => {
       try {
         const q = `address=${encodeURIComponent(address)}&chain=${encodeURIComponent(chain)}&limit=100`;
         const evs = await api(`/api/monitored-events?${q}`);
-        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
+        if (cancelled) return;
+        setEvents(Array.isArray(evs) ? evs : []);
+        // A 200 whose body is not an array is not an answer about the events, so
+        // it does not get written as one — same rule as the history read below.
+        setEventsOutcome({ key, state: Array.isArray(evs) ? "present" : "not_determined" });
       } catch {
-        if (!cancelled) setEvents([]);
+        if (cancelled) return;
+        // NOT `setEvents([])`. This runs every 30s: a failed refresh used to
+        // replace events a previous tick had PROVEN present with an empty list,
+        // so a transient 502 turned observed activity into "none recorded" and
+        // the next tick turned it back. The proven data is kept and the failure
+        // is said out loud instead (L-2).
+        setEventsOutcome({ key, state: "not_determined" });
       }
     };
     load();
@@ -135,6 +153,14 @@ export function EntityActivity({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [machine?.job_id, mayBeProxy]);
 
+  // Three states for the event rail, and only ever the one this selection earned.
+  // `pending` is the ABSENCE of a settled outcome for the current (address, chain),
+  // derived rather than stored so no path can forget to re-enter it.
+  const eventsState = useMemo(() => {
+    if (!address) return "not_determined";
+    return eventsOutcome?.key === `${address}|${chain}` ? eventsOutcome.state : "pending";
+  }, [address, chain, eventsOutcome]);
+
   // Four states, and only ever the one this selection earned.
   const historyState = useMemo(() => {
     // No back-fill channel exists for a PROVEN non-proxy, so the below-the-line
@@ -183,7 +209,15 @@ export function EntityActivity({
 
   return (
     <section className="ps-activity-entity">
-      <StatusStrip machine={machine} contract={contract} lastEventAt={newestEventAt} now={now} />
+      <StatusStrip
+        machine={machine}
+        contract={contract}
+        lastEventAt={newestEventAt}
+        now={now}
+        // "none recorded" is a claim about the contract; without this the strip
+        // makes it on the strength of a read that failed.
+        eventsState={eventsState}
+      />
 
       {contract ? (
         <AlertControls
@@ -196,6 +230,13 @@ export function EntityActivity({
       ) : null}
 
       <div className="ps-activity-sect-title" style={{ marginTop: 2 }}>Timeline</div>
+      {eventsState === "not_determined" ? (
+        <div className="ps-activity-unknown" role="status">
+          {events.length
+            ? "The last event refresh did not complete — the rows below are the last ones read, and newer events may be missing."
+            : "Events were not read — this contract's captured events are unknown, not absent."}
+        </div>
+      ) : null}
       {historyUnknown ? (
         <div className="ps-activity-unknown" role="status">
           Upgrade history was not read — this proxy's pre-enrollment upgrades

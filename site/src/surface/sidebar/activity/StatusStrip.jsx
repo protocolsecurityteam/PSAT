@@ -7,7 +7,10 @@ import { relativeTime, stateRows } from "../../../monitoring/format.js";
 // Monitoring status strip — the entity header in Activity's entity mode. Shows
 // monitoring STATE only (type badge, live state grid, scan freshness), never
 // analysis facts (TVL / role / audit) that live on Detail / Audits.
-export function StatusStrip({ machine, contract, lastEventAt, now }) {
+// `eventsState` is the per-contract event read's outcome (present / pending /
+// not_determined). "none recorded" is a positive claim about the contract, so it
+// is only made when the read actually answered.
+export function StatusStrip({ machine, contract, lastEventAt, now, eventsState = "present" }) {
   const name = machine?.name || shortAddr(machine?.address);
   const type = contract?.contract_type || contractTypeForMachine(machine);
   const rows = contract ? stateRows(contract) : [];
@@ -37,7 +40,13 @@ export function StatusStrip({ machine, contract, lastEventAt, now }) {
             </React.Fragment>
           ))}
           <div className="k">Last event</div>
-          <div className="v muted">{lastEventAt ? relativeTime(lastEventAt, now) : "none recorded"}</div>
+          <div className="v muted">
+            {lastEventAt
+              ? relativeTime(lastEventAt, now)
+              : eventsState === "present"
+                ? "none recorded"
+                : "not determined"}
+          </div>
         </div>
       ) : (
         <div className="ps-activity-kv">

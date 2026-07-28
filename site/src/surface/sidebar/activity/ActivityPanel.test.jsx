@@ -3,8 +3,8 @@
 // empty state, protocol-wide mode, and admin-vs-non-admin control visibility.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, waitFor, within, act } from "@testing-library/react";
 
 import { ActivityPanel } from "./ActivityPanel.jsx";
 import { setFetchHandler } from "../../../test/fetchMock.js";
@@ -309,6 +309,63 @@ describe("ActivityPanel — monitored principal (safe)", () => {
     expect(await screen.findByText("Treasury Safe")).toBeInTheDocument();
     expect(screen.getByText("Timeline")).toBeInTheDocument();
     expect(screen.queryByText(/monitoring is not enabled/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("ActivityPanel — a failed event poll does not erase proven events", () => {
+  const evRows = [evRow("eupg", "upgraded", 300, { implementation: CUR })];
+
+  it("says the events were not read instead of 'none recorded'", async () => {
+    // First read fails: there is nothing proven to keep, but "none recorded" is a
+    // claim about the contract and this read did not answer.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/api\/monitored-events$/.test(url.pathname), () => {
+      throw new TypeError("Failed to fetch");
+    });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText(/Events were not read/i)).toBeInTheDocument();
+    expect(screen.queryByText("none recorded")).toBeNull();
+    expect(screen.getByText("not determined")).toBeInTheDocument();
+  });
+
+  it("keeps the rows a previous tick proved present when the 30s refresh fails", async () => {
+    // The rail polls every 30s. `catch { setEvents([]) }` replaced events already
+    // PROVEN present with an empty list, so a transient 502 turned observed
+    // activity into "none recorded" and the next tick turned it back (L-2). The
+    // poll is what makes it a clobber rather than a first-read miss, so the test
+    // drives the real interval.
+    let calls = 0;
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    setFetchHandler((url) => /\/api\/monitored-events$/.test(url.pathname), () => {
+      calls += 1;
+      if (calls === 1) return evRows;
+      throw new TypeError("Failed to fetch");
+    });
+    vi.useFakeTimers();
+    try {
+      renderPanel({ selectedMachine: PROXY_MACHINE });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
+      expect(screen.queryByText(/refresh did not complete/i)).toBeNull();
+
+      // The next tick throws. The proven row survives, and the failure is said.
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_100); });
+      expect(calls).toBeGreaterThan(1);
+      expect(screen.getByText(/refresh did not complete/i)).toBeInTheDocument();
+      expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
+      expect(screen.queryByText(/Events were not read/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still reports 'none recorded' when the read answered with nothing", async () => {
+    // POSITIVE CONTROL: hedging on every empty rail would erase the one case where
+    // "this contract has no captured events" is the answer.
+    mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [] });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    expect(await screen.findByText("none recorded")).toBeInTheDocument();
+    expect(screen.queryByText(/Events were not read/i)).toBeNull();
   });
 });
 
