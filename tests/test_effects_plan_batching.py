@@ -128,7 +128,6 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
                 selector=SELECTOR,
                 function_name="upgradeTo",
                 authority_public=False,
-                effect_targets=("impl",),
                 principal_addresses=(PRINCIPAL,),
                 deployment_address=addr,
             )
@@ -280,7 +279,6 @@ def test_principals_by_selector_prefetch_matches_query(clean):
                 selector=None,
                 function_name="f",
                 authority_public=False,
-                effect_targets=(),
                 principal_addresses=(),
             )
         ],
@@ -332,7 +330,6 @@ def test_principals_by_selector_is_deterministic_with_two_principals(clean):
                 selector="0xcccccccc",
                 function_name="f",
                 authority_public=False,
-                effect_targets=("s",),
                 principal_addresses=(),
             )
         ],
@@ -379,7 +376,6 @@ def test_claim_latch_pairs_prefetch_matches_query(clean):
                 selector="0x8456cb59",
                 function_name="pause",
                 authority_public=False,
-                effect_targets=("paused",),
                 principal_addresses=(),
             )
         ],
@@ -448,7 +444,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
                     selector=SELECTOR,
                     function_name="upgradeTo",
                     authority_public=False,
-                    effect_targets=("impl",),
                     principal_addresses=(),
                     deployment_address=proxy,
                 ),
@@ -493,7 +488,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
         selector=SELECTOR,
         function_name="upgradeTo",
         authority_public=False,
-        effect_targets=("impl",),
         principal_addresses=(),
         deployment_address=orphan_proxy,
     )
@@ -522,7 +516,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
         selector="0xf3fef3a3",
         function_name="withdraw",
         authority_public=False,
-        effect_targets=("S",),
         principal_addresses=(),
     )
     got = resolver(session, plain_cand)

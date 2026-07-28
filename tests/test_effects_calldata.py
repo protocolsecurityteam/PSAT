@@ -202,7 +202,6 @@ def _candidate(
         selector=selector,
         function_name="f",
         authority_public=authority_public,
-        effect_targets=("slot0",),
         principal_addresses=principals,
         input_token_addresses=holdings,
     )
@@ -1415,7 +1414,6 @@ def test_synthesize_pause_entry_points_fixtures_and_denominator(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1448,7 +1446,6 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1510,7 +1507,6 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1540,7 +1536,6 @@ def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1701,7 +1696,6 @@ def _eeth_candidate(session, latch_var: str) -> tuple[Candidate, dict[str, int]]
         selector=cd._selector_of("pause()"),
         function_name="pause",
         authority_public=False,
-        effect_targets=(latch_var,),
         principal_addresses=(OPERATING_MULTISIG,),
         deployment_address=EETH_PROXY,
     )
@@ -1763,7 +1757,6 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
         selector=cd._selector_of(victim),
         function_name="mintShares",
         authority_public=False,
-        effect_targets=(PAUSABLE_SLOT,),
         principal_addresses=(LIQUIDITY_POOL,),
         deployment_address=EETH_PROXY,
     )
@@ -1862,7 +1855,6 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
         selector=selector,
         function_name="withdraw",
         authority_public=False,
-        effect_targets=("x",),
         principal_addresses=("0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",),
         deployment_address=LIQUIDITY_POOL,
     )
@@ -2328,7 +2320,6 @@ def test_synthesize_pause_emits_token_seed_fixtures(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -2360,7 +2351,6 @@ def test_synthesize_pause_without_token_slots_is_unchanged(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)

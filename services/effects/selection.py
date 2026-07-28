@@ -140,7 +140,13 @@ class Candidate:
     selector: str | None
     function_name: str
     authority_public: bool
-    effect_targets: tuple[str, ...]
+    # NO ``effect_targets``. It was carried here write-only — no production code and
+    # no test ever read it — and what it carries is the display list that conflates a
+    # proven state write with a dotted external-call head, which is exactly what the
+    # cascade stopped selecting on (:func:`_has_effect_evidence`). A field the next
+    # reader would take for the selection evidence, sitting on the object the effects
+    # worker passes around, is the trap; the persisted column is still there for the
+    # display consumers that own it (``analysis_detail``, ``governance.principals``).
     principal_addresses: tuple[str, ...]
     # Transitive USD an exercise of this function can reach through the control
     # graph. Upper bound; orders only (inv. 4/5). ``Decimal`` because it is a SORT
@@ -1123,7 +1129,6 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
             EffectiveFunction.selector,
             EffectiveFunction.function_name,
             EffectiveFunction.authority_public,
-            EffectiveFunction.effect_targets,
             EffectiveFunction.deployment_address,
             EffectiveFunction.claims,
             EffectiveFunction.capability_expr,
@@ -1264,7 +1269,7 @@ def select_candidates(
     protocol_tvl = _protocol_tvl_usd(session, protocol_id)
 
     candidates: list[Candidate] = []
-    for fid, contract_id, address, selector, name, public, targets, deployment, claims, capability_expr in rows:
+    for fid, contract_id, address, selector, name, public, deployment, claims, capability_expr in rows:
         families = _enrolled_families(claims)
         # Claim-carrying but no flow/supply family to re-probe → already explained.
         if families is not None and not families:
@@ -1282,7 +1287,6 @@ def select_candidates(
                 selector=selector,
                 function_name=name,
                 authority_public=bool(public),
-                effect_targets=tuple(targets or ()),
                 principal_addresses=tuple(prins),
                 value_at_stake_usd=graph.reachable_value(seeds),
                 deployment_address=deployment_addr,

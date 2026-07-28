@@ -299,7 +299,6 @@ def _candidate_for(address: str, principal: str, selector: str, **kw: Any) -> Ca
         selector=selector,
         function_name="f",
         authority_public=True,
-        effect_targets=(),
         principal_addresses=(principal,),
         **kw,
     )

@@ -70,7 +70,6 @@ def _candidate(principals: tuple[str, ...]) -> Candidate:
         selector="0x3659cfe6",
         function_name="upgradeTo",
         authority_public=False,
-        effect_targets=("impl",),
         principal_addresses=principals,
         deployment_address=PROXY,
     )

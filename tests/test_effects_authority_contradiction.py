@@ -128,7 +128,6 @@ def test_route_section9_files_the_authority_contradiction_on_a_fresh_probe():
         selector=SELECTOR,
         function_name="sweepETH(address,uint256)",
         authority_public=False,
-        effect_targets=(),
         principal_addresses=("0x" + "a0" * 20,),
         membership_exact=True,
     )
