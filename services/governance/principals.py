@@ -326,8 +326,16 @@ def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mappin
     grants before controllers). Publishing the bare record first would therefore
     make a role-granted principal read LESS resolved than the identical address
     under ``controllers`` — an unresolved-controller reading of an address whose
-    type is known. Classified fields win; the grant's own non-null fields
-    override.
+    type is known. Classified fields win.
+
+    ``details`` is merged KEY-WISE with the classified keys on top, never
+    replaced wholesale: the grant's ``details`` is always the non-None
+    ``{"source": "semantic_capability:role_grant"}`` marker, so a blanket
+    "grant's non-null fields override" erased the classified quorum/delay
+    witness (a Safe's ``owners``/``threshold``, a timelock's ``delay``) from
+    the exact record ``protocolScore.safeScore`` / ``principalLabel`` read
+    first — publishing a recorded threshold as "not recorded" and dropping the
+    principal to the 0.55 unknown floor.
     """
     principals: list[Any] = []
     for principal in grant.get("principals") or []:
@@ -339,7 +347,15 @@ def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mappin
             principals.append(dict(principal))
             continue
         merged = dict(classified)
-        merged.update({key: value for key, value in principal.items() if value is not None})
+        merged.update({key: value for key, value in principal.items() if value is not None and key != "details"})
+        grant_details = principal.get("details")
+        classified_details = classified.get("details")
+        if isinstance(grant_details, dict) and isinstance(classified_details, dict):
+            merged["details"] = {**grant_details, **classified_details}
+        elif classified_details is not None:
+            merged["details"] = classified_details
+        elif grant_details is not None:
+            merged["details"] = grant_details
         principals.append(merged)
     return {**dict(grant), "principals": principals}
 
