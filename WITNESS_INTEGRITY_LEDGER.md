@@ -500,3 +500,69 @@ The cache deployment/code plane split is a hand-enrolled denylist of exactly the
 ## Adjudication record — Wave 2 Leg D closeout (2026-07-28)
 
 Leg D hit the 3-round cap. Rounds 1–2 rejections were fixed and verified closed by the round-3 reviewer, whose sole remaining violation was the A7 clock-spelling gap (`now`/`block.number` latches still published proven-indefinite). Per OPERATIONS §2 the driving agent applied the reviewer's minimal prescription directly (`witness/leg-d` `0a7fa43e`): demotion counts `timestamp|now|number`, seconds harvest counts `timestamp|now` only. Mutation-checked (4 new arms red with the split reverted; 4 module controls green), 160 relevant tests pass, v31 comment amended (unreleased version). The differential re-verified the split empirically (0 realised corpus delta; monotone away from the proven state) and both tier-3 lenses confirmed the adjudication implements the prescription exactly. L-12 and L-38 remain OPEN with stated cause: Leg B neither fixed nor worsened them (verified byte-identical differential on an internal-callee-modifier shape); L-38's owner remains the predicate-extraction plane; L-12's the reconciler.
+
+---
+
+# Wave 3 exit sweep (2026-07-28: leg reviews + differential + tier-3 verifier findings)
+
+## L-63 · (found by W3 Leg E review — CLOSED at wave close)
+
+`auditMatching.matchesEra`'s temporal successor discriminator keyed on `hasOwnProperty("timestamp_replaced")` alone, but the producer writes `timestamp_replaced` only when the successor's log carried a timestamp while `block_replaced` is written for every era with a successor — so an era that provably ended (block known, timestamp unrecorded) Infinity-folded the containment question, the exact fold the commit removed elsewhere. Closed by the driving agent (`9e0c7f80`): the discriminator accepts either sibling key; discriminating vitest arm added.
+
+## L-64 · (found by W3 Leg E review)
+
+`role_holders`' `holders_state: "not_determined"` arm is structurally unreachable from the live derivation path, not merely unrealised: `capability_role_grants` ends with `if members`, so a memberless grant is dropped before the consumer sees it, and the only route to the arm is the `authority_roles` column fallback, which cannot fire while every row's `capability_expr` is a non-empty object. Fails safe (fixture-covered), but it is a dead hedge by construction on the live source. **Owner: record** (becomes reachable only if the grant algebra gains a partial state).
+
+**Reproduction:** `read capability_role_grants' final comprehension in services/policy/capability_surface.py; grep the fallback condition in services/chat/tools.py role derivation.`
+
+## L-65 · (found by W3 Leg E review)
+
+2 of the 229 control-graph nodes gaining `details.terminal_principal` are typed `proxy_admin` in the control-graph plane while the `PrincipalLabel` row that produced the walk is typed `contract` (the producer writes the walk only for `resolved_type == "contract"`). Inert today (no `proxy_admin` node is reachable as an indirect principal; 0 of 857 principal instances change their note), and the failure direction is a hedge, not an over-claim. The declared negative control covered only Safe/EOA. **Owner: record.**
+
+## L-66 · (found by W3 Leg E review)
+
+`BalanceTable.coverageNote` returns the truncation sentence and RETURNS EARLY on `holdings_coverage.state === "may_be_incomplete"`, so a contract both at the 100-row page cap and partly unpriced loses the `unvalued_rows` disclosure — two independent facts, one suppressed. 0 realised (all 7 at-cap contracts carry `protocol_id IS NULL`); live the first time an enrolled contract holds a full page. **Owner: Wave 4** (compose the sentences; disclosure suppression is the admission-test shape in the disclosure direction).
+
+**Reproduction:** `read coverageNote in site/src/surface/lanes/BalanceTable.jsx — early return on may_be_incomplete before the unvalued_rows sentence.`
+
+## L-67 · (found by W3 Leg E review, reproduced by accident)
+
+`tests/test_artifact_storage_integration.py` is not idempotent against a reused test DB: a second run against the same DB fails `test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable` and `test_hydrate_keeps_outage_absence_and_payload_apart`. The documented drop+recreate workflow hides it. **Owner: Wave 4.**
+
+**Reproduction:** `run the file twice against one psat_test_* DB without recreating it.`
+
+## L-68 · (found by W3 Leg D1 review, implementer-disclosed)
+
+`Candidate.effect_targets` (selection.py:143, populated at :1268) is WRITE-ONLY — no production code and no test reads it — and it carries the conflated display list D1 just removed from the selection decision into the dataclass the effects worker passes around: the next reader's trap. Correctly not fixed in the isolated leg. **Owner: Wave 4** (drop the field or rename it to its display meaning).
+
+**Reproduction:** `grep -rn 'effect_targets' services/effects workers | grep -v selection.py:1268-adjacent — no reader of cand.effect_targets.`
+
+## L-69 · (found by W3 Leg D1 review + differential)
+
+The protocol_id-NULL orphaning family, quantified on this plane: 594 of 1,773 `effective_functions` rows can never enter the cascade (their contracts carry `protocol_id IS NULL`, 474 such contracts), and 26 of the 107 persisted `effects` artifacts hang off `jobs` rows with SQL-NULL `protocol_id` although 18+ of those addresses are protocol-1 contracts — any projection scoped by `jobs.protocol_id` silently loses them (measured: 955/1179 coverage scoped by protocol vs 969/1179 by address). Every Wave 0-3 count on these planes is a lower bound for this reason too. **Owner: record** (discovery/orchestration plane, outside every wave surface; the known family from project memory).
+
+## L-70 · (found by W3 Leg D1 review)
+
+Latent `resource_cap` displacement: `PSAT_EFFECTS_RESOURCE_CAP` is set nowhere, so no cap fires today, but the 38 newly-admitted zero-plan candidates land at ranks 12-278 of the 481-long value-ordered queue — the first cap below ~90 displaces plan-bearing candidates with receiver-hook ones. `_log_dropped` names what it drops (not silent). 36 of the 38 are ERC-receiver hooks: fork-budget sizing note for the effects stage. **Owner: record (ops).**
+
+## L-71 · (found by W3 Leg D1 review + verifier lens 1)
+
+Instrument limits on D1's descriptive splits — the load-bearing numbers reproduce, the finer ones bracket: the 156-population's `state_changing` split "147 TRUE / 8 NULL / 1 FALSE" is join-rule-dependent (signature-only gives 125/30/1; +name fallback gives 153/2/1; FALSE=1 = fid 2344 is stable under every rule); the docstring's "11 of the 49" guard-origin admits measures 10 (corrected at wave close, `9e0c7f80`); SCORING_INVARIANTS' three-way split (219/84/42) tightens to 241/86/18 under the better join. The candidate delta (443→481, +38/−0) is invariant under all rules. Any later recount must state its artifact-join rule (per-JOB artifacts, keyed by jobs.address, pre-canonicalization signatures — see the Wave-3 method cautions). **Owner: record.**
+
+## L-72 · (found by W3 Leg D1 review)
+
+fids 2893 `alertBatchMetadataUpdate(uint256,uint256)` and 2894 `alertMetadataUpdate(uint256)` carry `selector = ''` (empty string) in `effective_functions` beside well-formed `abi_signature`s — the L-27 fallback/receive empty-selector convention on NAMED functions (pre-existing data defect). Both are in D1's entering set; both plan 0 probes today, so nothing is published, but an empty selector reaching `find_cached_verdict`/`_selector_key` is the L-27 collision class. **Owner: Wave 4** (one look: producer or backfill).
+
+**Reproduction:** `select id, abi_signature, selector from effective_functions where selector = '' and abi_signature not like 'fallback%' and abi_signature not like 'receive%';`
+
+## L-73 · (found by W3 differential + verifier lens 2)
+
+Wrong-chain `classify_address` residual: the chain predicate landed on the CGN `details` read, but `_resolve_contract` falls back to an address-only lookup across all chains and the name-hint promotion then fires — so a wrong-chain query still publishes `kind='timelock'` and `label='EtherFiTimelock'` from cross-chain rows; only the details-derived facts (delay_seconds, threshold) are chain-scoped. Stated-with-cause in the leg's commit (the label/CGN plane has no chain column — the handoff §3 known gap). **Owner: record beside the §3 deployment-key item** (structural on the first multichain run).
+
+## L-74 · (found by W3 differential)
+
+`contract_brief`'s "last upgrade" exact-timestamp tie prefers the poll-detected row (block NULL, tx NULL) over an equally-timestamped log-indexed event — deliberate per the comment (a NULL block is not evidence of being older) and honestly labelled by the `detection` discriminator, but the tie arm publishes the less-provenanced of two equal candidates. 0 realised. **Owner: record.**
+
+## Adjudication record — Wave 3 closeout (2026-07-28)
+
+Both tier-3 verdicts returned **PASS** (`controls_held`, `differential_reconciled` true on both) while the tier-0 gate returned FAIL on `no-new-jsonb-isnull` — identified by BOTH verifiers as a grep false positive: the flagged line was the correct compound guard (SQL-NULL + `jsonb_typeof` CASE), pre-existing on main, re-split across physical lines by D1's SQLAlchemy rewrite so the line-based grep lost sight of the guard. Disposed per the adjudication-economics rule (mechanically re-provable criterion): the redundant `IS NULL OR` was dropped from the test predicate (`jsonb_typeof(SQL NULL)` is SQL NULL, so the CASE ELSE arm already folds it — semantics identical, verified by the 66-test file), the gate re-run mechanically, and no verifier re-run spawned. The same closeout commit (`9e0c7f80`) fixed the four reviewer-flagged trivial residuals (L-63; the unpinned `state_changing IS NULL` disjunct with a mutation-checked sole-pin arm; StatusStrip's proven-state default; the role-source prose) and corrected the two stated-magnitude comments (L-71, the "62 of 147" figure). Playwright visual baselines — the one unexercised gate both verifiers flagged — were run at HEAD: **4/4 passed**. The two public-payload key removals (`confidence` → `naming_rule`; duplicate `label` suppressed) are called out prominently in WAVE_3_REPORT.md per §10. SCORING_INVARIANTS.md remains tracked (deliberate: it is D1's deliverable); the eight sibling witness docs remain untracked (an accidental `git add -A` staging of them was caught and amended out).
