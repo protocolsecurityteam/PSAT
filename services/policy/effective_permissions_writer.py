@@ -130,15 +130,30 @@ def _authority_roles_for(cap_dict: dict[str, Any] | None) -> list[dict[str, Any]
     return capability_role_grants(cap_dict)
 
 
-def _selector_key(selector: str | None) -> str:
-    return (selector or "").lower()
+def _selector_key(selector: str | None, function_name: str | None = None) -> tuple[str, str]:
+    """Identity for carrying observed-effect state across the row replace.
+
+    Keyed on ``(selector, function_name)``, not selector alone (L-27): a
+    selector-less entry point carries the documented ``""`` sentinel, and BOTH
+    ``fallback`` and ``receive`` are selector-less — so a contract declaring both
+    produced two rows under one key and the carry cross-assigned one's observed
+    claims and proven verdicts to the other. A ``None`` selector (the "could not
+    be derived" state) collapses onto the same ``""``, which is a second way in.
+    The function name discriminates without affecting any selector-bearing row,
+    where the pair is as unique as the selector was.
+
+    Armed population: 0 realised on the local corpus (no analysed contract
+    declares both, and every persisted selector-less row still carries the
+    pre-Leg-A fabricated selector) — structural on the first contract that
+    declares both after Leg A's sentinel landed."""
+    return ((selector or "").lower(), (function_name or "").lower())
 
 
 def _capture_observed_before(
     session: Session,
     contract_id: int,
     deployment_address: str | None,
-) -> dict[str, tuple[list[Any], list[Any]]]:
+) -> dict[tuple[str, str], tuple[list[Any], list[Any]]]:
     """§5.2 call site 2, capture phase. Read this deployment's *outgoing*
     observed-effect state BEFORE the wholesale row replace deletes it, keyed by
     selector, so the re-created rows can carry it forward.
@@ -155,14 +170,19 @@ def _capture_observed_before(
       NULL``) but come out unlinked; the carry phase relinks them to the
       re-created rows so claim witnesses keep resolving.
 
-    Returns ``{selector_key: (carried_observed_claims, proven_verdicts)}``.
+    Returns ``{(selector, function_name): (carried_observed_claims, proven_verdicts)}``.
     """
     # Older/stripped test metadata swaps in an EffectiveFunction model without the
     # claims plane; nothing observed can exist there, so there is nothing to carry.
     if not hasattr(EffectiveFunction, "claims"):
         return {}
     rows = (
-        session.query(EffectiveFunction.id, EffectiveFunction.selector, EffectiveFunction.claims)
+        session.query(
+            EffectiveFunction.id,
+            EffectiveFunction.selector,
+            EffectiveFunction.function_name,
+            EffectiveFunction.claims,
+        )
         .filter(
             EffectiveFunction.contract_id == contract_id,
             deployment_scope(EffectiveFunction.deployment_address, deployment_address),
@@ -171,16 +191,16 @@ def _capture_observed_before(
     )
     if not rows:
         return {}
-    observed_by_selector: dict[str, list[Any]] = {}
-    id_to_selector: dict[int, str] = {}
-    for row_id, selector, claims in rows:
-        key = _selector_key(selector)
+    observed_by_selector: dict[tuple[str, str], list[Any]] = {}
+    id_to_selector: dict[int, tuple[str, str]] = {}
+    for row_id, selector, function_name, claims in rows:
+        key = _selector_key(selector, function_name)
         id_to_selector[row_id] = key
         for claim in claims or []:
             if isinstance(claim, dict) and claim.get("tier") == claims_bridge.OBSERVED_TIER:
                 observed_by_selector.setdefault(key, []).append(claim)
 
-    verdicts_by_selector: dict[str, list[Any]] = {}
+    verdicts_by_selector: dict[tuple[str, str], list[Any]] = {}
     verdicts = (
         session.query(EffectVerdict)
         .filter(
@@ -355,7 +375,7 @@ def write_effective_function_rows(
         # (and any surviving proven verdicts) back onto this re-created row so a
         # policy-only rewrite never blanks observed labels. Only touches rows that
         # had observed state — claim-free functions stay byte-identical.
-        carried = observed_before.get(_selector_key(ef.selector))
+        carried = observed_before.get(_selector_key(ef.selector, ef.function_name))
         if carried:
             carried_claims, proven_verdicts = carried
             merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)

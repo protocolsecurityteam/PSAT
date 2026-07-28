@@ -106,3 +106,73 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
     )
     db_session.flush()
     assert _conditions_typeof(db_session, contract.id, "sweep") == "array"
+
+
+@requires_postgres
+def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
+    """L-27 (a ledger item in this leg's own file surface, fixed here with
+    declared scope): ``fallback`` and ``receive`` are BOTH selector-less, so
+    after Leg A's ``""`` sentinel a contract declaring both produced two rows
+    under one observed-carry key and the carry cross-assigned one row's observed
+    claims to the other. The key is now ``(selector, function_name)``.
+
+    Armed population: 0 realised on the local corpus (no analysed contract
+    declares both, and every persisted selector-less row still carries the
+    pre-Leg-A fabricated selector) — structural on the first contract that
+    declares both after the sentinel.
+    """
+    from services.effects import claims_bridge
+
+    contract = Contract(address="0x" + "fb" * 20, chain="ethereum")
+    db_session.add(contract)
+    db_session.flush()
+
+    observed = {
+        "claim_id": "flow.out",
+        "tier": claims_bridge.OBSERVED_TIER,
+        "witness": {"probe": "fallback-only"},
+    }
+
+    def _write(fallback_claims):
+        write_effective_function_rows(
+            db_session,
+            contract_id=contract.id,
+            function_records=cast(
+                "list[dict[str, Any]]",
+                [
+                    {
+                        "function": "fallback()",
+                        "abi_signature": "fallback()",
+                        "selector": "",
+                        "claims": fallback_claims,
+                        "effect_labels": [],
+                        "effect_targets": [],
+                        "action_summary": "stub",
+                    },
+                    {
+                        "function": "receive()",
+                        "abi_signature": "receive()",
+                        "selector": "",
+                        "claims": [],
+                        "effect_labels": [],
+                        "effect_targets": [],
+                        "action_summary": "stub",
+                    },
+                ],
+            ),
+            capability_by_function=None,
+        )
+        db_session.flush()
+
+    _write([observed])
+    # A policy-only rewrite: the carry must return the observed claim to
+    # fallback() and leave receive() claim-free.
+    _write([])
+
+    rows = db_session.execute(
+        text("select function_name, claims from effective_functions where contract_id = :cid"),
+        {"cid": contract.id},
+    ).all()
+    by_name = {name: claims for name, claims in rows}
+    assert [claim["claim_id"] for claim in by_name["fallback"] or []] == ["flow.out"]
+    assert (by_name["receive"] or []) == []

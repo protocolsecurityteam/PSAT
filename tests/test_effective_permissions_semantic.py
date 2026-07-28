@@ -97,6 +97,7 @@ class _TEffectiveFunction(_TestBase):
     capability_expr = Column(JSON)
     conditions = Column(JSON)
     status = Column(String(50))
+    claims = Column(JSON)
     principals = relationship(
         "_TFunctionPrincipal",
         backref="function",
