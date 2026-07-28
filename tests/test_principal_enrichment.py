@@ -939,3 +939,31 @@ def test_callee_edge_does_not_mint_controller_labels():
     assert "stakingmanager_calls_depositcontracteth2" in callee_labels
     assert "controller_value" not in callee_labels
     assert not any(label.startswith("controller_") for label in callee_labels)
+
+
+def test_authority_roles_present_with_none_does_not_crash_enrichment():
+    """W2-B item 8 consumer guard: ``authority_roles`` is now PRESENT with value
+    ``None`` on a role-gated function whose role identity is not determined, and
+    ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
+    plain default iterated ``None`` and raised. Not-determined must contribute no
+    role principals, exactly as ``[]`` did."""
+    from services.policy.principal_enrichment import _collect_permissions
+
+    permissions, labels = _collect_permissions(
+        {
+            "contract_name": "Target",
+            "contract_address": "0x" + "ab" * 20,
+            "functions": [
+                {
+                    "function": "f()",
+                    "effect_labels": [],
+                    "authority_public": False,
+                    "authority_roles": None,
+                    "controllers": [],
+                    "direct_owner": None,
+                }
+            ],
+        }
+    )
+    assert permissions == {}
+    assert labels == {}

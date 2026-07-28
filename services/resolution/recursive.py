@@ -648,7 +648,12 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
         if not isinstance(function, dict):
             continue
         function_signature = str(function.get("function", ""))
-        for role_grant in function.get("authority_roles", []):
+        # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
+        # ``None`` on a role-gated function whose role identity is not
+        # determined (W2-B item 8), and a dict default only fires on an
+        # ABSENT key — so the plain default would iterate None and raise.
+        # Not-determined contributes no role principals, exactly as [] did.
+        for role_grant in function.get("authority_roles") or []:
             if not isinstance(role_grant, dict):
                 continue
             role = _safe_role_int(role_grant.get("role"))

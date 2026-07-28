@@ -356,7 +356,11 @@ def _collect_permissions(
             by_address[address].append(permission)
             permission_labels[address].update({f"{contract_slug}_direct_owner", f"{contract_slug}_controlled"})
 
-        for role_grant in function.get("authority_roles", []):
+        # ``or []`` — see recursive.py: authority_roles is present-with-None
+        # for a role-gated function whose role is not determined, and a dict
+        # default only fires on an absent key. Not-determined mints no
+        # role_N label, exactly as [] did.
+        for role_grant in function.get("authority_roles") or []:
             raw_role = role_grant.get("role")
             role = _safe_role_int(raw_role)
             if role is None:
