@@ -1007,6 +1007,80 @@ def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_
     assert capability_to_dict(cap)["kind"] != "conditional_universal"
 
 
+def _tree_verdict(tree):
+    dd = capability_to_dict(evaluate_tree(tree))
+    return dd.get("kind")
+
+
+def test_self_gate_checker_own_entry_point_stays_public(tmp_path, earned_public):
+    """The un-hedged direction of Part A: the CHECKER's own entry point
+    constrains its ARGUMENT, not its caller — anyone may call
+    ``onlyUpgradeTimelock(anyAddress)``. Its own tree must stay
+    ``conditional_universal`` (public) with no fabricated caller witness: no
+    self-gate descriptor keyed on ``msg_sender``, no ``msg_sender`` in any
+    operand's ``derived_from``, even though ``_authorizeUpgrade`` elsewhere in
+    the contract calls it with ``msg.sender``. (The round-1 regression: the
+    entry-parameter Phi unioned the call-site argument into the checker's own
+    frame, so the verdict for a function was decided by what an unrelated
+    function does.)"""
+    sl = _compile(tmp_path, _SOLADY_SELF_GATE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    checker = trees["onlyUpgradeTimelock(address)"]
+    assert _tree_verdict(checker) == "conditional_universal"
+    for leaf in _leaves(checker):
+        descriptor = leaf.get("set_descriptor") or {}
+        assert descriptor.get("key_sources") != [{"source": "msg_sender"}]
+        assert leaf.get("references_msg_sender") is not True
+        for op in leaf.get("operands") or []:
+            origins = [o.get("source") for o in (op.get("derived_from") or [])]
+            assert "msg_sender" not in origins
+    # The hedged direction is unchanged: reached THROUGH a call that binds the
+    # parameter to msg.sender, the same gate still gates.
+    assert _tree_verdict(trees["f()"]) != "conditional_universal"
+
+
+_SIBLING_CHECKERS = """
+    pragma solidity ^0.8.19;
+    contract C {
+        uint256 public constant ROLE_A = 1;
+        uint256 public constant ROLE_B = 2;
+        function hasRole(address holder, uint256 role) public view returns (bool result) {
+            assembly {
+                mstore(0x00, holder)
+                mstore(0x20, role)
+                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
+            }
+        }
+        function onlyA(address account) public view { if (!hasRole(account, ROLE_A)) revert(); }
+        function onlyB(address account) public view { if (!hasRole(account, ROLE_B)) revert(); }
+        function guarded() external { onlyA(msg.sender); }
+    }
+"""
+
+
+def test_sibling_checkers_get_the_same_verdict_regardless_of_callers(tmp_path, earned_public):
+    """Byte-identical checkers must not diverge because only one of them is
+    ever called with ``msg.sender`` — the reviewer's cid-568 falsification
+    (onlyUpgradeTimelock flipped while its eight identical siblings stayed
+    public). Frame purity: each checker's own frame sees its parameter as a
+    parameter, and each ``hasRole`` sub-frame sees only ITS call site's role
+    constant, not the union of every sibling's."""
+    sl = _compile(tmp_path, _SIBLING_CHECKERS)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = _build_pipeline(contract)
+    assert _tree_verdict(trees["onlyA(address)"]) == "conditional_universal"
+    assert _tree_verdict(trees["onlyB(address)"]) == "conditional_universal"
+    # The caller that binds msg.sender still gates.
+    assert _tree_verdict(trees["guarded()"]) != "conditional_universal"
+    # Frame purity of the sub-frame: onlyA's leaf never carries onlyB's role
+    # constant (the cross-call-site union listed every sibling's constant).
+    for leaf in _leaves(trees["onlyA(address)"]):
+        for op in leaf.get("operands") or []:
+            names = {o.get("state_variable_name") for o in (op.get("derived_from") or [])}
+            assert "ROLE_B" not in names
+
+
 def test_solady_modifier_gate_caller_taint_survives_the_digest(tmp_path, earned_public):
     """Part B: the gate is in a MODIFIER (not a probe-able view), so no
     descriptor is possible — but the caller was passed as an ARGUMENT of the

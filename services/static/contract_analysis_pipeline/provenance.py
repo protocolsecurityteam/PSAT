@@ -543,14 +543,42 @@ class ProvenanceEngine:
         # Phi joins all incoming SSA versions with set union. Also
         # unions with the lvalue's existing source set so caller-
         # bound parameters seeded before the IR walk aren't
-        # clobbered. Slither's parameter-Phi at function entry
-        # represents the caller's binding via incoming SSA values
-        # the engine can't resolve in the callee's scope; the
-        # binding lives in the seeded source set.
+        # clobbered.
+        #
+        # The ENTRYPOINT Phi of a formal parameter is excluded outright.
+        # Slither's interprocedural SSA makes its rvalues the arguments of
+        # EVERY internal call site of this function in the contract, and its
+        # lvalue carries the parameter's BASE name — the exact key
+        # ``_seed_parameters`` wrote. Unioning it therefore imports other
+        # frames into this one: ``guarded() { onlyA(msg.sender); }`` made
+        # ``account`` msg_sender-tainted inside ``onlyA``'s OWN frame (where it
+        # is an arbitrary argument, not the caller), and a helper called with a
+        # different constant per call site accumulated every sibling's
+        # constants. The parameter's truth for THIS frame is what seeding
+        # already wrote: ``parameter`` in the function's own frame, the
+        # call-chain binding in a bound frame.
+        if self._is_entry_parameter_phi(ir):
+            return False
         result: SourceSet = self.provenance.get(self._var_name(ir.lvalue))
         for incoming in ir.rvalues:
             result = union(result, self._sources_for_value(incoming))
         return self.provenance.set(self._var_name(ir.lvalue), result)
+
+    def _is_entry_parameter_phi(self, ir: Any) -> bool:
+        """True for the function-entry Phi of one of THIS function's formal
+        parameters — the only Phi whose rvalues live in other functions'
+        frames (they are the call-site arguments). State-variable Phis at the
+        entry node keep normal handling: their rvalues classify
+        frame-independently as ``state_variable``, which is correct here."""
+        node = getattr(ir, "node", None)
+        node_type = getattr(getattr(node, "type", None), "name", "")
+        if node_type != "ENTRYPOINT":
+            return False
+        name = self._var_name(getattr(ir, "lvalue", None))
+        if not name:
+            return False
+        base = _strip_ssa_suffix(name)
+        return any(self._var_name(param) in (name, base) for param in getattr(self.function, "parameters", ()) or ())
 
     def _handle_binary(self, ir: Any) -> bool:
         # The result of a binary op is ``computed`` with the union of
