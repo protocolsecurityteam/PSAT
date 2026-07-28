@@ -26,6 +26,7 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from services.aggregations.action_summary import describe_action
 from services.policy.capability_surface import capability_currency
 
 logger = logging.getLogger(__name__)
@@ -355,13 +356,24 @@ def _serialize_effective_functions(
                 signature_witnesses.append(principal_dict)
             else:
                 controller_principals.append(principal_dict)
+        _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
+            ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
+        )
         entry: dict[str, Any] = {
             "function": ef.abi_signature or ef.function_name,
             "selector": ef.selector,
             "effect_labels": list(ef.effect_labels or []),
             "effect_targets": list(ef.effect_targets or []),
             "claims": list(getattr(ef, "claims", None) or []),
-            "action_summary": ef.action_summary,
+            # The quotable copy of the structured planes, reconciled against them
+            # (R3) and labelled with which shape it is: 130 local rows say
+            # "Performs a contract action." (no evidence at all), 528 restate
+            # effect_targets as a "write", and the 20 arbitrary-execution rows are
+            # the sentence A3 narrowed in Wave 1. See
+            # services/aggregations/action_summary.
+            "action_summary": _action_summary_text,
+            "action_summary_kind": _action_summary_kind,
+            "action_summary_note": _action_summary_note,
             "authority_public": ef.authority_public,
             # Three-state authority verdict beside the bool it splits. NULL on a
             # row written before the column existed — passed through as null so

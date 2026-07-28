@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from db.models import EffectiveFunction, FunctionPrincipal
+from services.aggregations.action_summary import describe_action
 
 # A principal is *terminal* when its resolved_type names a settled controlling
 # key or a recognized governance primitive (Safe / EOA / zero / timelock /
@@ -433,13 +434,22 @@ def _build_company_function_entry(
             or not all(_is_generic_authority_contract_principal(principal) for principal in entry["principals"])
         ]
 
+    _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
+        ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
+    )
     entry: dict[str, Any] = {
         "function": ef.abi_signature or ef.function_name,
         "selector": ef.selector,
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
         "claims": list(getattr(ef, "claims", None) or []),
-        "action_summary": ef.action_summary,
+        # The quotable copy of the structured planes, reconciled against them (R3)
+        # and labelled with which shape it is. See
+        # services/aggregations/action_summary — this endpoint and analysis_detail
+        # are the two public surfaces that publish the sentence.
+        "action_summary": _action_summary_text,
+        "action_summary_kind": _action_summary_kind,
+        "action_summary_note": _action_summary_note,
         "authority_public": ef.authority_public,
         # See analysis_detail: the three-state verdict rides alongside the bool,
         # null when the row predates the column.
