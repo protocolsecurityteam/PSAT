@@ -32,6 +32,44 @@ from services.policy.capability_surface import capability_currency
 logger = logging.getLogger(__name__)
 
 
+def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
+    """One ``principal_labels`` row as published, with two assertions narrowed.
+
+    ``confidence`` is NOT published under that name. The column is a
+    NAMING-BRANCH label: ``principal_enrichment._display_name`` returns ``"high"``
+    both for the ``safe_signer`` branch (an on-chain-verified fact) and for the
+    final fallback, where it means only *"``resolved_type`` was not the literal
+    string ``unknown``"*, and both print ``high``. Distribution: ``high`` 1,376 /
+    ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
+    ``resolved_type == "unknown"`` and no such row exists, so the field is
+    two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
+    express "I did not determine this" on a column inv 6 makes first-class.
+    Published as ``naming_rule``, which is what it measures. A real per-principal
+    confidence has to come from whether the identity was verified on-chain (Safe
+    ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
+    needs wiring this consumer does not own, and inventing one from this column
+    would be manufacturing the evidence the rename exists to stop claiming.
+
+    ``label`` is byte-identical to ``display_name`` on 1,556/1,556 rows, so a
+    consumer reading both believed there were two facts. It is published only when
+    the two actually differ.
+    """
+    out: dict[str, Any] = {
+        "address": row.address,
+        "display_name": row.display_name,
+        "resolved_type": row.resolved_type,
+        "labels": list(row.labels or []),
+        # Which naming branch produced ``display_name``. Never an epistemic
+        # confidence, and never omitted — key-absence marks a pre-rename payload.
+        "naming_rule": row.confidence,
+        "details": row.details or {},
+        "graph_context": list(row.graph_context or []),
+    }
+    if row.label is not None and row.label != row.display_name:
+        out["label"] = row.label
+    return out
+
+
 def _artifacts_or_degrade(
     session: Session,
     job_id: Any,
@@ -273,19 +311,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
     )
     if pl_rows:
         payload["principal_labels"] = {
-            "principals": [
-                {
-                    "address": p.address,
-                    "display_name": p.display_name,
-                    "label": p.label,
-                    "resolved_type": p.resolved_type,
-                    "labels": list(p.labels or []),
-                    "confidence": p.confidence,
-                    "details": p.details or {},
-                    "graph_context": list(p.graph_context or []),
-                }
-                for p in pl_rows
-            ],
+            "principals": [_principal_label_payload(p) for p in pl_rows],
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
         }
@@ -532,9 +558,7 @@ def _inherit_from_impl(
             )
             if impl_pls:
                 payload["principal_labels"] = {
-                    "principals": [
-                        {"address": p.address, "label": p.label, "resolved_type": p.resolved_type} for p in impl_pls
-                    ],
+                    "principals": [_principal_label_payload(p) for p in impl_pls],
                 }
 
         if "contract_name" not in payload and impl_c.contract_name:

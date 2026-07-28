@@ -2169,3 +2169,50 @@ def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
     assert nodes[controller.lower()]["details"]["terminal_principal"]["status"] == "multi_plane"
+
+
+def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_session):
+    """``principal_labels.confidence`` carries no epistemic content (W3-E item 7 /
+    G6-8): it is a naming-branch label, two-valued in practice (high 1,376 /
+    medium 180 / low 0 — ``low`` needs ``resolved_type == "unknown"`` and no such
+    row exists), ~97% a restatement of ``resolved_type``, and cannot say "I did not
+    determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
+    rows, so a consumer reading both believed there were two facts.
+    """
+    from db.models import PrincipalLabel
+    from services.aggregations.analysis_detail import _principal_label_payload
+
+    identical = PrincipalLabel(
+        contract_id=1,
+        address=_addr("plc1"),
+        label="EtherFi admin Safe",
+        display_name="EtherFi admin Safe",
+        resolved_type="safe",
+        labels=["etherfi_admin"],
+        confidence="high",
+        details={},
+        graph_context=[],
+    )
+    out = _principal_label_payload(identical)
+    assert out["naming_rule"] == "high"
+    assert "confidence" not in out
+    # One fact, published once.
+    assert "label" not in out
+    assert out["display_name"] == "EtherFi admin Safe"
+
+    # POSITIVE CONTROL: when the two really differ, both ship.
+    differing = PrincipalLabel(
+        contract_id=1,
+        address=_addr("plc2"),
+        label="raw-label",
+        display_name="Pretty Name",
+        resolved_type="contract",
+        labels=[],
+        confidence="medium",
+        details={},
+        graph_context=[],
+    )
+    out = _principal_label_payload(differing)
+    assert out["label"] == "raw-label"
+    assert out["display_name"] == "Pretty Name"
+    assert out["naming_rule"] == "medium"
