@@ -2216,3 +2216,67 @@ def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_s
     assert out["label"] == "raw-label"
     assert out["display_name"] == "Pretty Name"
     assert out["naming_rule"] == "medium"
+
+
+def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
+    """L-21: ``covered_to_block is None`` alone is not "this row covers the
+    currently-open impl window" — it is also what a row whose upper bound was never
+    determined looks like, and this module's own ImplWindow docstring calls that
+    inference invalid. ``AuditContractCoverage`` carries no ``successor`` column, so
+    the lower bound is the only evidence available here.
+
+    Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
+    realised badge changes today 0 — the 2 high-confidence rows that do land on a
+    current impl are ``covered_from_block`` set / ``covered_to_block`` NULL and keep
+    the badge (the positive control below).
+    """
+    from types import SimpleNamespace
+
+    from services.aggregations.contract_audit_timeline import _current_status
+
+    p = _add_protocol(db_session, f"e2e-l21-{uuid.uuid4().hex[:8]}")
+    impl_addr = _addr("l21i")
+    proxy_addr = _addr("l21p")
+    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="Impl")
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, name="Proxy")
+    impl = _add_contract(db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="Impl")
+    proxy = _add_contract(
+        db_session,
+        address=proxy_addr,
+        job=proxy_job,
+        protocol_id=p.id,
+        is_proxy=True,
+        implementation=impl_addr,
+        contract_name="Proxy",
+    )
+
+    # ``_current_status`` reads the coverage rows it is handed and only queries for
+    # the impl Contract, so the rows are built in memory — the table's
+    # (report, contract) unique key would otherwise force one AuditReport per shape
+    # for no gain in what is being tested.
+    def _cov(**kwargs):
+        base = {
+            "contract_id": impl.id,
+            "match_type": "impl_era",
+            "match_confidence": "high",
+            "equivalence_status": "pending",
+            "proof_kind": None,
+            "covered_from_block": None,
+            "covered_to_block": None,
+        }
+        base.update(kwargs)
+        return SimpleNamespace(**base)
+
+    # POSITIVE CONTROL: bounded start, no end — genuinely open-ended, keeps "audited".
+    open_ended = _cov(covered_from_block=100)
+    assert _current_status(db_session, proxy, [open_ended]) == "audited"
+
+    # Neither bound determined: never windowed at all, so it cannot earn the badge
+    # on the strength of a missing number.
+    unbounded = _cov()
+    assert _current_status(db_session, proxy, [unbounded]) == "unaudited_since_upgrade"
+
+    # NEGATIVE CONTROL: a cryptographic proof still overrides everything, so the
+    # narrowing cannot have removed the strongest evidence path.
+    proven = _cov(match_confidence="low", equivalence_status="proven", proof_kind="bytecode_match")
+    assert _current_status(db_session, proxy, [unbounded, proven]) == "audited"
