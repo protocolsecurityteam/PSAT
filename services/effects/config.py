@@ -89,6 +89,64 @@ OBSERVATION_EXECUTED = "executed"
 OBSERVATION_REVERTED = "reverted"
 OBSERVATION_NOT_RUN = "not_run"
 
+# ``details["duration_bound_source"]`` — how a freeze latch's window was
+# established (A7). Here in the shared vocabulary for the same reason
+# ``observation`` is: the static reader (``calldata.read_max_pause_duration``)
+# produces it and the fork recipe (``anvil.pause_recipe``) publishes it, and while
+# the answer was a bare ``int | None`` the two states ``None`` conflates were
+# published as one — with the SEVERE one asserted by default.
+#
+# CONTRACT for any consumer of ``duration_bound_seconds`` (scorer, inspector):
+#   * ``guard_constant`` — a mandatory guard leaf compares the clock against a
+#     constant offset of THIS latch. ``duration_bound_seconds`` is that window;
+#     trust it as a severity REDUCER only together with ``auto_expiry is True``
+#     (the fork warped past it and the frozen entry points came back).
+#   * ``no_time_reference`` — PROVEN indefinite: the latch IS read by a lowered
+#     guard, NO leaf anywhere in that guard tree touches a clock, and no operand
+#     anywhere in that tree stands for something the builder never read — the
+#     operand lists are known-complete (``calldata._absorption_recorded``) and no
+#     operand is an undecomposed expression or an unentered callee
+#     (``calldata._OPAQUE_OPERAND_SOURCES``). Only then does no passage of time lift
+#     the freeze. ``duration_bound_seconds`` is ``None`` and that ``None`` is a fact
+#     about the contract. This is the most severe freeze there is, so the extra
+#     conditions are not pedantry — each corresponds to a false proof reproduced
+#     from compiled Solidity, all three on freezes that demonstrably expire:
+#     ``require(!frozen || block.timestamp > unpauseAt)`` (Solidity lowers ``||``
+#     into sibling leaves, so no single leaf holds both facts); any pre-widening tree
+#     of ``require(block.timestamp - pausedUntil < 2592000)`` (a two-slot operand
+#     list dropped the clock); and ``require(!frozen || _clock() > unpauseAt)``,
+#     where the clock is read through an internal view helper or a time oracle — the
+#     Uniswap-V3 / OZ-Governor idiom — so no ``block_context`` operand exists
+#     anywhere in the tree to find.
+#   * ``not_determined`` — the window was NOT established: either the guard
+#     compares the latch against ``block.timestamp`` with the window held in
+#     storage (etherfi ``PausableUntil``: ``$.pauseUntilDuration``), or no lowered
+#     leaf reads the latch at all. ``duration_bound_seconds`` is ``None`` and that
+#     ``None`` means "unknown". It must NOT be scored as indefinite and must not
+#     be scored as bounded — it is a confidence gap (inv. 2).
+# An ABSENT key means the row predates the discriminator: those rows were written
+# under the pre-A7 contract, which read ``None`` as indefinite, and every one of
+# the four proven rows in the local corpus was a ``pauseUntil`` latch that DOES
+# expire — so treat an absent source as ``not_determined``, never as indefinite.
+DURATION_BOUND_GUARD_CONSTANT = "guard_constant"
+DURATION_BOUND_NO_TIME_REFERENCE = "no_time_reference"
+DURATION_BOUND_NOT_DETERMINED = "not_determined"
+
+# The pseudo-address ``eth_simulateV1``'s ``traceTransfers`` puts in the ``address``
+# (emitter) field of the SYNTHETIC ``Transfer`` log it emits for a NATIVE value move.
+# MEASURED against the live node, not assumed: 3 reads at head-10 plus a pinned read
+# at block 25619159 all return ``0xeeee…eeee`` for a plain ETH send, and a WETH
+# ``deposit()`` control in the same request emits BOTH that log and one whose emitter
+# is the token — so the field discriminates assets and this value is a real answer
+# rather than a parser artifact.
+#
+# It exists here because the §5b reach measurement is per ASSET: a holding is matched
+# against the emitter of the log that moved it, and native ETH has no token contract
+# to be the emitter. Without this key a native move matches no holding at all, which
+# is precisely why the "just pass ``only_asset``" fix was refuted — it would have
+# under-claimed 100%.
+NATIVE_ASSET_LOG_EMITTER = "0x" + "ee" * 20
+
 # Verdict vocabulary. ``unknown`` is the §8 fail-closed value used for every
 # non-observation and for the inv. 15 fail-forward exhaustion path.
 VERDICT_PROVEN = "proven"

@@ -299,7 +299,103 @@ logger = logging.getLogger(__name__)
 # the MERGED head is 66 -> 32 mutual directed edges (372 -> 306 distinct
 # directed pairs). Treat 66->32 as canonical; the commit-message figures were
 # measured pre-merge on the un-merged leg.)
-EFFECT_CACHE_SCHEMA_VERSION = 21
+# v22 (Wave 2 Leg D, A7): the freeze witness now says HOW the pause window was
+# established — ``duration_bound_source`` beside ``duration_bound_seconds``
+# (``config.DURATION_BOUND_*``) — and the predicate leaves the reader is fed carry
+# the additive sub-operands a two-slot comparison discarded
+# (``absorbed_operands``). A pre-v22 row publishes ``duration_bound_seconds:
+# null`` with no source, and the documented consumer contract read that pair as
+# "indefinite latch, most severe": false on all four proven ``freeze_pause``
+# verdicts in the local corpus, every one of them a ``pauseUntil`` timestamp latch
+# whose window is a storage value. The reader also now RESOLVES a window it could
+# not see before (measured: 10 of 11 compiled guard shapes went from ``None`` to
+# the declared constant), and the recipe warps the fork by that bound to test
+# auto-expiry — so a pre-v22 row for such a latch records a verdict reached
+# without the expiry probe ever running.
+# v23 (Wave 2 Leg D, ledger L-4): ``_principals_by_function`` had no ORDER BY, and
+# its first element is the identity every fork probe impersonates
+# (``candidate.principal_addresses[0]``). Which holder we simulated as — and so
+# which gate the probe passed, which revert it recorded, and what the witness said
+# — was a function of the query plan, not of the data, on every multi-principal
+# function (33 principals on one local function, 27 on two more). A pre-v23 row
+# records a verdict reached as whichever holder the heap happened to return first.
+# v24 (Wave 2 Leg D, G6-3): ``concrete_destination`` is withheld on a
+# ``caller_arbitrary`` destination shape, and the two identities this prober INVENTS
+# (``SENTINEL_ADDRESS``, ``NEUTRAL_CALLER``) are excluded from the observed-
+# destination capture everywhere. On 35 of 35 local caller_arbitrary rows the stored
+# value was the probe's own recipient argument read back, and the one row with no
+# resolved principals stored ``0x1111…1111`` — this stage's most concrete
+# "destination" fact was not a fact about the contract at all. The cache row itself
+# holds no destination (inv. 3), but the hit path's residue re-observation reads the
+# shape out of ``details`` to decide whether a re-probe can yield anything, so a
+# pre-v24 row drives that decision under the old rule.
+# v25 (Wave 2 Leg D, D3): the §5b reach payload gained ``reach_determined`` and now
+# publishes the acting deployment's own balance as ``observed_reach_floor_usd``
+# instead of as ``observed_reach_value_usd``. The not-measured branch fires for any
+# zap/router/adapter that moves value it does not hold (18 armed local flow.out
+# functions on 6 zero-balance contracts), and while the floor rode the
+# measured-reach key a consumer that read the number and ignored the flag scored
+# "$0 reach" for a function that may move millions. Reach itself is state-plane and
+# never enters a cache row (inv. 3) — the bump is because the same probe now returns
+# a different ``concrete`` shape, and the hit path re-publishes ``details`` beside
+# residue written under the old contract.
+# v26 (Wave 2 Leg D, A2): §5b reach is measured PER ASSET. The probe's holder set is
+# now ``(holder, asset, usd|None)`` — native keyed on the emitter
+# ``eth_simulateV1``'s traceTransfers actually uses (measured: 3 reads at head-10 + a
+# pinned read at 25619159, with an ERC-20 control) — and a moved asset with no priced
+# holding makes the total not-determined instead of contributing the holder's whole
+# balance sheet. A pre-v26 row's reach was computed asset-blind: the weETH proxy's
+# $3.489B sheet (99.99% eETH) was attributed to a synthetic native-ETH move, and two
+# rows of that shape carried 64.96% of ALL published reach USD in the DB.
+# v27 (Wave 2 Leg D, A2's envelope): the reach figure now carries the outcome of a
+# corroborating CEILING (``reach_tvl_check`` against ``tvl_snapshots.defillama_tvl`` —
+# never ``total_usd``, which is NULL on every row) and the REASON an asset could not be
+# valued, including a holdings list at the fetcher's one-page cap. A pre-v27 row's
+# reach was never checked against the protocol's own TVL: the worst published row
+# asserted $3.489B against a TVL of $3.297B.
+# v28 (Wave 2 Leg D, A6 / C3-S1): the claim witness now forwards
+# ``destination_shape`` and ``shape_proved_by``. NO claim in the database carried
+# either, so the fork's ``caller_arbitrary`` proof on 35 rows had never reached a
+# consumer, and the two approve-then-pull rows published $472M of reach with no
+# destination statement at all. The cache row already held both keys in ``details``;
+# the bump is because the claim projection a hit re-publishes now includes them, so a
+# pre-v28 row's ``details`` is served into a consumer contract that expects them.
+# v29 (Wave 2 Leg D, G6-C1): ``details`` is split into planes. Every key in
+# ``DEPLOYMENT_PLANE_KEYS`` — ``observed_blast_radius``, ``pre_pause_succeeding``,
+# ``scored_denominator``, ``input_seeded``, ``contract_balance_seeded``, ``backing`` —
+# is an observation of ONE deployment's fork state and is now stripped at the write, so
+# a hit serves code-plane facts only and those keys are ABSENT on the hitting
+# deployment's witness (absent, not null and not false). A pre-v29 row CARRIES them: 74
+# of 150 local rows do, and serving one republishes another contract's blast radius,
+# seeding qualifiers and mint backing as this deployment's own witness. Same defect
+# class as the §5b reach leak that moved to ``observed_residue``, on five more fields.
+# The §7 audit also gained its floor in this commit: a signature with no structural key
+# is no longer trusted on agreement alone (49 of 150 rows compare ``unknown`` with
+# itself), so which verdict a hitting deployment publishes can differ from a pre-v29 run.
+# v30 (Wave 2 Leg D, A7 round 2): ``duration_bound_source`` no longer asserts
+# ``no_time_reference`` — PROVEN indefinite, the most severe freeze this system
+# states — from a LEAF-LOCAL absence of a clock. Two shapes reproduced a false proof
+# from compiled Solidity: a lowered ``||`` puts the latch and the clock in SIBLING
+# leaves (``require(!frozen || block.timestamp > unpauseAt)``, a freeze that expires),
+# and a tree persisted before the ``absorbed_operands`` widening drops the clock out
+# of ``require(block.timestamp - pausedUntil < 2592000)`` altogether. The state now
+# also requires a clock-free whole guard tree and known-complete operand lists, so a
+# pre-v30 row's ``no_time_reference`` may be a proof its evidence never supported.
+# v31 (Wave 2 Leg D, A7 round 3): the OPACITY half of the ``no_time_reference`` proof
+# was still leaf-local, and its opaque-source set omitted the two operand kinds that
+# name a callee the builder never entered. Reproduced through the production predicate
+# builder: ``require(!frozen || _clock() > unpauseAt)`` with ``_clock()`` an internal
+# view returning ``block.timestamp`` — Uniswap V3's ``_blockTimestamp()``, OZ
+# Governor's ``clock()`` — and the same shape through a time oracle both published
+# PROVEN indefinite for a freeze that expires. No ``block_context`` operand exists
+# anywhere in those trees, so the v30 whole-tree clock walk could not see it either.
+# Both preconditions are now whole-tree and ``view_call``/``external_call`` are opaque,
+# so a pre-v31 row's ``no_time_reference`` may be a proof its evidence never supported.
+# The same (unreleased) version also covers the clock-spelling split adjudicated at
+# wave close: the clock test now counts ``now``/``number`` alongside ``timestamp``
+# for the demotion, while only second-denominated kinds feed the constant harvest —
+# no v31 row was ever written, so one version covers one shipped shape.
+EFFECT_CACHE_SCHEMA_VERSION = 31
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
@@ -317,6 +413,55 @@ AUDIT_FAILED = "failed"
 # resets a cap that exists to stop an unreproducible behavior from re-probing on
 # every job forever, so they survive the flip that clears the observations.
 RESIDUE_BOOKKEEPING_KEYS = ("destination_probe_attempts",)
+
+# ---------------------------------------------------------------------------
+# Replay identity: what a re-run is allowed to change (G6-C6)
+# ---------------------------------------------------------------------------
+# THE VIOLATION, stated rather than hidden. inv. 11 is byte-identical recomputation and
+# inv. 12 is "re-analysis without on-chain change is a no-op", and this cache MUTATES ON
+# READ: ``bump_hit`` and ``mark_audited`` are called from the read path
+# (``workers/effects_worker.py`` — the plain-hit, audit and floor branches), so two
+# identical pipeline runs over an unchanged chain leave the DB in DIFFERENT states.
+# W0-2/W0-8 close the float and string-hash determinism classes and neither can see
+# this one: both pin the PROCESS, and this is a difference in what the process WROTE.
+#
+# DECISION (the item's second permitted shape): the mutation is ACCEPTED and the columns
+# it touches are declared non-identity here, in the module that owns the schema, instead
+# of being split into a side table. Reasons, so a later reader can reverse it knowingly:
+#   * every one of these columns is bookkeeping ABOUT PROBING — how many times this row
+#     was served, whether a peer corroborated it, when — and none is an observation of a
+#     contract. Nothing published to a user, a claim or a score reads any of them.
+#   * ``audit_status`` is deliberately durable: it exists so a caught collision is not
+#     re-tested (and not re-trusted) forever. Moving it to a stats table would either
+#     lose that or duplicate the identity key to carry it.
+#   * a stats table would add a write to the hot read path for a value only operational
+#     metrics consume.
+# CONSEQUENCE, not to be softened: a replay-identity check over this table must compare
+# rows MODULO these columns. A checker that diffs whole rows will report a difference on
+# every second run, and it will be right — the invariant as stated is not what the code
+# does, and this constant is the exact size of the gap.
+#
+# ``hit_count`` semantics, since G6-C6 flags them: it counts times this row was SERVED as
+# a trusted hit, so ``0`` means "never served" (134 rows). It cannot mean "looked up and
+# missed" — a lookup that misses matches NO row, so the miss is a property of the
+# QUERY and is recorded where queries are: ``record_stage_metric("cache_misses", …)``
+# per job in the effects worker. The two facts live in two places because they are facts
+# about two different things.
+REPLAY_IDENTITY_EXCLUDED_COLUMNS = (
+    "hit_count",
+    "audit_status",
+    "audit_peer_hash",
+    "audited_at",
+    "updated_at",
+)
+
+# The same statement for ``effect_verdicts.observed_residue``: these keys are probe
+# bookkeeping (how many hit-path re-observations this deployment has spent), and
+# ``_mark_residue_gaps`` reads them to decide run N+1's probe set — so run N+1's WORK is
+# a function of what run N persisted. Bounded and deliberate (without it an
+# unreproducible deployment re-probes forever), and excluded from replay identity for
+# the same reason as the columns above: it describes probing, never the chain.
+REPLAY_IDENTITY_EXCLUDED_RESIDUE_KEYS = RESIDUE_BOOKKEEPING_KEYS
 
 
 def _lock_key(behavior_hash: str, effect_class: str, scope: str, surface: str, gate_ref: str) -> str:
@@ -470,6 +615,10 @@ def upsert_cached_verdict(
     surface = contract_surface_hash if scope != "kernel" else KERNEL_SURFACE_SENTINEL
     _advisory_lock(session, _lock_key(behavior_hash, effect_class, scope, surface, gate_ref))
     now = datetime.now(timezone.utc)
+    # inv. 3 at the WRITE, not by convention at the call sites: this row is served to
+    # every other deployment sharing the bytecode, so a per-deployment observation may
+    # not enter it (:data:`DEPLOYMENT_PLANE_KEYS`).
+    details = code_plane_details(details)
     stmt = pg_insert(EffectBehaviorCache).values(
         behavior_hash=behavior_hash,
         effect_class=effect_class,
@@ -559,12 +708,63 @@ _KERNEL_SIGNATURE_KEYS = (
     "destination_shape",
 )
 
+# State-plane keys that must NEVER be stored on a code-plane cache row (G6-C1 / inv. 3).
+# Every one is an observation of ONE deployment's fork state, and the cache re-publishes
+# whatever it stores to every OTHER deployment sharing the bytecode — so a hit used to
+# hand deployment B deployment A's blast radius, A's pre-pause succeeding set and A's
+# seeding qualifiers as B's own witness. Measured before this split: 74 of 150 cache
+# rows carried at least one of these (29 freeze_pause, 21 supply, 20 value_out, 4).
+#
+# Stripped on WRITE, so a hit cannot serve them and they are ABSENT on the hit
+# deployment's witness — absent, not ``null`` and not ``false`` (R1). The producing
+# deployment keeps the full payload on its own ``effect_verdicts.witness`` row, which is
+# where per-deployment observations belong. Consumers already have to treat absence as
+# "unproven lower bound" (``claims_bridge._observed_summary`` states it for
+# ``observed_blast_radius`` verbatim); the difference is that the absence is now HONEST
+# rather than replaced by another contract's number.
+DEPLOYMENT_PLANE_KEYS = (
+    "observed_blast_radius",
+    "pre_pause_succeeding",
+    "scored_denominator",
+    "input_seeded",
+    "contract_balance_seeded",
+    "backing",
+)
+
+
+def code_plane_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``details`` with every per-deployment observation removed."""
+    if not details:
+        return details
+    return {k: v for k, v in details.items() if k not in DEPLOYMENT_PLANE_KEYS}
+
 
 def kernel_signature(verdict: str, details: dict[str, Any] | None) -> tuple[Any, ...]:
     """The comparable kernel identity: the verdict plus its structural witness.
     Order-stable so two calls on equal inputs compare equal."""
     d = details or {}
     return (verdict, *(d.get(k) for k in _KERNEL_SIGNATURE_KEYS))
+
+
+def kernel_signature_is_comparable(details: dict[str, Any] | None) -> bool:
+    """Whether a signature carries ANY structural key — i.e. whether comparing it can
+    falsify anything.
+
+    THE FLOOR (§7 audit). ``authority_change`` — 49 of 150 cache rows — carries none of
+    :data:`_KERNEL_SIGNATURE_KEYS`, so with ``verdict='unknown'`` on all 49 the
+    signature is ``('unknown', None, None, None, None, None)`` on BOTH sides and the
+    audit passes unconditionally. That is not an audit; it is the string ``unknown``
+    compared with itself, and a hash collision between two different behaviors both
+    answering ``unknown`` is exactly what it would have to catch. Two of the five
+    allowlisted keys (``gate_mutation``, ``upgradeable``) appear in NO row at all.
+
+    A hit whose signature cannot be compared must not be TRUSTED. The caller re-probes
+    and publishes its own fresh result instead of the cached one (see
+    ``effects_worker._resolve_item``): the cheap free hit is what is refused, not the
+    verdict.
+    """
+    d = details or {}
+    return any(k in d for k in _KERNEL_SIGNATURE_KEYS)
 
 
 def kernel_verdicts_agree(
@@ -578,6 +778,11 @@ def kernel_verdicts_agree(
     The self-audit trusts a free cache hit only when this returns ``True``. A
     ``False`` is a caught hash collision: the caller withholds (writes
     ``unknown`` + files a discrepancy) instead of propagating the cached verdict.
+
+    Agreement is necessary and NOT sufficient: a signature with no structural key
+    agrees with itself trivially, so the caller must also check
+    :func:`kernel_signature_is_comparable`. Kept as two functions because they answer
+    two different questions — "do these disagree" and "could they have".
     """
     return kernel_signature(cached_verdict, cached_details) == kernel_signature(fresh_verdict, fresh_details)
 

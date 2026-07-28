@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import and_, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -43,9 +43,11 @@ from db.models import (
     Job,
     JobStage,
     JobStatus,
+    TvlSnapshot,
 )
-from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+from utils.etherscan import token_balances_may_be_truncated
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -151,23 +153,39 @@ class Candidate:
     # (never the whole class set — we don't re-simulate what's already explained).
     restrict_families: frozenset[str] | None = None
     # §5b downstream value-reach inputs. ``value_holders`` is the protocol's
-    # WITNESSED value-holder set — ``(address, usd)`` from ``contract_balances``, NOT
-    # control_graph_edges (which has no fund-flow edge) — against which the fork
-    # value-reach probe measures value that provably LEAVES a holder when the call
-    # runs. ``acting_balance_usd`` is this function's own deployment balance, the
-    # floor when downstream reach is fork-observed to be nothing. Shared by
-    # reference across a protocol's candidates (small, immutable), so carrying it
+    # WITNESSED value-holder set from ``contract_balances`` — NOT control_graph_edges
+    # (which has no fund-flow edge) — against which the fork value-reach probe
+    # measures value that provably LEAVES a holder when the call runs.
+    # ``acting_balance_usd`` is this function's own deployment balance, the floor
+    # when downstream reach is fork-observed to be nothing. Shared by reference
+    # across a protocol's candidates (small, immutable), so carrying it
     # per-candidate is cheap.
     #
-    # These two stay ``float`` where ``value_at_stake_usd`` is ``Decimal``: unlike
-    # the sort key they are PUBLISHED — they reach ``observed_reach_value_usd`` in
-    # the verdict's jsonb, which ``json.dumps`` cannot encode from a Decimal. Each
-    # is a single exact-to-float conversion of one stored cell, never a sum over a
-    # set, so the conversion is the last step rather than the first and no
-    # order-dependence survives it. Whoever changes them to Decimal must give the
-    # jsonb path an encoder first.
-    value_holders: tuple[tuple[str, float], ...] = ()
+    # PER ASSET, not per holder (A2). This was ``(address, usd)`` — one summed
+    # figure per holder — and the reach probe matched ANY ``Transfer`` out of that
+    # holder against the whole sum. The weETH proxy's $3.489B is 99.99% eETH, the
+    # probe's synthetic native-ETH move matched it, and the row published $3.489B of
+    # reach for a call that moved $0 of ETH: 64.96% of ALL published reach USD in the
+    # DB came from two such rows, both truly $0. Matching now pins the asset (the
+    # ``Transfer`` log's EMITTER), so an asset that moved contributes only its own
+    # holding and a moved asset we hold no priced record for contributes NOTHING but
+    # marks the total not-determined.
+    #
+    # ``usd_value`` stays ``float`` (and nullable) where ``value_at_stake_usd`` is
+    # ``Decimal``: unlike the sort key it is PUBLISHED — it reaches
+    # ``observed_reach_value_usd`` in the verdict's jsonb, which ``json.dumps``
+    # cannot encode from a Decimal. Each is a single exact-to-float conversion of one
+    # stored cell, never a sum over a set, so the conversion is the last step rather
+    # than the first and no order-dependence survives it. Whoever changes them to
+    # Decimal must give the jsonb path an encoder first.
+    value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
+    # The protocol's independently-measured TVL (``tvl_snapshots.defillama_tvl``), or
+    # ``None`` when there is no snapshot. A corroborating CEILING for the reach figure:
+    # no exercise of one function can reach more value than the protocol holds, and the
+    # worst published row asserted $3.489B against a protocol TVL of $3.297B. ``None``
+    # means the check is skipped, and the recipe records that it was.
+    protocol_tvl_usd: float | None = None
     # Assets the acting deployment PROVABLY holds, richest first — the only honest
     # identity for a caller-supplied token PARAMETER, which has no getter behind it
     # to resolve. Priced entries only (see :func:`_token_holdings_by_contract`).
@@ -333,6 +351,165 @@ def _deployment_by_contract(session: Session, protocol_id: int) -> dict[int, str
         if addr is not None:
             out.setdefault(contract_id, addr)
     return out
+
+
+# What is known about a holder's holdings list being WHOLE. TWO states, and the
+# missing third one is deliberate: there is no ``"complete"``. Completeness would have
+# to be proven from the fetch's PAGE LENGTH, and nothing persists it — ``get_token
+# _balances`` drops every zero-balance entry before the rows are stored, so a stored
+# count below the cap is consistent with a full page. A boolean here read "below the
+# cap" as PROVEN COMPLETE, i.e. a proven-absence claim derived from a count whose input
+# had already discarded rows.
+HOLDINGS_COMPLETENESS_AT_PAGE_CAP = "at_page_cap"
+HOLDINGS_COMPLETENESS_NOT_DETERMINED = "not_determined"
+HOLDINGS_COMPLETENESS_STATES = (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMPLETENESS_NOT_DETERMINED)
+
+
+class AssetHolding(NamedTuple):
+    """One (holder, asset) balance the §5b reach probe can match a moved asset to.
+
+    ``asset`` is the address that EMITS a ``Transfer`` log for it: the token
+    contract, or :data:`~services.effects.config.NATIVE_ASSET_LOG_EMITTER` for the
+    native balance (``contract_balances.token_address IS NULL``). Matching is per
+    asset because the whole A2 over-claim was asset-blindness: a synthetic native
+    move out of the weETH proxy matched a holder whose USD is 99.99% eETH, and the
+    row published $3.489B of "reach" for a call that moved $0 of ETH.
+
+    ``usd_value`` is ``None`` when the holding is UNPRICED — 1001 of 1376 local rows
+    carry ``price_usd = 0``, which the producer writes for "no price known", and
+    ``usd_value`` is the column that encodes that correctly as SQL NULL. It must
+    never be read as zero: that is a confident low value where the honest answer is
+    "unknown", which is inv. 1's ranking rule in its numeric form.
+    """
+
+    holder: str
+    asset: str
+    usd_value: float | None
+    # What is known about whether this holder's holdings list is WHOLE (G6-11), as one
+    # of :data:`HOLDINGS_COMPLETENESS_STATES`. Never ``"complete"``, and that is the
+    # point: this is derived from the stored rows, and the stored rows are the fetch's
+    # output AFTER ``utils.etherscan.get_token_balances`` drops every zero-balance
+    # entry, so a FULL 100-entry page containing any zero-balance entry stores fewer
+    # than the cap. The count is therefore a LOWER BOUND on the page length and can
+    # only ever prove the at-cap case, never its negation. Nothing persisted records
+    # the page length (see ``_holdings_completeness``), so "we know this list is whole"
+    # is not a state this input can reach. Uniform across every holding of one holder;
+    # carried per row so the reach probe needs no second input to thread.
+    completeness: str = HOLDINGS_COMPLETENESS_NOT_DETERMINED
+
+
+def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
+    """``deployment address -> its per-ASSET holdings``.
+
+    Keyed on the address that HOLDS the money (the proxy), because that is the only
+    address a ``Transfer`` log can name — the same reason ``deployment_balance``
+    exists beside ``balance``.
+
+    MAX per (holder, asset), not SUM, for the reason ``build_authority_graph``
+    documents: two implementation rows fronted by one proxy each carry a COPY of that
+    one deployment's holdings, and adding them reports the money twice.
+    """
+    rows = session.execute(
+        select(
+            Contract.id,
+            ContractBalance.token_address,
+            ContractBalance.usd_value,
+        )
+        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        .where(Contract.protocol_id == protocol_id)
+    ).all()
+    holders = _deployment_by_contract(session, protocol_id)
+    addresses: dict[int, str] = {
+        cid: address
+        for cid, address in session.execute(
+            select(Contract.id, Contract.address).where(Contract.protocol_id == protocol_id)
+        ).all()
+    }
+    # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
+    # is never treated as 0 in the max: a copy of the same holding that happened to be
+    # priced is strictly more informative.
+    best: dict[tuple[str, str], float | None] = {}
+    for contract_id, token_address, usd in rows:
+        holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
+        if holder is None:
+            continue
+        asset = _addr(token_address) or NATIVE_ASSET_LOG_EMITTER
+        key = (holder, asset)
+        value = None if usd is None else float(_usd(usd))
+        if key not in best:
+            best[key] = value
+            continue
+        current = best[key]
+        if current is None:
+            best[key] = value
+        elif value is not None:
+            best[key] = max(current, value)
+    # Per-holder completeness, from the same rows. The native row is excluded from the
+    # count because it is fetched separately and is not part of the paged list.
+    token_rows: dict[str, int] = {}
+    for (holder, asset), _usd_value in best.items():
+        if asset != NATIVE_ASSET_LOG_EMITTER:
+            token_rows[holder] = token_rows.get(holder, 0) + 1
+    out: dict[str, list[AssetHolding]] = {}
+    for (holder, asset), usd_value in sorted(best.items()):
+        out.setdefault(holder, []).append(
+            AssetHolding(
+                holder=holder,
+                asset=asset,
+                usd_value=usd_value,
+                completeness=_holdings_completeness(token_rows.get(holder, 0)),
+            )
+        )
+    return {holder: tuple(items) for holder, items in out.items()}
+
+
+def _holdings_completeness(stored_token_rows: int) -> str:
+    """What a STORED row count can say about a holdings list being whole.
+
+    ONE direction only. ``stored_token_rows >= cap`` proves the fetch returned a full
+    page, so assets are probably missing. Below the cap proves NOTHING: the stored rows
+    are ``utils.etherscan.get_token_balances``' output AFTER its ``raw_balance > 0``
+    filter, and the truncation check there is evaluated on that same filtered list, so
+    the page-size signal is destroyed one line above where it is read. A full 100-entry
+    page containing any zero-balance entry stores fewer than 100 and would have read as
+    proven-complete.
+
+    ARMED POPULATION, stated honestly (R2): ``at_page_cap`` is reachable by
+    construction and test-covered, and it fires on ZERO local holders. 7 local
+    contracts do sit exactly at the cap (WETH9, Dai, WstETH, Lido, LinkToken,
+    DepositContract, FiatTokenV2_2, one of them holding $8.6B) — but all 7 have
+    ``protocol_id IS NULL`` and ``_asset_holdings_by_deployment`` filters
+    ``Contract.protocol_id == protocol_id``, so none of them can enter a holder set.
+    The most token rows any protocol-1 contract carries is 90. So: 0 of 29 holders
+    armed, on one protocol on one chain, which is a LOWER BOUND and not evidence the
+    shape does not occur.
+
+    The only thing that could ever return ``"complete"`` is the fetch's own page
+    length, recorded at fetch time. That needs a schema column and a re-fetch of the
+    population — outside this effort's cost boundary — so it is DEFERRED with cause,
+    and until then the honest answer below the cap is "not determined".
+    """
+    if token_balances_may_be_truncated(stored_token_rows):
+        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+    return HOLDINGS_COMPLETENESS_NOT_DETERMINED
+
+
+def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:
+    """The protocol's most recent independently-measured TVL, or ``None``.
+
+    Reads ``defillama_tvl`` and NOTHING else. ``total_usd`` and ``contract_breakdown``
+    are NULL on EVERY row of this table locally, so a gate written against them cannot
+    fire and would be a mitigation that never runs (R2) — the exact shape this effort
+    exists to remove. ``None`` here means the gate is SKIPPED, and the caller says so
+    out loud rather than passing a comparison that silently always succeeds.
+    """
+    value = session.execute(
+        select(TvlSnapshot.defillama_tvl)
+        .where(TvlSnapshot.protocol_id == protocol_id, TvlSnapshot.defillama_tvl.isnot(None))
+        .order_by(TvlSnapshot.timestamp.desc(), TvlSnapshot.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return None if value is None else float(value)
 
 
 def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) -> dict[int, tuple[str, ...]]:
@@ -847,12 +1024,34 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
 
 
 def _principals_by_function(session: Session, function_ids: list[int]) -> dict[int, list[str]]:
+    """``function id -> its resolved principals``, in a TOTAL order.
+
+    The ORDER BY is load-bearing, not cosmetic (ledger L-4): element ``[0]`` of
+    this list becomes the identity every fork probe impersonates
+    (``candidate.principal_addresses[0]`` at ``calldata.py`` :1395, :1437, :1720,
+    :2312, and the first resolved principal of the code-upgrade plan in
+    ``orchestrator.py``). Without it, WHO the probe runs as — and therefore which
+    gate it passes, which revert it records, and what the witness says — was left
+    to the query plan / heap order rather than being a function of the data. The
+    multi-principal population is not hypothetical: fid 2527 carries 33 principals
+    locally, 801 and 811 carry 27, 2908/2909 carry 15.
+
+    Ordered on ``address`` for the same reason ``calldata._principals_by_selector``
+    is: the two must agree, because the pause plan reads the per-selector map while
+    the value probes read this one, and a job that impersonates two different
+    holders of the same function is unreproducible by construction. ``id`` makes
+    the order total when one function records the same address twice.
+
+    A third determinism class alongside PYTHONHASHSEED (W0-2) and allocation order
+    (W0-3), invisible to both gates because both of those fix the PROCESS, not the
+    plan.
+    """
     if not function_ids:
         return {}
     rows = session.execute(
-        select(FunctionPrincipal.function_id, FunctionPrincipal.address).where(
-            FunctionPrincipal.function_id.in_(function_ids)
-        )
+        select(FunctionPrincipal.function_id, FunctionPrincipal.address)
+        .where(FunctionPrincipal.function_id.in_(function_ids))
+        .order_by(FunctionPrincipal.function_id, FunctionPrincipal.address, FunctionPrincipal.id)
     ).all()
     out: dict[int, list[str]] = {}
     for fid, addr in rows:
@@ -888,11 +1087,21 @@ def select_candidates(
     graph = build_authority_graph(session, protocol_id)
 
     # §5b: the protocol's witnessed value-holder set (on-chain balances), built once
-    # and shared by reference across every candidate. Only positive balances — a
-    # zero-balance holder can't be a value-reach target and only adds noise. Keyed
-    # on the HOLDING address, which is the one a ``Transfer`` log can name.
-    value_holders = tuple(sorted((a, float(u)) for a, u in graph.deployment_balance.items() if u > _ZERO_USD))
+    # and shared by reference across every candidate, PER ASSET. Keyed on the HOLDING
+    # address, which is the one a ``Transfer`` log can name.
+    #
+    # An UNPRICED holding is kept (``usd_value=None``) where the old per-holder set
+    # dropped anything summing to zero: "we hold this and cannot value it" is the
+    # input that makes a reach total not-determined, and dropping it made a moved
+    # unpriced asset silently equivalent to no movement at all. A holding priced at
+    # exactly 0 is likewise kept — a measured zero is evidence.
+    value_holders = tuple(
+        holding
+        for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
+        for holding in holdings_for_deployment
+    )
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
+    protocol_tvl = _protocol_tvl_usd(session, protocol_id)
 
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, targets, deployment, claims, capability_expr in rows:
@@ -920,6 +1129,7 @@ def select_candidates(
                 restrict_families=families,
                 value_holders=value_holders,
                 acting_balance_usd=float(graph.deployment_balance.get(acting, _ZERO_USD)),
+                protocol_tvl_usd=protocol_tvl,
                 input_token_addresses=holdings.get(contract_id, ()),
                 membership_exact=_membership_exact(capability_expr),
             )

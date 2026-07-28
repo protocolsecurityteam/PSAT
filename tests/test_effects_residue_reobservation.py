@@ -399,6 +399,44 @@ def test_code_upgrade_residue_branch_is_unreachable_and_gone():
     assert EFFECT_CLASS_CODE_UPGRADE not in _RESIDUE_KEY
 
 
+def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effects):
+    """G6-3 consumer half. The recipe now WITHHOLDS ``concrete_destination`` on a
+    ``caller_arbitrary`` shape — whatever a probe sees there is the recipient
+    argument the prober supplied. A NULL that is deliberate must not read as "no
+    residue yet": otherwise every such deployment spends its whole re-probe budget
+    (2 Tier-1 ``eth_simulateV1`` probes) chasing a value this stage refuses to
+    store, and each one looks like a gap that never closes.
+
+    The two other shapes stay observable, so this narrows nothing else."""
+    session = clean_effects
+    arbitrary = _seed_cache(
+        session,
+        effect_class=EFFECT_CLASS_VALUE_OUT,
+        details={"destination_shape": "caller_arbitrary", "shape_proved_by": "simulation"},
+    )
+    assert _residue_observable(arbitrary, EFFECT_CLASS_VALUE_OUT) is False
+
+    for shape in ("unknown", "immutable_fixed"):
+        row = EffectBehaviorCache(
+            behavior_hash=BEHAVIOR_HASH,
+            effect_class=EFFECT_CLASS_VALUE_OUT,
+            scope=SCOPE_KERNEL,
+            verdict=VERDICT_PROVEN,
+            tier=TIER_CALL,
+            details={"destination_shape": shape},
+        )
+        assert _residue_observable(row, EFFECT_CLASS_VALUE_OUT) is True
+    # A details-less row (a class that publishes no shape) keeps the old answer.
+    bare = EffectBehaviorCache(
+        behavior_hash=BEHAVIOR_HASH,
+        effect_class=EFFECT_CLASS_VALUE_OUT,
+        scope=SCOPE_KERNEL,
+        verdict=VERDICT_PROVEN,
+        tier=TIER_CALL,
+    )
+    assert _residue_observable(bare, EFFECT_CLASS_VALUE_OUT) is True
+
+
 @requires_postgres
 def test_residue_reprobe_is_bounded_per_deployment(clean_effects, monkeypatch):
     """A behavior that is proven IN THE CACHE but that THIS deployment cannot

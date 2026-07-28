@@ -795,7 +795,19 @@ function flowOutTargetSummary(claims) {
 // EVERY classified out-flow is fixed and none is indeterminate/self/unclassified.
 function flowOutQualifier(claims) {
   const s = flowOutTargetSummary(claims);
-  if (!s.total) return null;
+  if (!s.total) {
+    // No static flow lattice at all (the approve-then-pull shape, A6). If the fork
+    // PROVED the caller picks the destination, that is the finding — the chip stayed
+    // unqualified only because the static side had nothing to say.
+    for (const c of claims) {
+      const observed = c.witness && c.witness.observed;
+      if (!observed) continue;
+      if (observed.destination_shape === "caller_arbitrary" && observed.shape_proved_by === "simulation") {
+        return "(caller-chosen destination)";
+      }
+    }
+    return null;
+  }
   if (s.sawCaller) return "(caller-chosen destination)";
   // An UNANALYSED param ranks directly under the proven-free case and ABOVE
   // every softer reading: the caller provably names the destination, and with
@@ -900,6 +912,23 @@ function formatDuration(seconds) {
   return `${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
+// A7: duration_bound_seconds === null is TWO facts, and duration_bound_source is
+// the only thing that separates them. "no_time_reference" is a PROVEN indefinite
+// latch: no leaf ANYWHERE in the guard tree that reads the latch touches a clock,
+// and nothing anywhere in that tree is an operand whose contents were never read
+// (an undecomposed expression, or a NAMED CALLEE the recorder does not enter).
+// Both conditions are part of the proof, not hygiene, and both are asked of the
+// whole tree — a leaf-local reading called `!frozen || block.timestamp > unpauseAt`
+// proven-most-severe (Solidity lowers `||` into sibling leaves), read a
+// pre-widening `block.timestamp - pausedUntil < 2592000` the same way, and read
+// `!frozen || _clock() > unpauseAt` — the Uniswap-V3 / OZ-Governor idiom of
+// reading time through a helper — the same way again.
+// "not_determined" — and an ABSENT source, which is every verdict written before
+// A7 — means the window was not established; the four rows in production that
+// carry it are all `pauseUntil`, a latch that DOES expire, so rendering them
+// "(indefinite)" asserted the most severe reading from an extraction failure.
+const PAUSE_BOUND_PROVEN_INDEFINITE = "no_time_reference";
+
 function pauseQualifier(claims) {
   const o = pauseObserved(claims);
   if (!o) return null;
@@ -913,9 +942,14 @@ function pauseQualifier(claims) {
   ) {
     return `(auto-expires ~${formatDuration(o.duration_bound_seconds)})`;
   }
-  // Indefinite latch = most severe: both fields present AND null. Absent keys
-  // (unknown) never reach here — undefined !== null.
-  if (o.auto_expiry === null && o.duration_bound_seconds === null) {
+  // Indefinite latch = most severe, and it is now a PROVEN state rather than the
+  // absence of a bound: both fields present AND null AND static proved the latch
+  // reads no clock. Absent keys (unknown) never reach here — undefined !== null.
+  if (
+    o.auto_expiry === null &&
+    o.duration_bound_seconds === null &&
+    o.duration_bound_source === PAUSE_BOUND_PROVEN_INDEFINITE
+  ) {
     return "(indefinite)";
   }
   return null;
@@ -1145,6 +1179,34 @@ function destinationConstraintText(claims) {
 // derived from a present, at-the-bar field — absent facts produce no row (the
 // same honesty rule as the chip; an unwitnessed destination shows nothing rather
 // than a reassuring default).
+// The fork-observed destination answer for an outflow claim, as prose, or null.
+// Reads `destination_shape` + `shape_proved_by` off the behavioral witness (A6 /
+// C3-S1): the fork proved `caller_arbitrary` on 35 rows and no consumer had ever seen
+// it, because the bridge did not forward either key.
+const OBSERVED_SHAPE_WORD = {
+  caller_arbitrary: "caller-chosen (a sentinel address received the outflow)",
+  immutable_fixed: "fixed — an immutable address static proved",
+  storage_determined: "storage-determined (no setter reached it)",
+};
+
+function observedDestinationShape(claims) {
+  for (const c of claims) {
+    if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
+    const observed = c.witness && c.witness.observed;
+    if (!observed) continue;
+    const shape = observed.destination_shape;
+    const provedBy = observed.shape_proved_by;
+    if (typeof shape !== "string") continue;
+    if (shape === "unknown" || provedBy === "none") {
+      // The honest sentence for the A6 rows: nothing was established, and no attempt
+      // is hidden. NOT silence — silence beside a large reach figure reads as "fine".
+      return "not determined (no static classification, no sentinel landed)";
+    }
+    return OBSERVED_SHAPE_WORD[shape] || `${shape} (observed)`;
+  }
+  return null;
+}
+
 export function claimWitnessFacts(fn) {
   const claims = claimsOf(fn);
   const facts = [];
@@ -1154,6 +1216,10 @@ export function claimWitnessFacts(fn) {
   const amtKinds = [];
   let reachValue = null;
   let reachIndeterminate = false;
+  let reachFloor = null;
+  let reachUnvalued = 0;
+  let reachPriced = null;
+  let reachRejected = false;
   for (const c of claims) {
     if (c.claim_id !== "flow.out" && c.claim_id !== "value_router") continue;
     const w = c.witness;
@@ -1185,19 +1251,66 @@ export function claimWitnessFacts(fn) {
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
+      // D3: on a not-measured row the acting deployment's own balance is a FLOOR
+      // and now arrives under its own key. Rendered as a floor, never as the reach:
+      // the producer used to publish it AS observed_reach_value_usd, so a
+      // zero-balance router read "$0 reach" for a function that can move millions.
+      if (typeof observed.observed_reach_floor_usd === "number")
+        reachFloor = observed.observed_reach_floor_usd;
+      // A2: value WAS observed leaving a holder, in an asset whose USD we do not
+      // have (unpriced, or no balance row for it at all). Its own state: neither a
+      // reach figure nor a floor on the acting contract.
+      if (Array.isArray(observed.observed_reach_unvalued_assets))
+        reachUnvalued = observed.observed_reach_unvalued_assets.length;
+      if (typeof observed.observed_reach_priced_usd === "number")
+        reachPriced = observed.observed_reach_priced_usd;
+      // The corroborating ceiling refused this figure: it exceeded the protocol's own
+      // measured TVL. Shown as the contradiction it is, never as the number.
+      if (observed.reach_tvl_check === "exceeds_protocol_tvl") reachRejected = true;
     }
   }
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
+  else {
+    // A6: the static flows matcher produces nothing for an approve-then-pull outflow
+    // (the transfer sink lives in the callee), so the inspector used to show a
+    // half-billion-dollar reach with NO statement about the destination at all —
+    // indistinguishable from a destination examined and found unclassifiable. The
+    // fork's own three-valued answer is now forwarded and rendered.
+    const observedShape = observedDestinationShape(claims);
+    if (observedShape) facts.push({ label: "Destination", value: observedShape });
+  }
   const destConstraint = destinationConstraintText(claims);
   if (destConstraint)
     facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
-  if (reachIndeterminate) {
+  if (reachRejected) {
     facts.push({
       label: "Reach",
-      value: "floored to own balance (reach indeterminate)",
+      value: "not determined (measured figure exceeded protocol TVL and was refused)",
+    });
+  } else if (reachUnvalued > 0) {
+    // Witnessed, not valued. Naming the count keeps this apart from both the
+    // measured row (a number) and the not-witnessed row (a floor on own balance).
+    const priced = formatUsdUpperBound(reachPriced);
+    const assets = `${reachUnvalued} asset(s) of unknown value`;
+    facts.push({
+      label: "Reach",
+      value: priced
+        ? `value not determined — ${assets}, priced part ${priced}`
+        : `value not determined — ${assets}`,
+    });
+  } else if (reachIndeterminate) {
+    // NOT measured. Name the floor for what it is and never as the reach: the
+    // acting contract's own balance is a lower bound on what an exercise of this
+    // function can touch, and a zero floor says nothing about the money it moves.
+    const floor = formatUsdUpperBound(reachFloor);
+    facts.push({
+      label: "Reach",
+      value: floor
+        ? `not determined (own balance floor ${floor})`
+        : "not determined (no downstream holder observed)",
     });
   } else {
     const reach = formatUsdUpperBound(reachValue);
@@ -1228,11 +1341,23 @@ export function claimWitnessFacts(fn) {
       facts.push({ label: "Auto-expiry", value: "does not self-recover" });
     } else if (
       observed.auto_expiry === null &&
-      observed.duration_bound_seconds === null
+      observed.duration_bound_seconds === null &&
+      observed.duration_bound_source === PAUSE_BOUND_PROVEN_INDEFINITE
     ) {
       facts.push({
         label: "Auto-expiry",
         value: "indefinite latch (no self-recovery bound)",
+      });
+    } else if (
+      observed.auto_expiry === null &&
+      observed.duration_bound_seconds === null
+    ) {
+      // not_determined, or an absent source on a pre-A7 verdict. The freeze window
+      // was NOT established — say so, rather than borrowing the proven-indefinite
+      // sentence (which is the most severe statement this inspector makes).
+      facts.push({
+        label: "Auto-expiry",
+        value: "not determined (no freeze window read)",
       });
     }
   }

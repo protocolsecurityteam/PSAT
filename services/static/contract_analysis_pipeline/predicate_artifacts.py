@@ -37,7 +37,7 @@ from utils.logging import record_stage_metric
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
-from .predicate_types import PredicateTree
+from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
 from .writer_gate import apply_writer_gate_pass
@@ -399,6 +399,16 @@ def build_predicate_artifacts_with_pause_info(
     # counts, not a degraded signal, so no WARNING is paired here.
     record_stage_metric("predicate_fns_attempted", fns_attempted)
     record_stage_metric("predicate_trees_built", len(trees))
+
+    # Stamp the absorbed-operand marker on every finished tree, AFTER the
+    # cross-contract passes (one of them can replace a root, and a replaced root
+    # that lost the marker must read as unmarked rather than inherit it). What the
+    # marker buys a consumer: an operand that is NOT in a leaf's lists is only
+    # evidence of absence on a tree built here. On a tree persisted earlier a
+    # two-slot comparison silently dropped one side, so the same absence is a gap.
+    # ``effects.calldata`` gates its proven-indefinite-freeze state on this.
+    for finished_tree in (*trees.values(), *check_trees.values()):
+        mark_operand_absorption_recorded(finished_tree)
 
     artifact = {
         "schema_version": SCHEMA_VERSION,

@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.effects.calldata import substitute_address_arg
+from services.effects.calldata import NEUTRAL_CALLER, SENTINEL_ADDRESS, substitute_address_arg
 from services.effects.config import (
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
@@ -56,6 +56,13 @@ from services.effects.seeding import (
     contract_balance_override,
     eth_value_override,
 )
+from services.effects.selection import (
+    HOLDINGS_COMPLETENESS_AT_PAGE_CAP,
+    AssetHolding,
+)
+from services.effects.selection import (
+    HOLDINGS_COMPLETENESS_NOT_DETERMINED as HOLDINGS_NOT_DETERMINED,
+)
 from services.effects.simulate import (
     SimCall,
     SimCallResult,
@@ -63,6 +70,7 @@ from services.effects.simulate import (
     StateOverride,
     transfers_in,
     transfers_out,
+    transfers_out_with_asset,
 )
 from utils.rpc import EthCallResult
 
@@ -555,8 +563,9 @@ def value_out(
     sentinel_calldata: str | None = None,
     static_shape: str | None = None,
     static_destination: str | None = None,
-    value_holders: Sequence[tuple[str, float]] = (),
+    value_holders: Sequence[AssetHolding] = (),
     acting_balance_usd: float = 0.0,
+    protocol_tvl_usd: float | None = None,
     gate_ref: str = "",
     seeder: Seeder | None = None,
     input_token_hints: Sequence[str] = (),
@@ -729,7 +738,7 @@ def value_out(
     # Measured on ``observed``, the execution the VERDICT came from: on a seeded
     # retry the unseeded call reverted and carries no logs at all, so reading
     # reach off it made every seeded verdict indeterminate by construction.
-    _add_reach(concrete, observed, value_holders, acting_balance_usd)
+    _add_reach(concrete, observed, value_holders, acting_balance_usd, protocol_tvl_usd)
     if budget is not None and used is not None:
         budget.record_proven()
     eff = proven(
@@ -1450,19 +1459,55 @@ def _resolve_destination_shape(
     The caller_arbitrary PROOF loses nothing by that — it lives in
     ``destination_shape``/``shape_proved_by``, which is where a consumer reads
     "the caller chooses this destination"; the sentinel's own address adds no
-    information (it is recomputable, and it is in the transcript)."""
+    information (it is recomputable, and it is in the transcript).
+
+    TWO ADDRESSES THAT GUARANTEE WAS ONE SHORT (G6-3). The sentinel is not the only
+    identity this prober invents: :data:`calldata.NEUTRAL_CALLER` is the caller a
+    public/unresolved-principal probe runs as, it is substituted into every address
+    ARGUMENT of the synthesized call, and it comes straight back out in the
+    ``Transfer`` log. Measured: on 35 of 35 ``caller_arbitrary`` rows in the local DB
+    the stored ``concrete_destination`` is the probe's own recipient argument echoed
+    back, and the one row with no resolved principals carries ``0x1111…1111``
+    verbatim. Both invented identities are excluded here, and — the point of the
+    item — a ``caller_arbitrary`` shape now publishes NO address at all: the shape
+    IS the adverse finding, the address is by construction whatever WE passed, and
+    a stored one can only mislead in the reassuring direction ("the money goes to
+    the timelock, so this is fine").
+
+    The exclusion is applied to the CONVERGENCE ANSWER, never to the destination set
+    it is computed from: removing an invented recipient before counting destinations
+    manufactures agreement out of a genuinely ambiguous outflow. See the comment on
+    the capture itself.
+    """
     # State-plane residue: the address value actually left to THIS run. Capture it
     # whenever every observed outflow converged on a single destination — a
     # withdrawal that emits several Transfer logs (burn + send, or send + fee to
     # the same address) still has one concrete destination. Divergent destinations
     # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
     # single observation can't prove "always this address").
+    #
+    # ORDER IS LOAD-BEARING: the convergence test runs over EVERY destination, and
+    # only then is an invented identity refused. Filtering first turned an ambiguous
+    # two-destination outflow into a "convergent" one and published the survivor:
+    # `from=holder, to=NEUTRAL_CALLER` is the ordinary "paid msg.sender" leg of a
+    # withdrawal, so dropping it and asserting the residual fee/treasury address as
+    # "the address value actually left to" is exactly the reassuring-direction
+    # mislead this filter exists to remove ("the money goes to the timelock, so this
+    # is fine") — measured: 90% to the impersonated caller and a 10% fee to the
+    # treasury published the treasury as THE destination. An invented recipient among
+    # several destinations means the destination is NOT determined.
     out_destinations = {to for _f, to, _v in base_transfers}
     observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
+    if _is_invented_identity(observed_dest):
+        observed_dest = None
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            return SHAPE_CALLER_ARBITRARY, "simulation", observed_dest, None
+            # PROVEN caller-arbitrary: the destination is whatever the caller says,
+            # so this run's recipient is our own calldata read back, never an
+            # observation about the contract. Withheld (the column has no
+            # "probe_supplied" state, and NULL is the honest one of the two it has).
+            return SHAPE_CALLER_ARBITRARY, "simulation", None, None
     # Rule 8.1, evaluated BEFORE the static branch returns. Taint saying the param
     # reaches the sink while the sentinel moved nothing is a matcher/probe
     # soundness problem (§9) whatever static believes — and it is most interesting
@@ -1499,40 +1544,199 @@ def _resolve_destination_shape(
 def _add_reach(
     concrete: dict[str, Any],
     base_call: SimCallResult,
-    value_holders: Sequence[tuple[str, float]],
+    value_holders: Sequence[AssetHolding],
     acting_balance_usd: float,
+    protocol_tvl_usd: float | None = None,
 ) -> None:
     """§5b downstream value-reach. From the SAME fork execution of F, a value-holder
     from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
     fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
-    conservative upper bound, inv. 5/7). No holder moved ⇒ the reach beyond the
-    acting deployment is fork-observed to be nothing, so value FLOORS to the acting
-    contract's own balance and the ``reach_indeterminate`` flag records that
-    downstream reach was not witnessed. Downstream value is NEVER imputed via the
+    conservative upper bound, inv. 5/7). Downstream value is NEVER imputed via the
     control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
     edge). Skipped entirely when no value-holder set was supplied (nothing to
     measure), leaving the verdict shape unchanged.
+
+    THREE STATES, and ``reach_determined`` is the one key that tells them apart (D3
+    / R1):
+
+    * ``reach_determined: True`` + ``observed_reach_value_usd`` +
+      ``observed_reach_holders`` + ``observed_reach_assets`` — measured, and every
+      asset that moved had a priced holding. The USD is an upper bound.
+    * ``reach_determined: False`` + ``reach_indeterminate: True`` +
+      ``observed_reach_floor_usd`` — NOTHING was witnessed leaving a holder, which is
+      not the same as "reach is nothing": this branch fires for any zap / router /
+      adapter that moves value it does not itself hold (18 armed ``flow.out``
+      functions on 6 zero-balance contracts locally). It used to publish the acting
+      deployment's own balance as ``observed_reach_value_usd``, so a consumer reading
+      the number and ignoring the flag got **"$0 reach" for a function that may move
+      millions** — a proven-absence sentence minted out of a non-observation. The
+      floor is still recorded, under a name that says what it is, and the key that
+      means "measured reach" is ABSENT.
+    * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
+      ``observed_reach_holders`` / ``observed_reach_assets`` /
+      ``observed_reach_unvalued_assets`` — value WAS witnessed leaving a holder and
+      its USD is not determined, because at least one asset that moved has no priced
+      holding on record. ``observed_reach_priced_usd`` carries the part that IS
+      priced (a partial floor) and is omitted when that part is nothing. This is the
+      A2 case: 1001 of 1376 local ``contract_balances`` rows are unpriced, and the
+      recoverETH row moved native ETH out of a deployment with no native balance row
+      at all — "holds nothing", "not fetched" and "fetch failed" are one shape there
+      (G6-11), so the only honest USD is *unknown*.
+    * every key absent — no holder set was supplied, so nothing was even attempted.
 
     Writes to ``concrete``, NOT ``details`` (inv. 3). Every value here is
     per-deployment — the holders are addresses and the USD is this protocol's
     balance sheet at this block — while ``details`` is the code-plane witness the
     behavioral cache stores and re-publishes to every OTHER deployment sharing the
     bytecode. Reach in ``details`` meant a second deployment's verdict named the
-    first one's holders and USD as its own."""
+    first one's holders and USD as its own.
+
+    ASSET-SCOPED MATCHING (A2). ``transfers_out`` is asked per (holder, asset), where
+    the asset is the ``Transfer`` log's EMITTER — the token contract, or
+    ``NATIVE_ASSET_LOG_EMITTER`` for a native move (measured against the live node,
+    see that constant). Asset-blind matching is what published $3.489B of reach for
+    ``WeETH.recoverETH``: the contract-balance seed gave the proxy synthetic native
+    ETH, ``traceTransfers`` emitted one synthetic ``Transfer`` out of it, and the
+    holder's ENTIRE balance — 99.99% of it eETH — was attributed as reached. Two rows
+    of that shape carried 64.96% of all published reach USD in the DB and both are
+    truly $0.
+
+    Note what is NOT done: this does not pass ``only_asset`` to a single whole-holder
+    match (the fix the handoff proposed and G7 refuted — a synthetic native log has
+    no token emitter, so that would have matched nothing and under-claimed 100%). The
+    INPUT changed: holdings arrive per asset, native included, keyed on the emitter
+    the node actually uses.
+
+    ONE ADD PER (HOLDER, ASSET), never per LOG. The attributed figure is a whole
+    recorded balance, so a second Transfer log of the same asset out of the same
+    holder must contribute nothing: summing per log published a MULTIPLE of the
+    balance in the field that documents itself as an upper bound."""
     if not value_holders:
         return
-    reached_usd = 0.0
-    reach_holders: list[str] = []
-    for holder, usd in value_holders:
-        if transfers_out(base_call, holder):
-            reach_holders.append(holder.lower())
-            reached_usd += usd
-    if reach_holders:
-        concrete["observed_reach_value_usd"] = reached_usd
-        concrete["observed_reach_holders"] = sorted(reach_holders)
-    else:
-        concrete["observed_reach_value_usd"] = acting_balance_usd
+    priced_usd = 0.0
+    priced_any = False
+    unvalued_assets: set[str] = set()
+    reach_holders: set[str] = set()
+    reach_assets: set[str] = set()
+    # (holder, asset) -> the priced holding, or None when we hold it unpriced. A
+    # (holder, asset) pair MISSING from this map is the third case: value left that
+    # holder in an asset we have no balance row for at all.
+    known: dict[tuple[str, str], float | None] = {
+        (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
+    }
+    # Uniform per holder (see ``AssetHolding.completeness``): what is KNOWN about an
+    # asset absent from ``known`` for that holder. Two states, and neither is "the
+    # list is whole" — the stored rows cannot prove that (``_holdings_completeness``),
+    # so the reason an absent asset gets is "not in the holdings we recorded, which
+    # are not provably all of them", never "this holder does not hold it".
+    completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
+    unvalued_reasons: set[str] = set()
+    # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
+    # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
+    # recorded balance for that asset (the documented conservative upper bound), and a
+    # single call legitimately emits several Transfer logs of the same asset out of the
+    # same holder — the shape ``_resolve_destination_shape`` names one screen up, "a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to the
+    # same address)". Adding once per LOG published a MULTIPLE of the entire balance
+    # and called it an upper bound; two logs made a $100 holding read as $200 reach.
+    moved: set[tuple[str, str]] = set()
+    for holder in sorted({h.holder.lower() for h in value_holders}):
+        for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
+            moved.add((holder, asset))
+    for holder, asset in sorted(moved):
+        reach_holders.add(holder)
+        reach_assets.add(asset)
+        if (holder, asset) not in known:
+            # No balance row at all for this (holder, asset): value left in an asset
+            # we never recorded. G6-11 — absence there conflates "holds nothing", "not
+            # fetched" and "fetch failed", so it is not a zero. The reason names which
+            # of the two things we know, and neither is "the holder does not hold it":
+            # ``holdings_at_page_cap`` when the holder's stored rows reach the
+            # fetcher's one-page cap (assets are probably missing), otherwise
+            # ``asset_not_in_recorded_holdings`` — recorded, not proven-complete.
+            unvalued_assets.add(asset)
+            unvalued_reasons.add(_UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)])
+            continue
+        usd = known[(holder, asset)]
+        if usd is None:
+            unvalued_assets.add(asset)  # held, but unpriced
+            unvalued_reasons.add("unpriced_holding")
+        else:
+            priced_usd += usd
+            priced_any = True
+    if not reach_holders:
+        concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
+        concrete["observed_reach_floor_usd"] = acting_balance_usd
+        return
+    concrete["observed_reach_holders"] = sorted(reach_holders)
+    concrete["observed_reach_assets"] = sorted(reach_assets)
+    if unvalued_assets:
+        # Witnessed, and NOT valued. The priced part is a floor, never the answer.
+        concrete["reach_determined"] = False
+        concrete["observed_reach_unvalued_assets"] = sorted(unvalued_assets)
+        concrete["observed_reach_unvalued_reasons"] = sorted(unvalued_reasons)
+        if priced_any:
+            concrete["observed_reach_priced_usd"] = priced_usd
+        return
+    # CORROBORATING CEILING: no exercise of one function can reach more value than the
+    # protocol holds. The worst published row asserted $3.489B against a protocol TVL
+    # of $3.297B, and nothing checked. A sum above the ceiling is not clamped (a clamp
+    # would invent a number nothing measured) — it is refused, with both figures
+    # recorded so the contradiction is inspectable.
+    tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
+    concrete["reach_tvl_check"] = tvl_state
+    if tvl_state == REACH_TVL_EXCEEDED:
+        logger.warning(
+            "§5b reach %.2f exceeds protocol TVL %.2f — refusing the figure; holders=%s assets=%s",
+            priced_usd,
+            protocol_tvl_usd or 0.0,
+            sorted(reach_holders),
+            sorted(reach_assets),
+        )
+        concrete["reach_determined"] = False
+        concrete["observed_reach_rejected_usd"] = priced_usd
+        concrete["protocol_tvl_usd"] = protocol_tvl_usd
+        return
+    if tvl_note is not None:
+        logger.warning("§5b reach TVL ceiling not applied: %s", tvl_note)
+    concrete["reach_determined"] = True
+    concrete["observed_reach_value_usd"] = priced_usd
+
+
+# The three answers of the reach-vs-TVL ceiling. ``skipped_no_tvl`` is published, not
+# implied: an absent ceiling must be visible as "not checked" rather than looking like
+# a check that passed (R2 — a gate that silently never fires is not a mitigation).
+# Why an asset that moved could not be valued, keyed on what is KNOWN about the
+# holder's holdings list. Neither reason asserts the holder does not hold the asset:
+# ``asset_not_in_recorded_holdings`` says only that our recorded set does not contain
+# it and that set is not provably complete (the stored rows already dropped every
+# zero-balance entry, so a below-cap count proves nothing — ``selection
+# ._holdings_completeness``). The previous name, ``unrecorded_asset``, read as a
+# proven absence and was derived from exactly that lossy count.
+_UNVALUED_REASON_BY_COMPLETENESS = {
+    HOLDINGS_COMPLETENESS_AT_PAGE_CAP: "holdings_at_page_cap",
+    HOLDINGS_NOT_DETERMINED: "asset_not_in_recorded_holdings",
+}
+
+REACH_TVL_WITHIN = "within_protocol_tvl"
+REACH_TVL_EXCEEDED = "exceeds_protocol_tvl"
+REACH_TVL_SKIPPED = "skipped_no_tvl"
+
+
+def _reach_tvl_state(reached_usd: float, protocol_tvl_usd: float | None) -> tuple[str, str | None]:
+    """``(state, log_note)`` for the reach-vs-TVL ceiling.
+
+    Reads ONLY a caller-supplied ``defillama_tvl`` figure (see
+    ``selection._protocol_tvl_usd``): ``tvl_snapshots.total_usd`` and
+    ``contract_breakdown`` are NULL on every local row, so a ceiling written against
+    them could never fire.
+    """
+    if protocol_tvl_usd is None or protocol_tvl_usd <= 0:
+        return REACH_TVL_SKIPPED, "no defillama_tvl snapshot for this protocol"
+    if reached_usd > protocol_tvl_usd:
+        return REACH_TVL_EXCEEDED, None
+    return REACH_TVL_WITHIN, None
 
 
 def _sim_precondition_unknown(effect_class: str, gate_ref: str, transcript: dict[str, Any]) -> ObservedEffect:
@@ -1594,6 +1798,20 @@ def _to_int(hexval: str | None) -> int | None:
         return int(hexval, 16)
     except ValueError:
         return None
+
+
+# The identities this prober INVENTS and substitutes into the calls it synthesizes.
+# Neither is ever a fact about the contract, so neither may be published as an
+# observed destination: ``SENTINEL_ADDRESS`` is the attacker stand-in planted at a
+# taint-identified address parameter, and ``NEUTRAL_CALLER`` is both the caller a
+# public / unresolved-principal probe runs as AND the filler for every address
+# argument of the synthesized call — so it arrives back in the ``Transfer`` log as
+# the "destination" of our own making.
+_INVENTED_IDENTITIES = (SENTINEL_ADDRESS, NEUTRAL_CALLER)
+
+
+def _is_invented_identity(address: str | None) -> bool:
+    return any(_addr_eq(address, invented) for invented in _INVENTED_IDENTITIES)
 
 
 def _addr_eq(a: str | None, b: str | None) -> bool:

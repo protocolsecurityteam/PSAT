@@ -690,9 +690,35 @@ describe("qualifierForClaims — pause freeze specifics", () => {
     expect(qualifierForClaims(fn)).toBe("(auto-expires ~8h)");
   });
 
-  it("renders (indefinite) for the null/null latch on a present behavioral witness", () => {
-    const fn = { claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })] };
-    expect(qualifierForClaims(fn)).toBe("(indefinite)");
+  it("renders (indefinite) only when static PROVED the latch reads no clock", () => {
+    // INVERTED (A7). This used to assert "(indefinite)" for null/null alone, which
+    // made the most severe freeze statement the DEFAULT for an unread window. All
+    // four proven freeze_pause verdicts in production are `pauseUntil` — a latch
+    // that expires — and every one of them rendered "(indefinite)".
+    const proven = {
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "no_time_reference",
+      })],
+    };
+    expect(qualifierForClaims(proven)).toBe("(indefinite)");
+  });
+
+  it("suppresses (indefinite) when the freeze window was merely not determined", () => {
+    const notDetermined = {
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "not_determined",
+      })],
+    };
+    expect(qualifierForClaims(notDetermined)).toBeNull();
+    // ...and the same for a pre-A7 verdict, whose witness carries no source at all.
+    const legacy = {
+      claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
+    };
+    expect(qualifierForClaims(legacy)).toBeNull();
   });
 
   it("suppresses when auto_expiry is false (fork contradicted the static bound)", () => {
@@ -861,11 +887,32 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(facts).toContainEqual({ label: "Auto-expiry", value: "self-recovers after ~30d" });
   });
 
-  it("labels an indefinite latch honestly", () => {
+  it("labels a PROVEN indefinite latch honestly", () => {
     const facts = claimWitnessFacts({
-      claims: [observedClaim("pause.set", { auto_expiry: null, duration_bound_seconds: null })],
+      claims: [observedClaim("pause.set", {
+        auto_expiry: null,
+        duration_bound_seconds: null,
+        duration_bound_source: "no_time_reference",
+      })],
     });
     expect(facts).toContainEqual({ label: "Auto-expiry", value: "indefinite latch (no self-recovery bound)" });
+  });
+
+  it("labels an unread freeze window as not determined, not as indefinite", () => {
+    // INVERTED (A7): the sentence above is the most severe statement this inspector
+    // makes and it was being produced from an extraction failure. The etherfi shape
+    // (a timestamp latch whose window is a storage value) is this case.
+    for (const observed of [
+      { auto_expiry: null, duration_bound_seconds: null, duration_bound_source: "not_determined" },
+      { auto_expiry: null, duration_bound_seconds: null }, // pre-A7 verdict: no source key
+    ]) {
+      const facts = claimWitnessFacts({ claims: [observedClaim("pause.set", observed)] });
+      expect(facts).toContainEqual({ label: "Auto-expiry", value: "not determined (no freeze window read)" });
+      expect(facts).not.toContainEqual({
+        label: "Auto-expiry",
+        value: "indefinite latch (no self-recovery bound)",
+      });
+    }
   });
 
   it("emits backing rows for both witnessed directions", () => {
@@ -886,15 +933,184 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
   });
 
-  it("floors reach to own balance when fork-observed indeterminate", () => {
+  it("names an unmeasured reach as not determined and the balance as a floor", () => {
+    // INVERTED (D3). The producer used to publish the acting contract's own balance
+    // as `observed_reach_value_usd` on this branch, so the row read as a measured
+    // reach with a flag beside it; on a zero-balance router that is "$0 reach" for a
+    // function that may move millions. The number now arrives as a FLOOR under its
+    // own key, and the row says it was not determined.
     const fn = {
       claims: [{
         claim_id: "flow.out",
         tier: "behavioral_observed",
-        witness: { effect_verdict_id: 1, observed: { reach_indeterminate: true, observed_reach_value_usd: 999 } },
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_indeterminate: true,
+            reach_determined: false,
+            observed_reach_floor_usd: 999,
+          },
+        },
       }],
     };
-    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach", value: "floored to own balance (reach indeterminate)" });
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "not determined (own balance floor up to ~$999)",
+    });
+  });
+
+  it("states the destination even when the static matcher produced no flows (A6)", () => {
+    // The approve-then-pull shape: reach renders, `flows` is empty, and the inspector
+    // used to say NOTHING about the destination — the worst combination available
+    // beside a $472M figure.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 170,
+          observed: {
+            observed_reach_value_usd: 472_190_234.24,
+            reach_determined: true,
+            destination_shape: "unknown",
+            shape_proved_by: "none",
+          },
+        },
+      }],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Destination",
+      value: "not determined (no static classification, no sentinel landed)",
+    });
+    expect(facts).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$472.2M" });
+  });
+
+  it("renders a fork-proven caller-chosen destination on the chip and in the facts", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { destination_shape: "caller_arbitrary", shape_proved_by: "simulation" },
+        },
+      }],
+    };
+    expect(qualifierForClaims(fn)).toBe("(caller-chosen destination)");
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Destination",
+      value: "caller-chosen (a sentinel address received the outflow)",
+    });
+  });
+
+  it("keeps the static lattice in charge when it has an answer", () => {
+    // The observed shape must not override a static destination row: the static
+    // lattice is a universal about the code and the observation is one execution.
+    const fn = {
+      claims: [
+        flowOut({ kind: "immutable", tier: "dispositive_ast" }),
+        {
+          claim_id: "flow.out",
+          tier: "behavioral_observed",
+          witness: { effect_verdict_id: 1, observed: { destination_shape: "unknown", shape_proved_by: "none" } },
+        },
+      ],
+    };
+    const dest = claimWitnessFacts(fn).filter((f) => f.label === "Destination");
+    expect(dest).toHaveLength(1);
+    expect(dest[0].value).toContain("immutable");
+  });
+
+  it("shows a TVL-refused reach as refused, never as the number", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            reach_tvl_check: "exceeds_protocol_tvl",
+            observed_reach_rejected_usd: 3_488_955_156.06,
+            protocol_tvl_usd: 3_297_344_734,
+          },
+        },
+      }],
+    };
+    const facts = claimWitnessFacts(fn);
+    expect(facts).toContainEqual({
+      label: "Reach",
+      value: "not determined (measured figure exceeded protocol TVL and was refused)",
+    });
+    // The rejected figure must not also render as a reach.
+    expect(JSON.stringify(facts)).not.toContain("3.5B");
+  });
+
+  it("names a witnessed-but-unvalued reach as its own state (A2)", () => {
+    // Value WAS observed leaving a holder, in an asset whose USD we do not have —
+    // the weETH recoverETH shape (a synthetic native move out of a deployment with
+    // no native balance row). Neither a reach figure nor a floor on own balance:
+    // before A2 this row published the holder's whole sheet, $3.489B, as the reach.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_holders: ["0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee"],
+            observed_reach_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+            observed_reach_unvalued_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 asset(s) of unknown value",
+    });
+  });
+
+  it("shows the priced part of an unvalued reach as a partial floor", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_unvalued_assets: ["0x" + "9d".repeat(20)],
+            observed_reach_priced_usd: 759.15,
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 asset(s) of unknown value, priced part up to ~$759",
+    });
+  });
+
+  it("says not determined with no number when the floor itself is zero", () => {
+    // The zero-balance router: the floor is a real 0 and must not be dressed up as
+    // a reach figure, nor suppressed into silence that reads as "no reach".
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_indeterminate: true, reach_determined: false, observed_reach_floor_usd: 0 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "not determined (no downstream holder observed)",
+    });
   });
 
   it("emits no rows when no witness facts are present (silence, not defaults)", () => {

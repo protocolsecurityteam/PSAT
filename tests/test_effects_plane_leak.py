@@ -40,7 +40,7 @@ from services.effects.anvil import EntryPoint  # noqa: E402
 from services.effects.config import EFFECT_CLASS_VALUE_OUT, SCOPE_KERNEL, VERDICT_PROVEN  # noqa: E402
 from services.effects.harness import SimContext  # noqa: E402
 from services.effects.orchestrator import ProbePlan  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
+from services.effects.selection import AssetHolding, Candidate  # noqa: E402
 from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
 from tests.test_effects_harness import RecordingStore, ok, transfer_log  # noqa: E402
@@ -166,7 +166,7 @@ def _real_value_out_plan(address: str):
             principal=PRINCIPAL,
             calldata="0x2e1a7d4d",
             simulate_supported=True,
-            value_holders=((HOLDER, REACH_USD),),
+            value_holders=(AssetHolding(HOLDER, TOKEN, REACH_USD),),
             acting_balance_usd=1.0,
         )
 
@@ -284,7 +284,7 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         simulate_supported=True,
         sentinel_address="0x" + "ee" * 20,
         sentinel_calldata="0x2e1a7d4d" + "ee" * 32,
-        value_holders=((HOLDER, REACH_USD),),
+        value_holders=(AssetHolding(HOLDER, TOKEN, REACH_USD),),
         acting_balance_usd=1.0,
     )
 
@@ -385,6 +385,14 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert row.observed_residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
+        # D3's discriminator and A2's asset list ride the STATE plane with the figures
+        # they qualify: both are answers about this deployment's observation, not
+        # about the code.
+        "reach_determined": True,
+        "observed_reach_assets": [TOKEN.lower()],
+        # The TVL ceiling's outcome travels with the figure it qualifies; this stub
+        # protocol has no snapshot, so the honest answer is "not checked".
+        "reach_tvl_check": "skipped_no_tvl",
     }
 
 

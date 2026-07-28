@@ -49,6 +49,7 @@ from db.effect_cache import (
     find_cached_verdict,
     find_cached_verdicts_batch,
     find_verdict_residue_batch,
+    kernel_signature_is_comparable,
     kernel_verdicts_agree,
     mark_audited,
     record_effect_verdict,
@@ -60,6 +61,7 @@ from services.effects import claims_bridge
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
+    SHAPE_CALLER_ARBITRARY,
     TIER_CALL,
     TIER_HISTORICAL,
     VERDICT_PROVEN,
@@ -212,6 +214,25 @@ _RESIDUE_JSON_KEYS = (
     "observed_reach_value_usd",
     "observed_reach_holders",
     "reach_indeterminate",
+    # D3: the three-state discriminator, and the floor under its own name. Both are
+    # load-bearing rather than decorative — while the not-measured branch published
+    # the acting balance AS ``observed_reach_value_usd``, a consumer reading the
+    # number without the flag got "$0 reach" for a zero-balance router that may move
+    # millions. Omitting either key here would drop it before it reaches the row.
+    "reach_determined",
+    "observed_reach_floor_usd",
+    # A2: which ASSETS the reach was measured over, and the ones whose USD is not
+    # known. Per-deployment observations, so they ride the state plane with the
+    # figures they qualify.
+    "observed_reach_assets",
+    "observed_reach_unvalued_assets",
+    "observed_reach_unvalued_reasons",
+    "observed_reach_priced_usd",
+    # The reach-vs-TVL ceiling's OUTCOME, including "skipped_no_tvl". A check whose
+    # result is dropped before the consumer is indistinguishable from no check.
+    "reach_tvl_check",
+    "observed_reach_rejected_usd",
+    "protocol_tvl_usd",
     # §5a backing COUNTS. The booleans (``inflow_observed``/``minted``) are the
     # code-plane witness and stay on ``details``; how many Transfer logs one
     # execution emitted is an observation of this deployment at this block and
@@ -234,9 +255,18 @@ def _residue_observable(cached: EffectBehaviorCache, effect_class: str) -> bool:
     cached row can exist for that branch and the arm that used to test for one
     was unreachable. Its Tier-1 branch yields ``impl_before``/``impl_after``,
     which this schema does not store.
+
+    A ``caller_arbitrary`` destination is excluded for the same reason (G6-3): the
+    recipe now WITHHOLDS the address on that shape — whatever a probe observes there
+    is the recipient argument the prober itself supplied — so a re-probe is a
+    guaranteed NULL by construction, and the attempt bound would otherwise be spent
+    twice per deployment chasing a value this stage refuses to store.
     """
     if effect_class == EFFECT_CLASS_VALUE_OUT:
-        return cached.verdict == VERDICT_PROVEN
+        if cached.verdict != VERDICT_PROVEN:
+            return False
+        details = cached.details if isinstance(cached.details, dict) else {}
+        return details.get("destination_shape") != SHAPE_CALLER_ARBITRARY
     return False
 
 
@@ -1031,6 +1061,64 @@ class EffectsWorker(BaseWorker):
             if fresh is None:
                 # Could not re-simulate to audit → do not trust the unaudited hit.
                 return self._withhold_collision(session, cached, it, counters, reason="audit_probe_failed")
+            if not kernel_signature_is_comparable(cached.details) or not kernel_signature_is_comparable(
+                fresh.witness_payload
+            ):
+                # THE AUDIT FLOOR (§7). A signature with no structural key agrees with
+                # itself unconditionally — 49 of 150 cache rows are ``authority_change``
+                # with ``verdict='unknown'`` and none of the five allowlisted keys, so
+                # their "audit" is the string ``unknown`` compared with itself, and a
+                # collision between two behaviours that both answer ``unknown`` is
+                # exactly what it would have to catch. Such a hit is NOT trusted on the
+                # signature alone.
+                #
+                # What is compared instead is the only thing such a row asserts: its
+                # verdict and its ``reason`` — which IS a claim about the twin
+                # (``no_supply_delta`` says "the call ran and no supply moved"). On
+                # agreement the row is stamped audited, because the assertion has been
+                # corroborated against a fresh probe of THIS deployment — strictly more
+                # evidence than the structural-key path collects. On disagreement this
+                # deployment publishes the verdict it just re-simulated and the row is
+                # left UNAUDITED rather than AUDIT_FAILED: a reason legitimately varies
+                # between two sightings of one behaviour (a precondition revert here, a
+                # clean non-observation there), so poisoning the key would withhold from
+                # every future sighting on the strength of a difference that proves
+                # nothing.
+                cached_reason = (cached.details or {}).get("reason")
+                fresh_reason = (fresh.witness_payload or {}).get("reason")
+                if cached.verdict == fresh.verdict and cached_reason == fresh_reason:
+                    mark_audited(session, cached, passed=True, peer_hash=it.surface_hash or it.behavior_hash)
+                    bump_hit(session, cached)
+                    self._count_hit(it, counters)
+                    return (
+                        cached.verdict,
+                        cached.tier,
+                        cached.transcript_ptr,
+                        cached.details,
+                        _residue_only(fresh.concrete, it.effect_class),
+                        None,
+                    )
+                record_degraded(
+                    phase="effect_cache_audit_floor",
+                    exc=RuntimeError("zero-key kernel signature and the fresh probe disagrees; hit not trusted"),
+                    context={
+                        "behavior_hash": it.behavior_hash,
+                        "effect_class": it.effect_class,
+                        "cached_verdict": cached.verdict,
+                        "cached_reason": cached_reason,
+                        "fresh_verdict": fresh.verdict,
+                        "fresh_reason": fresh_reason,
+                    },
+                )
+                counters.cache_misses += 1
+                return (
+                    fresh.verdict,
+                    fresh.tier,
+                    fresh.transcript_ptr,
+                    fresh.witness_payload or None,
+                    fresh.concrete,
+                    fresh.discrepancy,
+                )
             agree = kernel_verdicts_agree(cached.verdict, cached.details, fresh.verdict, fresh.details)
             mark_audited(session, cached, passed=agree, peer_hash=it.surface_hash or it.behavior_hash)
             if not agree:

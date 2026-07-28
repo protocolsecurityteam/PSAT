@@ -146,12 +146,80 @@ def make_bytecode_hash_resolver(chain_id: int) -> HashResolver:
     from services.effects.hashing import bytecode_fallback_hash, contract_surface_hash
 
     def _resolve(session: Session, candidate: Candidate) -> tuple[str, str] | None:
-        code = _runtime_bytecode(session, chain_id, candidate.contract_address)
+        address = _hashable_code_address(session, candidate)
+        if address is None:
+            return None
+        code = _runtime_bytecode(session, chain_id, address)
         if not code:
             return None
         return bytecode_fallback_hash(code, candidate.selector), contract_surface_hash(code)
 
     return _resolve
+
+
+def _hashable_code_address(session: Session, candidate: Candidate) -> str | None:
+    """The address whose runtime bytecode may key this candidate's verdict, or ``None``.
+
+    THE MISSING WITNESS (G6-C0). What makes bytecode hashing safe is the unstated
+    invariant *"a proxy row never carries ``effective_functions``"* — true today (39
+    proxy rows, 0 functions) and asserted by nothing: no constraint, no test, no
+    comment. When it breaks, ``candidate.contract_address`` is a PROXY address and the
+    bytecode at it is the forwarding STUB. The collisions that invariant holds back are
+    real and measured: 16 colliding surface-hash groups over 323 mainnet
+    ``bytecode_cache`` rows, 149 addresses inside a collision, largest group **15
+    distinct implementations behind ONE hash** (``UUPSProxy`` — LiquidityPool, eETH,
+    EtherFiNodesManager, weETH …). A verdict keyed on that hash — a Tier-1 code-upgrade
+    result, or any projection-scope class keyed on the selectorless surface hash — is
+    served to every unrelated implementation behind the same proxy pattern.
+
+    So a proxy row's OWN bytecode is never hashed. Where the row names an
+    implementation whose bytecode is cached, the hash keys on THAT (the behavior belongs
+    to the code — the same principle ``Candidate.probe_target`` states from the other
+    side: probe the deployment, hash the code). Where it does not, the answer is
+    ``None`` and the worker takes its existing "skip, degraded, never guess" path.
+
+    DECLARED DEVIATION from the item's literal shape ("return ``None`` for a proxy
+    row"), because that shape has a consequence the prescription did not name: the
+    code-upgrade class is planned ONLY for proxy contract rows
+    (``_code_upgrade_plans``), so a blanket refusal makes that class unplannable by
+    construction rather than merely uncached. The implementation redirect keeps the
+    class reachable while still never keying on a stub; the refusal remains for every
+    proxy row that cannot be resolved to cached implementation code. (Local corpus: 0
+    ``code_upgrade`` verdicts exist today, so neither variant changes a realised row —
+    a lower bound, not a proof of harmlessness.)
+    """
+    contract = _contract_row(session, candidate.contract_id)
+    if contract is None or not contract.is_proxy:
+        return candidate.contract_address
+    implementation = (contract.implementation or "").strip().lower()
+    if not implementation or implementation in ("0x", "0x" + "0" * 40):
+        logger.warning(
+            "effects hash: contract row %s (%s) is a proxy with function rows and no resolved "
+            "implementation — refusing to hash the forwarding stub (it collides across every "
+            "implementation behind it) and skipping the candidate",
+            candidate.contract_id,
+            candidate.contract_address,
+        )
+        return None
+    logger.info(
+        "effects hash: contract row %s (%s) is a proxy carrying function rows — hashing its "
+        "implementation %s instead of the forwarding stub",
+        candidate.contract_id,
+        candidate.contract_address,
+        implementation,
+    )
+    return implementation
+
+
+def _contract_row(session: Session, contract_id: int) -> Contract | None:
+    """The candidate's ``contracts`` row, from the batch store when installed (the same
+    source ``_code_upgrade_plans`` reads, so batched and unbatched planning agree)."""
+    from services.effects.prefetch import get_prefetch
+
+    pf = get_prefetch(session)
+    if pf is not None and contract_id in pf.contract_ids:
+        return pf.contract_by_id.get(contract_id)
+    return session.execute(select(Contract).where(Contract.id == contract_id).limit(1)).scalar_one_or_none()
 
 
 def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | None:
@@ -320,6 +388,7 @@ def _value_out_plan(ctx: ProbeContext, spec: calldata_synth.ValueOutPlanInputs) 
             sentinel_calldata=spec.sentinel_calldata,
             value_holders=spec.value_holders,
             acting_balance_usd=spec.acting_balance_usd,
+            protocol_tvl_usd=spec.protocol_tvl_usd,
             gate_ref=spec.gate_ref,
             seeder=ctx.effective_seeder(),
             input_token_hints=spec.input_token_hints,
@@ -446,6 +515,7 @@ def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> Prob
             entry_points=spec.entry_points,
             predicted_guard_set=spec.predicted_guard_set,
             max_pause_duration=spec.max_pause_duration,
+            duration_bound_source=spec.duration_bound_source,
             gate_ref=spec.gate_ref,
             fixtures=spec.fixtures,
         )

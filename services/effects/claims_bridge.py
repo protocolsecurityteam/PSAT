@@ -199,8 +199,23 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     cross-checked on-fork only as an upper bound. Trust it as a severity-REDUCER
     #     ONLY when ``auto_expiry is True``; ``auto_expiry is False`` means the fork
     #     contradicted the static constant, so the bound is not a mitigation.
-    #   * ``duration_bound_seconds is None`` + ``auto_expiry is None`` = an INDEFINITE
-    #     LATCH = the MOST severe freeze, never zero/short.
+    #   * ``duration_bound_seconds is None`` is TWO different facts and
+    #     ``duration_bound_source`` is the only thing that tells them apart
+    #     (``config.DURATION_BOUND_*``): ``no_time_reference`` = PROVEN indefinite
+    #     latch = the MOST severe freeze, never zero/short — and it is asserted only
+    #     when no leaf in the latch's whole guard tree reads a clock AND no operand
+    #     anywhere in that tree stands for something never read (lists known-complete,
+    #     no undecomposed expression, no unentered callee), because a lowered ``||``, a
+    #     pre-widening two-slot operand list, and a clock read through a view helper or
+    #     a time oracle each hide a clock from the leaf that reads the latch — and the
+    #     third hides it from a whole-tree ``block.timestamp`` walk as well;
+    #     ``not_determined`` (and
+    #     an ABSENT source, which is every row written before A7) = the window was
+    #     not established — score it as a confidence gap, never as indefinite and
+    #     never as bounded. The previous contract read this line as "None + None =
+    #     indefinite", and it was false on all four rows that had it: every proven
+    #     ``freeze_pause`` verdict in the corpus is a ``pauseUntil`` timestamp latch
+    #     whose window lives in storage.
     #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
     #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
     # ``backing`` (§5a) is the fork-observed mint-backing object
@@ -224,8 +239,25 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     value in current state". A scorer must not treat it as a live outflow of
     #     present treasury, and must not read its ABSENCE as "the contract is
     #     funded" — absence only means no balance override was needed.
+    # ``destination_shape`` / ``shape_proved_by`` are the fork's three-valued answer to
+    # "where can this outflow go", and NO claim in the database carried either (A6 /
+    # C3-S1). The two rows that made it visible are approve-then-pull outflows whose
+    # transfer sink lives in the CALLEE, so the static flows matcher emitted nothing at
+    # all: the merged claim carried $472M of reach and not one word about the
+    # destination, indistinguishable from a destination we examined and could not
+    # classify. The class is 7 functions (2 manifest, 5 latent) and it grows as
+    # coverage improves — every new successful probe converts a latent row — so the
+    # forwarding is unconditional rather than scoped to the rows that show it today.
+    #
+    # CONTRACT: ``shape_proved_by`` names the EVIDENCE — "static" (a universal proof
+    # from the code), "simulation" (a sentinel that landed, proving caller_arbitrary),
+    # or "none" (no evidence obtained). ``"none"`` means the destination contributes
+    # ZERO severity in either direction: it is a confidence gap, not a fixed
+    # destination and not a theft-shaped one (inv. 2).
     keep = (
         "supply_delta_sign",
+        "destination_shape",
+        "shape_proved_by",
         "gate_mutation",
         "historical",
         "current_capability",
@@ -233,6 +265,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "observed_blast_radius",
         "auto_expiry",
         "duration_bound_seconds",
+        "duration_bound_source",
         "backing",
         "input_seeded",
         "contract_balance_seeded",
@@ -250,14 +283,57 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 # and re-published as a DIFFERENT deployment's observation on every cache hit.
 # ``observed_residue`` is the state-plane column and is never a cache key (inv. 3).
 #
-# CONTRACT for the eventual scorer: the reach USD is a conservative upper bound (a
-# holder's full on-chain balance attributed when value provably leaves it, inv.
-# 5/7); ``reach_indeterminate is True`` means downstream reach was fork-observed to
-# be nothing, so the value is FLOORED to the acting deployment's own balance —
-# never inflated via a control-graph heuristic. ABSENCE of all three keys is NOT
-# "no reach": it means this deployment has no fork observation of its own yet (its
-# verdict came from a cache hit), so reach is simply unmeasured here.
-_REACH_KEYS = ("observed_reach_value_usd", "observed_reach_holders", "reach_indeterminate")
+# CONTRACT for the eventual scorer, in three states with ``reach_determined`` as
+# the discriminator (D3):
+#   * ``reach_determined is True`` — MEASURED. ``observed_reach_value_usd`` is a
+#     conservative upper bound (a holder's full on-chain balance attributed when
+#     value provably leaves it, inv. 5/7) over ``observed_reach_holders``.
+#   * ``reach_determined is False`` (with ``reach_indeterminate: True``) — NOT
+#     measured: no holder was observed moving value, which is NOT "reach is
+#     nothing". ``observed_reach_value_usd`` is ABSENT on such a row and
+#     ``observed_reach_floor_usd`` carries the acting deployment's own balance as a
+#     floor. Until D3 the floor was published as ``observed_reach_value_usd``
+#     itself, so a scorer reading the number and ignoring the flag scored "$0
+#     reach" for a zero-balance router that can move millions — the exact
+#     "unproven read as proven-zero" shape inv. 1 forbids.
+#   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
+#     observed leaving a holder and its USD is NOT determined, because at least one
+#     asset that moved has no priced holding on record
+#     (``observed_reach_unvalued_assets`` names them; ``observed_reach_priced_usd``
+#     is the priced part, a partial floor). A2: reach is measured PER ASSET, and
+#     1001 of 1376 local balance rows are unpriced, so this state is common and must
+#     lower confidence rather than produce a small number.
+#     ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
+#     the holder does not hold the asset: ``unpriced_holding`` (we have the row, no
+#     price), ``holdings_at_page_cap`` (the holder's stored rows reach the fetcher's
+#     one-page cap, so assets are probably missing), ``asset_not_in_recorded_holdings``
+#     (not in the set we recorded — and that set is not provably complete, because the
+#     stored rows already dropped every zero-balance entry the page returned). A
+#     scorer must read all three as CONFIDENCE GAPS, never as a small reach.
+#   * ``reach_tvl_check`` is the corroborating CEILING's outcome:
+#     ``within_protocol_tvl`` (the figure is at least possible),
+#     ``exceeds_protocol_tvl`` (REFUSED — ``observed_reach_rejected_usd`` and
+#     ``protocol_tvl_usd`` record the contradiction and there is no reach value), or
+#     ``skipped_no_tvl`` (no ``defillama_tvl`` snapshot — the ceiling did NOT run, and
+#     that is published rather than implied). The worst row in the DB asserted $3.489B
+#     against a protocol TVL of $3.297B with nothing checking.
+#   * ABSENCE of every key is NOT "no reach": this deployment has no fork
+#     observation of its own yet (its verdict came from a cache hit), so reach was
+#     never attempted here.
+_REACH_KEYS = (
+    "observed_reach_value_usd",
+    "observed_reach_holders",
+    "reach_indeterminate",
+    "reach_determined",
+    "observed_reach_floor_usd",
+    "observed_reach_assets",
+    "observed_reach_unvalued_assets",
+    "observed_reach_unvalued_reasons",
+    "observed_reach_priced_usd",
+    "reach_tvl_check",
+    "observed_reach_rejected_usd",
+    "protocol_tvl_usd",
+)
 
 
 def _reach_summary(verdict: VerdictLike) -> dict[str, Any]:

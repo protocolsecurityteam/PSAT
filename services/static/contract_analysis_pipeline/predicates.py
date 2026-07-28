@@ -1534,12 +1534,116 @@ def _build_binary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function:
         leaf["authority_role"] = _classify_authority_equality(leaf, kind)
         if kind == "equality" and function is not None:
             _stamp_param_keyed_authority_mapping(ir, prov, function, leaf)
+        _stamp_absorbed_operands(ir, prov, gate, function, leaf)
         return leaf
     # AND/OR at the binary level — these would normally be handled by
     # short-circuit evaluation; for now we treat as unsupported and
     # let the predicate-tree composition layer (week 2) split them
     # into AND/OR tree nodes properly.
     return _unsupported_leaf(reason=f"binary_op_{op_name}_unsupported", expression=str(ir))
+
+
+# Slither ``BinaryType`` names that make an expression an OFFSET of its other
+# operand. A product, a quotient or a shift is not an offset and is never read as
+# one: ``block.timestamp < pausedUntil * 2`` carries no window length, and
+# publishing its ``2`` as a duration would be a two-second freeze bound on an
+# open-ended latch — the severity-REDUCER direction, from arithmetic nobody read.
+_ADDITIVE_BINARY_TYPES = ("ADDITION", "SUBTRACTION")
+
+
+def _stamp_absorbed_operands(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None, leaf: LeafPredicate
+) -> None:
+    """Record the operands an ADDITIVE sub-expression contributed and the leaf could
+    not hold (A7 / ledger L-16).
+
+    A Solidity comparison lowers to a leaf with exactly TWO operands, and when one
+    side is arithmetic the operand recorder keeps ONE sub-operand and discards the
+    rest. Measured on compiled source: ``block.timestamp < pausedUntil +
+    MAX_PAUSE`` records ``{timestamp, MAX_PAUSE}`` — the latch is gone — while
+    ``block.timestamp - pausedUntil < 2592000`` records ``{pausedUntil, 2592000}``
+    — the clock is gone. Three facts do not fit in two slots, so a reader asking
+    "does this guard compare the CLOCK against this LATCH plus a fixed WINDOW?"
+    could not be answered from any source shape, and every timed pause latch in
+    the corpus published ``duration_bound_seconds: null`` — which the consumer
+    contract read as *indefinite latch, most severe*. An extraction failure was
+    being published as a proof about the contract.
+
+    This is deliberately NOT a change to ``operands``: it is a sibling list of
+    what the comparison ALSO read, so every existing operand consumer keeps the
+    exact list it had (the value-flow lattice folds a source set to one origin and
+    degrades to ``indeterminate`` the moment a set carries two, so widening
+    ``operands`` would silently collapse amount kinds protocol-wide).
+
+    Additive only, ONE level deep, and absent when nothing was absorbed — so
+    absence means "no additive sub-expression fed this comparison", never "there
+    was one and we could not read it": a nested ``a + b * c`` records ``a`` and the
+    opaque ``computed`` operand for ``b * c``, which is a not-determined marker a
+    reader must treat as such.
+    """
+    if function is None:
+        return
+    absorbed: list[Operand] = []
+    for side in (getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)):
+        if side is None:
+            continue
+        defining = _find_defining_ir(side, getattr(gate, "node", None), function)
+        if not isinstance(defining, Binary):
+            continue
+        if str(getattr(defining, "type", "")).split(".")[-1] not in _ADDITIVE_BINARY_TYPES:
+            continue
+        for inner in (getattr(defining, "variable_left", None), getattr(defining, "variable_right", None)):
+            if inner is None:
+                continue
+            op = _operand_for_value(inner, prov)
+            _attach_int_constant_value(op, inner)
+            absorbed.append(op)
+    if not absorbed:
+        return
+    # Deterministic order: the list is evidence, and two runs must publish the
+    # same bytes. ``_published_source_key`` is the same canonical key the operand
+    # sort uses elsewhere in this module.
+    leaf["absorbed_operands"] = sorted(absorbed, key=lambda o: _operand_sort_key(o))
+
+
+def _operand_sort_key(op: Operand) -> tuple[str, ...]:
+    return tuple(
+        str(op.get(key) or "")
+        for key in (
+            "source",
+            "state_variable_name",
+            "parameter_name",
+            "block_context_kind",
+            "computed_kind",
+            "constant_value",
+        )
+    )
+
+
+def _attach_int_constant_value(op: Operand, value: Any) -> None:
+    """Resolve a compile-time ``constant`` state variable's INTEGER literal onto an
+    absorbed operand.
+
+    Scoped to :func:`_stamp_absorbed_operands` on purpose. ``uint256 public
+    constant MAX_PAUSE = 30 days`` is a value the compiler fixed, so reading it is
+    not the name-matching heuristic ``read_max_pause_duration`` refuses — but
+    attaching it to every ``state_variable`` operand would change what resolution
+    and the claims matchers see on operands they already read, which is not this
+    item's surface.
+    """
+    if op.get("source") != "state_variable" or op.get("constant_value") is not None:
+        return
+    variable = getattr(value, "non_ssa_version", None) or value
+    if not getattr(variable, "is_constant", False):
+        return
+    literal = getattr(variable, "expression", None)
+    converted = getattr(literal, "converted_value", None)
+    if converted is None:
+        return
+    try:
+        op["constant_value"] = str(int(str(converted), 0))
+    except (TypeError, ValueError):
+        return
 
 
 def _stamp_param_keyed_authority_mapping(ir: Any, prov: ProvenanceMap, function: Any, leaf: LeafPredicate) -> None:

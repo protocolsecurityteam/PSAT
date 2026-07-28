@@ -34,7 +34,7 @@ from db.models import (
     JobStatus,
     Protocol,
 )
-from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT
+from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.effects.selection import (
     JobScope,
     _token_holdings_by_contract,
@@ -96,6 +96,20 @@ def _balance(session: Session, contract_id: int, usd: float | Decimal | str) -> 
             contract_id=contract_id,
             token_address=None,  # native
             raw_balance="0",
+            decimals=18,
+            usd_value=usd,
+        )
+    )
+
+
+def _token_balance(session: Session, contract_id: int, token: str | None, usd: float | Decimal | str | None) -> None:
+    """One ``contract_balances`` row. ``usd=None`` is the UNPRICED shape (the producer
+    writes ``price_usd = 0`` and leaves ``usd_value`` NULL on 1001 of 1376 local rows)."""
+    session.add(
+        ContractBalance(
+            contract_id=contract_id,
+            token_address=token,
+            raw_balance="1",
             decimals=18,
             usd_value=usd,
         )
@@ -452,12 +466,163 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     db_session.commit()
 
     cand = {c.function_id: c for c in select_candidates(db_session, p.id)}[f.id]
-    holders = dict(cand.value_holders)
-    assert holders.get(ADDR(0x9001).lower()) == pytest.approx(221_000_000.0)
-    assert holders.get(ADDR(0x9002).lower()) == pytest.approx(55_200_000.0)
-    assert ADDR(0x9003).lower() not in holders  # zero balance dropped
+    # PER ASSET since A2, keyed on (holder, asset). ``_balance`` writes NATIVE rows, so
+    # the asset is the emitter a synthetic native Transfer log carries.
+    holders = {(h.holder, h.asset): h.usd_value for h in cand.value_holders}
+    native = NATIVE_ASSET_LOG_EMITTER
+    assert holders[(ADDR(0x9001).lower(), native)] == pytest.approx(221_000_000.0)
+    assert holders[(ADDR(0x9002).lower(), native)] == pytest.approx(55_200_000.0)
+    # A holding priced at exactly ZERO is KEPT, where the old per-holder set dropped
+    # it: a measured zero is evidence, and dropping it made "this holder moved an
+    # asset worth nothing" indistinguishable from "this holder moved nothing".
+    assert holders[(ADDR(0x9003).lower(), native)] == pytest.approx(0.0)
     # Acting floor is this deployment's own balance.
     assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
+
+
+@requires_postgres
+def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
+    """The reach ceiling's input. ``tvl_snapshots.total_usd`` and ``contract_breakdown``
+    are NULL on EVERY row of this table locally, so a ceiling written against them
+    could never fire — R2's dead-sentinel shape. Reading ``defillama_tvl`` is the whole
+    point, and a row that has only ``total_usd`` must read as NO ceiling (skipped),
+    not as a ceiling of zero or of that number."""
+    from datetime import datetime, timedelta, timezone
+
+    from db.models import TvlSnapshot
+
+    p = _protocol(db_session, "tvl-ceiling")
+    c = _contract(db_session, p.id, ADDR(0x9500))
+    f = _fn(db_session, c.id, name="withdraw", selector="0x95000001", effect_targets=["S"])
+    _principal(db_session, f.id, ADDR(0x9501))
+    now = datetime.now(timezone.utc)
+    # Only total_usd: the column the old proposal would have read.
+    db_session.add(TvlSnapshot(protocol_id=p.id, timestamp=now - timedelta(hours=2), total_usd=999.0, source="x"))
+    db_session.commit()
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert cand.protocol_tvl_usd is None  # skipped, loudly — never 999.0 and never 0
+
+    # ...and the newest defillama figure wins once one exists.
+    db_session.add(
+        TvlSnapshot(protocol_id=p.id, timestamp=now - timedelta(hours=1), defillama_tvl=100.0, source="defillama")
+    )
+    db_session.add(TvlSnapshot(protocol_id=p.id, timestamp=now, defillama_tvl=3_297_344_734.00, source="defillama"))
+    db_session.commit()
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert cand.protocol_tvl_usd == 3_297_344_734.00
+
+
+@requires_postgres
+def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
+    """G6-11: the holdings fetch takes ONE page, and exactly-at-the-cap cannot be told
+    from truncated — so an at-cap holder is marked ``at_page_cap`` and the reach probe
+    names it as the reason an asset could not be valued instead of quietly skipping it.
+
+    INVERTED in round 2 (R4): the below-cap arm asserted ``holdings_complete is True``.
+    A stored-row count cannot establish completeness in that direction — the rows are
+    the fetch's output AFTER its ``raw_balance > 0`` filter, so a FULL page containing
+    any zero-balance entry stores fewer than the cap and read as proven-complete. The
+    below-cap answer is ``not_determined``; there is no ``complete`` state.
+
+    ARMED POPULATION, honestly (R2): ``at_page_cap`` fires on ZERO local holders. The 7
+    local contracts at the cap all have ``protocol_id IS NULL`` and this function
+    filters on ``protocol_id``, so none can enter a holder set; the most token rows any
+    protocol-1 contract carries is 90. Reachable by construction, covered here, 0 of 29
+    holders armed on one protocol/one chain — a lower bound, not an absence."""
+    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+
+    p = _protocol(db_session, "holdings-cap")
+    capped = _contract(db_session, p.id, ADDR(0x9600))
+    whole = _contract(db_session, p.id, ADDR(0x9601))
+    _fn(db_session, capped.id, name="a", selector="0x96000001", effect_targets=["S"])
+    _fn(db_session, whole.id, name="b", selector="0x96000002", effect_targets=["S"])
+    for n in range(TOKEN_BALANCE_PAGE_SIZE):
+        _token_balance(db_session, capped.id, ADDR(0x970000 + n), 1.0)
+    _token_balance(db_session, whole.id, ADDR(0x98A1), 1.0)
+    db_session.commit()
+
+    by_holder = {}
+    for cand in select_candidates(db_session, p.id):
+        for holding in cand.value_holders:
+            by_holder.setdefault(holding.holder, set()).add(holding.completeness)
+    assert by_holder[capped.address.lower()] == {"at_page_cap"}
+    assert by_holder[whole.address.lower()] == {"not_determined"}
+    # And there is no third state to reach: a "complete" answer would be a proven
+    # absence derived from a count whose input was already filtered.
+    from services.effects.selection import HOLDINGS_COMPLETENESS_STATES
+
+    assert set(HOLDINGS_COMPLETENESS_STATES) == {"at_page_cap", "not_determined"}
+
+
+@requires_postgres
+def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_session):
+    """A2's input fix. The reach probe used to receive ONE summed figure per holder and
+    match any ``Transfer`` out of it against the whole sum — so a synthetic native move
+    out of the weETH proxy claimed a sheet that is 99.99% eETH ($3.489B).
+
+    Three properties, all load-bearing:
+      * the native row is keyed on the emitter ``eth_simulateV1``'s ``traceTransfers``
+        actually uses (measured live), so a native move can match it at all;
+      * an UNPRICED holding survives as ``usd_value=None`` rather than being dropped or
+        zeroed — it is what makes a reach total not-determined;
+      * a holding is keyed on the DEPLOYMENT (the only address a Transfer log can
+        name), and two implementation rows behind one proxy do not double-count it.
+    """
+    p = _protocol(db_session, "per-asset-holdings")
+    deployment = ADDR(0x8800)
+    token = ADDR(0x88A1)
+    unpriced = ADDR(0x88A2)
+    impl_a = _contract(db_session, p.id, ADDR(0x8801))
+    impl_b = _contract(db_session, p.id, ADDR(0x8802))
+    for impl in (impl_a, impl_b):
+        _fn(
+            db_session,
+            impl.id,
+            name="withdraw",
+            selector=f"0x8800000{impl.id % 10}",
+            effect_targets=["S"],
+            deployment_address=deployment,
+        )
+        # Each code row carries a COPY of the same deployment's sheet.
+        _token_balance(db_session, impl.id, token, 250.0)
+        _token_balance(db_session, impl.id, None, 4_000.0)
+        _token_balance(db_session, impl.id, unpriced, None)
+    db_session.commit()
+
+    cand = next(c for c in select_candidates(db_session, p.id) if c.contract_id == impl_a.id)
+    holdings = {(h.holder, h.asset): h.usd_value for h in cand.value_holders}
+    assert holdings[(deployment.lower(), token.lower())] == 250.0
+    assert holdings[(deployment.lower(), NATIVE_ASSET_LOG_EMITTER)] == 4_000.0
+    assert holdings[(deployment.lower(), unpriced.lower())] is None
+    # MAX per (holder, asset), not SUM: the token appears once at 250, not twice.
+    assert sum(1 for (holder, asset) in holdings if asset == token.lower()) == 1
+    assert len(cand.value_holders) == 3
+
+
+def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_datas(db_session):
+    """Ledger L-4. ``principal_addresses[0]`` IS the identity every fork probe
+    impersonates (``calldata`` :1395/:1437/:1720/:2312 and the code-upgrade plan),
+    so an unordered read left WHO we simulate as — and therefore which gate the
+    probe passes and what the witness records — to the query plan.
+
+    A third determinism class: PYTHONHASHSEED (W0-2) and allocation order (W0-3)
+    both fix the PROCESS, and neither can see a plan-order dependency. The rows are
+    inserted in DESCENDING address order on purpose, so a plan that hands back heap
+    order (what dropping the ORDER BY produces here) fails this assertion.
+    """
+    p = _protocol(db_session, "principal-order-proto")
+    c = _contract(db_session, p.id, ADDR(0x7100))
+    f = _fn(db_session, c.id, name="rebalance", selector="0x71000001", effect_targets=["S"])
+    holders = [ADDR(0x71FF), ADDR(0x71C0), ADDR(0x7180), ADDR(0x7140), ADDR(0x7101)]
+    for addr in holders:  # descending: insertion order is NOT the answer
+        _principal(db_session, f.id, addr)
+    db_session.commit()
+
+    cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
+    assert list(cand.principal_addresses) == sorted(a.lower() for a in holders)
+    # The load-bearing element, stated as its own assertion because it is the one a
+    # probe actually consumes.
+    assert cand.principal_addresses[0] == ADDR(0x7101).lower()
 
 
 def test_blank_predicate_keys_on_claims_not_effect_labels(db_session):
@@ -1636,3 +1801,43 @@ def test_shape4_failed_contract_is_covered_by_its_own_job_too(db_session):
     contract — the own-address clause never depends on any ownership rule."""
     proto, addrs, fns = _interleaved(db_session, "shape4-self")
     assert fns["failed"] in _scoped(db_session, proto.id, addrs["failed"])
+
+
+def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monkeypatch):
+    """The truncation discriminator's INPUT must not be a list a filter already thinned.
+
+    ``get_token_balances`` keeps an entry only when ``raw_balance > 0``, and the page-cap
+    check used to be evaluated on that filtered list — so a FULL page containing any
+    zero-balance entry read as "not truncated", one line below the filter that destroyed
+    the signal. The check now asks how many entries the ENDPOINT returned.
+    """
+    from utils import etherscan
+
+    cap = etherscan.TOKEN_BALANCE_PAGE_SIZE
+    page = [
+        {
+            "TokenAddress": f"0x{i:040x}",
+            "TokenName": "T",
+            "TokenSymbol": "T",
+            "TokenDivisor": "18",
+            # ONE zero-balance entry in an otherwise full page: 100 returned, 99 stored.
+            "TokenQuantity": "0" if i == 0 else str(10**18),
+            "TokenPriceUSD": "1",
+        }
+        for i in range(cap)
+    ]
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page})
+    monkeypatch.setattr(etherscan.time, "sleep", lambda _s: None)
+    warnings: list[str] = []
+    monkeypatch.setattr(etherscan.logger, "warning", lambda msg, *a: warnings.append(msg % a))
+
+    rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
+
+    assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
+    assert any("FULL page" in w for w in warnings), "a full page went unreported because the filter shrank the list"
+    assert any(f"({cap} entries, {cap - 1} with a balance)" in w for w in warnings)
+    # NEGATIVE CONTROL: a genuinely short page reports nothing.
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
+    warnings.clear()
+    etherscan.get_token_balances("0x" + "ac" * 20, 1)
+    assert not [w for w in warnings if "FULL page" in w]

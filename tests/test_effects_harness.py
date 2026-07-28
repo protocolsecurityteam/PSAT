@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from services.effects import calldata as calldata_mod
 from services.effects import recipes
 from services.effects.config import (
     EFFECT_CLASS_SUPPLY,
@@ -30,6 +31,7 @@ from services.effects.preflight import (
     probe_simulate_support,
     require_simulate_or_fallback,
 )
+from services.effects.selection import AssetHolding
 from services.effects.simulate import (
     TRANSFER_TOPIC,
     SimCall,
@@ -202,14 +204,123 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # The caller_arbitrary PROOF lives in the shape; the sentinel is an address
-    # this prober invented, so it must never be published in the column that
-    # otherwise means "the address value actually left to". The concrete
-    # destination stays the one the BASE probe really observed.
-    assert eff.concrete["destination"] == "0x" + "ab" * 20
+    # INVERTED (G6-3). This used to assert the BASE probe's recipient
+    # ("0xabab…ab") as the concrete destination. That address is the recipient
+    # argument the prober itself supplied — measured on 35 of 35 caller_arbitrary
+    # rows in the local DB — so publishing it in the column that means "where the
+    # money went" presents our own calldata as an observation, and it can only
+    # mislead in the reassuring direction. A caller-arbitrary destination IS the
+    # adverse finding; the shape carries it, the address adds nothing.
+    assert "destination" not in eff.concrete
     assert SENTINEL.lower() not in str(eff.concrete)
     assert eff.discrepancy is None
     assert eff.transcript_ptr is not None
+
+
+def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destination():
+    """G6-3, the second invented identity. ``SENTINEL_ADDRESS`` was already excluded
+    by construction (the destination is read off the BASE probe); ``NEUTRAL_CALLER``
+    was not, and it is BOTH the caller a public/unresolved-principal probe runs as
+    AND the filler substituted into every address argument of the synthesized call
+    — so it comes straight back in the ``Transfer`` log. The one local
+    caller_arbitrary row with no resolved principals stored ``0x1111…1111``
+    verbatim.
+
+    Here the shape stays ``unknown`` (no sentinel), so this exercises the ordinary
+    destination-capture path rather than the caller_arbitrary early return."""
+    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 7)]),))
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.details["value_moved"] is True
+    assert "destination" not in eff.concrete
+    # POSITIVE CONTROL: a real counterparty in the same position is still recorded,
+    # so this is an exclusion of two known-invented addresses and not a blanket
+    # withholding.
+    real = "0x" + "cd" * 20
+    eff2 = recipes.value_out(
+        simulate=ScriptedSimulate(SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, real, 7)]),))),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff2.concrete["destination"] == real
+
+
+def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined():
+    """The invented-identity exclusion applies to the convergence ANSWER, not to the
+    set convergence is computed from.
+
+    Applied to the set first, it manufactured agreement: this call provably sends 90%
+    to ``NEUTRAL_CALLER`` — the caller a public/unresolved-principal probe
+    impersonates, i.e. the ordinary "paid msg.sender" leg of a withdrawal — and a 10%
+    fee to the treasury. Dropping the caller left ONE destination, and the fee sink
+    was published as "the address value actually left to": the reassuring-direction
+    mislead the exclusion exists to remove, newly created BY the exclusion. Two
+    destinations, one of them invented, means the destination is not determined."""
+    treasury = "0x" + "17" * 20
+    base = SimResult(
+        calls=(
+            ok(
+                logs=[
+                    transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 90),
+                    transfer_log(TOKEN, CONTRACT, treasury, 10),
+                ]
+            ),
+        )
+    )
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert "destination" not in eff.concrete
+    # POSITIVE CONTROL: two REAL destinations were already withheld as ambiguous and
+    # still are, so the answer above is not an artifact of the invented address.
+    other = "0x" + "ce" * 20
+    diverged = SimResult(
+        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, other, 10)]),)
+    )
+    eff2 = recipes.value_out(
+        simulate=ScriptedSimulate(diverged),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert "destination" not in eff2.concrete
+    # NEGATIVE CONTROL: several logs CONVERGING on one real destination (burn + send,
+    # or send + fee to the same address) is still one concrete destination.
+    converged = SimResult(
+        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, treasury, 10)]),)
+    )
+    eff3 = recipes.value_out(
+        simulate=ScriptedSimulate(converged),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff3.concrete["destination"] == treasury
 
 
 def test_sentinel_only_caller_arbitrary_publishes_no_destination():
@@ -653,7 +764,11 @@ def test_value_out_reach_measures_downstream_holder_loss():
         principal=PRINCIPAL,
         calldata="0x11111111",
         simulate_supported=True,
-        value_holders=((CONTRACT, 221_000_000.0), (lp, 55_200_000.0), (other, 1_000.0)),
+        value_holders=(
+            AssetHolding(CONTRACT, TOKEN, 221_000_000.0),
+            AssetHolding(lp, TOKEN, 55_200_000.0),
+            AssetHolding(other, TOKEN, 1_000.0),
+        ),
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
@@ -662,7 +777,9 @@ def test_value_out_reach_measures_downstream_holder_loss():
     # stores and re-publishes to every twin of this bytecode (inv. 3).
     assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
     assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
+    assert eff.concrete["reach_determined"] is True
     assert "reach_indeterminate" not in eff.concrete
+    assert "observed_reach_floor_usd" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
     assert lp.lower() not in str(eff.details)
 
@@ -681,12 +798,17 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         principal=PRINCIPAL,
         calldata="0x11111111",
         simulate_supported=True,
-        value_holders=((lp, 55_200_000.0),),
+        value_holders=(AssetHolding(lp, TOKEN, 55_200_000.0),),
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0
+    # D3: the floor is published as a FLOOR. The key that means "measured reach" is
+    # absent, because nothing was measured — publishing the acting balance as
+    # ``observed_reach_value_usd`` is what let a zero-balance router read "$0 reach".
+    assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
+    assert eff.concrete["observed_reach_floor_usd"] == 221_000_000.0
+    assert "observed_reach_value_usd" not in eff.concrete
     assert "observed_reach_holders" not in eff.concrete
     assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
 
@@ -707,6 +829,10 @@ def test_value_out_reach_absent_without_holder_set():
     assert eff.verdict == VERDICT_PROVEN
     assert "observed_reach_value_usd" not in eff.concrete
     assert "reach_indeterminate" not in eff.concrete
+    # ...and no discriminator either: absence of EVERY key is the third state, "no
+    # reach measurement was attempted", distinct from a measured or a floored one.
+    assert "reach_determined" not in eff.concrete
+    assert "observed_reach_floor_usd" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.details
     assert "reach_indeterminate" not in eff.details
 

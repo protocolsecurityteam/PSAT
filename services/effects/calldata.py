@@ -50,6 +50,9 @@ from db.models import EffectiveFunction, FunctionPrincipal
 from db.queue import get_artifact
 from services.effects.anvil import EntryPoint, ForkFixture
 from services.effects.config import (
+    DURATION_BOUND_GUARD_CONSTANT,
+    DURATION_BOUND_NO_TIME_REFERENCE,
+    DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
@@ -58,7 +61,7 @@ from services.effects.config import (
     SHAPE_STORAGE_DETERMINED,
 )
 from services.effects.seeding import SEED_UNIT_DECIMALS
-from services.effects.selection import Candidate
+from services.effects.selection import AssetHolding, Candidate
 from services.policy.effective_permissions import _abi_signature
 from services.resolution.differential_probe import (
     _default_value_for_type,
@@ -118,6 +121,7 @@ SEED_AMOUNT = 2**128
 # above this is not a freeze window (it is a chain-id, an amount, a role hash).
 _MAX_PLAUSIBLE_DURATION_S = 365 * 24 * 3600
 
+
 _AUTHORITY_ROLES = ("caller_authority", "delegated_authority")
 
 
@@ -140,8 +144,9 @@ class ValueOutPlanInputs:
     sentinel_calldata: str | None = None
     # §5b downstream value-reach: the protocol's witnessed value-holders the recipe
     # measures against, and the acting deployment's own balance floor.
-    value_holders: tuple[tuple[str, float], ...] = ()
+    value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
+    protocol_tvl_usd: float | None = None
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
     input_token_hints: tuple[str, ...] = ()
@@ -280,6 +285,12 @@ class PausePlanInputs:
     max_pause_duration: int | None
     gate_ref: str
     fixtures: tuple[ForkFixture, ...] = ()
+    # Which of the three ``DURATION_BOUND_*`` states produced
+    # ``max_pause_duration``. ``None`` there is two different facts — the latch
+    # cannot expire, or we could not find its window — and only this field tells
+    # them apart. Defaulted to ``not_determined`` so a caller that omits it can
+    # never assert the indefinite reading by accident.
+    duration_bound_source: str = DURATION_BOUND_NOT_DETERMINED
 
 
 @dataclass(frozen=True)
@@ -1405,6 +1416,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
         acting_balance_usd=candidate.acting_balance_usd,
+        protocol_tvl_usd=candidate.protocol_tvl_usd,
         input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
         token_param_indexes=token_params,
         seeded_calldata=seeded,
@@ -1821,24 +1833,233 @@ def _principals_by_selector(session: Session, contract_id: int) -> dict[str, str
     return out
 
 
-def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> int | None:
-    """A guard leaf that compares ``block.timestamp`` against a constant AND reads
-    the latch itself IS that latch's freeze window. Scoped to the latch because a
-    contract can carry two latches with different semantics (one indefinite, one
-    timed) and the wrong constant is a wrong witness, not a rounding error."""
+def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A leaf's operands UNION the additive sub-operands it absorbed.
+
+    A Solidity comparison holds two operands, and the pause-window question needs
+    three facts (the clock, the latch, the offset) — so before
+    ``absorbed_operands`` existed this reader's positive branch was unreachable
+    from any compiled source (ledger L-16, measured over 11 guard shapes).
+    ``absorbed_operands`` is the sibling list the leaf builder now records; taking
+    the union here is the whole widening.
+
+    Trees persisted before that field simply have no key, and this reads them
+    exactly as it did: absent ⇒ the old two-operand answer. What that answer may
+    NOT be used for is a conclusion drawn from an operand's ABSENCE — see
+    :func:`_absorption_recorded`, which is the positive marker that separates
+    "this comparison read nothing more" from "we do not know what it read".
+    """
+    absorbed = leaf.get("absorbed_operands")
+    extra = [op for op in absorbed if isinstance(op, dict)] if isinstance(absorbed, list) else []
+    return [*_operands(leaf), *extra]
+
+
+# Root-node marker stamped by ``predicate_artifacts.build_predicate_artifacts`` on
+# every tree built by a builder that records absorbed operands
+# (``predicates._stamp_absorbed_operands``). Duplicated as a literal for the same
+# reason ``"op"``/``"leaf"`` are: the effects plane reads static's persisted JSON and
+# does not import the static package.
+_OPERAND_ABSORPTION_RECORDED = "recorded"
+
+
+# Operand sources that stand for an expression whose CONTENTS were not recorded, so
+# the operand may be HIDING a clock read:
+#   * ``computed`` — any arithmetic / hash / encode result the absorption recorder did
+#     not decompose (it handles ``+``/``-`` one level deep and nothing else).
+#   * ``top`` — provenance saturation.
+#   * ``view_call`` / ``external_call`` — an operand that names a CALLEE the recorder
+#     never entered. Reading time through a helper is the mainstream idiom, not a
+#     curiosity: ``_blockTimestamp()`` in Uniswap V3's pool, ``clock()`` in OZ
+#     Governor, ``oracle.nowSeconds()`` on any time oracle. Reproduced from compiled
+#     Solidity: ``require(!frozen || _clock() > unpauseAt)`` records
+#     ``{view_call _clock(), state_variable unpauseAt}`` and no ``block_context``
+#     operand appears anywhere in the tree, so "no clock here" was a false proof about
+#     a freeze that demonstrably expires.
+# None of these may be read as "this operand is not a clock". The named, decomposed
+# sources are deliberately absent from this set: ``state_variable``, ``constant``,
+# ``parameter``, ``msg_sender``/``tx_origin``/``signature_recovery``,
+# ``self_address``, ``block_context``. Each is a fact the builder resolved and none
+# is an unentered expression — a stored timestamp or a caller-supplied deadline is
+# not a clock (no passage of time changes it without a transaction). A
+# ``block_context`` operand is not OPAQUE — its kind is right there — but three of
+# its kinds ARE the clock, which is what the two sets below express.
+_OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_call"})
+
+# The static plane maps every ``block.*`` global to ``source="block_context"`` with
+# ``block_context_kind`` = the suffix — and ``now``, the pre-0.7 spelling, IS
+# ``block.timestamp`` verbatim. Two sets because the two uses have different unit
+# constraints:
+#   * demotion (rule 1: a clock anywhere in a latch-reading tree denies the
+#     proven-indefinite state) counts every kind that advances on its own —
+#     ``block.number`` lifts a freeze by itself just as a timestamp does;
+#   * the SECONDS arithmetic (``saw_timed_latch_guard`` + the constant harvest) may
+#     count only second-denominated clocks: a ``block.number`` comparison constant
+#     is a BLOCK COUNT, and harvesting one as ``duration_bound_seconds`` would
+#     misstate the window by the block-time factor (216000 blocks ≈ 30 days, not
+#     2.5 days).
+_SECONDS_CLOCK_KINDS = frozenset({"timestamp", "now"})
+_CLOCK_KINDS = frozenset({"timestamp", "now", "number"})
+
+
+def _absorption_recorded(tree: Any) -> bool:
+    """Whether this tree's operand lists are known-complete for the additive shape.
+
+    An operand list is LOSSY by construction: a comparison leaf holds two slots, so
+    ``block.timestamp - pausedUntil < 2592000`` records ``{pausedUntil, 2592000}``
+    and the clock is simply gone. ``absorbed_operands`` is what recovers it — but a
+    MISSING ``absorbed_operands`` has two meanings, and only this marker tells them
+    apart:
+
+    * marker present ⇒ the builder ran the absorption recorder over every
+      comparison in this tree, so no key means the comparison read no additive
+      sub-expression. An operand's absence is then evidence.
+    * marker ABSENT ⇒ the tree was built before the widening (every
+      ``contract_materializations.predicate_trees`` row in the database is such a
+      tree, and an R5 bump does not re-run the static stage). An operand's absence
+      says nothing at all, so no conclusion may be drawn FROM it.
+
+    That distinction is load-bearing for exactly one caller: the
+    ``no_time_reference`` state of :func:`_duration_from_trees` is a claim that no
+    leaf reading the latch touches a clock — a proof BY ABSENCE, and the most
+    severe freeze statement this system makes. Reproduced on compiled source:
+    ``require(block.timestamp - pausedUntil < 2592000)`` reads as
+    ``(2592000, "guard_constant")`` from a tree built at this HEAD and, with
+    ``absorbed_operands`` stripped to the persisted shape, as PROVEN INDEFINITE —
+    the same source, the opposite answer, in the severe direction.
+    """
+    return isinstance(tree, dict) and tree.get("operand_absorption") == _OPERAND_ABSORPTION_RECORDED
+
+
+def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tuple[int | None, str]:
+    """The latch's freeze window and HOW it was established.
+
+    A guard leaf that compares ``block.timestamp`` against a constant offset of the
+    latch IS that latch's window (``guard_constant``). Scoped to the latch because
+    a contract can carry two latches with different semantics (one indefinite, one
+    timed) and the wrong constant is a wrong witness, not a rounding error.
+
+    ``no_time_reference`` is the PROOF of an indefinite latch: some guard leaf DOES
+    read the latch (so the gate was lowered and we are looking at it) and no leaf
+    reading it touches a clock, so no passage of time can lift the freeze — a plain
+    ``bool frozen`` gate. A latch no lowered leaf reads at all is
+    ``not_determined``, never indefinite: that is the tree-absent case, and it is
+    the governing rule of this whole effort — absence of a proven bound is not
+    proof that no bound exists. ``not_determined`` is likewise the honest answer
+    for the shape this reader cannot resolve: the guard DOES compare the latch
+    against ``block.timestamp`` (so the latch is timed and the freeze does expire)
+    but the window itself is not in the code — etherfi's ``PausableUntil`` stores
+    it (``$.pauseUntilDuration``, bounded by ``MIN``/``MAX_PAUSE_DURATION`` inside
+    a different function's guard), so only a live read of that state or a
+    cross-function derivation could name it. All 4 proven ``freeze_pause``
+    verdicts in the local corpus are that shape, and every one of them published
+    ``null`` — rendered as "indefinite latch (no self-recovery bound)" on the
+    function inspector, about a latch called ``pauseUntil``.
+
+    ``no_time_reference`` IS A PROOF BY ABSENCE, so it carries two preconditions
+    beyond the leaf-local one, and neither is optional. Both are asked of the WHOLE
+    gate tree that reads the latch, never of the latch-reading leaf alone: a
+    leaf-local reading of "no clock here" was unsound in both directions a real
+    compiler produces, and a leaf-local reading of "nothing unread here" is unsound
+    for exactly the same reason — the clock and the latch end up in sibling leaves.
+
+    1. A SIBLING LEAF MAY HOLD THE CLOCK. Solidity lowers ``||``/``&&`` into
+       separate leaves, so ``require(!frozen || block.timestamp > unpauseAt)``
+       yields one leaf holding ``{frozen}`` and another holding
+       ``{timestamp, unpauseAt}``. No leaf holds both, and the freeze
+       demonstrably expires. This is not an edge case: :func:`_latch_pairs` admits
+       only ``bool``-typed writes (or the ERC-7201 pseudo-slot) and a ``bool``
+       cannot be compared against ``block.timestamp`` in ANY leaf, so for the whole
+       two-variable timed-pause family (``bool paused`` + ``uint pauseExpiry``) the
+       leaf-local answers were only ``not_determined`` or proven-most-severe. So
+       the clock is looked for across the WHOLE gate tree that reads the latch: a
+       clock anywhere in it means time may lift this freeze, and the honest state
+       is ``not_determined``. Deliberately conservative — a pure conjunction
+       ``!frozen && block.timestamp > x`` genuinely IS indefinite and is demoted
+       too, because a tree walk cannot tell a lowered disjunction from a lowered
+       conjunction and the cost of being wrong is asymmetric.
+    2. THE OPERAND LISTS MUST BE KNOWN-COMPLETE (:func:`_absorption_recorded`). A
+       pre-widening tree drops the clock out of ``block.timestamp - pausedUntil <
+       2592000`` entirely, so its absence proves nothing. Every persisted tree in
+       the database is such a tree, which is why this state has ZERO realised rows
+       locally: it is reachable by construction and test-covered (the compiled
+       ``TimedLatch`` corpus fixture), and it will start being realised when the
+       static stage next re-runs. That is the honest reading of a lower bound, not
+       a dead branch. The marker's promise is bounded in the same way the recorder
+       is — ADDITIVE, one level deep, and it never enters a callee — so an OPAQUE
+       operand (:data:`_OPAQUE_OPERAND_SOURCES`) ANYWHERE in a latch-reading tree
+       denies the proof too. Two shapes, both compiled: ``block.timestamp / 2 >
+       pausedUntil`` records ``{computed, pausedUntil}`` (the recorder does not
+       decompose a quotient, so the clock is inside an operand nobody read), and
+       ``require(!frozen || _clock() > unpauseAt)`` — reading time through an
+       internal view helper or a time oracle, the Uniswap-V3 / OZ-Governor idiom —
+       records ``{view_call _clock(), unpauseAt}`` in the SIBLING leaf with no
+       ``block_context`` operand anywhere, so rule 1 does not see it either. Scoping
+       this to the tree rather than the leaf is what makes the two rules symmetric:
+       both ask "could this tree be hiding a clock from me", and neither may be
+       answered from the two slots of one comparison.
+
+       THE RECALL COST IS LARGE AND IS THE POINT, so it is stated rather than
+       discovered later. A tree here is a whole FUNCTION's lowered guard set, so an
+       unrelated leaf makes the whole tree opaque: SafeMath ``add``/``sub``, an
+       ``allowance()`` read, ``toTypedDataHash``, an internal helper's return.
+       Projected over the 75 local materializations with the marker force-stamped
+       (nothing persisted carries it yet, so the realised delta today is 0 either
+       way): of the 16 latches the static plane names, 9 reached the proven state
+       before and 1 does after; treating every compared state variable as a
+       hypothetical latch, 379 reached it before and 149 after. Every move is OFF the
+       proven state and none onto it, which is the only direction this reader is
+       allowed to be wrong in — a false "most severe freeze there is" is a claim
+       about a contract, ``not_determined`` is a claim about our evidence. Nothing in
+       the demoted set showed a plausible hidden clock, and the reader cannot tell
+       that from a real one: ``oracle.isExpired()`` is an ``external_bool`` leaf that
+       hides the entire time check, which is why the test cannot be narrowed to
+       ordering comparisons. Same conservatism as rule 1, one order louder.
+
+    When several plausible constants are in scope the MAX is taken: the value is
+    consumed as a severity reducer, so the longest candidate window is the least
+    mitigating reading of ambiguous evidence.
+    """
     best: int | None = None
+    saw_latch_guard = False
+    saw_timed_latch_guard = False
+    clock_in_a_latch_tree = False
+    latch_read_from_lossy_tree = False
     for tree in trees.values():
+        tree_reads_latch = False
+        tree_reads_clock = False
+        tree_holds_opaque_operand = False
         for leaf in _all_leaves(tree):
-            operands = _operands(leaf)
-            if not any(op.get("block_context_kind") == "timestamp" for op in operands):
-                continue
+            operands = _compared_operands(leaf)
+            clock_kinds = {str(op.get("block_context_kind") or "") for op in operands}
+            leaf_reads_clock = not clock_kinds.isdisjoint(_CLOCK_KINDS)
+            tree_reads_clock = tree_reads_clock or leaf_reads_clock
+            if any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
+                tree_holds_opaque_operand = True
             if not any(str(op.get("state_variable_name") or "") in latch_vars for op in operands):
                 continue
+            tree_reads_latch = True
+            saw_latch_guard = True
+            if clock_kinds.isdisjoint(_SECONDS_CLOCK_KINDS):
+                continue
+            saw_timed_latch_guard = True
             for op in operands:
                 value = _parse_int(op.get("constant_value"))
                 if value is not None and 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
                     best = value if best is None else max(best, value)
-    return best
+        if tree_reads_latch and tree_reads_clock:
+            clock_in_a_latch_tree = True
+        if tree_reads_latch and (not _absorption_recorded(tree) or tree_holds_opaque_operand):
+            latch_read_from_lossy_tree = True
+    if best is not None:
+        # A resolved window is positive evidence: all three facts were present in one
+        # leaf's union, which no lossy list can fake, so neither precondition above
+        # applies to it.
+        return best, DURATION_BOUND_GUARD_CONSTANT
+    if saw_timed_latch_guard or not saw_latch_guard:
+        return None, DURATION_BOUND_NOT_DETERMINED
+    if clock_in_a_latch_tree or latch_read_from_lossy_tree:
+        return None, DURATION_BOUND_NOT_DETERMINED
+    return None, DURATION_BOUND_NO_TIME_REFERENCE
 
 
 def _parse_int(value: Any) -> int | None:
@@ -1855,8 +2076,12 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
-def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int | None:
+def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> tuple[int | None, str]:
     """Inv. 10: the pause bound is READ, never hardcoded — and it is per-LATCH.
+    Returns ``(seconds_or_None, source)`` where ``source`` is one of the three
+    ``DURATION_BOUND_*`` states; the pair is the whole point (R1), because
+    ``None`` alone cannot say whether the latch has no window or whether we
+    failed to find one.
 
     A contract can hold an indefinite latch and a timed one at once; the writer
     function pins which. An indefinite latch legitimately yields ``None`` (the
@@ -1873,8 +2098,24 @@ def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int |
     (``claims_bridge._observed_summary``) reads a bound as a severity REDUCER. A
     cooldown, a minimum, or an unrelated timer picked up by the name pattern would
     therefore have discounted an indefinite freeze. No bound is the correct and
-    conservative output: ``duration_bound_seconds is None`` + ``auto_expiry is
-    None`` already means "indefinite latch, most severe"."""
+    conservative output — but "no bound" and "no bound FOUND" are different facts
+    and the returned ``source`` is what keeps them apart. The old contract
+    ("``duration_bound_seconds is None`` + ``auto_expiry is None`` means indefinite
+    latch, most severe") was false on every row that had it: the corpus's four
+    proven rows are all ``pauseUntil`` — a latch that expires — and they published
+    exactly that pair.
+
+    What is deliberately NOT read here, stated so the gap is not mistaken for an
+    oversight: etherfi's window lives in ``$.pauseUntilDuration``, a storage value
+    with a public getter, bounded by ``MIN_PAUSE_DURATION``/``MAX_PAUSE_DURATION``
+    inside ``setPauseUntilDuration``'s own guard. Reading it means either a live
+    ``eth_call`` (a per-deployment observation — it would belong in the state-plane
+    residue, never in the code-plane ``details`` this value rides) or a
+    cross-function derivation the static plane does not record (the latch write's
+    assigned-expression origins are not in the effects artifact). Selecting the
+    getter by NAME is the identifier matching this docstring already refuses. So
+    the honest published state for that shape is ``not_determined``, and the fork
+    still cross-checks any bound this reader DOES find by warping past it."""
     return _duration_from_trees(facts.trees, latch_vars)
 
 
@@ -2259,13 +2500,15 @@ def synthesize_pause(
     callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
     token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
     fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)
+    duration, duration_source = read_max_pause_duration(facts, latch_vars)
     return PausePlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
         pause_calldata=pause_calldata,
         entry_points=tuple(entry_points),
         predicted_guard_set=tuple(predicted),
-        max_pause_duration=read_max_pause_duration(facts, latch_vars),
+        max_pause_duration=duration,
+        duration_bound_source=duration_source,
         gate_ref=_gate_ref(fn.tree),
         fixtures=fixtures,
     )

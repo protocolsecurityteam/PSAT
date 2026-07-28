@@ -494,3 +494,68 @@ def test_function_id_link_survives_an_unresolved_rewrite(clean_effects):
     session.commit()
     session.expire_all()
     assert session.query(EffectVerdict).one().function_id == fn_id
+
+
+# ---------------------------------------------------------------------------
+# G6-C1 — the code/deployment plane split, and the §7 audit floor
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_a_cache_row_never_stores_a_per_deployment_observation(clean_effects):
+    """inv. 3 enforced at the WRITE. Every key in ``DEPLOYMENT_PLANE_KEYS`` is an
+    observation of ONE deployment's fork state, and this row is served to every other
+    deployment sharing the bytecode — so a hit used to hand deployment B deployment A's
+    blast radius, A's pre-pause succeeding set and A's seeding qualifiers as B's own
+    witness. Measured before the split: 74 of 150 local cache rows carried at least one
+    (29 freeze_pause, 21 supply, 20 value_out, 4 more).
+
+    They are ABSENT on the served row — absent, not ``null`` and not ``false`` (R1), so a
+    consumer reads "no observation of my own" instead of another contract's number."""
+    session = clean_effects
+    row = effect_cache.upsert_cached_verdict(
+        session,
+        behavior_hash="bh_plane",
+        effect_class="freeze_pause",
+        scope="projection",
+        contract_surface_hash="surface_x",
+        verdict="proven",
+        tier="tier2",
+        details={
+            "latch_flip": True,
+            "observation": "executed",
+            "duration_bound_seconds": 2592000,
+            "duration_bound_source": "guard_constant",
+            # per-deployment — must not survive the write
+            "observed_blast_radius": ["transfer(address,uint256)"],
+            "pre_pause_succeeding": ["transfer(address,uint256)"],
+            "scored_denominator": ["transfer(address,uint256)"],
+            "input_seeded": True,
+            "contract_balance_seeded": True,
+            "backing": {"inflow_observed": True},
+        },
+    )
+    stored = row.details or {}
+    for key in effect_cache.DEPLOYMENT_PLANE_KEYS:
+        assert key not in stored, key
+    # ...and the code-plane witness the cache exists to carry is intact.
+    assert stored["latch_flip"] is True
+    assert stored["duration_bound_seconds"] == 2592000
+    assert stored["duration_bound_source"] == "guard_constant"
+    assert stored["observation"] == "executed"
+
+
+def test_a_zero_key_signature_is_not_comparable():
+    """49 of 150 cache rows are ``authority_change`` with ``verdict='unknown'`` and none
+    of the five allowlisted structural keys, so their signature is
+    ``('unknown', None, None, None, None, None)`` on both sides and ``kernel_verdicts_
+    agree`` returns True unconditionally. Agreement there is the string ``unknown``
+    compared with itself."""
+    thin = {"observation": "executed", "reason": "no_authorization_delta_observed"}
+    assert effect_cache.kernel_verdicts_agree("unknown", thin, "unknown", thin) is True
+    assert effect_cache.kernel_signature_is_comparable(thin) is False
+    assert effect_cache.kernel_signature_is_comparable(None) is False
+    assert effect_cache.kernel_signature_is_comparable({}) is False
+    # One structural key is the floor, and each of the five clears it on its own.
+    for key in ("latch_flip", "gate_mutation", "upgradeable", "supply_delta_sign", "destination_shape"):
+        assert effect_cache.kernel_signature_is_comparable({**thin, key: None}) is True, key

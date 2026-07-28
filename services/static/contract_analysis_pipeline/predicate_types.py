@@ -257,6 +257,14 @@ class LeafPredicate(TypedDict):
     # NOT a recognized initializer standard. A candidate never changes the
     # badge statically — only a confirmed on-chain latch read does.
     one_shot_candidate: NotRequired[bool]
+    # Operands an ADDITIVE sub-expression fed this comparison and the two-slot
+    # ``operands`` list could not hold (``_stamp_absorbed_operands``). A SIBLING of
+    # ``operands``, never a replacement: consumers of ``operands`` see the same list
+    # they always saw, and a consumer that needs the whole compared expression
+    # (the A7 pause-window reader) takes the union. Absent when the comparison read
+    # no additive sub-expression; an opaque ``computed`` member inside it is a
+    # not-determined marker, not a proof that nothing more was read.
+    absorbed_operands: NotRequired[list[Operand]]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]
@@ -266,6 +274,29 @@ class PredicateTree(TypedDict, total=False):
     op: PredicateOp
     children: list["PredicateTree"]
     leaf: LeafPredicate | None
+    # ROOT-node-only marker: this tree was built by a builder that runs the
+    # absorbed-operand recorder over every comparison leaf. It exists so that a
+    # MISSING ``absorbed_operands`` is readable. With the marker it means "this
+    # comparison read no additive sub-expression"; WITHOUT it (every tree persisted
+    # before A7) it means "we do not know what the comparison read", because a
+    # two-slot operand list silently drops one side of ``block.timestamp -
+    # pausedUntil < 2592000``. Any reader that concludes something from an operand's
+    # ABSENCE must require this marker — see ``effects.calldata._absorption_recorded``
+    # and the ``no_time_reference`` (proven-indefinite-freeze) state it gates.
+    operand_absorption: NotRequired[str]
+
+
+# Value of ``PredicateTree.operand_absorption``. A single state, because the only
+# question a reader asks is "did the recorder run"; absence is the other answer.
+OPERAND_ABSORPTION_RECORDED = "recorded"
+
+
+def mark_operand_absorption_recorded(tree: PredicateTree | None) -> None:
+    """Stamp :data:`OPERAND_ABSORPTION_RECORDED` on a tree ROOT. Idempotent, and
+    applied once per finished tree rather than per node: the marker is a statement
+    about the BUILDER, so one per persisted tree is the whole fact."""
+    if isinstance(tree, dict):
+        tree["operand_absorption"] = OPERAND_ABSORPTION_RECORDED
 
 
 # ---------------------------------------------------------------------------
