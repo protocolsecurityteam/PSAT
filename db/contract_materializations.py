@@ -100,6 +100,13 @@ logger = logging.getLogger(__name__)
 # Both landed within the unreleased v4 window — no v4 row was ever
 # materialized under the pre-purity shape (verified: local DB carries only
 # v2/v3 rows; production runs pre-v4 code).
+# Also in the same unreleased v4 window (Wave 4 Leg B, L-25): operand
+# tie-breaking is now cross-process stable — ``provenance._digest`` derives
+# ``callee_args_digest`` from content instead of ``hash()``, so the operand
+# slots that previously flickered with PYTHONHASHSEED settle to one canonical
+# byte form. Not a shape change (no key appears or disappears); noted here per
+# the same-unreleased-version precedent rather than minting a version no row
+# was ever written under.
 ANALYSIS_SCHEMA_VERSION = 4
 
 

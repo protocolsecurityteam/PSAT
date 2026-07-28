@@ -1076,10 +1076,51 @@ def _selector_for_signature(signature: str | None) -> str | None:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
+def _canonical_source_key(source: "Source") -> str:
+    """Deterministic, content-complete string for one ``Source`` record.
+
+    Every field participates — including ``callee_args_digest`` (already a
+    content-stable string by the time a Source carrying one is a member of
+    another Source's argument set: digests are computed bottom-up) and
+    ``derived_from`` (whose members are stored with ``derived_from=None``,
+    bounding the recursion at one level).
+    """
+    return "\x1f".join(
+        str(part)
+        for part in (
+            source.kind,
+            source.parameter_index,
+            source.parameter_name,
+            source.state_variable_name,
+            source.callee,
+            source.callee_args_digest,
+            source.callee_signature,
+            source.callee_selector,
+            source.constant_value,
+            source.value_type,
+            source.computed_kind,
+            source.block_context_kind,
+            "/".join(source.member_path or ()),
+            source.storage_slot,
+            "None"
+            if source.derived_from is None
+            else "|".join(sorted(_canonical_source_key(origin) for origin in source.derived_from)),
+        )
+    )
+
+
 def _digest(s: SourceSet) -> str:
     """Stable digest of a SourceSet for nesting via ``callee_args_digest``.
 
-    Source is frozen so ``hash(s)`` is stable; we hex it for the JSON
-    serializer's benefit (artifacts are JSON, ints aren't).
+    Content-derived (keccak over the sorted canonical member keys), so the
+    same argument sources produce the same digest in EVERY process. The
+    previous ``hash()``-of-frozenset form was PYTHONHASHSEED-dependent, and
+    ``predicates._source_sort_key`` orders competing sources by this string
+    BEFORE ``computed_kind`` — so which of two otherwise-tied computed
+    sources became the published operand flickered run to run (the L-25
+    noise bucket: e.g. a Teller deposit operand flipping between
+    ``call(uint256,...)`` and ``UnaryType.BANG``). Same 8-hex width as
+    before; the value is never published, only compared and ordered.
     """
-    return f"{abs(hash(s)) & 0xFFFFFFFF:08x}"
+    payload = "\x1e".join(sorted(_canonical_source_key(member) for member in s))
+    return keccak(text=payload).hex()[:8]

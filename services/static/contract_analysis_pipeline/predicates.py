@@ -2433,11 +2433,12 @@ def _source_sort_key(source: Source) -> tuple[str, ...]:
 def _published_source_key(source: Source) -> tuple[str, ...]:
     """Order over the fields a Source actually *publishes* to an operand.
 
-    ``callee_args_digest`` is deliberately excluded. It is a ``hash()`` of a
-    frozenset, so it differs between processes for the same code — ordering a
-    published list by it makes the artifact bytes vary run to run for no
-    semantic reason. It is also never emitted, so two Sources that differ only
-    in the digest render identically and their relative order cannot matter.
+    ``callee_args_digest`` is deliberately excluded. It is never emitted, so
+    two Sources that differ only in the digest render identically and their
+    relative order cannot matter. (The digest is content-stable now —
+    ``provenance._digest`` hashes the sorted canonical member keys — so
+    including it would no longer vary run to run, but it still orders nothing
+    a reader can see.)
     """
     return (
         str(source.kind),
