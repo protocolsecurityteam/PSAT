@@ -207,6 +207,15 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
                     "observed_via": "eth_call",
                     "resolved_type": "contract",
                     "details": {"address": authority_address},
+                    # A real gating authority carries this from the static stage
+                    # (Leg F's provenance split). The fixture predates it and was
+                    # relying on the old absent-means-controller_value default,
+                    # which W2-B item 11 replaced with the honest
+                    # ``controller_value_unattributed`` — so the gate this test
+                    # is about now has to say it is a gate. The recursion the
+                    # test exercises is relation-independent
+                    # (``_maybe_queue_address`` keys on resolved_type).
+                    "authority_provenance": "caller_gate",
                 },
                 "state_variable:owner": {
                     "source": "owner",
@@ -240,6 +249,7 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
                         "owners": [signer_address],
                         "threshold": 1,
                     },
+                    "authority_provenance": "caller_gate",
                 }
             },
         },
@@ -1269,10 +1279,19 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     ``external_call_target``, not ``controller_value``.
 
     Positive control (``roleRegistry``, ``caller_gate``) must stay a control
-    edge; negative control (``eETH``, ``call_target``) must not; and a value
-    with NO provenance — a snapshot produced before the split, or a target for
-    which neither question was answered — must stay ``controller_value``,
-    because not-determined may not demote a real authority.
+    edge; negative control (``eETH``, ``call_target``) must not.
+
+    THIRD ARM AMENDED by W2-B item 11 (declared): a value with NO provenance
+    used to stay ``controller_value``, on the reading that not-determined must
+    not demote a real authority. That rule protects a proven authority from
+    being relabelled a mere callee — it does not license an authority CLAIM over
+    a target for which neither question was answered. Leg A's tree widening
+    minted 37 such targets in one merge (pure constants like
+    HUNDRED_PERCENT_IN_BPS, non-authority mappings like ``_balances``), and each
+    would have persisted as a control edge feeding the authority closure. The
+    not-determined input now reaches the not-determined relation
+    ``controller_value_unattributed``: published (the address stays visible),
+    excluded from ``CONTROL_EDGE_RELATIONS`` (it moves no authority).
     """
     root_address = "0x1111111111111111111111111111111111111111"
     gate_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1327,7 +1346,7 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     relations = {(edge["from_id"], edge["to_id"]): edge["relation"] for edge in graph["edges"]}
     assert relations[(f"address:{root_address}", f"address:{gate_address}")] == "controller_value"
     assert relations[(f"address:{root_address}", f"address:{callee_address}")] == "external_call_target"
-    assert relations[(f"address:{root_address}", f"address:{legacy_address}")] == "controller_value"
+    assert relations[(f"address:{root_address}", f"address:{legacy_address}")] == "controller_value_unattributed"
 
     # The provenance is stated on the row, including the not-determined case,
     # so a reader of the persisted edge never has to infer it from the relation.
@@ -1339,6 +1358,18 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     # The callee is still a NODE — it is a real contract the subject calls.
     # Demotion removes the control claim, not the address.
     assert any(node["address"] == callee_address for node in graph["nodes"])
+    # ...and so is the unattributed target: the edge is published, it just
+    # carries no authority.
+    assert any(node["address"] == legacy_address for node in graph["nodes"])
+
+    # The authority-bearing set is the allowlist, so only the proven gate moves
+    # value through the closure.
+    from db.models import CONTROL_EDGE_RELATIONS
+
+    carries_authority = {edge["to_id"] for edge in graph["edges"] if edge["relation"] in CONTROL_EDGE_RELATIONS}
+    assert f"address:{gate_address}" in carries_authority
+    assert f"address:{callee_address}" not in carries_authority
+    assert f"address:{legacy_address}" not in carries_authority
 
 
 def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):

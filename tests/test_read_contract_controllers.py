@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.resolution import tracking
-from services.resolution.tracking import _PROBE_ERROR, read_contract_controllers
+from services.resolution.tracking import read_contract_controllers
+from utils.rpc import EthCallResult, selector
 
 OWNER = "0x" + "a" * 40
 AUTHORITY = "0x" + "b" * 40
@@ -19,13 +20,39 @@ CONTRACT = "0x" + "1" * 40
 ZERO = "0x" + "0" * 40
 
 
+def _word(address: str) -> str:
+    return "0x" + address[2:].lower().rjust(64, "0")
+
+
 def _stub(monkeypatch, answers):
-    """Map signature -> decoded return for _try_eth_call_decoded."""
+    """Map signature -> the getter's outcome, at the ``eth_call`` layer (never
+    the transport). A value may be:
 
-    def _fake(rpc_url, address, signature, abi_type, block_tag="latest", *, chain_id=None):
-        return answers.get(signature, None)
+      * an address string  -> a successful read
+      * ``"revert"``       -> the EVM answered: this getter is not a control
+                              plane (the shape a contract without ``authority()``
+                              produces, and the case that used to be
+                              indistinguishable from a transport failure)
+      * ``"transport"``    -> the read did not happen: indeterminate
+      * absent             -> ``revert`` (a missing selector reverts on chain)
+    """
 
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", _fake)
+    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
+        out = []
+        by_selector = {selector(sig): value for sig, value in answers.items()}
+        for call in calls:
+            value = by_selector.get(call["data"], "revert")
+            if value == "transport":
+                out.append(EthCallResult(False, "0x", None, "connection reset"))
+            elif value == "revert":
+                out.append(EthCallResult(False, "0x", None, "execution reverted"))
+            elif value is None:
+                out.append(EthCallResult(True, "0x", None, None))
+            else:
+                out.append(EthCallResult(True, _word(value), None, None))
+        return out
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
 
 
 def test_reads_owner_getter(monkeypatch):
@@ -62,21 +89,74 @@ def test_no_getter_present_is_empty(monkeypatch):
     assert read_contract_controllers("http://rpc", CONTRACT) == []
 
 
-def test_any_getter_error_makes_set_incomplete_returns_none(monkeypatch):
-    # owner() answers but authority() ERRORS transiently -> the plane set is not
-    # dispositively complete (a real second plane could hide behind the error), so
-    # return None (retryable) rather than a possibly-false single plane.
-    def _fake(rpc_url, address, signature, abi_type, block_tag="latest", *, chain_id=None):
-        if signature == "owner()":
-            return OWNER
-        if signature == "authority()":
-            return _PROBE_ERROR
-        return None
-
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", _fake)
+def test_any_getter_transport_error_makes_set_incomplete_returns_none(monkeypatch):
+    # owner() answers but authority() fails to be READ -> the plane set is not
+    # dispositively complete (a real second plane could hide behind the failure),
+    # so return None (retryable) rather than a possibly-false single plane.
+    _stub(monkeypatch, {"owner()": OWNER, "authority()": "transport"})
     assert read_contract_controllers("http://rpc", CONTRACT) is None
 
 
-def test_all_getters_error_returns_none(monkeypatch):
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: _PROBE_ERROR)
+def test_all_getters_transport_error_returns_none(monkeypatch):
+    _stub(monkeypatch, {"owner()": "transport", "authority()": "transport", "admin()": "transport"})
     assert read_contract_controllers("http://rpc", CONTRACT) is None
+
+
+def test_whole_batch_failure_returns_none(monkeypatch):
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _raise)
+    assert read_contract_controllers("http://rpc", CONTRACT) is None
+
+
+# ---------------------------------------------------------------------------
+# W2-B item 12: a REVERT is the EVM answering ("not a control plane"); a
+# TRANSPORT failure is the read not happening. Every failure used to be the
+# single ``_PROBE_ERROR``, so a contract with no ``authority()`` — which is most
+# of them — tripped the incomplete-witness guard and the WHOLE plane set came
+# back None. Measured: terminal_principal.status was ``unknown_unfetched`` on
+# 180/180 armed rows and 5 of the 6 statuses had never fired.
+# ---------------------------------------------------------------------------
+
+
+def test_reverting_getter_is_not_a_control_plane_not_an_error(monkeypatch):
+    # The overwhelmingly common real shape: owner() answers, authority() and
+    # admin() revert because the contract does not declare them.
+    _stub(monkeypatch, {"owner()": OWNER, "authority()": "revert", "admin()": "revert"})
+    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
+
+
+def test_all_getters_reverting_is_a_proven_absence(monkeypatch):
+    # The ownerless contract (mainnet's Beacon DepositContract is the canonical
+    # one): every getter reverts, so the answer is "no controlling key", NOT
+    # "we could not look". ``[]`` is what makes the walk report no_controller.
+    _stub(monkeypatch, {"owner()": "revert", "authority()": "revert", "admin()": "revert"})
+    assert read_contract_controllers("http://rpc", CONTRACT) == []
+
+
+def test_revert_with_data_is_also_definitive(monkeypatch):
+    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
+        # A custom-error revert carries data and no recognisable message.
+        return [EthCallResult(False, "0x", "0x2603b7da", None) for _ in calls]
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
+    assert read_contract_controllers("http://rpc", CONTRACT) == []
+
+
+def test_unrecognised_failure_stays_indeterminate(monkeypatch):
+    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
+        # No revert data and no revert marker: fail closed rather than call it
+        # a proven absence.
+        return [EthCallResult(False, "0x", None, "out of gas") for _ in calls]
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
+    assert read_contract_controllers("http://rpc", CONTRACT) is None
+
+
+def test_undecodable_success_is_not_a_plane_and_not_an_error(monkeypatch):
+    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
+        return [EthCallResult(True, "0x1234", None, None) for _ in calls]
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
+    assert read_contract_controllers("http://rpc", CONTRACT) == []

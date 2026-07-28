@@ -49,8 +49,10 @@ def resolve_terminal_principal(
 
     ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
     a sequence of already-classified ``{"address", "resolved_type", "details"}``
-    mappings (owner/authority/admin order) — or ``None``/empty when none is
-    fetched/verified. The injected callable is the only wire this function
+    mappings (owner/authority/admin order), ``[]`` when every control-plane
+    getter answered cleanly and named none (a PROVEN absence), or ``None`` when
+    the planes could not be dispositively read (a probe error — not determined).
+    The injected callable is the only wire this function
     touches (integration callers back it with on-chain owner reads + classify;
     unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
 
@@ -61,8 +63,18 @@ def resolve_terminal_principal(
     unknown`` fallback the witness bar requires, never a guessed key.
 
     **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
-    ``depth_exceeded`` / ``unknown_unfetched`` (record shape unchanged, no extra
-    keys). When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
+    ``depth_exceeded`` / ``no_controller`` / ``unknown_unfetched`` (record shape
+    unchanged, no extra keys). ``no_controller`` and ``unknown_unfetched`` are
+    the split of one old answer (W2-B item 12): the resolver returns ``None``
+    when it could not dispositively read the control planes (a transient probe
+    error — retryable) and an EMPTY SEQUENCE when it probed every canonical
+    getter cleanly and the contract has no controlling key (renounced /
+    unowned — a proven absence, and a FACT about the contract). Both fail closed
+    to ``terminal=False`` / ``resolved_type="unknown"``, so nothing downstream
+    can read either as a key; a consumer that must not present "no owner" as
+    "we could not look" now has the distinction.
+
+    When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
     ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
     walk does NOT name one as THE key; instead it walks EACH plane to its own
     terminal and returns ``status="multi_plane"``, ``terminal=False``, a flat
@@ -142,11 +154,18 @@ def _walk_terminal(
             return _unknown("depth_exceeded")
         budget[0] -= 1
         steps = resolve_controllers(current)
-        if not steps:
-            # No controller fetched/verified -> unknown terminal.
+        if steps is None:
+            # The control planes could not be dispositively read (probe error) —
+            # not-determined, retryable next run.
             return _unknown("unknown_unfetched")
+        if not steps:
+            # Every canonical getter answered cleanly and named no controller:
+            # a PROVEN absence of a controlling key, not a failure to look.
+            return _unknown("no_controller")
         distinct = _distinct_controllers(steps)
         if not distinct:
+            # Steps were returned but none carried a usable address — fetched,
+            # unusable: not-determined, never a proven absence.
             return _unknown("unknown_unfetched")
         if len(distinct) > 1:
             controllers = list(distinct.keys())

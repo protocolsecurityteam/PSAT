@@ -326,3 +326,92 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
     assert entry["direct_owner"] is None
     # No principals, so no terminal marking is fabricated at the function level.
     assert "terminal" not in entry
+
+
+# ---------------------------------------------------------------------------
+# W2-B item 12 — the producer half: "no such controller" and "the read failed"
+# were one answer. 5 of the 6 statuses never fired; 1,556 rows were written.
+# (Consumer wiring is Wave 3 Leg E and is deliberately NOT done here.)
+# ---------------------------------------------------------------------------
+
+
+def test_probed_clean_with_no_controller_is_a_proven_absence_not_unfetched():
+    """``[]`` from the resolver means every canonical getter answered cleanly
+    and named no controller — a renounced / unowned contract. That is a FACT
+    about the contract, and it must not be reported as "we could not look"."""
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: [])
+    assert record["status"] == "no_controller"
+    # Still fails closed: a proven absence is not a settled key.
+    assert record["terminal"] is False
+    assert record["resolved_type"] == "unknown"
+    assert record["address"] is None
+
+
+def test_probe_error_stays_unknown_unfetched():
+    """``None`` means the plane set was NOT dispositively read (a transient
+    probe error — retryable). It must stay distinguishable from the above."""
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: None)
+    assert record["status"] == "unknown_unfetched"
+    assert record["terminal"] is False
+
+
+def test_steps_returned_but_unusable_is_not_a_proven_absence():
+    """Fetched-but-unusable (no step carries a valid address) is not-determined:
+    something answered, we just cannot use it. Never ``no_controller``."""
+    record = resolve_terminal_principal(
+        CONTRACT_A, "contract", resolve_controllers=lambda _address: [{"resolved_type": "contract"}]
+    )
+    assert record["status"] == "unknown_unfetched"
+
+
+def test_policy_worker_resolver_keeps_error_and_absence_apart():
+    """The collapse was at the CALL SITE: ``if not controllers: return None``
+    mapped both ``read_contract_controllers`` answers onto ``None``."""
+    import workers.policy_worker as pw
+
+    calls: dict[str, object] = {}
+
+    def _fake_read(rpc_url, address, *, chain_id=None):
+        return calls["value"]
+
+    original_read = pw.read_contract_controllers
+    original_classify = pw.classify_resolved_address_with_status
+    pw.read_contract_controllers = _fake_read  # type: ignore[assignment]
+    pw.classify_resolved_address_with_status = lambda rpc_url, address, chain_id=None: ("eoa", {}, True)  # type: ignore[assignment]
+    try:
+        resolver = pw._make_terminal_controller_resolver("http://rpc.example", chain_id=1)
+        assert resolver is not None
+
+        calls["value"] = None  # probe error
+        assert resolver(CONTRACT_A) is None
+
+        calls["value"] = []  # probed clean, no controller
+        assert resolver(CONTRACT_A) == []
+
+        calls["value"] = [EOA]  # a real controller
+        steps = resolver(CONTRACT_A)
+        assert steps is not None
+        assert [step["address"] for step in steps] == [EOA]
+    finally:
+        pw.read_contract_controllers = original_read  # type: ignore[assignment]
+        pw.classify_resolved_address_with_status = original_classify  # type: ignore[assignment]
+
+
+def test_multi_plane_records_no_controller_per_plane():
+    """A plane whose own walk hits a proven absence reports it as such, so a
+    weakest-path scorer sees "this plane has no key" rather than "unknown"."""
+    resolver_map = {
+        CONTRACT_A: [
+            {"address": SAFE, "resolved_type": "safe", "details": {}},
+            {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+        ],
+        CONTRACT_B: [],
+    }
+
+    def _resolve(address):
+        return resolver_map.get(address.lower())
+
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_resolve)
+    assert record["status"] == "multi_plane"
+    statuses = {plane["terminal_record"]["status"] for plane in record["planes"]}
+    assert statuses == {"terminated", "no_controller"}
