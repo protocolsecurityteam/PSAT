@@ -1475,12 +1475,16 @@ def test_generic_type_never_overwrites_a_specific_one():
 def test_analysis_state_splits_the_analyzed_bool():
     """``analyzed=False`` is four populations; ``analysis_state`` names which.
 
-    Each branch is proven to fire on real data — 1,183 analyzed / 1,236
-    not_analyzable / 28 attempt_failed / 29 beyond_depth_horizon / 55 NULL
-    across the 107 stored resolved_control_graph artifacts (R2) — so this test
-    pins the mapping rather than the reachability. (Those persisted rows carry
-    the pre-rename spelling ``not_a_contract``; the counts are the same
-    population. L-34.)
+    R2, corrected at the Wave-4 closeout (L-34). The counts quoted for this field
+    — 1,183 analyzed / 1,236 not_analyzable / 28 attempt_failed / 29
+    beyond_depth_horizon / 55 not-determined — are a RECOMPUTATION of
+    ``_analysis_state`` over the node dicts in the 107 stored
+    resolved_control_graph artifacts, not a census of persisted values. The field
+    itself is ABSENT on all 2,531 of those artifact nodes and SQL NULL on all
+    2,506 ``control_graph_nodes`` rows, because the column is newer than the last
+    analysis run. So the numbers say what the producer WOULD emit per branch, and
+    nothing about what any stored row currently holds. This test pins the mapping;
+    reachability of each branch on re-persisted rows binds the next real run.
     """
     max_depth = 6
 

@@ -22,16 +22,15 @@ ResolvedAnalysisState = Literal[
     # ``resolved_type not in ANALYZABLE_TYPES``. Analysis was never applicable,
     # so its absence says nothing adverse.
     "not_analyzable",
-    # LEGACY SPELLING of ``not_analyzable``, same meaning, no longer emitted by
-    # any producer (renamed at the Wave-4 closeout, L-34). Kept in the union so
-    # the type stays TOTAL over rows and artifacts written before the rename:
-    # 1,236 ``control_graph_nodes`` rows and the 107 stored
-    # ``resolved_control_graph`` artifacts still carry it, and the analysis-detail
-    # payload publishes both planes verbatim. It said something literally false
-    # about the 230 Gnosis Safes in that population — a Safe is a contract, it is
-    # just not an ANALYZABLE type. Those rows are rewritten by the next
-    # resolution run, not by hand; drop this member once none remain.
-    "not_a_contract",
+    # (Renamed from ``not_a_contract`` at the Wave-4 closeout, L-34. The old
+    # spelling said something literally false about the largest population it
+    # covered — a Gnosis Safe IS a contract, it is just not an ANALYZABLE type.
+    # No legacy member is kept because nothing has ever persisted either token:
+    # ``control_graph_nodes.analysis_state`` is SQL NULL on 2,506/2,506 local rows
+    # and ABSENT on 2,531/2,531 nodes across all 107 stored
+    # ``resolved_control_graph`` artifacts, and the migration that adds the
+    # column has never been deployed. The rename therefore lands before the
+    # first value is ever written.)
     # Materialization ran and failed. ``details.materialize_error`` carries why.
     "attempt_failed",
     # An analyzable contract the BFS never reached: its depth exceeded
