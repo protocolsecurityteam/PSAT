@@ -1448,3 +1448,185 @@ class TestResolvedGraphEmpty:
         stored_names = [name for name, _ in ctx["store_calls"]]
         assert "control_snapshot" in stored_names
         assert "resolved_control_graph" not in stored_names
+
+
+# ---------------------------------------------------------------------------
+# 10. The persistence boundary for the three-state columns (L-36).
+#
+# ``authority_provenance`` / ``analysis_state`` / ``graph_max_depth`` were added
+# with in-memory assertions only: every test stopped at the artifact dict. This
+# is the hop where "absent in the snapshot => SQL NULL" either holds or quietly
+# becomes a value, and where the jsonb-null trap lives (a Python ``None`` written
+# into a JSONB column lands as the jsonb scalar ``null``, which passes an
+# ``IS NULL`` test and is NOT the same as no value). Asserted through the real
+# ``ResolutionWorker.process`` writes, in SQL, with a present row and an absent
+# row in the SAME pass so neither state can be a fixture artifact.
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
+    db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import text
+
+    from db.models import Contract, Job, JobStage, JobStatus
+
+    determined = "0x" + "d1" * 20
+    undetermined = "0x" + "d2" * 20
+
+    real_job = Job(
+        id=uuid.uuid4(),
+        address=TARGET_ADDRESS,
+        chain_id=1,
+        stage=JobStage.resolution,
+        status=JobStatus.processing,
+        request={"rpc_url": "rpc", "chain": "ethereum"},
+    )
+    db_session.add(real_job)
+    db_session.commit()
+    contract = Contract(address=TARGET_ADDRESS, chain="ethereum", job_id=real_job.id)
+    db_session.add(contract)
+    db_session.commit()
+
+    snapshot = {
+        "contract_address": TARGET_ADDRESS,
+        "block_number": 100,
+        "controller_values": {
+            # PROVEN: the tracked controller gates callers, and the read carried
+            # a details payload.
+            "gate": {
+                "value": determined,
+                "resolved_type": "contract",
+                "source": "storage",
+                "details": {"read": "getter_call"},
+                "authority_provenance": "caller_gate",
+            },
+            # NOT DETERMINED: the plan carried no provenance for this slot and
+            # the read produced no details. Both must land SQL NULL — not the
+            # empty string, not the jsonb scalar null.
+            "silent": {
+                "value": undetermined,
+                "resolved_type": "contract",
+                "source": "storage",
+            },
+        },
+    }
+    graph = {
+        "root_contract_address": TARGET_ADDRESS,
+        "max_depth": 6,
+        "nodes": [
+            {
+                "address": determined,
+                "node_type": "contract",
+                "resolved_type": "safe",
+                "label": "Gate",
+                "depth": 1,
+                "analyzed": False,
+                "analysis_state": "not_analyzable",
+            },
+            {
+                "address": undetermined,
+                "node_type": "contract",
+                "resolved_type": "unknown",
+                "label": "Silent",
+                "depth": 1,
+                "analyzed": False,
+                # analysis_state ABSENT — the honest fifth state.
+            },
+        ],
+        "edges": [],
+    }
+
+    _patch_all(monkeypatch, snapshot=snapshot, resolved_graph=graph)
+    ResolutionWorker().process(db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
+
+    cv_rows = {
+        cid: (prov, details_typeof, details_is_sql_null)
+        for cid, prov, details_typeof, details_is_sql_null in db_session.execute(
+            text(
+                "select controller_id, authority_provenance, jsonb_typeof(details), details is null"
+                " from controller_values where contract_id = :cid"
+            ),
+            {"cid": contract.id},
+        ).all()
+    }
+    # Proven-present round-trips verbatim; the details payload is a real object.
+    assert cv_rows["gate"] == ("caller_gate", "object", False)
+    # Not-determined is SQL NULL on both columns. ``jsonb_typeof`` is the
+    # discriminator that an ``IS NULL`` test cannot make: the trap value would
+    # report typeof 'null' with ``details is null`` also true.
+    assert cv_rows["silent"] == (None, None, True)
+
+    node_rows = {
+        addr: (state, max_depth, analyzed)
+        for addr, state, max_depth, analyzed in db_session.execute(
+            text(
+                "select address, analysis_state, graph_max_depth, analyzed"
+                " from control_graph_nodes where contract_id = :cid"
+            ),
+            {"cid": contract.id},
+        ).all()
+    }
+    # Proven-present, plus the walk's horizon that makes ``depth`` interpretable.
+    assert node_rows[determined] == ("not_analyzable", 6, False)
+    # Absent in the graph => SQL NULL, never a guessed token. ``graph_max_depth``
+    # is a fact about the WALK, so it is present on every node of that walk.
+    assert node_rows[undetermined] == (None, 6, False)
+    assert (
+        db_session.execute(
+            text("select count(*) from control_graph_nodes where contract_id = :cid and analysis_state = 'null'"),
+            {"cid": contract.id},
+        ).scalar()
+        == 0
+    ), "not-determined was persisted as the four-character string 'null'"
+
+
+@requires_postgres
+def test_graph_without_max_depth_persists_sql_null_not_zero(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adverse branch of ``graph_max_depth``: a graph that never recorded its
+    horizon must persist NULL. ``0`` would read as a real horizon and make every
+    node at depth >= 1 look deliberately cut off."""
+    from sqlalchemy import text
+
+    from db.models import Contract, Job, JobStage, JobStatus
+
+    real_job = Job(
+        id=uuid.uuid4(),
+        address=TARGET_ADDRESS,
+        chain_id=1,
+        stage=JobStage.resolution,
+        status=JobStatus.processing,
+        request={"rpc_url": "rpc", "chain": "ethereum"},
+    )
+    db_session.add(real_job)
+    db_session.commit()
+    contract = Contract(address=TARGET_ADDRESS, chain="ethereum", job_id=real_job.id)
+    db_session.add(contract)
+    db_session.commit()
+
+    graph = _resolved_graph(
+        nodes=[
+            {
+                "address": CHILD_ADDRESS,
+                "node_type": "contract",
+                "resolved_type": "eoa",
+                "label": "child",
+                "depth": 1,
+                "analyzed": False,
+                "analysis_state": "not_analyzable",
+            }
+        ]
+    )
+    assert "max_depth" not in graph
+
+    _patch_all(monkeypatch, resolved_graph=graph)
+    ResolutionWorker().process(db_session, cast(Any, _job(id=real_job.id, request=real_job.request)))
+
+    row = db_session.execute(
+        text("select analysis_state, graph_max_depth from control_graph_nodes where contract_id = :cid"),
+        {"cid": contract.id},
+    ).first()
+    assert row is not None
+    assert row[0] == "not_analyzable"
+    assert row[1] is None
