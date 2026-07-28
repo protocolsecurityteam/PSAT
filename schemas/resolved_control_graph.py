@@ -18,8 +18,19 @@ ResolvedNodeType = Literal["contract", "principal"]
 # walk from a property of the address.
 ResolvedAnalysisState = Literal[
     "analyzed",
-    # Not an analyzable type (eoa / safe / zero / off-chain witness / …).
-    # Analysis was never applicable, so its absence says nothing adverse.
+    # Not an analyzable type (eoa / safe / zero / off-chain witness / …) — i.e.
+    # ``resolved_type not in ANALYZABLE_TYPES``. Analysis was never applicable,
+    # so its absence says nothing adverse.
+    "not_analyzable",
+    # LEGACY SPELLING of ``not_analyzable``, same meaning, no longer emitted by
+    # any producer (renamed at the Wave-4 closeout, L-34). Kept in the union so
+    # the type stays TOTAL over rows and artifacts written before the rename:
+    # 1,236 ``control_graph_nodes`` rows and the 107 stored
+    # ``resolved_control_graph`` artifacts still carry it, and the analysis-detail
+    # payload publishes both planes verbatim. It said something literally false
+    # about the 230 Gnosis Safes in that population — a Safe is a contract, it is
+    # just not an ANALYZABLE type. Those rows are rewritten by the next
+    # resolution run, not by hand; drop this member once none remain.
     "not_a_contract",
     # Materialization ran and failed. ``details.materialize_error`` carries why.
     "attempt_failed",

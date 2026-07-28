@@ -1476,9 +1476,11 @@ def test_analysis_state_splits_the_analyzed_bool():
     """``analyzed=False`` is four populations; ``analysis_state`` names which.
 
     Each branch is proven to fire on real data — 1,183 analyzed / 1,236
-    not_a_contract / 28 attempt_failed / 29 beyond_depth_horizon / 55 NULL
+    not_analyzable / 28 attempt_failed / 29 beyond_depth_horizon / 55 NULL
     across the 107 stored resolved_control_graph artifacts (R2) — so this test
-    pins the mapping rather than the reachability.
+    pins the mapping rather than the reachability. (Those persisted rows carry
+    the pre-rename spelling ``not_a_contract``; the counts are the same
+    population. L-34.)
     """
     max_depth = 6
 
@@ -1499,9 +1501,14 @@ def test_analysis_state_splits_the_analyzed_bool():
         return cast(ResolvedGraphNode, base)
 
     assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
-    # A principal was never a candidate — its absence says nothing adverse.
-    assert recursive._analysis_state(node(resolved_type="eoa"), max_depth) == "not_a_contract"
-    assert recursive._analysis_state(node(resolved_type="zero"), max_depth) == "not_a_contract"
+    # Not an ANALYZABLE type — analysis was never applicable, so its absence
+    # says nothing adverse. L-34: the token is ``not_analyzable``, never
+    # ``not_a_contract``. A ``safe`` is the discriminating case, because a Safe
+    # IS a contract (230 of the local corpus) — the old spelling asserted
+    # something literally false about it.
+    assert recursive._analysis_state(node(resolved_type="eoa"), max_depth) == "not_analyzable"
+    assert recursive._analysis_state(node(resolved_type="zero"), max_depth) == "not_analyzable"
+    assert recursive._analysis_state(node(resolved_type="safe"), max_depth) == "not_analyzable"
     # A fact about the contract.
     assert recursive._analysis_state(node(details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
     # A fact about OUR walk, not the address. This is the one the bool could
@@ -1518,6 +1525,12 @@ def test_analysis_state_splits_the_analyzed_bool():
     assert (
         recursive._analysis_state(node(depth=7, details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
     )
+
+    # L-34 pin, stated as the negation so a revert of the rename is caught even
+    # if some future arm re-introduces the spelling elsewhere: the producer must
+    # not mint the old token for ANY resolved_type outside ANALYZABLE_TYPES.
+    for outside in ("eoa", "zero", "safe", "off_chain_witness"):
+        assert recursive._analysis_state(node(resolved_type=outside), max_depth) != "not_a_contract"
 
 
 def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
@@ -1558,4 +1571,4 @@ def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
     )
     states = {node["address"]: node.get("analysis_state") for node in graph["nodes"]}
     assert states[root_address] == "analyzed"
-    assert states[eoa_address] == "not_a_contract"
+    assert states[eoa_address] == "not_analyzable"
