@@ -1880,8 +1880,25 @@ _OPERAND_ABSORPTION_RECORDED = "recorded"
 # ``parameter``, ``msg_sender``/``tx_origin``/``signature_recovery``,
 # ``self_address``, ``block_context``. Each is a fact the builder resolved and none
 # is an unentered expression — a stored timestamp or a caller-supplied deadline is
-# not a clock (no passage of time changes it without a transaction).
+# not a clock (no passage of time changes it without a transaction). A
+# ``block_context`` operand is not OPAQUE — its kind is right there — but three of
+# its kinds ARE the clock, which is what the two sets below express.
 _OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_call"})
+
+# The static plane maps every ``block.*`` global to ``source="block_context"`` with
+# ``block_context_kind`` = the suffix — and ``now``, the pre-0.7 spelling, IS
+# ``block.timestamp`` verbatim. Two sets because the two uses have different unit
+# constraints:
+#   * demotion (rule 1: a clock anywhere in a latch-reading tree denies the
+#     proven-indefinite state) counts every kind that advances on its own —
+#     ``block.number`` lifts a freeze by itself just as a timestamp does;
+#   * the SECONDS arithmetic (``saw_timed_latch_guard`` + the constant harvest) may
+#     count only second-denominated clocks: a ``block.number`` comparison constant
+#     is a BLOCK COUNT, and harvesting one as ``duration_bound_seconds`` would
+#     misstate the window by the block-time factor (216000 blocks ≈ 30 days, not
+#     2.5 days).
+_SECONDS_CLOCK_KINDS = frozenset({"timestamp", "now"})
+_CLOCK_KINDS = frozenset({"timestamp", "now", "number"})
 
 
 def _absorption_recorded(tree: Any) -> bool:
@@ -2013,7 +2030,8 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
         tree_holds_opaque_operand = False
         for leaf in _all_leaves(tree):
             operands = _compared_operands(leaf)
-            leaf_reads_clock = any(op.get("block_context_kind") == "timestamp" for op in operands)
+            clock_kinds = {str(op.get("block_context_kind") or "") for op in operands}
+            leaf_reads_clock = not clock_kinds.isdisjoint(_CLOCK_KINDS)
             tree_reads_clock = tree_reads_clock or leaf_reads_clock
             if any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
                 tree_holds_opaque_operand = True
@@ -2021,7 +2039,7 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
                 continue
             tree_reads_latch = True
             saw_latch_guard = True
-            if not leaf_reads_clock:
+            if clock_kinds.isdisjoint(_SECONDS_CLOCK_KINDS):
                 continue
             saw_timed_latch_guard = True
             for op in operands:

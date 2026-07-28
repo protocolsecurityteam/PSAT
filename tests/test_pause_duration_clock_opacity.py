@@ -103,6 +103,33 @@ SOURCE = """
             sink = to;
         }
     }
+
+    contract NumberTwin {
+        bool public frozen;
+        uint256 public unpauseAtBlock;
+        address public sink;
+
+        function freeze(bool v) external { frozen = v; }
+
+        // Byte-identical to the timestamp shape one clock spelling over: the
+        // freeze lifts when the chain reaches unpauseAtBlock, so proven-indefinite
+        // is false.
+        function transferBlockClock(address to) external {
+            require(!frozen || block.number > unpauseAtBlock, "frozen");
+            sink = to;
+        }
+    }
+
+    contract BlockWindow {
+        uint256 public pausedUntilBlock;
+        address public sink;
+
+        // The window constant is a BLOCK COUNT, not seconds.
+        function transferBlockWindow(address to) external {
+            require(block.number - pausedUntilBlock < 216000, "window");
+            sink = to;
+        }
+    }
 """
 
 
@@ -186,6 +213,29 @@ def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(com
     facts = compiled["PlainLatch"]
     assert _operand_sources(facts) == {"state_variable"}
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
+
+
+def test_a_block_number_clock_denies_the_proven_indefinite_state(compiled):
+    """``require(!frozen || block.number > unpauseAtBlock)`` must not read as PROVEN
+    indefinite: the chain reaching ``unpauseAtBlock`` lifts the freeze with no
+    transaction. The static plane emits ``block_context_kind == "number"`` for it —
+    a clock spelling the demotion must count (its ``block.timestamp`` twin already
+    lands here via the same rule)."""
+    facts = compiled["NumberTwin"]
+    assert facts.trees
+    assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
+    assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined")
+
+
+def test_a_block_count_window_is_never_published_as_seconds(compiled):
+    """The units trap on compiled source: ``require(block.number - pausedUntilBlock
+    < 216000)`` carries latch + clock + constant, but the constant is a block
+    count. ``duration_bound_seconds`` is consumed as a severity reducer in seconds;
+    publishing 216000 here would understate a ~30-day gate as 2.5 days. The
+    block-number clock demotes the proven state and nothing more."""
+    facts = compiled["BlockWindow"]
+    assert facts.trees
+    assert cd.read_max_pause_duration(facts, {"pausedUntilBlock"}) == (None, "not_determined")
 
 
 def test_a_window_the_recorder_did_read_is_unaffected_by_either_precondition(compiled):

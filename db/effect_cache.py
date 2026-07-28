@@ -391,6 +391,10 @@ logger = logging.getLogger(__name__)
 # anywhere in those trees, so the v30 whole-tree clock walk could not see it either.
 # Both preconditions are now whole-tree and ``view_call``/``external_call`` are opaque,
 # so a pre-v31 row's ``no_time_reference`` may be a proof its evidence never supported.
+# The same (unreleased) version also covers the clock-spelling split adjudicated at
+# wave close: the clock test now counts ``now``/``number`` alongside ``timestamp``
+# for the demotion, while only second-denominated kinds feed the constant harvest —
+# no v31 row was ever written, so one version covers one shipped shape.
 EFFECT_CACHE_SCHEMA_VERSION = 31
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than

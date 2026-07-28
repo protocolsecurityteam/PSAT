@@ -942,6 +942,61 @@ def test_max_pause_duration_read_from_a_timestamp_guard_constant():
     assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (2592000, "guard_constant")
 
 
+def test_max_pause_duration_treats_every_clock_spelling_as_a_clock():
+    """``now`` (the pre-0.7 spelling of ``block.timestamp``) and ``block.number``
+    arrive as ``block_context_kind`` "now" / "number". Both deny the
+    proven-indefinite state — a block-number gate expires on its own schedule just
+    as a timestamp gate does — so a latch compared against either lands on
+    ``not_determined``, exactly like its ``block.timestamp`` twin."""
+    for kind in ("now", "number"):
+        facts = _token_facts(
+            trees={
+                "transfer(address)": _and(
+                    _leaf(
+                        _state("LATCH_SLOT", "frozen"),
+                        {"source": "block_context", "block_context_kind": kind},
+                    )
+                )
+            }
+        )
+        assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined"), kind
+
+
+def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
+    """The units trap: ``require(block.number - pausedUntilBlock < 216000)`` holds a
+    latch, a clock and a constant in one leaf — but the constant is a BLOCK COUNT.
+    Harvesting it would publish 216000 "seconds" (2.5 days) for a ~30-day gate, a
+    fabricated mitigating credit. Only second-denominated clocks (timestamp, now)
+    feed the constant harvest; the block-number clock still demotes the proven
+    state."""
+    facts = _token_facts(
+        trees={
+            "transfer(address)": _and(
+                _leaf(
+                    _state("LATCH_SLOT", "pausedUntilBlock"),
+                    {"source": "block_context", "block_context_kind": "number"},
+                    {"source": "constant", "constant_value": "216000"},
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined")
+    # ``now`` IS the seconds clock, so the identical shape with the pre-0.7
+    # spelling resolves the window.
+    now_facts = _token_facts(
+        trees={
+            "transfer(address)": _and(
+                _leaf(
+                    _state("LATCH_SLOT", "pausedUntil"),
+                    {"source": "block_context", "block_context_kind": "now"},
+                    {"source": "constant", "constant_value": "2592000"},
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(now_facts, {"LATCH_SLOT"}) == (2592000, "guard_constant")
+
+
 def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
     """THE POSITIVE CASE ON REAL COMPILER OUTPUT (A7 / L-16, R4).
 
