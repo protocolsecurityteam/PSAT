@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict, get_args
 
+from typing_extensions import NotRequired
+
 SCHEMA_VERSION = "claims/1"
 
 Tier = Literal["behavioral_observed", "standard_exact", "idiom_structural", "policy_derived"]
@@ -56,6 +58,14 @@ class ClaimsArtifact(TypedDict):
     contract_name: str | None
     # Function full-name -> its claims (empty list is valid and common).
     functions: dict[str, list[Claim]]
+    # Function full-name -> the 4-byte selector of its CANONICAL ABI signature
+    # (enum/interface/struct params lowered) — the value a caller puts in
+    # ``msg.sig``. Three states per function, and consumers must keep them
+    # apart: present = lowered and proven; ABSENT from the map = the signature
+    # could not be lowered (not determined — never a proof); fallback/receive
+    # never appear (they have no selector by construction). The whole key is
+    # absent on artifacts minted before it existed.
+    abi_selectors: NotRequired[dict[str, str]]
 
 
 @dataclass(frozen=True)

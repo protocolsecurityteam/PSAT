@@ -966,3 +966,103 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
     assert has_ok_with_external, (
         f"unpacked `ok` didn't inherit external_call source. map={dict(eng.provenance.sources)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# L-25: ``callee_args_digest`` is content-stable across processes/seeds.
+# ---------------------------------------------------------------------------
+
+_DIGEST_SNIPPET = """
+import sys
+sys.path.insert(0, {repo!r})
+from services.static.contract_analysis_pipeline.provenance import Source, _digest
+a = frozenset({{
+    Source(kind="parameter", parameter_index=0, parameter_name="who"),
+    Source(kind="state_variable", state_variable_name="owner"),
+    Source(
+        kind="view_call",
+        callee="registry",
+        callee_signature="hasRole(address,uint256)",
+        callee_args_digest=_digest(frozenset({{Source(kind="msg_sender")}})),
+    ),
+}})
+b = frozenset({{Source(kind="parameter", parameter_index=1, parameter_name="amt")}})
+print(_digest(a), _digest(b))
+"""
+
+
+def _digests_under_seed(seed: str) -> list[str]:
+    import os
+    import subprocess
+
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONHASHSEED=seed)
+    out = subprocess.run(
+        [sys.executable, "-c", _DIGEST_SNIPPET.format(repo=repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.split()
+
+
+def test_callee_args_digest_is_seed_independent():
+    """The digest of the same SourceSet is byte-identical under different
+    PYTHONHASHSEED values (it is content-derived, not ``hash()``-derived), and
+    two different SourceSets still get different digests (the discriminating
+    role the field exists for)."""
+    run_a = _digests_under_seed("0")
+    run_b = _digests_under_seed("12345")
+    assert run_a == run_b, f"digest varies with hash seed: {run_a} vs {run_b}"
+    assert run_a[0] != run_a[1], "different SourceSets collapsed to one digest"
+
+
+def test_operand_tie_break_is_seed_independent():
+    """Two computed Sources tied on every sort-key field before the digest
+    (the L-25 shape: same kind, no parameter/state/callee identity) must
+    resolve to the SAME published operand in every process. Before the fix the
+    winner was ordered by a ``hash()``-seeded digest string; 37-46 operand
+    slots flickered across 25/88 production units."""
+    import os
+    import subprocess
+
+    repo = str(Path(__file__).resolve().parents[1])
+    snippet = """
+import sys
+sys.path.insert(0, {repo!r})
+from services.static.contract_analysis_pipeline.provenance import ProvenanceMap, Source, _digest
+from services.static.contract_analysis_pipeline.predicates import _operand_for_value
+
+
+class _Fake:
+    name = "v_0"
+
+
+sources = frozenset({{
+    Source(
+        kind="computed",
+        computed_kind="BinaryType.AND",
+        callee_args_digest=_digest(frozenset({{Source(kind="parameter", parameter_index=0)}})),
+    ),
+    Source(
+        kind="computed",
+        computed_kind="call(uint256,uint256)",
+        callee_args_digest=_digest(frozenset({{Source(kind="parameter", parameter_index=1)}})),
+    ),
+}})
+prov = ProvenanceMap(sources={{"v_0": sources}})
+print(_operand_for_value(_Fake(), prov)["computed_kind"])
+"""
+    winners = set()
+    for seed in ("0", "1", "31337"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", snippet.format(repo=repo)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        winners.add(out.stdout.strip())
+    assert len(winners) == 1, f"operand winner flickers with hash seed: {winners}"

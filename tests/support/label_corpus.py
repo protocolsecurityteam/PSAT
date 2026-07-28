@@ -249,10 +249,11 @@ MANIFEST: list[dict[str, Any]] = [
     {
         # The only ``policy_derived`` producer in the corpus. One body call
         # resolves onto CastWrappedPull above and inherits its standard_exact
-        # flow.in at the policy tier; the second resolves onto AssetRecovery and
-        # derives nothing, because the join keys callee claims by keccak of the
-        # DECLARED name and that callee takes an interface-typed parameter. See
-        # the fixture header — the empty row is pinned on purpose.
+        # flow.in at the policy tier; the second resolves onto AssetRecovery —
+        # an interface-typed-parameter callee, joinable only through the
+        # canonical ``abi_selector`` key (L-17) — and inherits its flow.out.
+        # See the fixture header: that row going empty again means the
+        # canonical half of the join regressed.
         "address": "0x0000000000000000000000000000000000000100",
         "name": "PolicyCaller",
         "chain": "synthetic",

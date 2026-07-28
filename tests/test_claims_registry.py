@@ -400,3 +400,74 @@ def test_precedence_output_is_deterministically_sorted():
     ]
     resolved = resolve_claim_precedence(claims)
     assert [c["claim_id"] for c in resolved] == ["authority.replace", "supply.mint"]
+
+
+# ---------------------------------------------------------------------------
+# L-17: the canonical ABI selector is computed at build time and stamped at
+# attach time — the value the cross-contract join keys on.
+# ---------------------------------------------------------------------------
+
+
+def _sweep_effects() -> dict:
+    return {
+        "contract_name": "AssetRecovery",
+        "functions": {
+            # Declared signature carries an interface-typed param: its keccak
+            # (0x38541c00) is NOT the dispatched selector (0x0aeef8c8).
+            "sweepTo(IERC20,address,uint256)": {"selector": "0x38541c00", "sinks": []},
+            # Elementary signature: canonical == declared.
+            "sweep(address)": {"selector": "0x01681a62", "sinks": []},
+            # No selector by construction; hashing the rendered name would
+            # manufacture one (the L-14 class).
+            "receive()": {"selector": "", "sinks": []},
+            "fallback()": {"selector": "", "sinks": []},
+        },
+    }
+
+
+_SWEEP_TREES = {"canonical_signatures": {"sweepTo(IERC20,address,uint256)": "sweepTo(address,address,uint256)"}}
+
+
+def test_build_claims_records_the_canonical_abi_selector():
+    artifact = build_claims(None, _sweep_effects(), _SWEEP_TREES)
+    assert "abi_selectors" in artifact
+    selectors = artifact.get("abi_selectors") or {}
+    assert selectors["sweepTo(IERC20,address,uint256)"] == "0x0aeef8c8"
+    assert selectors["sweep(address)"] == "0x01681a62"
+
+
+def test_build_claims_never_fabricates_a_selector():
+    """Three not-determined shapes, all OMITTED from the map (absence is the
+    not-determined state — a consumer must fall back, never infer):
+    fallback/receive (no selector exists), and a user-typed signature with no
+    canonical mapping and no Slither subject to lower it."""
+    artifact = build_claims(None, _sweep_effects(), {})  # no canonical map
+    assert "abi_selectors" in artifact
+    selectors = artifact.get("abi_selectors") or {}
+    assert "receive()" not in selectors
+    assert "fallback()" not in selectors
+    assert "sweepTo(IERC20,address,uint256)" not in selectors
+    # The elementary signature is still lowerable from its own text.
+    assert selectors["sweep(address)"] == "0x01681a62"
+
+
+def test_attach_stamps_abi_selector_beside_the_declared_one():
+    effects = _sweep_effects()
+    artifact = build_claims(None, effects, _SWEEP_TREES)
+    attach_claims_to_effects(effects, artifact)
+    record = effects["functions"]["sweepTo(IERC20,address,uint256)"]
+    assert record["abi_selector"] == "0x0aeef8c8"
+    assert record["selector"] == "0x38541c00"  # the declared form stays
+    # Not-determined stays ABSENT, never null and never fabricated.
+    assert "abi_selector" not in effects["functions"]["receive()"]
+    assert "abi_selector" not in effects["functions"]["fallback()"]
+
+
+def test_attach_tolerates_an_artifact_without_the_selector_map():
+    """Claims artifacts minted before ``abi_selectors`` existed attach exactly
+    as before — key absent on every record."""
+    effects = _sweep_effects()
+    artifact = build_claims(None, effects, _SWEEP_TREES)
+    del artifact["abi_selectors"]
+    attach_claims_to_effects(effects, artifact)
+    assert all("abi_selector" not in rec for rec in effects["functions"].values())

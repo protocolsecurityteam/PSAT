@@ -1076,10 +1076,83 @@ def _selector_for_signature(signature: str | None) -> str | None:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
+def _canonical_source_key(source: "Source") -> str:
+    """Deterministic, content-complete string for one ``Source`` record.
+
+    Every field participates — including ``callee_args_digest`` (already a
+    content-stable string by the time a Source carrying one is a member of
+    another Source's argument set: digests are computed bottom-up) and
+    ``derived_from``, folded by its members' content tokens (each member is
+    stored with ``derived_from=None``, bounding the recursion at one level).
+    """
+    return "\x1f".join(
+        str(part)
+        for part in (
+            source.kind,
+            source.parameter_index,
+            source.parameter_name,
+            source.state_variable_name,
+            source.callee,
+            source.callee_args_digest,
+            source.callee_signature,
+            source.callee_selector,
+            source.constant_value,
+            source.value_type,
+            source.computed_kind,
+            source.block_context_kind,
+            "/".join(source.member_path or ()),
+            source.storage_slot,
+            "None"
+            if source.derived_from is None
+            else "|".join(f"{_source_token(origin):016x}" for origin in sorted_tokens(source.derived_from)),
+        )
+    )
+
+
+def sorted_tokens(members: "frozenset[Source]") -> "list[Source]":
+    """Members ordered by their content tokens — a total order that never
+    consults the seed-dependent set iteration order."""
+    return sorted(members, key=_source_token)
+
+
+def _source_token(source: "Source") -> int:
+    """Content-stable 64-bit token for one Source: keccak of its canonical
+    key, cached ON THE INSTANCE. A structurally-keyed cache (``lru_cache``)
+    is the wrong tool here: every lookup deep-compares dataclass keys, and
+    the ``derived_from`` frozensets made that an ``__eq__`` storm (134M calls
+    on one 44-function unit). The lazy per-instance slot costs one key build
+    + one keccak per Source OBJECT and no structural comparisons; equal
+    instances independently compute the same seed-free value, so the digest
+    stays content-stable."""
+    token = source.__dict__.get("_content_token")
+    if token is None:
+        token = int.from_bytes(keccak(text=_canonical_source_key(source))[:8], "big")
+        # Frozen dataclass: bypass the immutability guard for the cache slot.
+        # Not a declared field, so repr/eq/hash never see it; a concurrent
+        # race recomputes the identical value.
+        object.__setattr__(source, "_content_token", token)
+    return token
+
+
 def _digest(s: SourceSet) -> str:
     """Stable digest of a SourceSet for nesting via ``callee_args_digest``.
 
-    Source is frozen so ``hash(s)`` is stable; we hex it for the JSON
-    serializer's benefit (artifacts are JSON, ints aren't).
+    Content-derived — XOR of the members' canonical-key keccak tokens — so
+    the same argument sources produce the same digest in EVERY process, and
+    the fold is order-independent without sorting. The previous
+    ``hash()``-of-frozenset form was PYTHONHASHSEED-dependent, and
+    ``predicates._source_sort_key`` orders competing sources by this string
+    BEFORE ``computed_kind`` — so which of two otherwise-tied computed
+    sources became the published operand flickered run to run (the L-25
+    noise bucket: e.g. a Teller deposit operand flipping between
+    ``call(uint256,...)`` and ``UnaryType.BANG``). Same 8-hex width as
+    before; the value is never published, only compared and ordered.
+
+    Performance note: this runs per NEW union inside the fixed point, so the
+    per-set work must stay O(members) with cheap ops. A frozenset holds no
+    duplicates, so the XOR never cancels a member against itself.
     """
-    return f"{abs(hash(s)) & 0xFFFFFFFF:08x}"
+    acc = 0
+    for member in s:
+        acc ^= _source_token(member)
+    return f"{acc & 0xFFFFFFFF:08x}"

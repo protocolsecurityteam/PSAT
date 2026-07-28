@@ -470,24 +470,25 @@ def test_the_golden_carries_a_policy_derived_claim():
     assert witness["source_tier"] == "standard_exact"
 
 
-def test_a_callee_with_an_interface_typed_parameter_is_unreachable_across_the_join():
-    """MEASURED, and pinned EMPTY on purpose.
-
-    ``recoverVia`` resolves onto AssetRecovery, whose ``sweepTo`` carries a
-    standard_exact ``flow.out``, and derives nothing. ``build_callee_claim_map``
-    keys the callee's claims by the selector on its effects record — keccak of the
-    DECLARED name, ``sweepTo(IERC20,address,uint256)`` → 0x38541c00 — while the
-    caller records the ABI selector, ``sweepTo(address,address,uint256)`` →
-    0x0aeef8c8. Every callee taking an interface- or contract-typed parameter is
-    therefore invisible to the cross-contract pass.
-
-    This is the row that must gain a claim when that is fixed.
+def test_a_callee_with_an_interface_typed_parameter_is_reached_via_the_canonical_key():
+    """INVERTED (L-17): this arm pinned the join miss as correct while the gap
+    was real — ``build_callee_claim_map`` keyed the callee's claims by keccak
+    of the DECLARED name, ``sweepTo(IERC20,address,uint256)`` → 0x38541c00,
+    while the caller's sink records the ABI selector,
+    ``sweepTo(address,address,uint256)`` → 0x0aeef8c8, so every callee taking
+    an interface- or contract-typed parameter was invisible to the
+    cross-contract pass. The claims pass now stamps the canonical
+    ``abi_selector`` on the callee record and the map keys on it, so the join
+    meets and ``recoverVia`` inherits the callee's ``flow.out`` at
+    ``policy_derived`` — its own rank, not the callee's ``standard_exact``.
     """
     fns = _functions(POLICY_CALLER)
-    assert fns["recoverVia(address,address,uint256)"]["claims"] == []
-    assert fns["recoverVia(address,address,uint256)"]["effect_labels"] == ["external_contract_call"]
-    # The callee's own claim exists and is propagatable — the gap is the key, not
-    # the evidence.
+    derived = _claim(fns["recoverVia(address,address,uint256)"], "flow.out")
+    assert derived["tier"] == "policy_derived"
+    assert derived["witness"]["selector"] == "0x0aeef8c8"
+    assert derived["witness"]["callee"] == "0x0000000000000000000000000000000000000070"
+    # The callee's own claim is the standard_exact evidence the derivation
+    # inherited from — the tiers must stay distinct.
     recovery = _functions("0x0000000000000000000000000000000000000070")
     assert _claim(recovery["sweepTo(IERC20,address,uint256)"], "flow.out")["tier"] == "standard_exact"
 
