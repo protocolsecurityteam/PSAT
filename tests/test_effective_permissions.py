@@ -767,3 +767,113 @@ def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
     assert fn.get("status") == "unsupported"
     assert fn.get("authority_public") is not True
     assert fn.get("capability_expr", {}).get("unsupported_reason") == "guard_extraction_uncertain"
+
+
+# ---------------------------------------------------------------------------
+# authority_openness on the ARTIFACT plane (L-53).
+#
+# The three-state openness split is computed twice: once here, in
+# ``build_effective_permissions``, onto the ``effective_permissions`` artifact
+# the API and the recursive resolver read, and once in
+# ``effective_permissions_writer`` on its way to the ``effective_functions``
+# column. Every existing openness test asserts the SECOND one, so reverting
+# either of the two blocks in ``build_effective_permissions`` left the suite
+# green while the artifact silently lost the key — and an absent key is
+# published as "written before the column existed", a claim the record does
+# not have. These two tests pin the payload plane on its own.
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_carries_openness_for_a_resolver_capability():
+    """Resolver-capability branch: the openness projection of the capability the
+    record publishes travels ON the record, not only into the DB column.
+
+    Input-shape → published-state table:
+
+      finite_set(1 member), enumerable  → 'restricted'  (witnessed restriction)
+      conditional_universal             → 'open'        (earned public)
+      unsupported(assembly_only)        → 'not_determined'
+    """
+    restricted = _finite_cap("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    universal = {
+        "kind": "conditional_universal",
+        "conditions": [{"kind": "time", "description": "after cooldown"}],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+    }
+    undetermined = {
+        "kind": "unsupported",
+        "unsupported_reason": "assembly_only",
+        "membership_quality": "unknown",
+        "confidence": "unsupported",
+    }
+    payload = build_effective_permissions(
+        _public_default_target(),
+        capability_resolver_output={
+            "gated()": restricted,
+            "timed()": universal,
+            "asm()": undetermined,
+        },
+        effects=_effects(
+            _effect("gated()", targets=["paused"], labels=["pause_toggle"]),
+            _effect("timed()", targets=["paused"], labels=["pause_toggle"]),
+            _effect("asm()", targets=["paused"], labels=["pause_toggle"]),
+        ),
+    )
+    by_name = {fn["function"]: fn for fn in payload["functions"]}
+
+    # The key must be PRESENT on every record — its absence is a fourth state.
+    for name in ("gated()", "timed()", "asm()"):
+        assert "authority_openness" in by_name[name], f"{name} lost the openness key"
+
+    assert by_name["gated()"]["authority_openness"] == "restricted"
+    assert by_name["timed()"]["authority_openness"] == "open"
+    assert by_name["asm()"]["authority_openness"] == "not_determined"
+
+
+def test_artifact_carries_openness_for_a_policy_minted_capability():
+    """Policy-minted branch (empty resolver output): the record publishes a
+    ``capability_expr`` the policy layer minted, so its openness has to be the
+    projection of THAT dict — the answer was already computable from what the
+    record publishes.
+
+    Input-shape → published-state table:
+
+      fall-through public (sink-bearing, tree-less) → 'open'
+      guard_extraction_uncertain reroute            → 'not_determined'
+
+    The adverse branch is the second row: it proves the not-determined arm
+    executes on the artifact plane, not just the credit-granting one.
+    """
+    payload = build_effective_permissions(
+        _public_default_target(),
+        capability_resolver_output={},
+        effects=_effects(
+            _effect(
+                "sweep(address)",
+                targets=["token.transfer"],
+                labels=["external_contract_call"],
+                sink_kind="external_call",
+            ),
+            _effect(
+                "gated(address)",
+                targets=["token.transfer"],
+                labels=["external_contract_call"],
+                sink_kind="external_call",
+            ),
+        ),
+        predicate_trees={
+            "schema_version": "semantic",
+            "trees": {},
+            "guard_extraction_uncertain": ["gated(address)"],
+        },
+    )
+    by_name = {fn["function"]: fn for fn in payload["functions"]}
+
+    assert "authority_openness" in by_name["sweep(address)"]
+    assert by_name["sweep(address)"]["status"] == "public"
+    assert by_name["sweep(address)"]["authority_openness"] == "open"
+
+    assert "authority_openness" in by_name["gated(address)"]
+    assert by_name["gated(address)"]["status"] == "unsupported"
+    assert by_name["gated(address)"]["authority_openness"] == "not_determined"
