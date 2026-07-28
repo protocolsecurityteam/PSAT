@@ -215,7 +215,30 @@ def test_role_grants_empty_when_no_role_authority_witnessed():
 
     assert capability_role_grants({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}) == []
     assert capability_role_grants({"kind": "conditional_universal", "conditions": []}) == []
-    assert capability_role_grants({"kind": "unsupported", "unsupported_reason": "x"}) == []
+
+
+def test_role_grants_not_determined_on_unsupported():
+    """``[]`` is "the gate was lowered and no role appeared in it" — proven
+    absent. An ``unsupported`` capability means the gate was NEVER lowered, so
+    nothing (including "not role-keyed") was read: that is the not-determined
+    ``None``, anywhere in the tree. (Inverts the round-1 pin that read an
+    unsupported gate as proven not role-gated — the chronic not-determined→
+    proven route.)"""
+    from services.policy.capability_surface import capability_role_grants
+
+    assert capability_role_grants({"kind": "unsupported", "unsupported_reason": "x"}) is None
+    assert (
+        capability_role_grants(
+            {
+                "kind": "and",
+                "children": [
+                    {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
+                    {"kind": "unsupported", "unsupported_reason": "x"},
+                ],
+            }
+        )
+        is None
+    )
 
 
 def test_role_grants_public_solmate_capability_is_not_role_gated():

@@ -286,22 +286,36 @@ def write_effective_function_rows(
 
         cap = capability_by_function.get(fn_signature)
         cap_dict = _to_dict(cap)
+        # The capability the RECORD itself publishes (policy-minted
+        # ``_public_capability`` / ``_unsupported_capability`` shapes travel
+        # here, not in ``capability_by_function`` — that mapping is the
+        # RESOLVER's output). Column answers that are pure projections of the
+        # capability shape are derived from it when no resolver capability
+        # exists, so a row is never published with NULL ("this producer could
+        # not say") next to a capability_expr that says the answer.
+        record_cap = fn.get("capability_expr")
+        if not isinstance(record_cap, dict):
+            record_cap = None
 
         # Column values: prefer resolved capability columns; otherwise use
         # explicit per-function compatibility fields.
         if cap_dict is not None:
             cap_columns = _column_values_for_capability(cap_dict)
         else:
+            openness = fn.get("authority_openness")
+            if openness is None and record_cap is not None:
+                openness = capability_surface_openness(record_cap, project_capability_surface(record_cap))
             cap_columns = {
                 "capability_expr": fn.get("capability_expr"),
                 "conditions": fn.get("conditions"),
                 "status": fn.get("status"),
                 "authority_public": bool(fn.get("authority_public", False)),
-                # ``fn.get`` with no default: a record that never carried the
-                # key leaves the column NULL ("this writer could not say"),
-                # which is a different fact from ``not_determined`` ("the
-                # resolver looked and could not decide").
-                "authority_openness": fn.get("authority_openness"),
+                # NULL only when there is nothing to project from: a record
+                # with neither the key nor a capability_expr ("this writer
+                # could not say"), which is a different fact from
+                # ``not_determined`` ("the resolver looked and could not
+                # decide").
+                "authority_openness": openness,
             }
         # Per-function explicit override applies when the capability
         # itself didn't pin the column. ``conditional_universal``
@@ -346,9 +360,15 @@ def write_effective_function_rows(
             # that already carries a NON-EMPTY list wins (an upstream caller
             # resolved it); the historical literal ``[]`` every record ships is
             # NOT treated as an answer — it is exactly the constant this item
-            # exists to remove, so the capability's own verdict replaces it.
+            # exists to remove, so the capability's own verdict replaces it:
+            # the resolver capability when there is one, otherwise the
+            # capability the record itself publishes (the policy-minted
+            # shapes), so the proven-absent ``[]`` is reachable on the
+            # production path and NULL keeps meaning "no capability at all".
             "authority_roles": (
-                fn.get("authority_roles") if fn.get("authority_roles") else _authority_roles_for(cap_dict)
+                fn.get("authority_roles")
+                if fn.get("authority_roles")
+                else _authority_roles_for(cap_dict if cap_dict is not None else record_cap)
             ),
         }
         # Optional columns may be absent in older test metadata.

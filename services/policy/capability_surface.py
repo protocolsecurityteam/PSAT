@@ -152,13 +152,16 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
     * **non-empty list** — proven present. Emitted only where an adapter trace
       names exactly ONE role id for the enumerated set: every member of that set
       then holds that role, because it is the only role carrying the capability.
-    * ``None`` — **not determined**. Either a role-keyed authority whose role
-      identity the adapter dissolves by design (``enumerable_role_store``), or a
-      multi-role capability (``roles: [1, 2]``) where WHICH role each member
-      holds is not recoverable — attributing every member to every role would be
-      the over-claim. The function IS role-gated; the role is unknown.
-    * ``[]`` — proven absent: no role-keyed authority was witnessed at all
-      (a plain owner equality, a public path, an unsupported gate).
+    * ``None`` — **not determined**. A role-keyed authority whose role identity
+      the adapter dissolves by design (``enumerable_role_store``); a multi-role
+      capability (``roles: [1, 2]``) where WHICH role each member holds is not
+      recoverable — attributing every member to every role would be the
+      over-claim; or an ``unsupported`` node anywhere in the tree — extraction
+      failed, so nothing about the gate (including whether it is role-keyed)
+      was read, and "proven absent" is not available from a gate that was
+      never lowered.
+    * ``[]`` — proven absent: the gate WAS lowered and no role-keyed authority
+      appeared in it (a plain owner equality, a public path).
 
     Reads only the persisted capability shape — no wire, no DB.
     """
@@ -169,6 +172,8 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
         nonlocal not_determined
         if not isinstance(node, dict):
             return
+        if node.get("kind") == "unsupported":
+            not_determined = True
         for step in node.get("trace") or []:
             if not isinstance(step, dict):
                 continue

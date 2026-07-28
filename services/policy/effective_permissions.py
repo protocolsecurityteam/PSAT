@@ -735,13 +735,24 @@ def build_effective_permissions(
 
         # Three-state role half (see ``capability_role_grants``): the
         # capability's own verdict replaces the historical literal ``[]`` that
-        # every one of 1,773 persisted rows carried. ``None`` is "no capability
-        # was resolved for this function, so nothing was read" — not the
-        # proven-absent ``[]``.
+        # every one of 1,773 persisted rows carried. The verdict is read from
+        # whichever capability THIS record actually carries — the resolver's
+        # when it produced one, otherwise the policy-minted shape
+        # (``_public_capability`` / ``_unsupported_capability``): those rows
+        # are published with a capability_expr, so their role half must be the
+        # projection of that same dict, not a blanket ``None``. ``None`` is
+        # reserved for a record carrying no capability at all ("nothing was
+        # read").
         resolved_capability = capability_dicts.get(fn_signature)
+        minted_capability = function_record.get("capability_expr")
+        role_source_capability = (
+            resolved_capability
+            if resolved_capability is not None
+            else (minted_capability if isinstance(minted_capability, dict) else None)
+        )
         authority_roles_out = cast(
             "list[AuthorityRoleGrant] | None",
-            capability_role_grants(resolved_capability) if resolved_capability is not None else None,
+            capability_role_grants(role_source_capability) if role_source_capability is not None else None,
         )
 
         function_permission: EffectiveFunctionPermission = {
@@ -782,6 +793,12 @@ def build_effective_permissions(
             # conditional_universal short-circuits authority_public.
             if cap_columns["authority_public"]:
                 function_permission["authority_public"] = True
+            # The three-state verdict travels WITH the record: the writer's
+            # ``cap_dict is None`` branch reads ``fn.get("authority_openness")``,
+            # so dropping it here left the column NULL on every row the policy
+            # layer minted — and NULL is documented as "written before the
+            # column existed", which is false for a fresh row.
+            function_permission["authority_openness"] = cap_columns["authority_openness"]
         else:
             if function_record.get("capability_expr") is not None:
                 function_permission["capability_expr"] = function_record["capability_expr"]
@@ -791,6 +808,19 @@ def build_effective_permissions(
                 function_permission["status"] = function_record["status"]
             if function_record.get("authority_public") is True:
                 function_permission["authority_public"] = True
+            # Policy-minted capabilities (``_public_capability`` /
+            # ``_unsupported_capability``) get the SAME openness projection a
+            # resolver capability gets: ``open`` for the earned-public
+            # fall-through, ``not_determined`` for every fail-closed reroute
+            # (guard_extraction_uncertain / assembly_only / resolver-missing).
+            # The answer was already computable from the dict this record
+            # publishes; leaving the key absent published NULL with a meaning
+            # ("pre-column legacy row") the row does not have.
+            if isinstance(minted_capability, dict):
+                minted_surface = project_capability_surface(minted_capability)
+                function_permission["authority_openness"] = capability_surface_openness(
+                    minted_capability, minted_surface
+                )
 
         functions.append(function_permission)
 

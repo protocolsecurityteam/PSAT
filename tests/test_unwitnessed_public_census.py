@@ -109,6 +109,88 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
 
 
 @requires_postgres
+def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_session):
+    """R1 round-2: every row the POLICY layer mints (the fall-through publics,
+    the assembly fail-closed rows, item 1's ``guard_extraction_uncertain``
+    reroute) must reach the table with ``authority_openness`` and
+    ``authority_roles`` PROJECTED FROM the capability_expr the row itself
+    publishes — never the NULL that is documented as "written before the
+    column existed". Exercises the real path: ``build_effective_permissions``
+    → ``write_effective_function_rows`` with an EMPTY resolver output, which
+    is exactly the branch that dropped the answers in round 1.
+
+    Input-shape → published-state table this test pins:
+
+      fall-through public   → openness 'open',           roles ``[]`` (proven absent)
+      assembly fail-closed  → openness 'not_determined', roles ``None``
+      guard-uncertain reroute → openness 'not_determined', roles ``None``
+    """
+    contract = Contract(address="0x" + "cf" * 20, chain="ethereum")
+    db_session.add(contract)
+    db_session.flush()
+
+    effects = {
+        "functions": {
+            "sweep(address)": {
+                "function": "sweep(address)",
+                "state_changing": True,
+                "state_writes": [],
+                "sinks": [{"kind": "external_call", "target": "token.transfer"}],
+                "writer_selectors": [],
+            },
+            "asmMutator()": {
+                "function": "asmMutator()",
+                "state_changing": True,
+                "state_writes": [],
+                "sinks": [],
+                "assembly_state_access": True,
+                "writer_selectors": [],
+            },
+            "gated(address)": {
+                "function": "gated(address)",
+                "state_changing": True,
+                "state_writes": [],
+                "sinks": [{"kind": "external_call", "target": "t"}],
+                "writer_selectors": [],
+            },
+        }
+    }
+    payload = build_effective_permissions(
+        _TARGET,
+        capability_resolver_output={},
+        effects=effects,
+        predicate_trees={
+            "schema_version": "semantic",
+            "trees": {},
+            "guard_extraction_uncertain": ["gated(address)"],
+        },
+    )
+    write_effective_function_rows(
+        db_session,
+        contract_id=contract.id,
+        function_records=cast("list[dict[str, Any]]", payload["functions"]),
+        capability_by_function={},
+    )
+    db_session.flush()
+    rows = {
+        name: (status, openness, roles)
+        for name, status, openness, roles in db_session.execute(
+            text(
+                "select function_name, status, authority_openness, authority_roles"
+                " from effective_functions where contract_id = :cid"
+            ),
+            {"cid": contract.id},
+        ).all()
+    }
+    assert rows["sweep"] == ("public", "open", [])
+    assert rows["asmMutator"] == ("unsupported", "not_determined", None)
+    assert rows["gated"] == ("unsupported", "not_determined", None)
+    # The census predicate itself is unaffected: openness rides alongside,
+    # conditions stays JSON null on the fall-through public.
+    assert _conditions_typeof(db_session, contract.id, "sweep") == "null"
+
+
+@requires_postgres
 def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
     """L-27 (a ledger item in this leg's own file surface, fixed here with
     declared scope): ``fallback`` and ``receive`` are BOTH selector-less, so
