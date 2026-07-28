@@ -331,7 +331,14 @@ class Artifact(Base):
     # Size of the object in the bucket, not of anything stored in this row.
     # It is nonzero on all 5,770 rows while ``data``/``text_data`` are null on
     # all of them; the old name ``size_bytes`` read as "this row holds N bytes".
-    stored_object_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    stored_object_size_bytes: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment=(
+            "Byte length of the object at storage_key in the bucket. Says nothing "
+            "about data/text_data, which are null whenever this is set."
+        ),
+    )
     content_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -909,7 +916,16 @@ class EffectiveFunction(Base):
     # witnessed caller restriction with "we could not determine the authority"):
     # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
     # this row predates the column and cannot be read as any of the three.
-    authority_openness: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    authority_openness: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment=(
+            "Three-state authority verdict: 'open' (a public path was earned), "
+            "'restricted' (a caller restriction was witnessed), 'not_determined' "
+            "(no public path and no witnessed caller set). NULL = written before "
+            "this column existed; never read it as any of the three."
+        ),
+    )
     authority_roles: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
@@ -934,10 +950,44 @@ class EffectiveFunction(Base):
     # default renders a Python ``None`` as the jsonb scalar ``null``, which is a
     # DIFFERENT state from SQL NULL and is why ``conditions`` above is unusable
     # in a null test on 780 of its 1773 rows (see ``db/jsonb.py``).
-    state_changing: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    state_writes: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    sinks: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    writer_selectors: Mapped[list[str] | None] = mapped_column(ARRAY(String(10)), nullable=True)
+    state_changing: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment=(
+            "ABI mutability of a selector-bearing external/public entry point: true when "
+            "non-view and non-pure. SQL NULL = not determined and is NOT the same fact as "
+            "false; fallback/receive are always NULL here because they have no selector, "
+            "which is a different reason from being proven non-mutating."
+        ),
+    )
+    state_writes: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Proven state writes, richer than the state_write sinks (member path, "
+            "granularity, hygiene class). SQL NULL = not determined; [] = the effects "
+            "stage looked and proved none."
+        ),
+    )
+    sinks: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Kind-tagged sinks (state_write | external_call | delegatecall | "
+            "contract_creation | selfdestruct) with body/guard origin. Kept alongside "
+            "state_writes because a function can be a proven actor with zero state "
+            "writes -- EtherFiRedemptionManager.sweepDust moves tokens under a role gate "
+            "with state_writes=[]. SQL NULL = not determined; [] = proven none."
+        ),
+    )
+    writer_selectors: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(10)),
+        nullable=True,
+        comment=(
+            "Selectors to replay when attributing the state writes of this function; empty "
+            "when it writes no state. SQL NULL = not determined."
+        ),
+    )
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="effective_functions")
     principals: Mapped[list["FunctionPrincipal"]] = relationship(
