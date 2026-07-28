@@ -780,6 +780,18 @@ def _prefetch_child_tables(
         distinct addresses across 180 rows). A narrow projection with the jsonb
         ``has_key`` filter in the WHERE clause, so contracts with no walk cost
         nothing.
+
+        CHAIN SCOPE, stated rather than claimed: the read is scoped by
+        ``contract_id`` (chain-scoped through ``contracts.chain``) but the returned
+        MAP is keyed by a bare lowercase address, which is the pre-existing shape of
+        the whole ``principal_lookup`` plane — ``principal_labels`` /
+        ``control_graph_nodes`` / ``controller_values`` carry no chain column at all
+        (handoff §3), and ``_build_principal_lookup`` already merges every source
+        into one bare-address dict. So a protocol spanning two chains could in
+        principle have one chain's walk annotate the other's node. Not realised: the
+        control/policy plane is 100% ethereum, and 0 addresses carry differing
+        records. Closing it means giving that plane a chain key, which is a
+        producer-side schema change, not a consumer split.
         """
         local: dict[str, dict[str, Any]] = {}
         rows = 0
@@ -1212,7 +1224,9 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
-    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]
+    # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
+    # fact about the address, not about the subject contract that recorded it.
+    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
 
     # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
     # contract_id buckets. The flow/principal passes key on the primary impl

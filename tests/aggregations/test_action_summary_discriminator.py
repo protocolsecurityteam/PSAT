@@ -66,6 +66,7 @@ def test_a_proven_gate_on_the_destination_narrows_the_sentence():
         ARBITRARY_SUMMARY,
         [_exec_claim({"state": "constrained", "guard": "mapping_allowlist"})],
     )
+    assert summary is not None
     assert "arbitrary" not in summary
     assert "a mandatory gate constrains the destination (mapping_allowlist)" in summary
     assert note and "destination_constraint=constrained" in note
@@ -77,6 +78,7 @@ def test_an_absent_destination_verdict_does_not_publish_arbitrary():
     the question being unanswered — the same reading ``claimsVocab.constraintText``
     takes — and "arbitrary" asserts an answer."""
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim()])
+    assert summary is not None
     assert "arbitrary" not in summary
     assert "was not determined" in summary
     assert note and "no destination_constraint verdict" in note
@@ -84,6 +86,7 @@ def test_an_absent_destination_verdict_does_not_publish_arbitrary():
 
 def test_an_explicit_not_determined_verdict_also_hedges():
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim({"state": "not_determined"})])
+    assert summary is not None
     assert "was not determined" in summary
     assert note and "not_determined" in note
 

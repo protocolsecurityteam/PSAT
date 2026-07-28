@@ -30,6 +30,7 @@ from db.models import (  # noqa: E402
     Job,
     JobStage,
     JobStatus,
+    PrincipalLabel,
     Protocol,
     UpgradeEvent,
 )
@@ -890,6 +891,10 @@ def _normalize_prefetch(result: dict) -> dict:
         "balances": {cid: sorted(bal_key(b) for b in rows) for cid, rows in result["balances"].items()},
         "cgn": {cid: sorted(cgn_key(n) for n in rows) for cid, rows in result["cgn"].items()},
         "cge": {cid: sorted(cge_key(e) for e in rows) for cid, rows in result["cge"].items()},
+        # Keyed by ADDRESS, not contract_id — the terminal walk is a fact about the
+        # address (see ``_terminal_walk``). Included so a parallel-only divergence
+        # in the newest stage is caught by the same parity check as its siblings.
+        "terminal_walk": {addr: tuple(sorted(record.items())) for addr, record in result["terminal_walk"].items()},
     }
 
 
@@ -1046,6 +1051,16 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
         authority_roles=[],
     )
     db_session.add(ef_b)
+    db_session.add(
+        PrincipalLabel(
+            contract_id=contract_a.id,
+            address=safe_addr,
+            label="Parity Safe",
+            display_name="Parity Safe",
+            resolved_type="safe",
+            details={"terminal_principal": {"status": "unknown_unfetched", "terminal": False, "address": None}},
+        )
+    )
     db_session.commit()
 
     contract_ids = {contract_a.id, contract_b.id}
@@ -1055,6 +1070,7 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     assert _normalize_prefetch(parallel) == _normalize_prefetch(sequential), (
         "parallel fan-out diverged from the sequential reference"
     )
+    assert _normalize_prefetch(parallel)["terminal_walk"], "terminal_walk missing its seeded record"
 
     # Sanity: every dict key has content from the seed so the equality
     # check above wasn't trivially {} == {}.
@@ -2063,8 +2079,6 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
     Measured after wiring: 229 control-graph node payloads and 6 function-principal
     payloads on the real corpus carry the record (0 before).
     """
-    from db.models import PrincipalLabel
-
     p = _add_protocol(db_session, f"e2e-tp-{uuid.uuid4().hex[:8]}")
     addr = _addr("tp1")
     controller = _addr("tp2")
@@ -2137,8 +2151,6 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
 def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_session):
     """``setdefault``: this pass adds the fact where it is missing, never replaces
     one a ControlGraphNode's own ``details`` already carried."""
-    from db.models import PrincipalLabel
-
     p = _add_protocol(db_session, f"e2e-tpo-{uuid.uuid4().hex[:8]}")
     addr = _addr("tpo1")
     controller = _addr("tpo2")
