@@ -1467,6 +1467,11 @@ def _resolve_destination_shape(
     IS the adverse finding, the address is by construction whatever WE passed, and
     a stored one can only mislead in the reassuring direction ("the money goes to
     the timelock, so this is fine").
+
+    The exclusion is applied to the CONVERGENCE ANSWER, never to the destination set
+    it is computed from: removing an invented recipient before counting destinations
+    manufactures agreement out of a genuinely ambiguous outflow. See the comment on
+    the capture itself.
     """
     # State-plane residue: the address value actually left to THIS run. Capture it
     # whenever every observed outflow converged on a single destination — a
@@ -1474,8 +1479,21 @@ def _resolve_destination_shape(
     # the same address) still has one concrete destination. Divergent destinations
     # are genuinely ambiguous → withheld. This never proves the SHAPE (§8 rule 1: a
     # single observation can't prove "always this address").
-    out_destinations = {to for _f, to, _v in base_transfers if not _is_invented_identity(to)}
+    #
+    # ORDER IS LOAD-BEARING: the convergence test runs over EVERY destination, and
+    # only then is an invented identity refused. Filtering first turned an ambiguous
+    # two-destination outflow into a "convergent" one and published the survivor:
+    # `from=holder, to=NEUTRAL_CALLER` is the ordinary "paid msg.sender" leg of a
+    # withdrawal, so dropping it and asserting the residual fee/treasury address as
+    # "the address value actually left to" is exactly the reassuring-direction
+    # mislead this filter exists to remove ("the money goes to the timelock, so this
+    # is fine") — measured: 90% to the impersonated caller and a 10% fee to the
+    # treasury published the treasury as THE destination. An invented recipient among
+    # several destinations means the destination is NOT determined.
+    out_destinations = {to for _f, to, _v in base_transfers}
     observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
+    if _is_invented_identity(observed_dest):
+        observed_dest = None
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:

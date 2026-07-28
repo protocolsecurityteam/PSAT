@@ -257,6 +257,72 @@ def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destinatio
     assert eff2.concrete["destination"] == real
 
 
+def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined():
+    """The invented-identity exclusion applies to the convergence ANSWER, not to the
+    set convergence is computed from.
+
+    Applied to the set first, it manufactured agreement: this call provably sends 90%
+    to ``NEUTRAL_CALLER`` — the caller a public/unresolved-principal probe
+    impersonates, i.e. the ordinary "paid msg.sender" leg of a withdrawal — and a 10%
+    fee to the treasury. Dropping the caller left ONE destination, and the fee sink
+    was published as "the address value actually left to": the reassuring-direction
+    mislead the exclusion exists to remove, newly created BY the exclusion. Two
+    destinations, one of them invented, means the destination is not determined."""
+    treasury = "0x" + "17" * 20
+    base = SimResult(
+        calls=(
+            ok(
+                logs=[
+                    transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 90),
+                    transfer_log(TOKEN, CONTRACT, treasury, 10),
+                ]
+            ),
+        )
+    )
+    eff = recipes.value_out(
+        simulate=ScriptedSimulate(base),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff.verdict == VERDICT_PROVEN
+    assert "destination" not in eff.concrete
+    # POSITIVE CONTROL: two REAL destinations were already withheld as ambiguous and
+    # still are, so the answer above is not an artifact of the invented address.
+    other = "0x" + "ce" * 20
+    diverged = SimResult(
+        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, other, 10)]),)
+    )
+    eff2 = recipes.value_out(
+        simulate=ScriptedSimulate(diverged),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert "destination" not in eff2.concrete
+    # NEGATIVE CONTROL: several logs CONVERGING on one real destination (burn + send,
+    # or send + fee to the same address) is still one concrete destination.
+    converged = SimResult(
+        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, treasury, 10)]),)
+    )
+    eff3 = recipes.value_out(
+        simulate=ScriptedSimulate(converged),
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        calldata="0xdeadbeef",
+        simulate_supported=True,
+    )
+    assert eff3.concrete["destination"] == treasury
+
+
 def test_sentinel_only_caller_arbitrary_publishes_no_destination():
     # The sentinel lands but the base probe moved nothing: caller_arbitrary is
     # still proven, and the concrete destination is EMPTY rather than the
