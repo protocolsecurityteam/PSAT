@@ -6,7 +6,11 @@ facts. Two independent concerns:
 
 1. **Cascade** — the filter that produces the blank-gated simulation set
    (Appendix A funnel: 756 → gated 406 / facts 691 / blank+facts+gated 265).
-   Every row that survives is a distinct behavior we must simulate.
+   Every row that survives is a distinct behavior we must simulate. The "facts"
+   leg of that funnel was measured when it read ``effect_targets``; it now reads
+   the W0-6 evidence plane (:func:`_has_effect_evidence`), so the number moves —
+   on the local protocol-1 slice the cascade admits 49 more rows once that plane
+   is written, and 0 fewer.
 2. **Ordering** — transitive value-at-stake sorts the survivors so the highest
    blast-radius unknowns run first. Value ORDERS, it never GATES (inv. 4): the
    only thing that removes a candidate is a hard resource safety-valve, and if
@@ -25,11 +29,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
 
-from sqlalchemy import and_, cast, func, literal, or_, select
+from sqlalchemy import and_, case, cast, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.jsonb import jsonb_state
 from db.models import (
     CONTROL_EDGE_RELATIONS,
     Artifact,
@@ -899,11 +904,166 @@ def _carries_public_admission_claim():
     )
 
 
+def _proven_array_len(col: Any):
+    """``jsonb_array_length`` that cannot raise, for a column whose payload is a
+    jsonb array or nothing.
+
+    The bare function ERRORS on any non-array: ``cannot get array length of a
+    scalar``. SQL NULL is safe, but the jsonb scalar ``null`` and every malformed
+    payload would abort candidate selection for the whole protocol — the same
+    total-vs-partial trap ``_carries_public_admission_claim`` documents for
+    ``jsonb_array_elements``. The guard folds a non-array to ``[]`` so the
+    expression is total; callers must NOT read that fold as a proven emptiness,
+    which is why :func:`_evidence_not_determined` tests the shape separately and
+    every caller here pairs the two.
+    """
+    return func.jsonb_array_length(case((jsonb_state(col) == "array", col), else_=cast(literal("[]"), JSONB)))
+
+
+def _evidence_proven_present(col: Any):
+    """The column holds a non-empty jsonb array — the writer looked and FOUND."""
+    return and_(jsonb_state(col) == "array", _proven_array_len(col) > 0)
+
+
+def _evidence_not_determined(col: Any):
+    """The column holds no array — SQL NULL (never written / withheld), the jsonb
+    scalar ``null``, or a malformed shape. All three mean NOT DETERMINED: a value
+    that is not the writer's array shape is not evidence of emptiness, exactly as
+    ``policy.effective_permissions._mutability_fields`` treats a wrongly-typed
+    field on the producing side. Total by construction — ``jsonb_state``
+    coalesces SQL NULL to a non-type name, so this never evaluates to NULL and
+    can never be silently dropped from an ``or_``."""
+    return jsonb_state(col) != "array"
+
+
+def _has_effect_evidence():
+    """SQL predicate for cascade filter (a): is there anything here to simulate,
+    or could we not determine that there is not?
+
+    Reads the W0-6 state-write evidence plane — ``state_changing`` /
+    ``state_writes`` / ``sinks``, each three-state — and NOT ``effect_targets``,
+    which is a display field that concatenates state-write variable names with
+    dotted external-call heads (``_effect_targets_from_sinks``). Selecting on it
+    made a populated value assert a state write nothing had proven: **501 of its
+    1,642 populated rows carry only call heads**, and on the local protocol-1
+    slice **156 gated functions** entered this cascade on external-call targets
+    alone while the docstring here claimed the list *was* the state-write target
+    list. What is removed is that inference, not those rows: no reader of this
+    filter can infer a proven write from membership any more.
+
+    Which disjunct actually admits those 156, measured on the projected plane
+    (never assumed — the shape below is not the one the narrative suggests):
+    ``state_changing IS TRUE`` for **147**, not-determined for **8**
+    (``state_changing`` NULL), and the sink evidence for exactly **1**
+    (``shouldSubmitReport(address)``, function_id 2344). So for 147 of them the
+    admitting ground is the ABI's mutability flag and the sink list is redundant.
+    The population the sink ground is actually load-bearing for is a DIFFERENT one:
+    116 filter-(a) rows that are compiler-typed views (``state_changing`` FALSE)
+    with ``state_writes = []`` and a proven non-empty ``external_call`` sink list.
+    115 of those are public and filter (c) drops them; the 116th is 2344, and it is
+    the only candidate this predicate would lose if the two
+    :func:`_evidence_proven_present` disjuncts were deleted (``pp_sinks`` sole-admits
+    116 rows / 1 candidate; ``pp_state_writes`` sole-admits 0 rows today — see the
+    two dedicated arms in ``test_filter_a_keeps_the_three_evidence_states_apart``,
+    which exist because every other arm survives that deletion).
+
+    Input shape → candidacy. Every ADMIT is either proven-active or
+    not-determined; the single EXCLUDE needs three independent proven absences:
+
+    ==================  ==============  ==============  =========  ==================================
+    ``state_changing``  ``state_writes``  ``sinks``     candidacy  why
+    ==================  ==============  ==============  =========  ==================================
+    any                 array, len>0    any             ADMIT      proven state write
+    any                 any             array, len>0    ADMIT      proven sink of ANY kind
+    ``TRUE``            ``[]``          ``[]``          ADMIT      the ABI proves mutability and the
+                                                                   extractor found no sink — two
+                                                                   witnesses disagree, so nothing is
+                                                                   settled and evidence is what a
+                                                                   probe is for
+    ``NULL``            any             any             ADMIT      not determined
+    any                 not an array    any             ADMIT      not determined
+    any                 any             not an array    ADMIT      not determined
+    ``FALSE``           ``[]``          ``[]``          EXCLUDE    the only proven-inert shape:
+                                                                   compiler-typed view/pure (the
+                                                                   compiler forbids ``SSTORE``,
+                                                                   low-level calls and value sends
+                                                                   there) AND a writer that looked
+                                                                   and found no write and no sink
+    ==================  ==============  ==============  =========  ==================================
+
+    Three consequences worth naming, because they are the point:
+
+    * **Not-determined admits.** A row whose evidence was never written (every
+      row written before W0-6's columns), or withheld — L-15: the view-contradiction
+      rule nulls 89 legitimate ``external_call`` sinks on 14 rows — is probed, not
+      dropped. Dropping it would publish "nothing to see here" from an absence of
+      measurement, which is the error this whole effort exists to remove. Where
+      the plane is entirely unwritten (1,773/1,773 rows locally) this filter is
+      vacuous by design and the cascade is bounded by (b), (c) and the
+      ``resource_cap``, which names everything it drops.
+    * **``state_changing`` is read as a bool, not as evidence of writes.** It is
+      ``TRUE`` for a selector-bearing external/public non-view function whose
+      writes may sit in inline assembly the IR never saw — the exact row W0-6
+      exists to stop losing. ``FALSE`` reaches this filter only from a named
+      function the compiler typed ``view``/``pure``: ``_mutability_fields``
+      withholds it to NULL for ``fallback``/``receive`` (no selector is not a
+      proof of purity — WETH9's ``fallback()`` writes ``balanceOf``).
+    * **``writer_selectors`` is deliberately not read.** It answers "which
+      selector replays this write", not "is there a write": ``_writer_selectors_for``
+      returns ``[]`` unless a ``state_write`` sink exists, so it can admit nothing
+      the two columns above do not (verified: 0 rows over the 1,179 projected
+      protocol-1 rows carry a non-empty ``writer_selectors`` without a proven
+      write or sink). Reading it would also drag L-14's fabricated
+      ``keccak("fallback()")[:4]`` values (15 fallback/receive rows) into a
+      selection decision for no recall at all.
+
+    **Why ``state_changing IS FALSE`` alone is not the exclusion.**
+    ``tests/test_effective_function_mutability_columns.py``'s
+    ``test_a_state_write_only_filter_would_suppress_the_positive_control`` — W0-6's
+    own pin for whoever retargets this filter — ends "a sink-only filter is not
+    sufficient on its own, ``state_changing`` is", and a stricter reading of it
+    would drop every compiler-typed view outright. It is not taken, for a reason
+    that is this effort's whole thesis: ``view``/``pure`` is a proof about STATE
+    MUTATION, and this filter's question is broader than that. The effects stage
+    also contradicts the AUTHORITY plane (§9 direction 3 — it is the only stage
+    that calls as a resolved principal), and a gated view can carry a caller-set
+    claim a probe would falsify. Using a mutation proof to assert "there is
+    nothing here to observe" is the same over-reach in miniature. So the
+    exclusion requires the compiler AND the extractor to agree: ``state_changing``
+    is the discriminator that keeps ``sweepDust`` (proven actor, ``state_writes =
+    []``) in, via the ``TRUE`` arm, and it can only help drop a row when both
+    evidence lists are proven empty beside it. Measured cost of the choice on the
+    local slice: exactly ONE row differs — ``shouldSubmitReport(address)``
+    (function_id 2344, a gated view with one ``external_call`` sink), which stays
+    a candidate and plans 0 probes, so the fork budget is untouched either way.
+    That is the same single row the sink ground sole-admits, which is the honest
+    size of this choice today: one candidate, and 115 more public rows of the same
+    shape that filter (c) drops anyway.
+
+    Origin-agnostic on purpose: ``sinks``/``state_writes`` carry a modifier's
+    ``origin='guard'`` facts as well as body ones, and ``effect_targets`` filtered
+    those out. A probe executes the modifiers too, so a guard-origin write is
+    state the simulation really does change; and the difference only ever ADMITS
+    (11 of the 49 projected new rows), which is the direction that cannot publish
+    a false absence.
+    """
+    return or_(
+        _evidence_proven_present(EffectiveFunction.state_writes),
+        _evidence_proven_present(EffectiveFunction.sinks),
+        EffectiveFunction.state_changing.is_(True),
+        _evidence_not_determined(EffectiveFunction.state_writes),
+        _evidence_not_determined(EffectiveFunction.sinks),
+        EffectiveFunction.state_changing.is_(None),
+    )
+
+
 def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = None):
     """The §6 filter cascade as one query.
 
-    (a) has a sink   — ``array_length(effect_targets, 1) > 0`` (there is no
-        ``sinks`` column; the sink is the state-write target list).
+    (a) has something to simulate — the W0-6 state-write evidence plane, three
+        states kept apart; see :func:`_has_effect_evidence` for the input-shape
+        table. NOT ``effect_targets``, which conflated a proven write with a
+        call head.
     (c) gated over public — ``authority_public = false``, EXCEPT a public
         function carrying ``flow.out`` or ``supply.mint``.
 
@@ -937,7 +1097,7 @@ def _cascade_rows(session: Session, protocol_id: int, scope: JobScope | None = N
     """
     where = [
         Contract.protocol_id == protocol_id,
-        func.array_length(EffectiveFunction.effect_targets, 1) > 0,
+        _has_effect_evidence(),
         # Deliberately still keyed on the BOOL, not the new three-state
         # ``authority_openness``: this predicate selects the *candidate* set, so
         # a not-determined authority must be admitted exactly as a witnessed

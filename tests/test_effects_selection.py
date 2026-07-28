@@ -13,9 +13,10 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -37,6 +38,8 @@ from db.models import (
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.effects.selection import (
     JobScope,
+    _has_effect_evidence,
+    _proven_array_len,
     _token_holdings_by_contract,
     build_authority_graph,
     select_candidates,
@@ -65,6 +68,12 @@ def _contract(session: Session, protocol_id: int, addr: str, **kw) -> Contract:
     return c
 
 
+#: Sentinel for "this test does not set that mutability column", so the default
+#: stays SQL NULL (not-determined) — the shape every row written before W0-6's
+#: columns carries, and the shape 1,773/1,773 local rows carry today.
+_UNSET = object()
+
+
 def _fn(
     session: Session,
     contract_id: int,
@@ -75,6 +84,10 @@ def _fn(
     claims=None,
     authority_public: bool = False,
     deployment_address: str | None = None,
+    state_changing: bool | None = None,
+    state_writes: Any = _UNSET,
+    sinks: Any = _UNSET,
+    writer_selectors: list[str] | None = None,
 ) -> EffectiveFunction:
     f = EffectiveFunction(
         contract_id=contract_id,
@@ -84,7 +97,17 @@ def _fn(
         claims=claims,
         authority_public=authority_public,
         deployment_address=deployment_address,
+        state_changing=state_changing,
+        writer_selectors=writer_selectors,
     )
+    # ``none_as_null=True`` on the two JSONB columns means passing ``None``
+    # explicitly is the same SQL NULL as never setting them; the sentinel keeps
+    # "proven none" (``[]``) tellable from "not determined" in the CALL, which is
+    # the whole point of the columns.
+    if state_writes is not _UNSET:
+        f.state_writes = state_writes
+    if sinks is not _UNSET:
+        f.sinks = sinks
     session.add(f)
     session.flush()
     return f
@@ -144,19 +167,48 @@ def _principal(session: Session, function_id: int, addr: str) -> None:
 
 
 def test_cascade_filters_sink_claim_and_public(db_session):
-    """Sink-empty dropped; claim-present dropped; public dropped; blank-gated kept.
+    """Proven-inert dropped; claim-present dropped; public dropped; blank-gated kept.
 
     The blank predicate MUST key on ``claims``, not ``effect_labels``: a row
     with a populated ``effect_labels`` but empty ``claims`` is still blank and
     must survive.
+
+    Filter (a) reads the W0-6 evidence plane, so "dropped for having nothing to
+    simulate" now requires the writer to have LOOKED: a compiler-typed view with
+    ``state_writes = []`` and ``sinks = []``. The two arms this test used to pin —
+    ``effect_targets`` NULL and ``[]`` with no evidence written at all — are
+    INVERTED below (``unmeasured``): they are not-determined and are kept.
     """
     p = _protocol(db_session, "cascade-proto")
     c = _contract(db_session, p.id, ADDR(0x1000))
 
-    kept = _fn(db_session, c.id, name="pause", selector="0xaaaa0001", effect_targets=["SLOT"])
-    # (a) no sink -> dropped
-    no_sink = _fn(db_session, c.id, name="view", selector="0xaaaa0002", effect_targets=None)
-    empty_sink = _fn(db_session, c.id, name="view2", selector="0xaaaa0003", effect_targets=[])
+    kept = _fn(
+        db_session,
+        c.id,
+        name="pause",
+        selector="0xaaaa0001",
+        effect_targets=["SLOT"],
+        state_changing=True,
+        state_writes=[{"var": "paused", "declared_type": "bool", "origin": "body"}],
+        sinks=[{"kind": "state_write", "target": "paused", "origin": "body"}],
+    )
+    # (a) the writer looked and proved there is nothing here -> dropped. Gated on
+    # purpose: (c) must not be what carries this exclusion.
+    inert_view = _fn(
+        db_session,
+        c.id,
+        name="view",
+        selector="0xaaaa0002",
+        effect_targets=None,
+        state_changing=False,
+        state_writes=[],
+        sinks=[],
+        writer_selectors=[],
+    )
+    # (a) INVERTED: the evidence plane was never written for this row (every row
+    # predating the W0-6 columns) -> not determined -> KEPT. Pre-D1 this row was
+    # dropped for the absence of a display field.
+    unmeasured = _fn(db_session, c.id, name="view2", selector="0xaaaa0003", effect_targets=[])
     # (b) confident claim present -> dropped
     claimed = _fn(
         db_session,
@@ -164,6 +216,9 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         name="mint",
         selector="0xaaaa0004",
         effect_targets=["SLOT"],
+        state_changing=True,
+        state_writes=[{"var": "totalSupply", "origin": "body"}],
+        sinks=[{"kind": "state_write", "target": "totalSupply", "origin": "body"}],
         claims=[{"claim_id": "supply_up", "tier": "fact"}],
     )
     # (c) public -> dropped
@@ -173,16 +228,237 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         name="poke",
         selector="0xaaaa0005",
         effect_targets=["SLOT"],
+        state_changing=True,
+        state_writes=[{"var": "x", "origin": "body"}],
+        sinks=[{"kind": "state_write", "target": "x", "origin": "body"}],
         authority_public=True,
     )
     db_session.commit()
 
     got = {cand.function_id for cand in select_candidates(db_session, p.id)}
     assert kept.id in got
-    assert no_sink.id not in got
-    assert empty_sink.id not in got
+    assert inert_view.id not in got
+    assert unmeasured.id in got
     assert claimed.id not in got
     assert public.id not in got
+
+
+def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
+    """The input-shape → candidacy table of ``_has_effect_evidence``, row by row.
+
+    Filter (a) used to read ``effect_targets``, a DISPLAY field concatenating
+    state-write variable names with dotted external-call heads: 501 of its 1,642
+    populated rows carry only call heads, so a populated value asserted a write
+    nothing had proven, and an empty one dropped the function on an absence of
+    measurement. Each arm below is a shape that decision got wrong, or must keep
+    getting right.
+
+    One arm per DISJUNCT, not one per narrative: the predicate is an ``or_`` of
+    six, and an arm only pins the disjunct that is the SOLE admitter of its shape.
+    The two ``_evidence_proven_present`` disjuncts are why ``sink_only_view`` and
+    ``write_only_view`` exist below — every other arm here is admitted by
+    ``state_changing IS TRUE`` or by not-determined, so with the sink/write ground
+    deleted this test would still pass and the projected plane would silently lose
+    116 filter-(a) rows and one gated candidate.
+    """
+    p = _protocol(db_session, "evidence-plane")
+    c = _contract(db_session, p.id, ADDR(0x1100))
+    sw = [{"var": "balanceOf", "declared_type": "mapping(address => uint256)", "origin": "body"}]
+
+    # PROVEN WRITE with an EMPTY display field (a write reached only through a
+    # modifier: ``effect_targets`` is body-origin only, ``state_writes`` is not).
+    guard_writer = _fn(
+        db_session,
+        c.id,
+        name="init",
+        selector="0xbb000001",
+        effect_targets=[],
+        state_changing=True,
+        state_writes=sw,
+        sinks=[{"kind": "state_write", "target": "balanceOf", "origin": "guard"}],
+    )
+    # The 156-function class as it MEASURES on the projected plane: gated,
+    # populated ``effect_targets``, not one proven state write, and
+    # ``state_changing = TRUE`` (147 of the 156; 8 are NULL, 1 is FALSE). It keeps
+    # its candidate slot, and the disjunct that keeps it is the ABI-mutability one
+    # — NOT the sink evidence. This arm therefore pins nothing about sinks; see
+    # ``sink_only_view`` for the 1-of-156 shape that does.
+    external_call_only = _fn(
+        db_session,
+        c.id,
+        name="harvest",
+        selector="0xbb000002",
+        effect_targets=["oracle.latestAnswer"],
+        state_changing=True,
+        state_writes=[],
+        sinks=[{"kind": "external_call", "target": "oracle.latestAnswer"}],
+    )
+    # Two witnesses disagree: the ABI proves mutability, the extractor found no
+    # sink (an inline-assembly writer, or a body the IR never entered). Unsettled
+    # is not inert.
+    abi_mutator = _fn(
+        db_session,
+        c.id,
+        name="asmWrite",
+        selector="0xbb000003",
+        effect_targets=[],
+        state_changing=True,
+        state_writes=[],
+        sinks=[],
+        writer_selectors=[],
+    )
+    # SOLE PIN for ``_evidence_proven_present(sinks)``. A compiler-typed view with
+    # a PROVEN ``external_call`` sink and a proven-empty write list: every other
+    # disjunct votes no (``state_changing`` is FALSE, both lists are arrays), so
+    # only the sink ground admits it. Modelled on a real row —
+    # ``shouldSubmitReport(address)`` (function_id 2344 locally, gated, one
+    # ``etherFiAdmin.lastHandledReportRefSlot`` call) — and that row is the ONE
+    # candidate the projected plane loses if this ground is deleted, out of 116
+    # filter-(a) rows of this exact shape (the other 115 are public and (c) drops
+    # them). Deleting it would mean "the compiler says no write, therefore there is
+    # nothing to observe", and a gated view whose answer moves protocol money is
+    # exactly the claim a probe falsifies.
+    sink_only_view = _fn(
+        db_session,
+        c.id,
+        name="shouldSubmitReport",
+        selector="0xbb000006",
+        effect_targets=["etherFiAdmin.lastHandledReportRefSlot"],
+        state_changing=False,
+        state_writes=[],
+        sinks=[{"kind": "external_call", "target": "etherFiAdmin.lastHandledReportRefSlot", "origin": "body"}],
+        writer_selectors=[],
+    )
+    # SOLE PIN for ``_evidence_proven_present(state_writes)``: a proven write
+    # beside a ``view`` ABI flag. Zero realised rows on the local slice and no
+    # producer path through ``_mutability_fields`` today, because L-15's
+    # view-contradiction rule nulls exactly this shape (state_changing FALSE +
+    # non-empty writes -> writes, sinks and selectors all withheld), which is why
+    # the ``withheld`` arm below is what the plane actually carries. Kept anyway,
+    # and asserted ADMITTED: the reachable writers that bypass that rule are the
+    # same ones L-13 names (``db/effect_cache.py``, hand backfills), and a proven
+    # write is proven whatever a second witness says — the disagreement is the
+    # reason to probe, never the reason to drop. Honest lower bound, not a
+    # firing proof.
+    write_only_view = _fn(
+        db_session,
+        c.id,
+        name="previewMint",
+        selector="0xbb000007",
+        effect_targets=[],
+        state_changing=False,
+        state_writes=sw,
+        sinks=[],
+        writer_selectors=[],
+    )
+    # L-15: the view-contradiction rule withholds sinks/writes (89 legitimate
+    # ``external_call`` sinks on 14 local rows). Withheld is not proven-absent.
+    withheld = _fn(
+        db_session,
+        c.id,
+        name="previewDeposit",
+        selector="0xbb000004",
+        effect_targets=["asset.balanceOf"],
+        state_changing=False,
+        state_writes=None,
+        sinks=None,
+        writer_selectors=None,
+    )
+    # The one proven-inert shape.
+    inert = _fn(
+        db_session,
+        c.id,
+        name="paused",
+        selector="0xbb000005",
+        effect_targets=[],
+        state_changing=False,
+        state_writes=[],
+        sinks=[],
+        writer_selectors=[],
+    )
+    # L-14: ``writer_selectors`` carries a FABRICATED ``keccak("fallback()")[:4]``
+    # on 15 fallback/receive rows. The filter does not read the column, so a
+    # fabricated selector cannot mint candidacy — this row is inert and stays out.
+    fabricated_selector = _fn(
+        db_session,
+        c.id,
+        name="fallback",
+        selector="",
+        effect_targets=[],
+        state_changing=False,
+        state_writes=[],
+        sinks=[],
+        writer_selectors=["0x552079dc"],
+    )
+    db_session.commit()
+
+    got = {cand.function_id for cand in select_candidates(db_session, p.id)}
+    assert guard_writer.id in got
+    assert external_call_only.id in got
+    assert abi_mutator.id in got
+    # The two proven-present grounds, each the only admitter of its arm.
+    assert sink_only_view.id in got
+    assert write_only_view.id in got
+    assert withheld.id in got
+    assert inert.id not in got
+    assert fabricated_selector.id not in got
+
+
+def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
+    """A non-array in ``state_writes`` / ``sinks`` reads as not-determined, and
+    cannot abort the query.
+
+    ``jsonb_array_length`` RAISES on a scalar, and one such row would kill
+    candidate selection for the whole protocol — the same trap
+    ``_carries_public_admission_claim`` documents. Both shapes are reachable
+    today: the jsonb scalar ``null`` from any writer that bypasses
+    ``none_as_null`` (``db/effect_cache.py:462`` is a live instance of that class,
+    L-13), and a malformed payload from a hand-written backfill. Neither is
+    evidence of emptiness, so both must ADMIT rather than raise or drop.
+    """
+    p = _protocol(db_session, "jsonb-shapes")
+    c = _contract(db_session, p.id, ADDR(0x1200))
+    written_null = _fn(db_session, c.id, name="a", selector="0xbc000001", effect_targets=[], state_changing=False)
+    malformed = _fn(db_session, c.id, name="b", selector="0xbc000002", effect_targets=[], state_changing=False)
+    db_session.commit()
+    # Bypass the ORM: ``none_as_null=True`` cannot produce either shape.
+    db_session.execute(
+        text("update effective_functions set state_writes='null'::jsonb, sinks='null'::jsonb where id=:i"),
+        {"i": written_null.id},
+    )
+    db_session.execute(
+        text("update effective_functions set state_writes='\"nope\"'::jsonb, sinks='{}'::jsonb where id=:i"),
+        {"i": malformed.id},
+    )
+    db_session.commit()
+
+    got = {cand.function_id for cand in select_candidates(db_session, p.id)}
+    assert {written_null.id, malformed.id} <= got
+
+    # And the predicate itself is total: no row evaluates to SQL NULL and drops
+    # out of the ``or_`` silently.
+    admitted = db_session.execute(
+        select(func.count())
+        .select_from(EffectiveFunction)
+        .where(EffectiveFunction.contract_id == c.id, _has_effect_evidence())
+    ).scalar_one()
+    assert admitted == 2
+
+    # The length guard is asserted on its OWN, not through the ``and_`` in
+    # ``_evidence_proven_present``: SQL does not promise to short-circuit an AND,
+    # so a cascade that only passes because the planner happened to evaluate the
+    # cheap ``jsonb_typeof`` test first is not a proof of totality. Unguarded,
+    # this SELECT raises ``cannot get array length of a scalar``.
+    lengths = db_session.execute(
+        select(
+            EffectiveFunction.id,
+            _proven_array_len(EffectiveFunction.state_writes),
+            _proven_array_len(EffectiveFunction.sinks),
+        )
+        .where(EffectiveFunction.contract_id == c.id)
+        .order_by(EffectiveFunction.id)
+    ).all()
+    assert [(sw, sk) for _id, sw, sk in lengths] == [(0, 0), (0, 0)]
 
 
 def test_a_public_payout_or_mint_is_admitted_to_the_candidate_set(db_session):
@@ -1002,16 +1278,26 @@ def test_appendix_a_funnel_on_dev_db():
         if not present:
             pytest.skip("etherfi (protocol_id=1) rows absent from dev DB")
 
-        # The historical blank-claim predicate count (sink + gated + no confident
-        # claim) — the exact set that used to be the whole candidate list.
+        # The blank-claim predicate count (evidence + gated + no confident claim) —
+        # the set the cascade's own filters (a) and (c) admit for full synthesis.
+        # Filter (a) is taken from the module rather than hand-copied as SQL: the
+        # copy was of ``array_length(effect_targets,1) > 0``, and keeping a second
+        # spelling of a retired conflation in a test is how a defect outlives its
+        # fix. What this asserts is the PARTITION (blank == the (a)+(c)+blank set,
+        # enrolled == the flow/supply claim carriers), not a frozen number.
         expected_blank = s.execute(
-            text(
-                "SELECT count(*) FROM effective_functions ef "
-                "JOIN contracts c ON c.id = ef.contract_id "
-                "WHERE c.protocol_id = 1 AND array_length(ef.effect_targets, 1) > 0 "
-                "AND ef.authority_public IS FALSE AND (ef.claims IS NULL OR "
-                "(CASE WHEN jsonb_typeof(ef.claims) = 'array' "
-                "THEN jsonb_array_length(ef.claims) ELSE 0 END) = 0)"
+            select(func.count())
+            .select_from(EffectiveFunction)
+            .join(Contract, Contract.id == EffectiveFunction.contract_id)
+            .where(
+                Contract.protocol_id == 1,
+                _has_effect_evidence(),
+                EffectiveFunction.authority_public.is_(False),
+                text(
+                    "(effective_functions.claims IS NULL OR (CASE WHEN "
+                    "jsonb_typeof(effective_functions.claims) = 'array' THEN "
+                    "jsonb_array_length(effective_functions.claims) ELSE 0 END) = 0)"
+                ),
             )
         ).scalar_one()
 
