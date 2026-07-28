@@ -71,8 +71,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     abi_selectors = {
         signature: selector
         for signature in signatures
-        if signature not in ("fallback()", "receive()")
-        and (selector := ctx.canonical_selector(signature)) is not None
+        if signature not in ("fallback()", "receive()") and (selector := ctx.canonical_selector(signature)) is not None
     }
 
     return {
