@@ -203,6 +203,12 @@ function collectActions(contracts) {
         kind: action.kind,
         severity: action.severity,
         weight: action.severity * importance,
+        // Set only when the claim that produced this severity carries a tier with
+        // no single-contract evidence, so the severity was attenuated for
+        // PROVENANCE and not because the action is less dangerous. Carried into
+        // the example meta below: an unexplained lower number reads as a smaller
+        // risk instead of weaker evidence.
+        provenanceTier: action.provenance_tier || null,
         principals: collectPrincipals(fn),
       });
     }
@@ -472,6 +478,10 @@ function actionExample(action, reason) {
     meta: [
       action.kind,
       principals ? `by ${principals}` : emptyMeta,
+      // Names the provenance when the claim behind this action carries no
+      // single-contract evidence (a cross-contract inference), so the reader is
+      // not left to read an attenuated severity as a smaller hazard.
+      action.provenanceTier === "policy_derived" ? "cross-contract inference" : null,
       shortAddress(address),
     ].filter(Boolean).join(" · "),
     contractAddress: address,

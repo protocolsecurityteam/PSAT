@@ -441,6 +441,35 @@ export function hasClaims(fn) {
 
 export const OBSERVED_TIER = "behavioral_observed";
 
+// Provenance weighting for the SCORE path, in one place.
+//
+// `behavioral_observed` is EXCLUDED by `scoreClaimsView` below — a deferral, not
+// a weighting (EFFECTS_RESOLUTION_SPEC §5.2 / §3a amendment).
+//
+// Among the static tiers the line that matters is single-contract evidence.
+// `standard_exact` (an exact ABI-selector match) and `idiom_structural` (a
+// structural idiom in this contract's own code) both have it. `policy_derived` is
+// defined at services/static/cross_contract.py:1-21 as having NONE: it is
+// inferred from a SIBLING contract's claim across a call join, and it was scored
+// identically to an exact selector match because everything except the observed
+// tier fell through untouched — the tier is computed, ranked, labelled and
+// rendered, then discarded at the one point where provenance strength decides
+// something.
+//
+// It is NOT dropped. Dropping it would take the action out of the candidate set
+// entirely and make the protocol read SAFER for a risk nobody disproved — the
+// adverse direction. It enters at its own rank relative to an exact match, read
+// off the TIER_RANK table that already exists rather than a number invented here.
+//
+// Realised effect on the local corpus: ZERO. `policy_derived` is 0 of 679 claims
+// because the producer has never fired (`workers/policy_worker` wires the whole
+// path; the one plausible silent-swallow was checked and ruled out). W0-7 fixture
+// 10 is the gate that exists precisely because no corpus row can be one.
+function tierSeverityFactor(tier) {
+  if (tier !== "policy_derived") return 1;
+  return TIER_RANK.policy_derived / TIER_RANK.standard_exact;
+}
+
 // Score-facing view of a function: the effects bridge mints observable labels at
 // the `behavioral_observed` tier, but the score must NOT consume verdicts yet
 // (EFFECTS_RESOLUTION_SPEC §5.2 / §3a amendment — deferred to
@@ -448,6 +477,10 @@ export const OBSERVED_TIER = "behavioral_observed";
 // effect_labels they alone projected, so a function scores exactly as it did
 // before the bridge labeled it (byte-identical). Display consumers keep the full
 // claim set; only the score path uses this view.
+//
+// The weaker static tiers are NOT stripped here — see `tierSeverityFactor`, which
+// is where a tier that carries no single-contract evidence stops entering the
+// score at the weight of one that does.
 export function scoreClaimsView(fn) {
   const claims = Array.isArray(fn?.claims) ? fn.claims : [];
   const observed = claims.filter((c) => c && c.tier === OBSERVED_TIER);
@@ -564,8 +597,16 @@ export function sentenceForClaims(fn) {
   return primary ? CLAIM_VOCAB[primary.claim_id].sentence : null;
 }
 
-// Joined chip line for the wider surfaces (graph meta, permissions chip):
-// every claim's sentence in priority order plus the strongest provenance tier.
+// Joined chip line for the wider surfaces (graph meta, permissions chip): every
+// claim's sentence in priority order plus its provenance.
+//
+// `tier` is the STRONGEST tier present, which is the right headline. On its own it
+// hid the weakest: a function carrying both a `standard_exact` claim and a
+// `policy_derived` one (a cross-contract inference with no single-contract
+// evidence) labelled as "standard" and the policy provenance disappeared from
+// every surface that reads this line. `weakestTier` is published beside it, and
+// the label names it whenever the two differ — the reader needs the weakest link,
+// not only the strongest.
 export function claimSummaryLine(fn) {
   const claims = claimsOf(fn);
   if (!claims.length) return null;
@@ -576,6 +617,7 @@ export function claimSummaryLine(fn) {
   const seen = new Set();
   const phrases = [];
   let bestTier = null;
+  let worstTier = null;
   for (const c of ordered) {
     const phrase = CLAIM_VOCAB[c.claim_id].sentence;
     if (!seen.has(phrase)) {
@@ -587,6 +629,12 @@ export function claimSummaryLine(fn) {
       (TIER_RANK[c.tier] || 0) > (TIER_RANK[bestTier] || 0)
     ) {
       bestTier = c.tier;
+    }
+    if (
+      worstTier === null ||
+      (TIER_RANK[c.tier] || 0) < (TIER_RANK[worstTier] || 0)
+    ) {
+      worstTier = c.tier;
     }
   }
   // Append the primary claim's witness qualifier to the PRIMARY claim's phrase,
@@ -605,11 +653,19 @@ export function claimSummaryLine(fn) {
     phrases[at] = `${phrases[at]} ${qualifier}`;
   }
   const tierLabel = TIER_LABEL[bestTier];
+  const weakLabel = TIER_LABEL[worstTier];
   const text = phrases.join(" · ");
+  // Both tiers named when they differ, so the weakest provenance on the line is
+  // never hidden behind the strongest.
+  const provenance =
+    tierLabel && weakLabel && worstTier !== bestTier
+      ? `${tierLabel} + ${weakLabel}`
+      : tierLabel;
   return {
     text,
     tier: bestTier,
-    label: tierLabel ? `${text} · ${tierLabel}` : text,
+    weakestTier: worstTier,
+    label: provenance ? `${text} · ${provenance}` : text,
   };
 }
 
@@ -1509,9 +1565,20 @@ export function sharedDeployerNote(principal) {
 const ROUTED_IN_SCORE = { kind: "asset_in", severity: 0.5 };
 
 function scoreOfClaim(c) {
-  const score = CLAIM_VOCAB[c.claim_id].score;
-  if (!score || c.claim_id !== "value_router") return score;
-  return routedOutFlows(c.witness).length ? score : ROUTED_IN_SCORE;
+  const base = CLAIM_VOCAB[c.claim_id].score;
+  const score =
+    !base || c.claim_id !== "value_router"
+      ? base
+      : routedOutFlows(c.witness).length
+        ? base
+        : ROUTED_IN_SCORE;
+  if (!score) return score;
+  const factor = tierSeverityFactor(c.tier);
+  if (factor === 1) return score;
+  // `provenance_tier` rides along so the score's own prose can say WHY the
+  // severity is attenuated. Without it the tooltip would report a weaker number
+  // with no reason, which reads as a weaker risk rather than weaker evidence.
+  return { ...score, severity: score.severity * factor, provenance_tier: c.tier };
 }
 
 // {kind, severity} for protocolScore — the strongest-severity scoreable claim.
