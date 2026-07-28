@@ -418,6 +418,29 @@ logger = logging.getLogger(__name__)
 # provable here in either direction. The bump is the fail-closed choice on an
 # unobservable: re-probing costs fork time, serving a verdict selected under retired
 # rules costs a witness.
+# Wave 4 Leg B's L-25 operand settle (``provenance._digest`` now content-derived,
+# so the PYTHONHASHSEED-dependent tie-break between competing computed sources is
+# gone) DOES move a witness input, and the decision not to bump is recorded here —
+# not only at ANALYSIS_SCHEMA_VERSION — because the moved field feeds this cache's
+# own probe: ``claims/matchers/_facts.param_constraints`` reads ``derived_from``
+# on the winning ``computed`` operand and mints the constraint fragment published
+# as ``target_constraint`` (flows) / ``destination_constraint``
+# (exec.arbitrary, delegatecall) — the v11 destination witness the probe shapes
+# its inner call from. Measured with ONE code side over base-vs-head trees so the
+# settle is the only variable: 12 verdicts on 6 units (cids 74/78/87/89/90/456,
+# ``claimFees(ERC20)`` param 0, value_flow and external_call modes) move
+# ``constrained``/``hash_commitment``/``derived_from`` -> ``not_determined``.
+# No bump, on three measured grounds: (a) every move retreats FROM a proof state
+# and no unit in the 88 moves toward a stronger one (the 18 slots that gain a
+# parameter origin — ``manage(address,bytes,uint256)`` param 0 on cids
+# 22/47/76/80-84/94/95 — produce zero verdict change); (b) the pre-fix
+# ``constrained`` was seed-luck, not evidence (four distinct base digests
+# observed for the deciding slot across seeds), so a cached row would hold a
+# coin-flip the settle merely stops re-rolling; (c) nothing persisted serves the
+# fragment — 0 local effective_functions.claims rows carry a constraint verdict,
+# and the settle leaves every effects artifact byte-identical (the full-leg
+# differential's effects diffs attribute to L-17's ``abi_selector`` addition and
+# the cid-561 identity-hash sink-order noise documented at v10).
 EFFECT_CACHE_SCHEMA_VERSION = 32
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than

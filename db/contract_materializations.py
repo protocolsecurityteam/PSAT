@@ -104,9 +104,15 @@ logger = logging.getLogger(__name__)
 # tie-breaking is now cross-process stable — ``provenance._digest`` derives
 # ``callee_args_digest`` from content instead of ``hash()``, so the operand
 # slots that previously flickered with PYTHONHASHSEED settle to one canonical
-# byte form. Not a shape change (no key appears or disappears); noted here per
-# the same-unreleased-version precedent rather than minting a version no row
-# was ever written under.
+# byte form. The tree SCHEMA gains and loses no key, but WHICH computed source
+# wins a slot changes, and ``derived_from`` on the winner is a witness input:
+# ``claims/matchers/_facts.param_constraints`` reads it to mint the
+# destination-constraint fragment. The measured verdict movement (12 verdicts
+# on 6 units, all retreating from a proof state) and the cache non-bump
+# decision are recorded at ``EFFECT_CACHE_SCHEMA_VERSION``
+# (db/effect_cache.py), where the probe-input consumers live. Noted per the
+# same-unreleased-version precedent rather than minting a version no row was
+# ever written under.
 ANALYSIS_SCHEMA_VERSION = 4
 
 
