@@ -5,6 +5,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+)
 from services.policy.principal_enrichment import build_principal_labels
 from utils.concurrency import RpcExecutor
 
@@ -939,6 +943,85 @@ def test_callee_edge_does_not_mint_controller_labels():
     assert "stakingmanager_calls_depositcontracteth2" in callee_labels
     assert "controller_value" not in callee_labels
     assert not any(label.startswith("controller_") for label in callee_labels)
+
+
+def test_unattributed_edge_does_not_mint_controller_labels():
+    """L-52: ``controller_value_unattributed`` must mint NO ``controller_*`` label.
+
+    The relation means the tracked controller's ``authority_provenance`` was
+    ABSENT — neither "gates callers" nor "is merely called" was answered. The
+    edge exists only so the address stays visible; it moves no authority, so
+    every label that asserts control has to stay off it.
+
+    Today that holds by *fall-through*: ``_graph_labels_for_node`` has no arm for
+    the relation. This test is the pin — a future arm added to that dispatch
+    (however reasonable-looking) silently re-admits an unattributed edge to the
+    controller vocabulary, which is the pre-Wave-2 over-claim this relation was
+    introduced to remove. Positive control: the sibling ``controller_value``
+    edge on the same graph still earns the full controller label set, so a
+    regression in the dispatch itself cannot pass by minting nothing at all.
+    """
+    target = "0x4444444444444444444444444444444444444444"
+    gate = "0x5555555555555555555555555555555555555555"
+    unattributed = "0x6666666666666666666666666666666666666666"
+
+    def _node(address: str, name: str) -> dict:
+        return {
+            "id": f"address:{address}",
+            "address": address,
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": name,
+            "contract_name": name,
+            "depth": 0 if address == target else 1,
+            "analyzed": address == target,
+            "details": {"address": address},
+            "artifacts": {},
+        }
+
+    resolved_graph = {
+        "nodes": [_node(target, "Vault"), _node(gate, "RoleRegistry"), _node(unattributed, "LegacyAuthority")],
+        "edges": [
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{gate}",
+                "relation": EDGE_RELATION_CONTROLLER_VALUE,
+                "label": "roleRegistry",
+                "source_controller_id": "external_contract:roleRegistry",
+                "notes": ["authority_provenance=caller_gate"],
+            },
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{unattributed}",
+                "relation": EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+                "label": "legacyAuthority",
+                "source_controller_id": "external_contract:legacyAuthority",
+                "notes": ["authority_provenance=absent"],
+            },
+        ],
+    }
+
+    payload = build_principal_labels(
+        {"contract_address": target, "contract_name": "Vault", "functions": []},
+        resolved_control_graph=resolved_graph,
+    )
+    principals = {item["address"]: item for item in payload["principals"]}
+
+    # Positive control — the attributed gate keeps the whole controller set.
+    gate_labels = set(principals[gate]["labels"])
+    assert "controller_value" in gate_labels
+    assert "controller_legacyauthority" not in gate_labels
+    assert "controller_roleregistry" in gate_labels
+
+    # The pin: not-determined provenance earns no control vocabulary at all.
+    # ``call_target`` is equally forbidden — it is the OTHER proven answer, and
+    # the relation exists precisely because neither was proven.
+    unattributed_labels = set(principals[unattributed]["labels"])
+    assert not any(label.startswith("controller_") for label in unattributed_labels)
+    assert "controller_value" not in unattributed_labels
+    assert "authority_controller" not in unattributed_labels
+    assert "owner_controller" not in unattributed_labels
+    assert "call_target" not in unattributed_labels
 
 
 def test_authority_roles_present_with_none_does_not_crash_enrichment():
