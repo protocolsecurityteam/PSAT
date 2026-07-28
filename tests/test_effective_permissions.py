@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -820,7 +820,9 @@ def test_artifact_carries_openness_for_a_resolver_capability():
             _effect("asm()", targets=["paused"], labels=["pause_toggle"]),
         ),
     )
-    by_name = {fn["function"]: fn for fn in payload["functions"]}
+    by_name: dict[str, dict[str, Any]] = {
+        cast("dict[str, Any]", fn)["function"]: cast("dict[str, Any]", fn) for fn in payload["functions"]
+    }
 
     # The key must be PRESENT on every record — its absence is a fourth state.
     for name in ("gated()", "timed()", "asm()"):
@@ -868,7 +870,9 @@ def test_artifact_carries_openness_for_a_policy_minted_capability():
             "guard_extraction_uncertain": ["gated(address)"],
         },
     )
-    by_name = {fn["function"]: fn for fn in payload["functions"]}
+    by_name: dict[str, dict[str, Any]] = {
+        cast("dict[str, Any]", fn)["function"]: cast("dict[str, Any]", fn) for fn in payload["functions"]
+    }
 
     assert "authority_openness" in by_name["sweep(address)"]
     assert by_name["sweep(address)"]["status"] == "public"
