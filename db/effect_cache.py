@@ -402,7 +402,23 @@ logger = logging.getLogger(__name__)
 # probe-visible ``gate_ref`` derives from leaf authority_role and so cold-misses
 # rather than serving stale, and every local cache row predates v21 anyway. Noted
 # here per the v10/v20 precedent rather than minting a version nothing can serve.
-EFFECT_CACHE_SCHEMA_VERSION = 31
+# v32 (Wave 3 D1): the CANDIDATE POPULATION changed. ``selection._has_effect_evidence``
+# replaced ``array_length(effect_targets,1) > 0`` with the W0-6 evidence plane, so the
+# stage now probes every row whose state-write evidence is NOT DETERMINED and every
+# ABI-mutating entry point whose sinks the IR could not see (+49 of 1,179 on the local
+# protocol-1 slice once that plane is written; 0 removed). Two honest halves, kept
+# apart: (a) the newly admitted rows have no v31 verdict of their own, so for them the
+# bump changes nothing — a cold miss either way; (b) they enter the SAME
+# ``behavior_hash`` space as the rows already cached, and their admission ground is a
+# class no v31 probe ever ran under (no proven sink at all, or evidence withheld), so a
+# v31 row reached under the narrower population would be transferred onto a function
+# selected by different rules. Unlike v30/v31 no mechanism was demonstrated by which a
+# stored v31 PAYLOAD becomes false — the local plane cannot exhibit a hit at either
+# revision (all 150 rows carry ``analysis_schema_version=5``), so the claim is not
+# provable here in either direction. The bump is the fail-closed choice on an
+# unobservable: re-probing costs fork time, serving a verdict selected under retired
+# rules costs a witness.
+EFFECT_CACHE_SCHEMA_VERSION = 32
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
