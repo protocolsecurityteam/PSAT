@@ -501,7 +501,11 @@ def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysis
             return "beyond_depth_horizon"
         return None
     if resolved_type and resolved_type != "unknown":
-        return "not_a_contract"
+        # ``not_analyzable``, not ``not_a_contract``: the test is membership of
+        # ANALYZABLE_TYPES, and the largest population outside it is Gnosis
+        # Safes (230 of the local corpus's 1,236), which ARE contracts. The old
+        # token stated something literally false about every one of them.
+        return "not_analyzable"
     return None
 
 

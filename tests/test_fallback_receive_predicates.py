@@ -149,3 +149,45 @@ def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signatur
 
     assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
     assert _abi_signature_and_selector("contribute()", {})[1] == "0xd7bb99ba"
+
+
+def test_no_named_function_can_receive_the_selectorless_sentinel():
+    """L-72: the ``""`` sentinel is reserved for a PROVEN absence of a selector.
+
+    The ledger recorded two named functions (``alertBatchMetadataUpdate``,
+    ``alertMetadataUpdate``) as carrying ``selector = ''`` beside well-formed ABI
+    signatures. That does not reproduce — no row in any local database carries
+    an empty or NULL selector, and both functions hold their real keccak — but
+    the invariant it asks for was only pinned by a single unlowered example. Pin
+    it over the shapes instead, because ``''`` on a named function re-opens the
+    L-27 identity collision: ``_selector_key`` deliberately folds ``None`` onto
+    ``""``, so a named function landing there shares an identity with the
+    contract's ``fallback``/``receive`` and inherits its observed claims.
+
+    ``fallbackHandler()`` is the discriminating control: it is the reason this
+    recognition must stay signature-EXACT and can never become a prefix or
+    substring test on "fallback"/"receive".
+    """
+    named = [
+        "alertMetadataUpdate(uint256)",
+        "alertBatchMetadataUpdate(uint256,uint256)",
+        # Named functions whose names embed the selectorless keywords.
+        "fallbackHandler()",
+        "receiveELRewards()",
+        "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)",
+        # Unlowered: not-determined, which is ``None`` — a different answer.
+        "setAuthority(IFoo.Bar)",
+    ]
+    for signature in named:
+        selector = _abi_signature_and_selector(signature, {})[1]
+        assert selector != "", f"{signature} was handed the proven-no-selector sentinel"
+        assert selector is None or selector.startswith("0x")
+
+    # Positive controls, so a helper that returned ``None`` for everything could
+    # not satisfy the assertions above.
+    assert _abi_signature_and_selector("alertMetadataUpdate(uint256)", {})[1] == "0x6800a4f4"
+    assert _abi_signature_and_selector("fallbackHandler()", {})[1] == "0xeed2f252"
+    assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
+    # Negative control: the two signatures that DO earn the sentinel still do.
+    assert _abi_signature_and_selector("fallback()", {})[1] == ""
+    assert _abi_signature_and_selector("receive()", {})[1] == ""

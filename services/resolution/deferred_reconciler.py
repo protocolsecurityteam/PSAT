@@ -48,6 +48,15 @@ Safety properties
   selected again.
 * **No double work.** A job with a re-analysis already queued/processing
   for its address is skipped.
+* **Reachable.** ``contracts.job_id`` is ``ON DELETE SET NULL`` and every stage
+  finds its contract through it, so deleting a job strands that contract's rows
+  outside the reconciler's reach permanently (L-12). Orphaned contracts are
+  selected on their own ``(address, chain)`` identity and their linkage is
+  REPAIRED before the re-enqueue, because the policy stage writes rows for
+  ``Contract.job_id == job.id`` and would otherwise re-run and write nothing.
+  Orphans with no job at their ``(address, chain)`` at all cannot be converged
+  from here — their artifacts and sources went with the deleted job — so they are
+  counted and logged instead of silently skipped.
 """
 
 from __future__ import annotations
@@ -55,12 +64,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterator
 
-from sqlalchemy import Text, cast, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Text, and_, cast, exists, func, select
+from sqlalchemy.orm import Session, aliased
 
 from db.jsonb import jsonb_has_payload
 from db.models import Contract, EffectiveFunction, IndexedEventCursor, IndexedEventLog, Job, JobStage, JobStatus
 from services.resolution.role_store_standards import all_topic0s
+from utils.chains import UnknownChainError, chain_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +107,114 @@ def _iter_deferred_authorities(node: Any) -> Iterator[str]:
     signer = node.get("signer")
     if isinstance(signer, dict):
         yield from _iter_deferred_authorities(signer)
+
+
+def _chain_name_for(chain_id: int) -> str | None:
+    """Mainnet-coalesced chain name for ``chain_id``, or ``None`` when the id is
+    not in the registry.
+
+    ``contracts`` has no ``chain_id`` — its only scoping key is the string
+    ``chain``, which persisted NULL for mainnet on legacy rows. Coalescing
+    NULL→``'ethereum'`` lets a chain-1 pass match those rows while a
+    non-mainnet pass (its own name ≠ ``'ethereum'``) stays isolated; mirrors
+    ``db.queue._mainnet_coalesced_chain``. ``None`` makes the caller skip the
+    contract-keyed route entirely rather than guess a chain.
+    """
+    try:
+        return chain_by_id(chain_id).name.lower()
+    except UnknownChainError:
+        return None
+
+
+def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
+    """Marker-bearing ``effective_functions`` rows whose contract is ORPHANED —
+    ``contracts.job_id IS NULL`` — paired with the job that can rewrite them.
+
+    ``contracts.job_id`` is ``ON DELETE SET NULL``, so deleting a job (the admin
+    routes do) detaches its contract permanently. Every stage finds "its"
+    contract by ``Contract.job_id == job.id``, so an orphaned contract's rows are
+    unreachable to the main query below and its deferred authority NEVER
+    resolves: a permanent index-cold capability on the published surface.
+
+    The pair is keyed on the system's own contract identity — ``(address,
+    chain)``, the ``uq_contract_address_chain`` unique key — never on the bare
+    address (handoff §3): a twin deployment of the same address on another chain
+    is a different contract and must not be re-enqueued by this chain's pass.
+
+    ``NOT EXISTS`` on the job's own contract is what keeps this to exactly the
+    orphaned class and makes the adoption in the caller safe. A job that already
+    owns a contract row is never a candidate, so the ``copy_static_cache``
+    reassignment case (where the row legitimately belongs to a later target job)
+    cannot be stolen back, and no job can end up with two contracts.
+    """
+    chain_name = _chain_name_for(chain_id)
+    if chain_name is None:
+        return []
+    owned = aliased(Contract)
+    return list(
+        session.execute(
+            select(Job.id, Job.address, EffectiveFunction.capability_expr, Contract.id)
+            .select_from(Contract)
+            .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+            .join(
+                Job,
+                and_(
+                    Job.address.isnot(None),
+                    func.lower(Job.address) == func.lower(Contract.address),
+                    Job.chain_id == chain_id,
+                ),
+            )
+            .where(Contract.job_id.is_(None))
+            .where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
+            .where(Job.status == JobStatus.completed)
+            .where(Job.stage == JobStage.done)
+            .where(jsonb_has_payload(EffectiveFunction.capability_expr))
+            .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
+            .where(~exists(select(owned.id).where(owned.job_id == Job.id)))
+            .order_by(Job.created_at.desc(), Job.id)
+        ).all()
+    )
+
+
+def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
+    """How many orphaned contracts carry the marker with NO job at their
+    ``(address, chain)`` that could rewrite them — the residue this reconciler
+    still cannot converge, counted so it stops being silent.
+
+    Deleting a job deletes its artifacts and source files too, so these
+    contracts cannot be re-resolved from anything on disk: closing them takes a
+    fresh analysis job, which is a decision for an operator, not a background
+    pass. 2 contracts / 32 rows on the local corpus, and a lower bound (one
+    protocol, one chain).
+    """
+    chain_name = _chain_name_for(chain_id)
+    if chain_name is None:
+        return 0
+    candidate = aliased(Job)
+    owned = aliased(Contract)
+    return int(
+        session.execute(
+            select(func.count(func.distinct(Contract.id)))
+            .select_from(Contract)
+            .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+            .where(Contract.job_id.is_(None))
+            .where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
+            .where(jsonb_has_payload(EffectiveFunction.capability_expr))
+            .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
+            .where(
+                ~exists(
+                    select(candidate.id)
+                    .where(candidate.address.isnot(None))
+                    .where(func.lower(candidate.address) == func.lower(Contract.address))
+                    .where(candidate.chain_id == chain_id)
+                    .where(candidate.status == JobStatus.completed)
+                    .where(candidate.stage == JobStage.done)
+                    .where(~exists(select(owned.id).where(owned.job_id == candidate.id)))
+                )
+            )
+        ).scalar()
+        or 0
+    )
 
 
 def _authority_backfilled(session: Session, chain_id: int, event_address: str) -> bool:
@@ -178,6 +296,37 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         _addr, existing = by_job.setdefault(job_id, (address, set()))
         existing.update(authorities)
 
+    # Second route: marker rows on ORPHANED contracts (``contracts.job_id IS
+    # NULL``), which the join above cannot reach at all. Their linkage is
+    # repaired below, before the re-enqueue — reaching them without repairing is
+    # worse than not reaching them, see ``adopt``.
+    #
+    # ``setdefault`` deliberately does NOT overwrite: a job already selected by
+    # the linked route owns a contract, so it can never be an orphan candidate
+    # (``_orphaned_marker_rows`` requires the job to own none), and the ordering
+    # inside the orphan query picks the newest candidate job per contract.
+    adopt: dict[Any, int] = {}
+    for job_id, address, capability_expr, contract_id in _orphaned_marker_rows(session, chain_id):
+        authorities = set(_iter_deferred_authorities(capability_expr))
+        if not authorities:
+            continue
+        _addr, existing = by_job.setdefault(job_id, (address, set()))
+        existing.update(authorities)
+        adopt.setdefault(job_id, contract_id)
+
+    stranded = _unreachable_orphan_contracts(session, chain_id)
+    if stranded:
+        # Not a sentinel that mitigates anything — a count that stops the
+        # condition being invisible. These contracts have no job at their
+        # (address, chain), so nothing here can converge them.
+        logger.warning(
+            "deferred-resolution reconciler: %s orphaned contract(s) on chain %s carry index-cold "
+            "deferrals with no completed job at their (address, chain) — a fresh analysis is required "
+            "to converge them",
+            stranded,
+            chain_id,
+        )
+
     reenqueued = 0
     for job_id, (address, authorities) in by_job.items():
         if reenqueued >= limit:
@@ -193,6 +342,32 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             continue
         if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
             continue
+        orphan_contract_id = adopt.get(job_id)
+        if orphan_contract_id is not None:
+            contract = session.get(Contract, orphan_contract_id)
+            # Re-check under the same transaction that produced the plan: the row
+            # must still be orphaned and the job must still own nothing.
+            if contract is None or contract.job_id is not None:
+                continue
+            if session.execute(select(Contract.id).where(Contract.job_id == job.id).limit(1)).first() is not None:
+                continue
+            # Repair the linkage, do not merely reach past it. The policy stage
+            # writes ``effective_functions`` for ``Contract.job_id == job.id``;
+            # re-enqueueing an address-matched job WITHOUT this would make that
+            # stage log "no Contract row for job; wrote zero DB rows", leave the
+            # marker in place, and hand the same job back to the next pass
+            # forever — the thrash-free property depends on the re-run clearing
+            # the marker. So the choice is repair-and-re-enqueue or leave it
+            # alone; reach-without-repair is a re-enqueue storm plus a
+            # guaranteed no-op.
+            contract.job_id = job.id
+            logger.info(
+                "deferred-resolution reconciler re-linked orphaned contract %s (%s) to job %s before "
+                "re-enqueue; contracts.job_id had been cleared by a job deletion",
+                orphan_contract_id,
+                contract.address,
+                job_id,
+            )
         _requeue_policy(job, "Re-resolving: durable event index caught up for a deferred authority")
         reenqueued += 1
         logger.info(

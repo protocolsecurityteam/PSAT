@@ -18,9 +18,19 @@ ResolvedNodeType = Literal["contract", "principal"]
 # walk from a property of the address.
 ResolvedAnalysisState = Literal[
     "analyzed",
-    # Not an analyzable type (eoa / safe / zero / off-chain witness / …).
-    # Analysis was never applicable, so its absence says nothing adverse.
-    "not_a_contract",
+    # Not an analyzable type (eoa / safe / zero / off-chain witness / …) — i.e.
+    # ``resolved_type not in ANALYZABLE_TYPES``. Analysis was never applicable,
+    # so its absence says nothing adverse.
+    "not_analyzable",
+    # (Renamed from ``not_a_contract`` at the Wave-4 closeout, L-34. The old
+    # spelling said something literally false about the largest population it
+    # covered — a Gnosis Safe IS a contract, it is just not an ANALYZABLE type.
+    # No legacy member is kept because nothing has ever persisted either token:
+    # ``control_graph_nodes.analysis_state`` is SQL NULL on 2,506/2,506 local rows
+    # and ABSENT on 2,531/2,531 nodes across all 107 stored
+    # ``resolved_control_graph`` artifacts, and the migration that adds the
+    # column has never been deployed. The rename therefore lands before the
+    # first value is ever written.)
     # Materialization ran and failed. ``details.materialize_error`` carries why.
     "attempt_failed",
     # An analyzable contract the BFS never reached: its depth exceeded

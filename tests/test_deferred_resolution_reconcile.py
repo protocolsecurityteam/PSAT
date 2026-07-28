@@ -374,6 +374,312 @@ def test_reconciler_does_not_select_off_chain_twin(db_session):
     assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
 
 
+# ---------------------------------------------------------------------------
+# Half 2b — the ORPHANED-CONTRACT class (L-12). ``contracts.job_id`` is
+# ``ON DELETE SET NULL`` and every stage finds its contract through that column,
+# so deleting a job strands its contract's rows outside the reconciler's reach
+# for good: the deferred authority never resolves and the index-cold capability
+# is published forever. 2 contracts / 32 marker rows on the local
+# production-shaped DB (a LOWER bound — one protocol, one chain), which is why
+# these tests pin the SHAPE and not the number.
+# ---------------------------------------------------------------------------
+
+
+def _seed_orphaned_contract(
+    db_session,
+    *,
+    address: str,
+    capability_expr: dict,
+    chain: str = "ethereum",
+    with_job: bool = True,
+) -> Job | None:
+    """A marker-bearing contract whose ``job_id`` is NULL — the exact state a job
+    deletion leaves behind — optionally with a completed job still present at the
+    same ``(address, chain)``."""
+    db_session.query(Contract).filter(func.lower(Contract.address) == address.lower()).delete()
+    db_session.query(Job).filter(func.lower(Job.address) == address.lower()).delete()
+    db_session.commit()
+    job = None
+    if with_job:
+        job = Job(address=address, status=JobStatus.completed, stage=JobStage.done, request={"chain": chain})
+        db_session.add(job)
+        db_session.flush()
+    contract = Contract(address=address, chain=chain, job_id=None)
+    db_session.add(contract)
+    db_session.flush()
+    db_session.add(
+        EffectiveFunction(
+            contract_id=contract.id,
+            function_name="pause",
+            abi_signature="pause()",
+            selector=_PAUSE,
+            capability_expr=capability_expr,
+        )
+    )
+    db_session.commit()
+    return job
+
+
+@requires_postgres
+def test_orphaned_contract_marker_rows_are_reachable_at_all(db_session):
+    """The reachability half, stated as its own assertion: before the fix the
+    inner join on ``Contract.job_id == Job.id`` returned NOTHING for these rows,
+    whatever the cursor state. Pins the shape (a (job, orphan contract) pair is
+    produced), not the corpus count."""
+    from services.resolution.deferred_reconciler import _orphaned_marker_rows
+
+    authority = "0x" + "a7" * 20
+    addr = "0x" + "b8" * 20
+    job = _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority))
+    assert job is not None
+
+    # Control: the pre-fix query shape sees zero rows for this contract.
+    linked = db_session.execute(
+        select(func.count())
+        .select_from(Contract)
+        .join(Job, Contract.job_id == Job.id)
+        .where(func.lower(Contract.address) == addr.lower())
+    ).scalar()
+    assert linked == 0
+
+    rows = _orphaned_marker_rows(db_session, 1)
+    pairs = {(row[0], row[3]) for row in rows}
+    contract_id = db_session.execute(select(Contract.id).where(func.lower(Contract.address) == addr.lower())).scalar()
+    assert (job.id, contract_id) in pairs
+
+
+@requires_postgres
+def test_orphaned_contract_is_relinked_and_reenqueued_once_warm(db_session):
+    """The fix end to end. Reaching the rows is not enough: the policy stage
+    writes ``effective_functions`` for ``Contract.job_id == job.id``, so the
+    linkage is REPAIRED before the re-enqueue. Without that repair the re-run
+    would write zero rows, leave the marker in place, and hand the same job back
+    on every subsequent pass."""
+    authority = "0x" + "a9" * 20
+    addr = "0x" + "ba" * 20
+    job = _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority))
+    assert job is not None
+
+    # Still cold → the orphan route inherits the same thrash guard.
+    _seed_role_cursors(db_session, authority, backfill_complete=False)
+    db_session.commit()
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    assert job.stage == JobStage.done
+
+    for cur in db_session.execute(
+        select(IndexedEventCursor).where(IndexedEventCursor.event_address == authority.lower())
+    ).scalars():
+        cur.backfill_complete = True
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
+    assert job.status == JobStatus.queued and job.stage == JobStage.policy
+
+    # The linkage is repaired, so the policy re-run will actually rewrite the
+    # marker rows instead of logging "no Contract row for job".
+    contract = db_session.execute(select(Contract).where(func.lower(Contract.address) == addr.lower())).scalar_one()
+    assert contract.job_id == job.id
+
+    # Idempotent: the job is no longer completed/done.
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+
+
+@requires_postgres
+def test_orphan_with_no_job_at_its_address_is_left_alone(db_session):
+    """The residue, and the reason this is not a re-enqueue storm. Deleting a job
+    deletes its artifacts and source files too, so a contract with no job at its
+    ``(address, chain)`` cannot be re-resolved from anything on disk. Repeated
+    passes must stay at zero rather than churning a job that would write nothing.
+
+    This is the LOCAL CORPUS's actual shape: both orphaned marker-bearing
+    contracts (79 AccountantWithRateProviders, 640 TellerWithMultiAssetSupport)
+    have no job at their address at all, so the local 32 rows stay unconverged —
+    stated in the commit, not papered over here."""
+    authority = "0x" + "ab" * 20
+    addr = "0x" + "bc" * 20
+    _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority), with_job=False)
+    _seed_role_cursors(db_session, authority, backfill_complete=True)
+    db_session.commit()
+
+    from services.resolution.deferred_reconciler import _unreachable_orphan_contracts
+
+    for _ in range(3):
+        assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    assert (
+        db_session.execute(select(Contract.job_id).where(func.lower(Contract.address) == addr.lower())).scalar() is None
+    )
+
+    # The residue is COUNTED rather than silently skipped, and the counter
+    # discriminates: giving the contract a completed job at its (address, chain)
+    # moves it out of the stranded set and into the convergeable one.
+    stranded_before = _unreachable_orphan_contracts(db_session, 1)
+    assert stranded_before >= 1
+    db_session.add(Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"}))
+    db_session.commit()
+    assert _unreachable_orphan_contracts(db_session, 1) == stranded_before - 1
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
+
+
+@requires_postgres
+def test_orphan_adoption_never_steals_a_contract_from_a_job_that_has_one(db_session):
+    """The guard that keeps the new route to EXACTLY the orphaned class. A
+    candidate job that already owns a contract row is not a candidate: that is
+    the ``copy_static_cache`` reassignment shape, where the row legitimately
+    belongs to the job it points at, and adopting would give one job two
+    contracts."""
+    authority = "0x" + "ad" * 20
+    orphan_addr = "0x" + "be" * 20
+    other_addr = "0x" + "bf" * 20
+
+    db_session.query(Contract).filter(
+        func.lower(Contract.address).in_([orphan_addr.lower(), other_addr.lower()])
+    ).delete()
+    db_session.query(Job).filter(func.lower(Job.address) == orphan_addr.lower()).delete()
+    db_session.commit()
+
+    job = Job(address=orphan_addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
+    db_session.add(job)
+    db_session.flush()
+    # The job already owns a DIFFERENT contract row.
+    owned = Contract(address=other_addr, chain="ethereum", job_id=job.id)
+    db_session.add(owned)
+    orphan = Contract(address=orphan_addr, chain="ethereum", job_id=None)
+    db_session.add(orphan)
+    db_session.flush()
+    db_session.add(
+        EffectiveFunction(
+            contract_id=orphan.id,
+            function_name="pause",
+            abi_signature="pause()",
+            selector=_PAUSE,
+            capability_expr=_deferred_cap(authority),
+        )
+    )
+    _seed_role_cursors(db_session, authority, backfill_complete=True)
+    db_session.commit()
+
+    # Pinned at the QUERY level too, not only at the outcome: the candidate pair
+    # must never be planned. Without this arm the query guard and the
+    # same-transaction re-check in the loop cover for each other, and neither is
+    # individually pinned.
+    from services.resolution.deferred_reconciler import _orphaned_marker_rows
+
+    assert all(row[3] != orphan.id for row in _orphaned_marker_rows(db_session, 1))
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    db_session.refresh(orphan)
+    assert orphan.job_id is None
+    assert job.stage == JobStage.done
+
+
+@requires_postgres
+def test_orphan_adoption_is_chain_scoped(db_session):
+    """``contracts`` has no ``chain_id`` — its only scoping key is the string
+    ``chain`` — so the orphan route keys on ``(address, chain)``, never the bare
+    address. A base-chain orphan must not be adopted by a chain-1 pass that finds
+    a chain-1 job at the same address; those are different deployments."""
+    authority = "0x" + "ae" * 20
+    addr = "0x" + "c1" * 20
+
+    db_session.query(Contract).filter(func.lower(Contract.address) == addr.lower()).delete()
+    db_session.query(Job).filter(func.lower(Job.address) == addr.lower()).delete()
+    db_session.commit()
+
+    eth_job = Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
+    db_session.add(eth_job)
+    db_session.flush()
+    base_orphan = Contract(address=addr, chain="base", job_id=None)
+    db_session.add(base_orphan)
+    db_session.flush()
+    db_session.add(
+        EffectiveFunction(
+            contract_id=base_orphan.id,
+            function_name="pause",
+            abi_signature="pause()",
+            selector=_PAUSE,
+            capability_expr=_deferred_cap(authority),
+        )
+    )
+    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    db_session.refresh(base_orphan)
+    assert base_orphan.job_id is None
+    assert eth_job.stage == JobStage.done
+
+
+@requires_postgres
+def test_two_candidate_jobs_adopt_the_orphan_exactly_once(db_session):
+    """The collapsed-inputs question asked of the new code itself: ``contracts``
+    is unique on ``(address, chain)``, so one orphan can have SEVERAL completed
+    contract-less jobs at its address. Exactly one may adopt it and be
+    re-enqueued; the other has no contract to write and must be skipped, not
+    handed a second claim on the same row."""
+    authority = "0x" + "c3" * 20
+    addr = "0x" + "c4" * 20
+
+    db_session.query(Contract).filter(func.lower(Contract.address) == addr.lower()).delete()
+    db_session.query(Job).filter(func.lower(Job.address) == addr.lower()).delete()
+    db_session.commit()
+
+    jobs = []
+    for _ in range(2):
+        job = Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
+        db_session.add(job)
+        db_session.flush()
+        jobs.append(job)
+    orphan = Contract(address=addr, chain="ethereum", job_id=None)
+    db_session.add(orphan)
+    db_session.flush()
+    db_session.add(
+        EffectiveFunction(
+            contract_id=orphan.id,
+            function_name="pause",
+            abi_signature="pause()",
+            selector=_PAUSE,
+            capability_expr=_deferred_cap(authority),
+        )
+    )
+    _seed_role_cursors(db_session, authority, backfill_complete=True)
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
+    db_session.refresh(orphan)
+    assert orphan.job_id in {j.id for j in jobs}
+    requeued = [j for j in jobs if j.stage == JobStage.policy]
+    assert len(requeued) == 1
+    assert requeued[0].id == orphan.job_id
+    # Exactly one contract row points at the winner, and none at the loser.
+    assert (
+        db_session.execute(select(func.count()).select_from(Contract).where(Contract.job_id == requeued[0].id)).scalar()
+        == 1
+    )
+
+
+@requires_postgres
+def test_orphan_route_ignores_a_non_deferred_external_check(db_session):
+    """True negatives stay negative on the new route too: an orphaned contract
+    whose external check carries no deferred marker is never re-enqueued, even
+    with a warm cursor on its target."""
+    target = "0x" + "af" * 20
+    addr = "0x" + "c2" * 20
+    plain = capability_to_dict(
+        CapabilityExpr.external_check_only(
+            ExternalCheck(target_address=target, target_call_selector="0xdeadbeef", extra={"basis": ["eip1271"]})
+        )
+    )
+    job = _seed_orphaned_contract(db_session, address=addr, capability_expr=plain)
+    assert job is not None
+    _seed_role_cursors(db_session, target, backfill_complete=True)
+    db_session.commit()
+
+    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+    contract = db_session.execute(select(Contract).where(func.lower(Contract.address) == addr.lower())).scalar_one()
+    assert contract.job_id is None
+    assert job.stage == JobStage.done
+
+
 @requires_postgres
 def test_reconciler_active_job_check_is_chain_scoped(db_session):
     # Same address deployed on two chains. The ethereum job's authority is warm on
