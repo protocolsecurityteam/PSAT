@@ -21,10 +21,26 @@ pragma solidity ^0.8.27;
 // window at all and must stay unresolved — it is etherfi's real shape).
 //
 // So this pair NOW discriminates, and on three states rather than two:
-//   * pausedUntil ⇒ (2592000, "guard_constant")   — the window is in the code
+//   * pausedUntil ⇒ (None, "not_determined")      — a clock DOES compare it, so the
+//                                                   freeze expires; the window is not
+//                                                   established (see below)
 //   * frozen      ⇒ (None, "no_time_reference")   — PROVEN indefinite: a lowered
 //                                                   guard reads it, no clock does
 //   * any latch no lowered leaf reads ⇒ (None, "not_determined")
+//
+// WAVE 4 (L-58): ``pausedUntil`` read ``(2592000, "guard_constant")`` here until the
+// harvest became side/operator-aware. Its guard is ``block.timestamp < pausedUntil +
+// MAX_PAUSE``, whose absorbed group is ``{latch, constant}`` — and the recorder sorts
+// both inner operands of an ADDITION *or* a SUBTRACTION into one list, keeping neither
+// the sign nor the side. So this source and ``block.timestamp < pausedUntil -
+// MAX_PAUSE`` (where MAX_PAUSE is a margin, not a window) leave byte-identical
+// evidence, and the blind harvest also published a LEAD TIME
+// (``block.timestamp + 3600 < pausedUntil`` → 3600) and a COOLDOWN offset
+// (``block.timestamp > pausedUntil + 300`` → 300) as freeze windows. The provable
+// shape — the clock and the latch inside ONE absorbed additive group, i.e. their time
+// difference, bounded by a constant on the other side — still resolves, from compiled
+// source, in ``tests/test_pause_duration_clock_opacity.py``. Stamping the additive
+// sign in the static plane is what would restore this contract's bound provably.
 // Only the middle one may render as "indefinite latch (no self-recovery bound)".
 // What this fixture still gates is a reader that INVENTS a bound — scraping a
 // constant by name, or letting one latch inherit the other's window — because that
@@ -63,10 +79,12 @@ contract TimedLatch {
         frozen = false;
     }
 
-    // The guard that makes the bound readable. It compiles to two leaves —
-    // {timestamp, pausedUntil} and {timestamp, MAX_PAUSE} — and neither carries all
-    // three facts in its OPERANDS; the second one's ``absorbed_operands`` carries
-    // the latch and MAX_PAUSE's resolved 2592000. See the header.
+    // It compiles to two leaves — {timestamp, pausedUntil} and {timestamp, MAX_PAUSE}
+    // — and neither carries all three facts in its OPERANDS; the second one's
+    // ``absorbed_operands`` carries the latch and MAX_PAUSE's resolved 2592000. That
+    // union is what made the constant READABLE; what it does not carry is whether
+    // MAX_PAUSE was ADDED to the latch or SUBTRACTED from it, which is what would make
+    // it a window rather than a margin. See the header (L-58).
     function transferTimed(address to, uint256 amount) external {
         require(block.timestamp > pausedUntil, "timed pause");
         require(block.timestamp < pausedUntil + MAX_PAUSE, "window closed");

@@ -254,6 +254,38 @@ def test_freeze_pause_indefinite_latch_fields_survive_as_none():
     assert observed["duration_bound_seconds"] is None
 
 
+def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
+    """L-58's CONTAINMENT PIN, scorer half.
+
+    ``duration_bound_seconds`` is a STATIC read of a guard constant and the fork
+    cross-check (warp ``bound + 1`` and re-probe) is the only thing that turns it into
+    a mitigation: the documented contract is "trust it as a severity REDUCER ONLY when
+    ``auto_expiry is True``". That containment is what keeps a fabricated constant —
+    the harvest published lead times and cooldown offsets as freeze windows until Wave
+    4 narrowed it — from ever scoring as a shorter freeze.
+
+    So the pin is on the PAIRING: whenever the projection forwards a bound it must
+    also forward the qualifier the witness recorded, in every one of its three states,
+    and it must forward ``duration_bound_source`` so ``None`` stays two facts. A future
+    edit that trims the keep-list to the number alone would leave a consumer unable to
+    apply the rule and unable to tell that it could not."""
+    for expiry in (True, False, None):
+        witness = {
+            "latch_flip": True,
+            "observed_blast_radius": ["freeze(uint256)"],
+            "auto_expiry": expiry,
+            "duration_bound_seconds": 3600,
+            "duration_bound_source": "guard_constant",
+        }
+        claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_FREEZE_PAUSE, tier=TIER_FORK, witness=witness))
+        assert claim is not None
+        observed = claim["witness"]["observed"]
+        assert observed["duration_bound_seconds"] == 3600
+        # Present, not defaulted: the key must exist even when its value is None.
+        assert "auto_expiry" in observed and observed["auto_expiry"] is expiry
+        assert observed["duration_bound_source"] == "guard_constant"
+
+
 def test_no_blast_verdict_mints_no_behavioral_claim():
     # The 58/65 no-blast verdicts take the fork unknown path — they must mint NO
     # behavioral claim (absent blast radius is an unproven lower bound, not a proven

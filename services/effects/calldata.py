@@ -1900,6 +1900,15 @@ _OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_c
 _SECONDS_CLOCK_KINDS = frozenset({"timestamp", "now"})
 _CLOCK_KINDS = frozenset({"timestamp", "now", "number"})
 
+# Comparison operators under which a constant BOUNDS ITS OTHER SIDE FROM ABOVE, keyed
+# by the slot the constant sits in (``operands`` is the comparison's two slots in IR
+# left-right order, which is what makes the question answerable at all). ``eq``/``ne``
+# and the unary ``truthy``/``falsy`` are deliberately absent: neither bounds anything.
+# Measured over the 5,089 persisted leaves in the local database: every one carries an
+# ``operator`` (lte 324, gte 225, lt 170, gt 88, plus the non-ordering kinds), so an
+# ABSENT operator is a hand-built leaf and is read as undecidable rather than defaulted.
+_CONSTANT_IS_UPPER_BOUND = {0: frozenset({"gt", "gte"}), 1: frozenset({"lt", "lte"})}
+
 
 def _absorption_recorded(tree: Any) -> bool:
     """Whether this tree's operand lists are known-complete for the additive shape.
@@ -1930,13 +1939,105 @@ def _absorption_recorded(tree: Any) -> bool:
     return isinstance(tree, dict) and tree.get("operand_absorption") == _OPERAND_ABSORPTION_RECORDED
 
 
+def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> int | None:
+    """The constant this comparison PROVES is a ceiling on the clock-to-latch gap, or
+    ``None`` when the comparison's shape does not establish one (L-58 / L-60).
+
+    The harvest used to take the max plausible constant out of
+    ``operands ∪ absorbed_operands``, blind to which SIDE of the comparison it sat on
+    and to the operator — so three shapes a compiler really produces published a
+    number that is not the freeze window at all, in the severity-REDUCING direction
+    (``duration_bound_seconds`` is read as a mitigation, gated on fork confirmation):
+
+        require(block.timestamp + 3600 < pausedUntil)   → 3600  = a LEAD TIME
+        require(block.timestamp > pausedUntil + 300)    → 300   = a COOLDOWN offset
+        require(block.timestamp - pausedUntil > 600)    → 600   = a MINIMUM elapsed
+
+    In all three the real expiry is a storage timestamp (etherfi's shape, which the
+    reader's own docstring says must be ``not_determined``).
+
+    ONE shape is decidable from what the static plane records, and it is the only one
+    admitted here: the comparison's two slots hold the CONSTANT on one side and the
+    collapsed representative of an additive group on the other, and that group holds
+    BOTH a seconds clock and the latch — i.e. the compared expression is the signed
+    time DIFFERENCE between the clock and the latch, and the constant is its bound.
+    Both subtraction orders are admissible (elapsed ``clock - latch`` and remaining
+    ``latch - clock`` bound the same gap by the same magnitude), which is what makes
+    this arm answerable without the sign the recorder does not keep. Compiled and
+    verified: ``block.timestamp - pausedUntil < 2592000``,
+    ``2592000 > block.timestamp - pausedUntil`` and
+    ``pausedUntil - block.timestamp < 2592000`` all resolve; the ``> 600`` twin of the
+    first does not.
+
+    NOT ADMITTED, and the reason is a missing producer fact rather than a judgment
+    about the shape: when the absorbed group is ``{latch, constant}`` (the mainstream
+    ``require(block.timestamp < pausedUntil + MAX_PAUSE)``) or ``{clock, constant}``,
+    the answer turns entirely on the SIGN with which the constant entered that group —
+    ``latch + C`` bounds the gap by C and ``latch - C`` does not — and
+    ``predicates._stamp_absorbed_operands`` records neither the sign nor the side
+    (``absorbed_operands`` is a SORTED list of both inner operands of an ADDITION *or*
+    a SUBTRACTION). Two sources with opposite meanings therefore produce byte-identical
+    evidence here, and the honest answer for that family is ``not_determined``. The
+    recall cost is real and is stated rather than discovered later; recovering it needs
+    the static producer to stamp the additive sign, which is not this leg's surface.
+    Reading the sign out of ``leaf["expression"]`` is available and deliberately
+    refused: this reader's whole history is the removal of a source-text fallback.
+
+    Two further conditions, both about not being fooled by what the leaf does NOT say:
+
+    * exactly TWO slots. "Which side" is meaningless otherwise, and a 3-slot leaf is a
+      real persisted shape (560 of the 5,089 local leaves), not only a hand-built one —
+      a threshold/oracle leaf can carry more. None of the 560 holds a latch, a clock
+      and a plausible constant today, so this refuses nothing that was being answered.
+    * no FOREIGN clock anywhere in the leaf (L-60). A leaf whose operand union carries
+      both a seconds clock and ``block.number`` cannot say which clock the constant is
+      denominated against, and harvesting a block count as seconds understates a
+      ~30-day gate as 2.5 days (216000 blocks ≈ 30 days). The outer reader already
+      refuses a leaf with NO seconds clock; this refuses the MIXED one, which absorption
+      across a mixed expression is what makes reachable.
+    """
+    operands = _operands(leaf)
+    if len(operands) != 2:
+        return None
+    raw_absorbed = leaf.get("absorbed_operands")
+    absorbed = [op for op in raw_absorbed if isinstance(op, dict)] if isinstance(raw_absorbed, list) else []
+    # The compared side must be a clock-to-latch difference: both facts inside ONE
+    # additive group, which no two-slot operand list can fake.
+    if all(str(op.get("block_context_kind") or "") not in _SECONDS_CLOCK_KINDS for op in absorbed):
+        return None
+    if all(str(op.get("state_variable_name") or "") not in latch_vars for op in absorbed):
+        return None
+    clock_kinds = {str(op.get("block_context_kind") or "") for op in (*operands, *absorbed)}
+    if clock_kinds & (_CLOCK_KINDS - _SECONDS_CLOCK_KINDS):
+        return None
+    operator = str(leaf.get("operator") or "")
+    best: int | None = None
+    for slot, operand in enumerate(operands):
+        if operator not in _CONSTANT_IS_UPPER_BOUND[slot]:
+            continue
+        value = _parse_int(operand.get("constant_value"))
+        if value is None or not 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
+            continue
+        # Two plausible constants cannot both be the ceiling in a two-slot comparison,
+        # but the MAX is kept as the tie-break for the same reason the reader's other
+        # ambiguities take it: the value is consumed as a severity reducer, so the
+        # longest candidate window is the least mitigating reading.
+        best = value if best is None else max(best, value)
+    return best
+
+
 def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tuple[int | None, str]:
     """The latch's freeze window and HOW it was established.
 
-    A guard leaf that compares ``block.timestamp`` against a constant offset of the
-    latch IS that latch's window (``guard_constant``). Scoped to the latch because
-    a contract can carry two latches with different semantics (one indefinite, one
-    timed) and the wrong constant is a wrong witness, not a rounding error.
+    A guard leaf whose SHAPE proves a constant is a ceiling on the gap between the
+    clock and the latch IS that latch's window (``guard_constant``) —
+    :func:`_window_ceiling_constant` is that shape test, and it is the whole of the
+    harvest: taking the largest plausible constant out of the operand union instead
+    published a lead time, a cooldown offset or a minimum-elapsed as the freeze window
+    (L-58), and a block count as seconds off a mixed-clock leaf (L-60). Scoped to the
+    latch because a contract can carry two latches with different semantics (one
+    indefinite, one timed) and the wrong constant is a wrong witness, not a rounding
+    error.
 
     ``no_time_reference`` is the PROOF of an indefinite latch: some guard leaf DOES
     read the latch (so the gate was lowered and we are looking at it) and no leaf
@@ -2015,9 +2116,9 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
        hides the entire time check, which is why the test cannot be narrowed to
        ordering comparisons. Same conservatism as rule 1, one order louder.
 
-    When several plausible constants are in scope the MAX is taken: the value is
-    consumed as a severity reducer, so the longest candidate window is the least
-    mitigating reading of ambiguous evidence.
+    When several leaves each prove a ceiling the MAX is taken: the value is consumed
+    as a severity reducer, so the longest candidate window is the least mitigating
+    reading of ambiguous evidence.
     """
     best: int | None = None
     saw_latch_guard = False
@@ -2042,10 +2143,9 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
             if clock_kinds.isdisjoint(_SECONDS_CLOCK_KINDS):
                 continue
             saw_timed_latch_guard = True
-            for op in operands:
-                value = _parse_int(op.get("constant_value"))
-                if value is not None and 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
-                    best = value if best is None else max(best, value)
+            value = _window_ceiling_constant(leaf, latch_vars)
+            if value is not None:
+                best = value if best is None else max(best, value)
         if tree_reads_latch and tree_reads_clock:
             clock_in_a_latch_tree = True
         if tree_reads_latch and (not _absorption_recorded(tree) or tree_holds_opaque_operand):

@@ -816,6 +816,50 @@ describe("qualifierForClaims — pause freeze specifics", () => {
     // present observed but no freeze fields → unknown, not indefinite
     expect(qualifierForClaims({ claims: [observedClaim("pause.set", { gate_mutation: "x" })] })).toBeNull();
   });
+
+  // L-58's CONTAINMENT PIN, prose half. `duration_bound_seconds` is a STATIC read of a
+  // guard constant, and until Wave 4 the harvest that produced it was side- and
+  // operator-blind: `require(block.timestamp + 3600 < pausedUntil)` published 3600 —
+  // a lead time — as the freeze window. What kept that number off every rendered
+  // surface is the fork cross-check: BOTH prose copies show a bound only when
+  // `auto_expiry === true`. That containment is load-bearing, so it is pinned
+  // exhaustively over the qualifier's states rather than by one example — a future
+  // edit that renders a bound on `auto_expiry` false/null/absent re-opens it.
+  const NON_AFFIRMED = [
+    ["false — the fork contradicted the bound", false],
+    ["null — the probe did not run", null],
+    ["absent — a witness with no qualifier at all", undefined],
+  ];
+
+  it.each(NON_AFFIRMED)("shows no bound in the pause QUALIFIER when auto_expiry is %s", (_label, expiry) => {
+    const observed = { duration_bound_seconds: 3600, duration_bound_source: "guard_constant" };
+    if (expiry !== undefined) observed.auto_expiry = expiry;
+    const rendered = qualifierForClaims({ claims: [observedClaim("pause.set", observed)] });
+    expect(rendered === null || !/3600|1h|auto-expires/.test(rendered)).toBe(true);
+  });
+
+  it.each(NON_AFFIRMED)("shows no bound in the INSPECTOR facts when auto_expiry is %s", (_label, expiry) => {
+    const observed = { duration_bound_seconds: 3600, duration_bound_source: "guard_constant" };
+    if (expiry !== undefined) observed.auto_expiry = expiry;
+    const facts = claimWitnessFacts({ claims: [observedClaim("pause.set", observed)] });
+    const expiryFacts = facts.filter((f) => f.label === "Auto-expiry");
+    for (const fact of expiryFacts) expect(fact.value).not.toMatch(/self-recovers|1h|3600/);
+    // The proven-indefinite sentence is the most severe statement here and must not be
+    // borrowed either: a bound WAS read, so the latch is not proven indefinite.
+    for (const fact of expiryFacts) expect(fact.value).not.toContain("indefinite latch");
+  });
+
+  it("still shows the bound in both copies once the fork affirms it", () => {
+    // POSITIVE CONTROL for the two pins above: the containment is a discrimination,
+    // not a blanket refusal.
+    const observed = { auto_expiry: true, duration_bound_seconds: 3600, duration_bound_source: "guard_constant" };
+    const fn = { claims: [observedClaim("pause.set", observed)] };
+    expect(qualifierForClaims(fn)).toBe("(auto-expires ~1h)");
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Auto-expiry",
+      value: "self-recovers after ~1h",
+    });
+  });
 });
 
 describe("qualifierForClaims — mint backing", () => {

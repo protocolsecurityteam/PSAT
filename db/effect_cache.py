@@ -431,7 +431,17 @@ logger = logging.getLogger(__name__)
 # fail-closed choice on a shape the local plane cannot exhibit either way (no row is
 # servable at any revision — all 150 carry ``analysis_schema_version=5``), stated so
 # the next reader does not mistake it for a demonstrated stale-serve.
-EFFECT_CACHE_SCHEMA_VERSION = 33
+# v34 (Wave 4 Leg A, L-58 + L-60): the pause-window harvest is side- and
+# operator-aware. A v33 row could carry a ``duration_bound_seconds`` that is not a
+# freeze window at all — a lead time (``block.timestamp + 3600 < pausedUntil`` → 3600),
+# a cooldown offset (``block.timestamp > pausedUntil + 300`` → 300), a minimum-elapsed,
+# or a block count harvested as seconds off a mixed-clock leaf — and the value rides
+# ``details``, the code plane a hit re-publishes to every bytecode twin. The direction
+# is MITIGATING (the bound is read as a severity reducer once the fork affirms it), so
+# serving the stale number is the one direction this reader may not be wrong in. Same
+# span also narrows the source to ``not_determined`` for the ``{latch, constant}``
+# absorbed family, whose sign the static plane does not record.
+EFFECT_CACHE_SCHEMA_VERSION = 34
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —
