@@ -1198,6 +1198,59 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     });
   });
 
+  it("renders a MEASURED $0 reach as a measured zero, not as silence", () => {
+    // L-47. `formatUsdUpperBound(0)` is falsy, so a reach D3 measured at exactly $0
+    // — every asset that moved had a priced holding and the total came out at
+    // nothing — emitted no Reach row at all, which is what a never-attempted reach
+    // emits. The backend payload is already pinned correct by
+    // test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_determined: true, observed_reach_value_usd: 0 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "$0 — measured, no priced value reachable",
+    });
+  });
+
+  it("keeps a measured non-zero reach as the upper-bound row", () => {
+    // POSITIVE CONTROL: the measured branch must not have changed the wording of
+    // every real figure.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: { reach_determined: true, observed_reach_value_usd: 55_200_000 },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({ label: "Reach (upper bound)", value: "up to ~$55.2M" });
+  });
+
+  it("stays silent on a PRE-D3 payload whose reach figure is zero", () => {
+    // NEGATIVE CONTROL. Without `reach_determined` a 0 may be the acting
+    // deployment's own (zero) balance published as the reach — the exact
+    // "$0 reach for a function that may move millions" sentence D3 removed — so
+    // this renderer must not assert a measurement it cannot see.
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: { effect_verdict_id: 1, observed: { observed_reach_value_usd: 0 } },
+      }],
+    };
+    expect(claimWitnessFacts(fn).some((f) => String(f.label).startsWith("Reach"))).toBe(false);
+  });
+
   it("emits no rows when no witness facts are present (silence, not defaults)", () => {
     expect(claimWitnessFacts({ claims: [claim("flow.out")] })).toEqual([]);
     expect(claimWitnessFacts({ claims: [claim("ownership.transfer")] })).toEqual([]);

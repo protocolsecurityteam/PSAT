@@ -1271,6 +1271,7 @@ export function claimWitnessFacts(fn) {
   const destKinds = [];
   const amtKinds = [];
   let reachValue = null;
+  let reachDetermined = null;
   let reachIndeterminate = false;
   let reachFloor = null;
   let reachUnvalued = 0;
@@ -1306,6 +1307,13 @@ export function claimWitnessFacts(fn) {
     if (observed) {
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
+      // D3's discriminator, read HERE and not only in the branches below: it is the
+      // one key that separates a MEASURED reach from a never-attempted one, and a
+      // measured reach of exactly $0 is otherwise indistinguishable from silence
+      // (`formatUsdUpperBound(0)` is falsy). Absent on a pre-D3 payload, which is
+      // its own third value — see the render branch.
+      if (typeof observed.reach_determined === "boolean")
+        reachDetermined = observed.reach_determined;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
       // D3: on a not-measured row the acting deployment's own balance is a FLOOR
       // and now arrives under its own key. Rendered as a floor, never as the reach:
@@ -1368,7 +1376,25 @@ export function claimWitnessFacts(fn) {
         ? `not determined (own balance floor ${floor})`
         : "not determined (no downstream holder observed)",
     });
+  } else if (reachDetermined === true) {
+    // MEASURED. A zero here is a measurement — every asset that moved had a priced
+    // holding and the total came out at nothing — and it used to render as silence,
+    // which is what "nothing was attempted" renders as (L-47). The backend payload
+    // is already pinned correct by
+    // `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only this
+    // renderer was blind.
+    const reach = formatUsdUpperBound(reachValue);
+    facts.push(
+      reach
+        ? { label: "Reach (upper bound)", value: reach }
+        : { label: "Reach", value: "$0 — measured, no priced value reachable" },
+    );
   } else {
+    // `reach_determined` absent: a pre-D3 payload, where a 0 may be the acting
+    // deployment's own (zero) balance published as the reach rather than a
+    // measurement. Left exactly as it was — asserting a measured zero here would
+    // re-mint the "$0 reach for a function that may move millions" sentence D3
+    // removed. A never-attempted reach stays silent, as before.
     const reach = formatUsdUpperBound(reachValue);
     if (reach) facts.push({ label: "Reach (upper bound)", value: reach });
   }
