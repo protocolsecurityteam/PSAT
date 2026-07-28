@@ -576,11 +576,13 @@ _token_balance_lock = threading.Lock()
 _token_balance_last_call = 0.0
 
 
-# Etherscan's ``addresstokenbalance`` page size. ONE page is fetched, so a holder
-# with more assets than this is silently truncated — 7 local contracts sit exactly at
-# the cap, one of them holding $8.6B. Exported so a consumer can ask whether a stored
-# holdings list is at the cap (:func:`token_balances_may_be_truncated`) instead of
-# hardcoding 100 in a second place.
+# Etherscan's ``addresstokenbalance`` page size. ONE page is fetched, so a holder with
+# more assets than this is silently truncated — 7 local contracts sit exactly at the
+# cap, one of them holding $8.6B (all 7 have ``protocol_id IS NULL``, so no effects
+# holder set can reach them today; see ``selection._holdings_completeness`` for the
+# armed-population statement). Exported so a consumer can ask whether a holdings count
+# is at the cap (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in
+# a second place.
 TOKEN_BALANCE_PAGE_SIZE = 100
 
 
@@ -592,6 +594,12 @@ def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
     the actual fix and is deliberately not attempted here: it changes the request
     count per contract against a live rate-limited API, which cannot be validated
     inside this change's read budget.
+
+    ONE-DIRECTIONAL, and a caller must not invert it. ``True`` is a fact about the
+    page. ``False`` is not "the list is whole": pass it a count that a filter has
+    already thinned (a stored-row count, or ``results`` inside
+    :func:`get_token_balances`) and a full page reads as ``False``. Ask it about the
+    number of entries the ENDPOINT returned, or treat ``False`` as not-determined.
     """
     count = rows if isinstance(rows, int) else len(rows)
     return count >= TOKEN_BALANCE_PAGE_SIZE
@@ -677,12 +685,19 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
                     "usd_value": usd_value,
                 }
             )
-    if token_balances_may_be_truncated(results):
+    # The page-size question is asked of the RAW response, never of ``results``. The
+    # loop above drops every zero-balance entry, so a full 100-entry page with any
+    # zero-balance entry produces fewer than 100 results and would read as "not
+    # truncated" — the signal destroyed one line above where it is read. ``returned``
+    # is what the endpoint actually paged.
+    returned = len(data.get("result") or [])
+    if token_balances_may_be_truncated(returned):
         logger.warning(
-            "token balance fetch for %s on chain %s returned a FULL page (%d): "
+            "token balance fetch for %s on chain %s returned a FULL page (%d entries, %d with a balance): "
             "holdings may be truncated and any total derived from them is a lower bound",
             address,
             chain_id,
+            returned,
             len(results),
         )
     return sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True)

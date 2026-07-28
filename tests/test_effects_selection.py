@@ -514,10 +514,21 @@ def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
 
 @requires_postgres
 def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
-    """G6-11: the holdings fetch takes ONE page and 7 local contracts sit exactly at
-    the cap (one holding $8.6B). Exactly-at-the-cap cannot be told from truncated, so
-    the honest mark is "not complete" — and the reach probe then names truncation as
-    the reason an asset could not be valued instead of quietly skipping it."""
+    """G6-11: the holdings fetch takes ONE page, and exactly-at-the-cap cannot be told
+    from truncated — so an at-cap holder is marked ``at_page_cap`` and the reach probe
+    names it as the reason an asset could not be valued instead of quietly skipping it.
+
+    INVERTED in round 2 (R4): the below-cap arm asserted ``holdings_complete is True``.
+    A stored-row count cannot establish completeness in that direction — the rows are
+    the fetch's output AFTER its ``raw_balance > 0`` filter, so a FULL page containing
+    any zero-balance entry stores fewer than the cap and read as proven-complete. The
+    below-cap answer is ``not_determined``; there is no ``complete`` state.
+
+    ARMED POPULATION, honestly (R2): ``at_page_cap`` fires on ZERO local holders. The 7
+    local contracts at the cap all have ``protocol_id IS NULL`` and this function
+    filters on ``protocol_id``, so none can enter a holder set; the most token rows any
+    protocol-1 contract carries is 90. Reachable by construction, covered here, 0 of 29
+    holders armed on one protocol/one chain — a lower bound, not an absence."""
     from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
     p = _protocol(db_session, "holdings-cap")
@@ -533,9 +544,14 @@ def test_holdings_at_the_fetch_page_cap_are_marked_incomplete(db_session):
     by_holder = {}
     for cand in select_candidates(db_session, p.id):
         for holding in cand.value_holders:
-            by_holder.setdefault(holding.holder, set()).add(holding.holdings_complete)
-    assert by_holder[capped.address.lower()] == {False}
-    assert by_holder[whole.address.lower()] == {True}
+            by_holder.setdefault(holding.holder, set()).add(holding.completeness)
+    assert by_holder[capped.address.lower()] == {"at_page_cap"}
+    assert by_holder[whole.address.lower()] == {"not_determined"}
+    # And there is no third state to reach: a "complete" answer would be a proven
+    # absence derived from a count whose input was already filtered.
+    from services.effects.selection import HOLDINGS_COMPLETENESS_STATES
+
+    assert set(HOLDINGS_COMPLETENESS_STATES) == {"at_page_cap", "not_determined"}
 
 
 @requires_postgres
@@ -1785,3 +1801,43 @@ def test_shape4_failed_contract_is_covered_by_its_own_job_too(db_session):
     contract — the own-address clause never depends on any ownership rule."""
     proto, addrs, fns = _interleaved(db_session, "shape4-self")
     assert fns["failed"] in _scoped(db_session, proto.id, addrs["failed"])
+
+
+def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monkeypatch):
+    """The truncation discriminator's INPUT must not be a list a filter already thinned.
+
+    ``get_token_balances`` keeps an entry only when ``raw_balance > 0``, and the page-cap
+    check used to be evaluated on that filtered list — so a FULL page containing any
+    zero-balance entry read as "not truncated", one line below the filter that destroyed
+    the signal. The check now asks how many entries the ENDPOINT returned.
+    """
+    from utils import etherscan
+
+    cap = etherscan.TOKEN_BALANCE_PAGE_SIZE
+    page = [
+        {
+            "TokenAddress": f"0x{i:040x}",
+            "TokenName": "T",
+            "TokenSymbol": "T",
+            "TokenDivisor": "18",
+            # ONE zero-balance entry in an otherwise full page: 100 returned, 99 stored.
+            "TokenQuantity": "0" if i == 0 else str(10**18),
+            "TokenPriceUSD": "1",
+        }
+        for i in range(cap)
+    ]
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page})
+    monkeypatch.setattr(etherscan.time, "sleep", lambda _s: None)
+    warnings: list[str] = []
+    monkeypatch.setattr(etherscan.logger, "warning", lambda msg, *a: warnings.append(msg % a))
+
+    rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
+
+    assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
+    assert any("FULL page" in w for w in warnings), "a full page went unreported because the filter shrank the list"
+    assert any(f"({cap} entries, {cap - 1} with a balance)" in w for w in warnings)
+    # NEGATIVE CONTROL: a genuinely short page reports nothing.
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
+    warnings.clear()
+    etherscan.get_token_balances("0x" + "ac" * 20, 1)
+    assert not [w for w in warnings if "FULL page" in w]

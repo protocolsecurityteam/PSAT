@@ -20,7 +20,12 @@ from __future__ import annotations
 from services.effects import recipes
 from services.effects.config import NATIVE_ASSET_LOG_EMITTER, VERDICT_PROVEN  # noqa: F401
 from services.effects.harness import SimContext
-from services.effects.selection import AssetHolding, build_authority_graph, select_candidates
+from services.effects.selection import (
+    HOLDINGS_COMPLETENESS_AT_PAGE_CAP,
+    AssetHolding,
+    build_authority_graph,
+    select_candidates,
+)
 from services.effects.simulate import SimCallResult, SimResult
 from tests.conftest import ADDR, requires_postgres
 from tests.test_effects_harness import RecordingStore, transfer_log
@@ -393,19 +398,29 @@ def test_no_tvl_snapshot_skips_the_ceiling_out_loud():
 
 def test_a_truncated_holdings_list_names_truncation_as_the_reason():
     """G6-11 consumer rule: a truncated fetch must LOWER CONFIDENCE, never produce a
-    confident low value. 7 local contracts sit exactly at the fetcher's one-page cap,
-    one of them holding $8.6B, and an asset absent from a capped list may simply never
-    have been fetched."""
-    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0, holdings_complete=False),)
+    confident low value. An asset absent from a capped list may simply never have been
+    fetched.
+
+    INVERTED in round 2 (R4): the control arm asserted ``unrecorded_asset`` for a
+    holder whose list was "whole". Nothing can establish that — the stored rows are the
+    fetch's output AFTER its zero-balance filter, so a below-cap count is consistent
+    with a full page — so the below-cap reason now says only that the asset is not in
+    the holdings we RECORDED. The old name asserted a proven absence derived from a
+    count whose input had already discarded rows."""
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0, completeness=HOLDINGS_COMPLETENESS_AT_PAGE_CAP),)
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(EETH, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=holdings, floor=1.0)
 
     assert eff.concrete["reach_determined"] is False
-    assert eff.concrete["observed_reach_unvalued_reasons"] == ["holdings_possibly_truncated"]
-    # The COMPLETE control: the same unrecorded asset, from a holder whose list is
-    # whole, is a genuine absence and says so instead.
+    assert eff.concrete["observed_reach_unvalued_reasons"] == ["holdings_at_page_cap"]
+    # The below-cap arm: still a confidence gap, and the reason no longer claims the
+    # holder does not hold the asset.
     eff2 = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=1.0)
-    assert eff2.concrete["observed_reach_unvalued_reasons"] == ["unrecorded_asset"]
+    assert eff2.concrete["observed_reach_unvalued_reasons"] == ["asset_not_in_recorded_holdings"]
+    # NEGATIVE CONTROL, both arms: an asset the holder DOES hold priced is valued, so
+    # neither reason is a blanket refusal to value anything.
+    held = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    assert _value_out([held], holders=holdings, floor=1.0).concrete["observed_reach_value_usd"] == 100.0
 
 
 def test_two_logs_of_one_asset_out_of_one_holder_attribute_that_holding_once():

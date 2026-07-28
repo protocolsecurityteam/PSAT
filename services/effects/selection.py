@@ -353,6 +353,18 @@ def _deployment_by_contract(session: Session, protocol_id: int) -> dict[int, str
     return out
 
 
+# What is known about a holder's holdings list being WHOLE. TWO states, and the
+# missing third one is deliberate: there is no ``"complete"``. Completeness would have
+# to be proven from the fetch's PAGE LENGTH, and nothing persists it — ``get_token
+# _balances`` drops every zero-balance entry before the rows are stored, so a stored
+# count below the cap is consistent with a full page. A boolean here read "below the
+# cap" as PROVEN COMPLETE, i.e. a proven-absence claim derived from a count whose input
+# had already discarded rows.
+HOLDINGS_COMPLETENESS_AT_PAGE_CAP = "at_page_cap"
+HOLDINGS_COMPLETENESS_NOT_DETERMINED = "not_determined"
+HOLDINGS_COMPLETENESS_STATES = (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMPLETENESS_NOT_DETERMINED)
+
+
 class AssetHolding(NamedTuple):
     """One (holder, asset) balance the §5b reach probe can match a moved asset to.
 
@@ -373,13 +385,17 @@ class AssetHolding(NamedTuple):
     holder: str
     asset: str
     usd_value: float | None
-    # Whether this holder's holdings list is COMPLETE (G6-11). ``False`` means the
-    # stored rows sit at Etherscan's one-page cap, so an asset absent from them may
-    # simply not have been fetched — a reach total that skips it is a lower bound and
-    # the row must say so instead of quietly valuing what it happens to know. Uniform
-    # across every holding of one holder; carried per row so the reach probe needs no
-    # second input to thread.
-    holdings_complete: bool = True
+    # What is known about whether this holder's holdings list is WHOLE (G6-11), as one
+    # of :data:`HOLDINGS_COMPLETENESS_STATES`. Never ``"complete"``, and that is the
+    # point: this is derived from the stored rows, and the stored rows are the fetch's
+    # output AFTER ``utils.etherscan.get_token_balances`` drops every zero-balance
+    # entry, so a FULL 100-entry page containing any zero-balance entry stores fewer
+    # than the cap. The count is therefore a LOWER BOUND on the page length and can
+    # only ever prove the at-cap case, never its negation. Nothing persisted records
+    # the page length (see ``_holdings_completeness``), so "we know this list is whole"
+    # is not a state this input can reach. Uniform across every holding of one holder;
+    # carried per row so the reach probe needs no second input to thread.
+    completeness: str = HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
@@ -428,10 +444,8 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
             best[key] = value
         elif value is not None:
             best[key] = max(current, value)
-    # Per-holder completeness, from the same rows: a holder whose TOKEN rows sit at
-    # the fetcher's page cap may be missing assets entirely (7 local contracts are at
-    # it, one holding $8.6B). The native row is excluded from the count because it is
-    # fetched separately and is not part of the paged list.
+    # Per-holder completeness, from the same rows. The native row is excluded from the
+    # count because it is fetched separately and is not part of the paged list.
     token_rows: dict[str, int] = {}
     for (holder, asset), _usd_value in best.items():
         if asset != NATIVE_ASSET_LOG_EMITTER:
@@ -443,10 +457,41 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
                 holder=holder,
                 asset=asset,
                 usd_value=usd_value,
-                holdings_complete=not token_balances_may_be_truncated(token_rows.get(holder, 0)),
+                completeness=_holdings_completeness(token_rows.get(holder, 0)),
             )
         )
     return {holder: tuple(items) for holder, items in out.items()}
+
+
+def _holdings_completeness(stored_token_rows: int) -> str:
+    """What a STORED row count can say about a holdings list being whole.
+
+    ONE direction only. ``stored_token_rows >= cap`` proves the fetch returned a full
+    page, so assets are probably missing. Below the cap proves NOTHING: the stored rows
+    are ``utils.etherscan.get_token_balances``' output AFTER its ``raw_balance > 0``
+    filter, and the truncation check there is evaluated on that same filtered list, so
+    the page-size signal is destroyed one line above where it is read. A full 100-entry
+    page containing any zero-balance entry stores fewer than 100 and would have read as
+    proven-complete.
+
+    ARMED POPULATION, stated honestly (R2): ``at_page_cap`` is reachable by
+    construction and test-covered, and it fires on ZERO local holders. 7 local
+    contracts do sit exactly at the cap (WETH9, Dai, WstETH, Lido, LinkToken,
+    DepositContract, FiatTokenV2_2, one of them holding $8.6B) — but all 7 have
+    ``protocol_id IS NULL`` and ``_asset_holdings_by_deployment`` filters
+    ``Contract.protocol_id == protocol_id``, so none of them can enter a holder set.
+    The most token rows any protocol-1 contract carries is 90. So: 0 of 29 holders
+    armed, on one protocol on one chain, which is a LOWER BOUND and not evidence the
+    shape does not occur.
+
+    The only thing that could ever return ``"complete"`` is the fetch's own page
+    length, recorded at fetch time. That needs a schema column and a re-fetch of the
+    population — outside this effort's cost boundary — so it is DEFERRED with cause,
+    and until then the honest answer below the cap is "not determined".
+    """
+    if token_balances_may_be_truncated(stored_token_rows):
+        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+    return HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 def _protocol_tvl_usd(session: Session, protocol_id: int) -> float | None:

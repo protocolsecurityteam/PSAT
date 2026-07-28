@@ -56,7 +56,13 @@ from services.effects.seeding import (
     contract_balance_override,
     eth_value_override,
 )
-from services.effects.selection import AssetHolding
+from services.effects.selection import (
+    HOLDINGS_COMPLETENESS_AT_PAGE_CAP,
+    AssetHolding,
+)
+from services.effects.selection import (
+    HOLDINGS_COMPLETENESS_NOT_DETERMINED as HOLDINGS_NOT_DETERMINED,
+)
 from services.effects.simulate import (
     SimCall,
     SimCallResult,
@@ -1618,9 +1624,12 @@ def _add_reach(
     known: dict[tuple[str, str], float | None] = {
         (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
     }
-    # Uniform per holder (see ``AssetHolding.holdings_complete``): whether an asset
-    # ABSENT from ``known`` for that holder is a real absence or an unfetched one.
-    complete: dict[str, bool] = {h.holder.lower(): h.holdings_complete for h in value_holders}
+    # Uniform per holder (see ``AssetHolding.completeness``): what is KNOWN about an
+    # asset absent from ``known`` for that holder. Two states, and neither is "the
+    # list is whole" — the stored rows cannot prove that (``_holdings_completeness``),
+    # so the reason an absent asset gets is "not in the holdings we recorded, which
+    # are not provably all of them", never "this holder does not hold it".
+    completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
     unvalued_reasons: set[str] = set()
     # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
     # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
@@ -1638,12 +1647,15 @@ def _add_reach(
         reach_holders.add(holder)
         reach_assets.add(asset)
         if (holder, asset) not in known:
-            # No balance row at all for this (holder, asset): value left in an
-            # asset we never recorded. G6-11 — absence there conflates "holds
-            # nothing", "not fetched" and "fetch failed", so it is not a zero, and
-            # a holder at the fetcher's page cap gets the more specific reason.
+            # No balance row at all for this (holder, asset): value left in an asset
+            # we never recorded. G6-11 — absence there conflates "holds nothing", "not
+            # fetched" and "fetch failed", so it is not a zero. The reason names which
+            # of the two things we know, and neither is "the holder does not hold it":
+            # ``holdings_at_page_cap`` when the holder's stored rows reach the
+            # fetcher's one-page cap (assets are probably missing), otherwise
+            # ``asset_not_in_recorded_holdings`` — recorded, not proven-complete.
             unvalued_assets.add(asset)
-            unvalued_reasons.add("unrecorded_asset" if complete.get(holder, True) else "holdings_possibly_truncated")
+            unvalued_reasons.add(_UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)])
             continue
         usd = known[(holder, asset)]
         if usd is None:
@@ -1695,6 +1707,18 @@ def _add_reach(
 # The three answers of the reach-vs-TVL ceiling. ``skipped_no_tvl`` is published, not
 # implied: an absent ceiling must be visible as "not checked" rather than looking like
 # a check that passed (R2 — a gate that silently never fires is not a mitigation).
+# Why an asset that moved could not be valued, keyed on what is KNOWN about the
+# holder's holdings list. Neither reason asserts the holder does not hold the asset:
+# ``asset_not_in_recorded_holdings`` says only that our recorded set does not contain
+# it and that set is not provably complete (the stored rows already dropped every
+# zero-balance entry, so a below-cap count proves nothing — ``selection
+# ._holdings_completeness``). The previous name, ``unrecorded_asset``, read as a
+# proven absence and was derived from exactly that lossy count.
+_UNVALUED_REASON_BY_COMPLETENESS = {
+    HOLDINGS_COMPLETENESS_AT_PAGE_CAP: "holdings_at_page_cap",
+    HOLDINGS_NOT_DETERMINED: "asset_not_in_recorded_holdings",
+}
+
 REACH_TVL_WITHIN = "within_protocol_tvl"
 REACH_TVL_EXCEEDED = "exceeds_protocol_tvl"
 REACH_TVL_SKIPPED = "skipped_no_tvl"

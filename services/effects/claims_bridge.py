@@ -300,6 +300,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     is the priced part, a partial floor). A2: reach is measured PER ASSET, and
 #     1001 of 1376 local balance rows are unpriced, so this state is common and must
 #     lower confidence rather than produce a small number.
+#     ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
+#     the holder does not hold the asset: ``unpriced_holding`` (we have the row, no
+#     price), ``holdings_at_page_cap`` (the holder's stored rows reach the fetcher's
+#     one-page cap, so assets are probably missing), ``asset_not_in_recorded_holdings``
+#     (not in the set we recorded — and that set is not provably complete, because the
+#     stored rows already dropped every zero-balance entry the page returned). A
+#     scorer must read all three as CONFIDENCE GAPS, never as a small reach.
 #   * ``reach_tvl_check`` is the corroborating CEILING's outcome:
 #     ``within_protocol_tvl`` (the figure is at least possible),
 #     ``exceeds_protocol_tvl`` (REFUSED — ``observed_reach_rejected_usd`` and
