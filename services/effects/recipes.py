@@ -1466,9 +1466,11 @@ def _resolve_destination_shape(
     public/unresolved-principal probe runs as, it is substituted into every address
     ARGUMENT of the synthesized call, and it comes straight back out in the
     ``Transfer`` log. Measured: on 35 of 35 ``caller_arbitrary`` rows in the local DB
-    the stored ``concrete_destination`` is the probe's own recipient argument echoed
-    back, and the one row with no resolved principals carries ``0x1111…1111``
-    verbatim. Both invented identities are excluded here, and — the point of the
+    the stored ``concrete_destination`` is a ``function_principals`` address of the
+    same function echoed back; a stored ``NEUTRAL_CALLER`` has zero realised rows
+    here (lower bound — it arises whenever a probe runs with no resolved principal,
+    which the exclusion below is test-pinned against). Both invented identities are
+    excluded here, and — the point of the
     item — a ``caller_arbitrary`` shape now publishes NO address at all: the shape
     IS the adverse finding, the address is by construction whatever WE passed, and
     a stored one can only mislead in the reassuring direction ("the money goes to

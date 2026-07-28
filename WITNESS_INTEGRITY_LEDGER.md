@@ -394,3 +394,109 @@ exec.arbitrary narrowing lands 8 of the expected 9; the EndpointV2.lzCompose mis
 Harness invalidation extends to Leg C's own commit-message measurements: ee46c314's census (4/31/45 param states; 11 unconstrained_proven exec rows; forwardExternalCall 'constrained/mapping_allowlist') came from the artifact-only build_claims(None,...) recompute and does not match merged HEAD (16/15/49; exec unconstrained_proven 0/19; forwardExternalCall constrained via external_call_revert). States held; the numbers must not be re-cited.
 
 **Reproduction/evidence:** `ee46c314 commit body vs full replay full_claims.txt: cid=586 forwardExternalCall {binding: operand, guard: external_call_revert}; exec census head = {constrained 7, not_determined 12, unconstrained_proven 0}; param census 16/15/49. Differential's flagged item 4 (scratchpad/recompute_legc.py drops every idiom-tier exec.arbitrary under contract=None) is the same defect; any future A3/A4 re-derivation must use the full-replay substrate.`
+
+---
+
+# Wave 2 exit sweep (2026-07-28: leg reviews + tier-3 verifier findings)
+
+## L-45 · (found by W2 Leg D review)
+
+`get_token_balances` now returns a `decimals_reported` key, but neither writer persists it: `workers/resolution_worker.py:458-470` and `services/monitoring/tvl.py:258-269` construct ContractBalance field-by-field and there is no such column. The "Etherscan reported nothing" fact is discarded at the DB boundary, and the surviving discriminator is `price_usd IS NULL` — which the same commit gives a SECOND meaning (`price_usd if decimals is not None else None`), so a NULL `price_usd` now means either "no divisor reported" or the older "unpriced". `company_overview.py:1298` republishes `price_usd` verbatim and cannot tell them apart. The leg strictly improves the prior state (no money derived from a guessed divisor). **Owner: W3-E** (balance-table consumer must disclose both meanings, or the producer plane gains the column).
+
+**Reproduction:** `grep -rn 'decimals_reported' --include=*.py /home/riley/PSAT   # only utils/etherscan.py; no column in db/models.py, no reader`
+
+## L-46 · (found by W2 Leg D review)
+
+The reach-vs-TVL ceiling is applied only on the `reach_determined: True` path in `_add_reach`. The unvalued branch returns before it, so `observed_reach_priced_usd` — published as a "partial floor" — is never checked against `protocol_tvl_usd`, and a floor above the protocol's own measured TVL is publishable with no `reach_tvl_check` at all. Same contradiction the ceiling was added to catch, on the sibling key. **Owner: Wave 4** (admission test met: a false floor can reach the witness plane).
+
+**Reproduction:** `Read services/effects/recipes.py::_add_reach: the "if unvalued_assets:" block sets observed_reach_priced_usd and returns above the _reach_tvl_state(...) call.`
+
+## L-47 · (found by W2 Leg D review)
+
+A MEASURED reach of exactly $0 (`reach_determined: True`, `observed_reach_value_usd: 0.0`) renders no Reach row at all in `claimWitnessFacts`: `formatUsdUpperBound(0)` is falsy, so a measured zero reads as silence — the "never attempted" state D3 just built a discriminator for, in the one renderer branch that does not consult it. Pre-existing; the backend payload is pinned correct by `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only the renderer is blind. **Owner: W3-E.**
+
+**Reproduction:** `node -e "import('./site/src/claimsVocab.js').then(m=>...)" with a flow.out witness carrying reach_determined:true, observed_reach_value_usd:0 — no Reach fact emitted.`
+
+## L-48 · (found by W2 Leg D review)
+
+`SENTINEL_ADDRESS` (`calldata.py`) and `NATIVE_ASSET_LOG_EMITTER` (`config.py`) are the SAME address (`0xee`×20). A2 compares that value against a log EMITTER while `_is_invented_identity` compares it against a log RECIPIENT; the two uses do not currently meet, but they are one field-name away from conflating "the attacker stand-in received the money" with "the asset that moved was native ETH". The emitter fact itself was independently verified live (4 sanctioned reads incl. pinned 25619159; WETH `deposit()` control discriminates). **Owner: record** (naming hygiene; split the constants when either is next touched).
+
+**Reproduction:** `grep -n '^SENTINEL_ADDRESS' services/effects/calldata.py && grep -n '^NATIVE_ASSET_LOG_EMITTER' services/effects/config.py   # same literal`
+
+## L-49 · (found by W2 Leg D review, verifier-confirmed)
+
+`effect_transcripts` record calls and success/revert only — no logs — so no reach or value verdict is re-derivable from persisted evidence. Every A2-plane differential is therefore a projection or a fixture, never a recomputation over the 41 published rows; an earlier "41 changed / $0.00" projection was an artifact of empty log lists and must never be cited. Blocks inv 11's replay story for the effects plane. **Owner: record** (a transcript-plane logs column is a schema change outside every wave surface).
+
+**Reproduction:** `psql "$DATABASE_URL" -c "select distinct jsonb_object_keys(payload) from effect_transcripts;"   # no logs key`
+
+## L-50 · (found by W2 Leg B review)
+
+Leg B extends `derived_from` to view_call/external_call/Unary operands and replaces a bare-bool leaf with an `external_set` leaf carrying `authority_role="delegated_authority"`. The effects plane does not read `derived_from` (only `services/resolution/permissionless_shapes.py` does) and `gate_ref` is part of the cache key so changed roles cold-miss — but one residual route was NOT proven cold: `calldata.py` `_authority_gate_target` and the pauser probe select OTHER functions to probe based on `_authority_roles(tree)`, a cross-function dependency the cache key does not capture. Unreproduced as a stale serve; every local row predates v21 anyway. **Owner: record** (re-examine if a cache row is ever served across an analysis-schema boundary).
+
+**Reproduction:** `grep -rn 'derived_from' services/effects services/policy services/resolution | grep -v permissionless_shapes; grep -n '_authority_gate_target' services/effects/calldata.py`
+
+## L-51 · (found by W2 Leg B review)
+
+The "tree-absent population G3 measured is closed" claim is instrument-limited: the measurement asks `RevertDetector(fn).run()` for every tree-less predicate target (828 at HEAD, 0 with a visible gate — independently reproduced with tree-bearing positive controls 22/22, 29/29). L-38's class (internal-callee-modifier gates) is exactly what that detector cannot see, so the honest statement is "0 tree-less functions carry a gate the RevertDetector can see". Verified not to bite here: StrategyManager's tree-less set is 20 view getters; the L-38 functions are tree-bearing. **Owner: record beside L-38.**
+
+**Reproduction:** `see W2 Leg B round-3 review; recount script over the 88 replay outputs gives 828/0, with cids 568/577 as positive controls.`
+
+## L-52 · (found by W2 Leg B review)
+
+`ControlGraphEdge.relation` has three readers beyond the enumerated set: `principal_enrichment.py:465-491` (label dispatch — `controller_value_unattributed` matches no arm, so no `controller_*` label is minted: strictly better than the pre-fix over-claim), `analysis_detail.py:439` and `company_overview.py:1358` (publish the raw relation string). All three verified correct by fall-through, but nothing pins the new relation's non-participation in the principal-label chain — a future arm added there silently re-admits unattributed edges. **Owner: Wave 4** (one pin test).
+
+**Reproduction:** `grep -rn '\.relation\b|"relation"' --include=*.py --include=*.js services routers site/src db schemas | grep -v test`
+
+## L-53 · (found by W2 Leg B final review)
+
+The `build_effective_permissions` half of the `authority_openness` R1 fix is UNPINNED: reverting both added blocks in `effective_permissions.py` leaves the relevant suite green (41 passed), because `effective_permissions_writer.py` independently derives openness from the record's capability. No behavioural harm today (both paths compute the same value), but the payload-plane `authority_openness` key (`schemas/effective_permissions.py:63`) can be silently dropped by a future edit. **Owner: Wave 4** (one mutation-pinning test).
+
+**Reproduction:** `revert the two blocks in services/policy/effective_permissions.py; tests stay green (41 passed) — see W2 Leg B round-3 review for the exact revert.`
+
+## L-54 · (found by W2 Leg B review — CLOSED at wave close)
+
+R5 note was missing in `db/effect_cache.py` for Leg B's predicate-tree shape changes (v10/v20 precedent). Closed by the driving agent in the Wave 2 closeout commit: a no-bump NOTE under the unreleased v31 entry, per the file's own "same version, second correction" precedent (`ANALYSIS_SCHEMA_VERSION` 3→4 already gates the materialization plane; `gate_ref` cold-misses; every local row predates v21).
+
+## L-55 · (found by W2 Leg B review)
+
+The `guard_extraction_uncertain` marker is written into the predicate artifact only when non-empty, so artifact ABSENCE of the key collapses "the builder looked and found no missed guards" with "this artifact predates the marker". Every downstream reader (`effective_permissions.py`, `tracking.py`) reads absence as the former. Same absent-vs-empty shape R1 targets, one level up in the artifact plane. Pre-existing; unchanged by the leg. **Owner: record** (bites only when a reader must distinguish marker eras; today all 107 artifacts predate it uniformly).
+
+**Reproduction:** `sed -n '413,418p' services/static/contract_analysis_pipeline/predicate_artifacts.py   # emit-when-non-empty`
+
+## L-56 · (found by W2 Leg B review)
+
+`capability_role_grants` returns `None` (not-determined) whenever ANY not-determined signal appears in the tree, discarding a witnessed single-role grant in e.g. `AND(finite_set role 8, unsupported)`. Defensible for a whole-field verdict with no partial state; zero realised rows (witnessed count 200 before and after the round-2 `unsupported` change). Latent over-hedge, adverse direction. **Owner: record.**
+
+**Reproduction:** `census script over the 1,773 capability_expr rows — witnessed stays 200; construct AND(role-grant, unsupported) to see the discard.`
+
+## L-57 · (found by W2 Leg B review)
+
+cid 570 `DelegationManager.undelegate(address)` now correctly projects public (self-keyed arm verified in source), but `protocolScore` scores it as a plain public action, losing the distinction that an operator/approver may FORCE-undelegate a third party (the `msg.sender != staker` arm). A scoring-vocabulary gap, not a resolution error. **Owner: W3-E** (protocolScore reads the surface Leg E owns).
+
+**Reproduction:** `stored source for cid 570: if (msg.sender != staker) { require(_canCall(operator) || msg.sender == delegationApprover(operator)) } — the earned-public algebra reads the self-keyed arm as open, which is correct; the score treats both arms identically.`
+
+## L-58 · (found by W2 Leg D final review)
+
+`_duration_from_trees`'s `guard_constant` branch harvests any plausible constant from `operands ∪ absorbed_operands`, discarding which SIDE of the comparison the constant sat on and the operator: `require(block.timestamp + 3600 < pausedUntil)` → `(3600,'guard_constant')` and `require(block.timestamp > pausedUntil + 300)` → `(300,'guard_constant')` — a lead time or cooldown offset published as the freeze window, for a latch whose real expiry is a storage timestamp (the etherfi shape the docstring says must be `not_determined`). New in the leg (base read `operands` only). Error direction flips over-severe → MITIGATING, but it is CONTAINED: every consumer (both prose copies + the claims_bridge scorer contract) trusts a bound only with `auto_expiry === true`, and the fork cross-check (anvil warps `max_pause_duration+1`) sets `auto_expiry=False` when the freeze does not lift. The fabricated number reaches `effect_verdicts.witness` and the cache details plane but renders nothing and scores nothing without fork confirmation. **Owner: Wave 4** (harvest should be side/operator-aware; the fork containment must gain a pin test so it cannot be loosened).
+
+**Reproduction:** `uv run python <scratchpad>/rv2/window_shapes.py   # compiled shapes print (3600,'guard_constant') / (300,'guard_constant')`
+
+## L-59 · (found by W2 tier-3 verifiers, both lenses)
+
+Wave-record corrections that supersede earlier stated figures — the corrected numbers are the citable ones: (1) `resolved_empty → not_determined` has **1** projectable transition (cid 577 `WithdrawRequestNFT.requestWithdraw`), not "3 of 80" — the `_intersect_finite` half is unobservable by re-projection because persisted `capability_expr` is the collapsed output; the fix is demonstrated on reconstructed conjuncts with an inherited-empty control. (2) Commit `673adc95`'s "the one row with no resolved principals carries `0x1111…1111`" has **0** realised rows (all 35 `caller_arbitrary` destinations are same-function principal echoes); docstring corrected at wave close. (3) The self-audit floor refuses **78/150** rows (49 `authority_change` + 29 `freeze_pause`), not 49; docstring corrected at wave close. (4) The public→gated flip population is exactly **2** (cid 568), gated→public exactly **3** — "sample 3 rerouted rows" was not satisfiable. (5) `f60b931a` says "42 latch-carrying rows"; the differential measures 52 evaluable (slicing stated; published quantities agree: 0 bounds, 0 `no_time_reference`).
+
+## L-60 · (found by W2 tier-3 verifier lens 1)
+
+Units-trap residual, pre-existing relative to the adjudication (not a regression): a leaf whose operand union carries BOTH a seconds clock and a block-number clock plus a block-count constant harvests the block count as seconds (the harvest loop is entered via the seconds clock and takes the max constant blind to which clock each constant was compared against). No compiled shape produced it (a comparison leaf holds one comparison); reachable only through operand absorption across a mixed expression. **Owner: record beside L-58** (the same side/operator-aware harvest fix closes both).
+
+## L-61 · (found by W2 tier-3 verifier lens 1 — substrate hygiene, RESOLVED at wave close)
+
+Two measurement-substrate mutations during Wave 2, both resolved by the driving agent at wave close: (1) a synthetic `contract_materializations` row (`0xaaaa…aaaa`/`TestContract`, schema v4) leaked into the local dev DB `psat` during Leg B verification — deleted (81 real rows remain); it also invalidated the letter of `0e60ce0d`'s "only v2/v3 rows" claim while leaving its substance intact (no v4 row carried pre-purity trees). (2) Migration `c4b81e2a90fd` (`authority_openness`) was unapplied on `psat`, so ORM entity loads of `EffectiveFunction` raised `UndefinedColumn` — `alembic upgrade head` run on the dev DB (Wave-1 precedent: dev DB tracks the branch's additive migrations).
+
+## L-62 · (found by W2 tier-3 verifier lens 1)
+
+The cache deployment/code plane split is a hand-enrolled denylist of exactly the spec's six `DEPLOYMENT_PLANE_KEYS`; any future deployment-plane key must be enrolled by hand or it leaks cross-deployment on a hit. **Owner: record** (a naming-convention or schema-level split is the durable fix; out of every wave surface now that G6-C1 landed).
+
+## Adjudication record — Wave 2 Leg D closeout (2026-07-28)
+
+Leg D hit the 3-round cap. Rounds 1–2 rejections were fixed and verified closed by the round-3 reviewer, whose sole remaining violation was the A7 clock-spelling gap (`now`/`block.number` latches still published proven-indefinite). Per OPERATIONS §2 the driving agent applied the reviewer's minimal prescription directly (`witness/leg-d` `0a7fa43e`): demotion counts `timestamp|now|number`, seconds harvest counts `timestamp|now` only. Mutation-checked (4 new arms red with the split reverted; 4 module controls green), 160 relevant tests pass, v31 comment amended (unreleased version). The differential re-verified the split empirically (0 realised corpus delta; monotone away from the proven state) and both tier-3 lenses confirmed the adjudication implements the prescription exactly. L-12 and L-38 remain OPEN with stated cause: Leg B neither fixed nor worsened them (verified byte-identical differential on an internal-callee-modifier shape); L-38's owner remains the predicate-extraction plane; L-12's the reconciler.

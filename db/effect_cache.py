@@ -395,6 +395,13 @@ logger = logging.getLogger(__name__)
 # wave close: the clock test now counts ``now``/``number`` alongside ``timestamp``
 # for the demotion, while only second-denominated kinds feed the constant harvest —
 # no v31 row was ever written, so one version covers one shipped shape.
+# Wave 2 Leg B's predicate-tree shape changes (the ``external_set`` self-gate
+# descriptor, ``derived_from`` on view_call/external_call/Unary operands, and the
+# entry-parameter-Phi frame purity) are ALSO covered by this same unreleased span:
+# they are gated by ANALYSIS_SCHEMA_VERSION 3→4 on the materialization plane, the
+# probe-visible ``gate_ref`` derives from leaf authority_role and so cold-misses
+# rather than serving stale, and every local cache row predates v21 anyway. Noted
+# here per the v10/v20 precedent rather than minting a version nothing can serve.
 EFFECT_CACHE_SCHEMA_VERSION = 31
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
@@ -750,9 +757,10 @@ def kernel_signature_is_comparable(details: dict[str, Any] | None) -> bool:
     """Whether a signature carries ANY structural key — i.e. whether comparing it can
     falsify anything.
 
-    THE FLOOR (§7 audit). ``authority_change`` — 49 of 150 cache rows — carries none of
-    :data:`_KERNEL_SIGNATURE_KEYS`, so with ``verdict='unknown'`` on all 49 the
-    signature is ``('unknown', None, None, None, None, None)`` on BOTH sides and the
+    THE FLOOR (§7 audit). 78 of 150 cache rows carry none of
+    :data:`_KERNEL_SIGNATURE_KEYS` — all 49 ``authority_change`` rows plus 29
+    ``freeze_pause`` rows — so with ``verdict='unknown'`` the signature is
+    ``('unknown', None, None, None, None, None)`` on BOTH sides and the
     audit passes unconditionally. That is not an audit; it is the string ``unknown``
     compared with itself, and a hash collision between two different behaviors both
     answering ``unknown`` is exactly what it would have to catch. Two of the five
