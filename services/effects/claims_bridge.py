@@ -203,10 +203,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     #     ``duration_bound_source`` is the only thing that tells them apart
     #     (``config.DURATION_BOUND_*``): ``no_time_reference`` = PROVEN indefinite
     #     latch = the MOST severe freeze, never zero/short — and it is asserted only
-    #     when no leaf in the latch's whole guard tree reads a clock AND that tree's
-    #     operand lists are known-complete, because both a lowered ``||`` and a
-    #     pre-widening two-slot operand list hide a clock from the leaf that reads
-    #     the latch; ``not_determined`` (and
+    #     when no leaf in the latch's whole guard tree reads a clock AND no operand
+    #     anywhere in that tree stands for something never read (lists known-complete,
+    #     no undecomposed expression, no unentered callee), because a lowered ``||``, a
+    #     pre-widening two-slot operand list, and a clock read through a view helper or
+    #     a time oracle each hide a clock from the leaf that reads the latch — and the
+    #     third hides it from a whole-tree ``block.timestamp`` walk as well;
+    #     ``not_determined`` (and
     #     an ABSENT source, which is every row written before A7) = the window was
     #     not established — score it as a confidence gap, never as indefinite and
     #     never as bounded. The previous contract read this line as "None + None =

@@ -381,7 +381,17 @@ logger = logging.getLogger(__name__)
 # of ``require(block.timestamp - pausedUntil < 2592000)`` altogether. The state now
 # also requires a clock-free whole guard tree and known-complete operand lists, so a
 # pre-v30 row's ``no_time_reference`` may be a proof its evidence never supported.
-EFFECT_CACHE_SCHEMA_VERSION = 30
+# v31 (Wave 2 Leg D, A7 round 3): the OPACITY half of the ``no_time_reference`` proof
+# was still leaf-local, and its opaque-source set omitted the two operand kinds that
+# name a callee the builder never entered. Reproduced through the production predicate
+# builder: ``require(!frozen || _clock() > unpauseAt)`` with ``_clock()`` an internal
+# view returning ``block.timestamp`` — Uniswap V3's ``_blockTimestamp()``, OZ
+# Governor's ``clock()`` — and the same shape through a time oracle both published
+# PROVEN indefinite for a freeze that expires. No ``block_context`` operand exists
+# anywhere in those trees, so the v30 whole-tree clock walk could not see it either.
+# Both preconditions are now whole-tree and ``view_call``/``external_call`` are opaque,
+# so a pre-v31 row's ``no_time_reference`` may be a proof its evidence never supported.
+EFFECT_CACHE_SCHEMA_VERSION = 31
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

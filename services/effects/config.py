@@ -102,16 +102,22 @@ OBSERVATION_NOT_RUN = "not_run"
 #     trust it as a severity REDUCER only together with ``auto_expiry is True``
 #     (the fork warped past it and the frozen entry points came back).
 #   * ``no_time_reference`` — PROVEN indefinite: the latch IS read by a lowered
-#     guard, NO leaf anywhere in that guard tree touches a clock, and the tree's
-#     operand lists are known-complete (``calldata._absorption_recorded``), so no
-#     passage of time lifts the freeze. ``duration_bound_seconds`` is ``None`` and
-#     that ``None`` is a fact about the contract. This is the most severe freeze
-#     there is, so the two extra conditions are not pedantry: a leaf-local reading
-#     published proven-most-severe for ``require(!frozen || block.timestamp >
-#     unpauseAt)`` (Solidity lowers ``||`` to sibling leaves, so no single leaf
-#     holds both facts) and for any pre-widening tree of
-#     ``require(block.timestamp - pausedUntil < 2592000)`` (a two-slot operand list
-#     dropped the clock). Both freezes demonstrably expire.
+#     guard, NO leaf anywhere in that guard tree touches a clock, and no operand
+#     anywhere in that tree stands for something the builder never read — the
+#     operand lists are known-complete (``calldata._absorption_recorded``) and no
+#     operand is an undecomposed expression or an unentered callee
+#     (``calldata._OPAQUE_OPERAND_SOURCES``). Only then does no passage of time lift
+#     the freeze. ``duration_bound_seconds`` is ``None`` and that ``None`` is a fact
+#     about the contract. This is the most severe freeze there is, so the extra
+#     conditions are not pedantry — each corresponds to a false proof reproduced
+#     from compiled Solidity, all three on freezes that demonstrably expire:
+#     ``require(!frozen || block.timestamp > unpauseAt)`` (Solidity lowers ``||``
+#     into sibling leaves, so no single leaf holds both facts); any pre-widening tree
+#     of ``require(block.timestamp - pausedUntil < 2592000)`` (a two-slot operand
+#     list dropped the clock); and ``require(!frozen || _clock() > unpauseAt)``,
+#     where the clock is read through an internal view helper or a time oracle — the
+#     Uniswap-V3 / OZ-Governor idiom — so no ``block_context`` operand exists
+#     anywhere in the tree to find.
 #   * ``not_determined`` — the window was NOT established: either the guard
 #     compares the latch against ``block.timestamp`` with the window held in
 #     storage (etherfi ``PausableUntil``: ``$.pauseUntilDuration``), or no lowered

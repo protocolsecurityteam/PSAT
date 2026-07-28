@@ -1102,22 +1102,63 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
     )
 
 
+OPAQUE_OPERANDS = (
+    {"source": "computed", "computed_kind": "arithmetic"},
+    {"source": "top"},
+    # An operand that only NAMES a callee: the recorder is additive and one level
+    # deep, and it never enters a function body, so ``_blockTimestamp()`` (Uniswap
+    # V3), ``clock()`` (OZ Governor) or a time oracle is a clock nobody read.
+    {"source": "view_call", "callee": "_clock()"},
+    {"source": "external_call", "callee": "nowSeconds"},
+)
+
+
 def test_an_unread_operand_denies_the_proven_indefinite_state():
-    """The marker promises only what the recorder does — ADDITIVE, one level deep —
-    so an operand standing for an expression nobody decomposed denies the proof.
+    """The marker promises only what the recorder does — ADDITIVE, one level deep,
+    and never into a callee — so an operand standing for an expression nobody
+    decomposed denies the proof.
 
     ``block.timestamp / 2 > pausedUntil`` records ``{computed, pausedUntil}``: the
     recorder skips a quotient by design (an offset is additive; a product or a
     quotient carries no window length), so the clock sits INSIDE an operand that was
     never read. Concluding "no leaf reading this latch touches a clock" from that is
-    the same proof-by-absence in a marked tree."""
-    for opaque in ({"source": "computed", "computed_kind": "arithmetic"}, {"source": "top"}):
+    the same proof-by-absence in a marked tree. ``view_call``/``external_call`` are
+    the same fact about a callee — see ``test_pause_duration_clock_opacity.py`` for
+    the compiled shape."""
+    for opaque in OPAQUE_OPERANDS:
         facts = _token_facts(trees={"transfer(address,uint256)": _and(_leaf(_state("pausedUntil"), opaque))})
         assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (None, "not_determined"), opaque
     # POSITIVE CONTROL: the same leaf shape with a FULLY READ second operand keeps
     # the proven state — the demotion is about the unread operand, not arity.
     readable = _and(_leaf(_state("pausedUntil"), {"source": "constant", "constant_value": "0"}))
     assert cd.read_max_pause_duration(_token_facts(trees={"t()": readable}), {"pausedUntil"}) == (
+        None,
+        "no_time_reference",
+    )
+
+
+def test_an_unread_operand_in_a_sibling_leaf_denies_the_proven_indefinite_state():
+    """The opacity test is asked of the whole latch-reading TREE, exactly like the
+    clock walk — a lowered ``||`` puts the unread operand in the sibling leaf.
+
+    ``require(!frozen || _clock() > unpauseAt)`` compiles to ``{frozen}`` and
+    ``{view_call _clock(), unpauseAt}``. The leaf that reads the latch is a
+    single-operand equality — fully read, no clock — so a leaf-local opacity test saw
+    a clean tree and published PROVEN indefinite for a freeze that expires at
+    ``unpauseAt``. Neither precondition caught it: there is no ``block_context``
+    operand anywhere for the clock walk to find."""
+    for opaque in OPAQUE_OPERANDS:
+        disjunction = _or(_leaf(_state("frozen")), _leaf(opaque, _state("unpauseAt")))
+        facts = _token_facts(trees={"transfer(address,uint256)": disjunction})
+        assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined"), opaque
+    # POSITIVE CONTROL, same disjunction shape: a sibling leaf whose operands were
+    # ALL read keeps the proven state, so the demotion tracks opacity and not the
+    # mere presence of a sibling leaf.
+    read_sibling = _or(
+        _leaf(_state("frozen")),
+        _leaf(_state("minDeposit"), {"source": "parameter", "parameter_name": "amount"}),
+    )
+    assert cd.read_max_pause_duration(_token_facts(trees={"t()": read_sibling}), {"frozen"}) == (
         None,
         "no_time_reference",
     )

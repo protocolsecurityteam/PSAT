@@ -1862,11 +1862,26 @@ def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
 _OPERAND_ABSORPTION_RECORDED = "recorded"
 
 
-# Operand sources that stand for an expression whose CONTENTS were not recorded:
-# ``computed`` is any arithmetic / hash / encode result the absorption recorder did
-# not decompose (it handles ``+``/``-`` one level deep and nothing else), and ``top``
-# is provenance saturation. Neither can be read as "this operand is not a clock".
-_OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top"})
+# Operand sources that stand for an expression whose CONTENTS were not recorded, so
+# the operand may be HIDING a clock read:
+#   * ``computed`` — any arithmetic / hash / encode result the absorption recorder did
+#     not decompose (it handles ``+``/``-`` one level deep and nothing else).
+#   * ``top`` — provenance saturation.
+#   * ``view_call`` / ``external_call`` — an operand that names a CALLEE the recorder
+#     never entered. Reading time through a helper is the mainstream idiom, not a
+#     curiosity: ``_blockTimestamp()`` in Uniswap V3's pool, ``clock()`` in OZ
+#     Governor, ``oracle.nowSeconds()`` on any time oracle. Reproduced from compiled
+#     Solidity: ``require(!frozen || _clock() > unpauseAt)`` records
+#     ``{view_call _clock(), state_variable unpauseAt}`` and no ``block_context``
+#     operand appears anywhere in the tree, so "no clock here" was a false proof about
+#     a freeze that demonstrably expires.
+# None of these may be read as "this operand is not a clock". The named, decomposed
+# sources are deliberately absent from this set: ``state_variable``, ``constant``,
+# ``parameter``, ``msg_sender``/``tx_origin``/``signature_recovery``,
+# ``self_address``, ``block_context``. Each is a fact the builder resolved and none
+# is an unentered expression — a stored timestamp or a caller-supplied deadline is
+# not a clock (no passage of time changes it without a transaction).
+_OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_call"})
 
 
 def _absorption_recorded(tree: Any) -> bool:
@@ -1924,8 +1939,11 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
     function inspector, about a latch called ``pauseUntil``.
 
     ``no_time_reference`` IS A PROOF BY ABSENCE, so it carries two preconditions
-    beyond the leaf-local one, and neither is optional. A leaf-local reading of
-    "no clock here" was unsound in both directions a real compiler produces:
+    beyond the leaf-local one, and neither is optional. Both are asked of the WHOLE
+    gate tree that reads the latch, never of the latch-reading leaf alone: a
+    leaf-local reading of "no clock here" was unsound in both directions a real
+    compiler produces, and a leaf-local reading of "nothing unread here" is unsound
+    for exactly the same reason — the clock and the latch end up in sibling leaves.
 
     1. A SIBLING LEAF MAY HOLD THE CLOCK. Solidity lowers ``||``/``&&`` into
        separate leaves, so ``require(!frozen || block.timestamp > unpauseAt)``
@@ -1950,10 +1968,35 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
        ``TimedLatch`` corpus fixture), and it will start being realised when the
        static stage next re-runs. That is the honest reading of a lower bound, not
        a dead branch. The marker's promise is bounded in the same way the recorder
-       is — ADDITIVE, one level deep — so an OPAQUE operand (``computed``, ``top``)
-       in a latch-reading leaf denies the proof too: ``block.timestamp / 2 >
-       pausedUntil`` records ``{computed, pausedUntil}``, and the recorder does not
-       decompose a quotient, so a clock is inside an operand nobody read.
+       is — ADDITIVE, one level deep, and it never enters a callee — so an OPAQUE
+       operand (:data:`_OPAQUE_OPERAND_SOURCES`) ANYWHERE in a latch-reading tree
+       denies the proof too. Two shapes, both compiled: ``block.timestamp / 2 >
+       pausedUntil`` records ``{computed, pausedUntil}`` (the recorder does not
+       decompose a quotient, so the clock is inside an operand nobody read), and
+       ``require(!frozen || _clock() > unpauseAt)`` — reading time through an
+       internal view helper or a time oracle, the Uniswap-V3 / OZ-Governor idiom —
+       records ``{view_call _clock(), unpauseAt}`` in the SIBLING leaf with no
+       ``block_context`` operand anywhere, so rule 1 does not see it either. Scoping
+       this to the tree rather than the leaf is what makes the two rules symmetric:
+       both ask "could this tree be hiding a clock from me", and neither may be
+       answered from the two slots of one comparison.
+
+       THE RECALL COST IS LARGE AND IS THE POINT, so it is stated rather than
+       discovered later. A tree here is a whole FUNCTION's lowered guard set, so an
+       unrelated leaf makes the whole tree opaque: SafeMath ``add``/``sub``, an
+       ``allowance()`` read, ``toTypedDataHash``, an internal helper's return.
+       Projected over the 75 local materializations with the marker force-stamped
+       (nothing persisted carries it yet, so the realised delta today is 0 either
+       way): of the 16 latches the static plane names, 9 reached the proven state
+       before and 1 does after; treating every compared state variable as a
+       hypothetical latch, 379 reached it before and 149 after. Every move is OFF the
+       proven state and none onto it, which is the only direction this reader is
+       allowed to be wrong in — a false "most severe freeze there is" is a claim
+       about a contract, ``not_determined`` is a claim about our evidence. Nothing in
+       the demoted set showed a plausible hidden clock, and the reader cannot tell
+       that from a real one: ``oracle.isExpired()`` is an ``external_bool`` leaf that
+       hides the entire time check, which is why the test cannot be narrowed to
+       ordering comparisons. Same conservatism as rule 1, one order louder.
 
     When several plausible constants are in scope the MAX is taken: the value is
     consumed as a severity reducer, so the longest candidate window is the least
@@ -1967,16 +2010,17 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
     for tree in trees.values():
         tree_reads_latch = False
         tree_reads_clock = False
+        tree_holds_opaque_operand = False
         for leaf in _all_leaves(tree):
             operands = _compared_operands(leaf)
             leaf_reads_clock = any(op.get("block_context_kind") == "timestamp" for op in operands)
             tree_reads_clock = tree_reads_clock or leaf_reads_clock
+            if any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
+                tree_holds_opaque_operand = True
             if not any(str(op.get("state_variable_name") or "") in latch_vars for op in operands):
                 continue
             tree_reads_latch = True
             saw_latch_guard = True
-            if not _absorption_recorded(tree) or any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
-                latch_read_from_lossy_tree = True
             if not leaf_reads_clock:
                 continue
             saw_timed_latch_guard = True
@@ -1986,6 +2030,8 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
                     best = value if best is None else max(best, value)
         if tree_reads_latch and tree_reads_clock:
             clock_in_a_latch_tree = True
+        if tree_reads_latch and (not _absorption_recorded(tree) or tree_holds_opaque_operand):
+            latch_read_from_lossy_tree = True
     if best is not None:
         # A resolved window is positive evidence: all three facts were present in one
         # leaf's union, which no lossy list can fake, so neither precondition above
