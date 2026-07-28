@@ -1365,8 +1365,10 @@ def build_governance_view(
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
         # Three states through the payload. ``False`` used to be published for a
-        # contract that HAS NO SUMMARY ROW — 62 of 147 entries on the local
-        # corpus — so "this contract cannot be paused / has no timelock / is not
+        # contract that HAS NO SUMMARY ROW — 3 of the 56 entries the endpoint
+        # serves on the local corpus (lower bound; every dependency-only contract
+        # without a summary takes this path) — so "this contract cannot be paused
+        # / has no timelock / is not
         # a factory" was asserted on the strength of never having looked. The
         # producer's own columns are three-state (``bool | None``), and a row
         # whose column is NULL means the detector ran and could not tell; both

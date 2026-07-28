@@ -481,8 +481,9 @@ def list_protocol_principals(session, name: str) -> dict[str, Any]:
 
 ROLE_SOURCE_NOT_A_ROLE = (
     "function_principals.origin is a resolver-source constant "
-    "('semantic_capability:finite_set' on 1132/1132 rows), not a role name; roles are read from "
-    "effective_functions.authority_roles"
+    "('semantic_capability:finite_set' on 1132/1132 rows), not a role name; roles are derived "
+    "from each function's capability_expr role grants (effective_functions.authority_roles is "
+    "the fallback when no capability is stored)"
 )
 
 

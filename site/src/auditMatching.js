@@ -92,11 +92,19 @@ export function matchesEra(cov, impl) {
   // date, so the only signal left is addrMatch.
   const eraFromTs =
     impl?.timestamp_introduced != null ? impl.timestamp_introduced * 1000 : null;
-  const eraHasSuccessorTs = impl != null && Object.prototype.hasOwnProperty.call(impl, "timestamp_replaced");
+  // A successor is proven by EITHER sibling key: the producer writes
+  // block_replaced for every era that has a successor, but timestamp_replaced
+  // only when the successor's log carried a timestamp — so key-presence on the
+  // timestamp alone reads "no successor" for an era that provably has one, and
+  // the Infinity arm would answer the containment question from missing data.
+  const eraHasSuccessor =
+    impl != null &&
+    (Object.prototype.hasOwnProperty.call(impl, "timestamp_replaced") ||
+      Object.prototype.hasOwnProperty.call(impl, "block_replaced"));
   const eraToTs =
     impl?.timestamp_replaced != null
       ? impl.timestamp_replaced * 1000
-      : eraHasSuccessorTs
+      : eraHasSuccessor
         ? null
         : Infinity;
   if (eraFromTs === null || eraToTs === null) {

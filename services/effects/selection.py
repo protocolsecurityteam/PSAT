@@ -1044,8 +1044,8 @@ def _has_effect_evidence():
     ``origin='guard'`` facts as well as body ones, and ``effect_targets`` filtered
     those out. A probe executes the modifiers too, so a guard-origin write is
     state the simulation really does change; and the difference only ever ADMITS
-    (11 of the 49 projected new rows), which is the direction that cannot publish
-    a false absence.
+    (10 of the projected new rows, measured from the raw effects artifacts), which
+    is the direction that cannot publish a false absence.
     """
     return or_(
         _evidence_proven_present(EffectiveFunction.state_writes),

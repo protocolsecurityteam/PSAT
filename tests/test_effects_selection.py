@@ -351,6 +351,25 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[],
         writer_selectors=[],
     )
+    # SOLE PIN for ``state_changing IS NULL``. The fallback/receive shape:
+    # ``_mutability_fields`` withholds the ABI flag to NULL for unselectored
+    # entry points (no selector is not a proof of purity — WETH9's fallback()
+    # writes balanceOf) while both evidence lists are proven-empty arrays — so
+    # every other disjunct votes no and only the withheld-mutability ground
+    # admits it. Deleting that disjunct reads "the ABI question was never
+    # answered" as "proven inert", the exact collapse this filter exists to
+    # prevent.
+    mutability_withheld = _fn(
+        db_session,
+        c.id,
+        name="unselectoredEntry",
+        selector="0xbb000008",
+        effect_targets=[],
+        state_changing=None,
+        state_writes=[],
+        sinks=[],
+        writer_selectors=[],
+    )
     # L-15: the view-contradiction rule withholds sinks/writes (89 legitimate
     # ``external_call`` sinks on 14 local rows). Withheld is not proven-absent.
     withheld = _fn(
@@ -399,6 +418,8 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
     # The two proven-present grounds, each the only admitter of its arm.
     assert sink_only_view.id in got
     assert write_only_view.id in got
+    # The withheld-mutability ground, likewise the only admitter of its arm.
+    assert mutability_withheld.id in got
     assert withheld.id in got
     assert inert.id not in got
     assert fabricated_selector.id not in got
@@ -1293,10 +1314,11 @@ def test_appendix_a_funnel_on_dev_db():
                 Contract.protocol_id == 1,
                 _has_effect_evidence(),
                 EffectiveFunction.authority_public.is_(False),
+                # jsonb_typeof(SQL NULL) is SQL NULL, so the ELSE arm already folds
+                # the no-row-value case to 0 — all three "no claims" states land here.
                 text(
-                    "(effective_functions.claims IS NULL OR (CASE WHEN "
-                    "jsonb_typeof(effective_functions.claims) = 'array' THEN "
-                    "jsonb_array_length(effective_functions.claims) ELSE 0 END) = 0)"
+                    "(CASE WHEN jsonb_typeof(effective_functions.claims) = 'array' THEN "
+                    "jsonb_array_length(effective_functions.claims) ELSE 0 END) = 0"
                 ),
             )
         ).scalar_one()

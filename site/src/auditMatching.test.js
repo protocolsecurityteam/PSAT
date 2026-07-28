@@ -269,6 +269,19 @@ describe("matchesEra: the temporal branch applies the same rule to timestamps", 
     expect(matchesEra(DATED_COV, unknownEnd)).toBe(false);
   });
 
+  it("does not answer the containment from an Infinity fold when the successor's timestamp was never recorded", () => {
+    // `block_replaced` proves a successor exists, but the producer writes
+    // `timestamp_replaced` only when the successor's log carried a timestamp —
+    // so this era provably ended at an unknown time. Its end is unknown, not
+    // infinite; only addrMatch is left, and this impl's address does not match.
+    const successorNoTs = {
+      address: "0x3333333333333333333333333333333333333333",
+      timestamp_introduced: TS_NOV_2023,
+      block_replaced: 19400000,
+    };
+    expect(matchesEra(DATED_COV, successorNoTs)).toBe(false);
+  });
+
   it("still places an audit in a bounded era and in the open-ended current one", () => {
     // POSITIVE CONTROLS: the grace-zone placement that drives every name-based
     // match must survive, including the current impl's key-absent open end.
