@@ -566,3 +566,69 @@ Wrong-chain `classify_address` residual: the chain predicate landed on the CGN `
 ## Adjudication record — Wave 3 closeout (2026-07-28)
 
 Both tier-3 verdicts returned **PASS** (`controls_held`, `differential_reconciled` true on both) while the tier-0 gate returned FAIL on `no-new-jsonb-isnull` — identified by BOTH verifiers as a grep false positive: the flagged line was the correct compound guard (SQL-NULL + `jsonb_typeof` CASE), pre-existing on main, re-split across physical lines by D1's SQLAlchemy rewrite so the line-based grep lost sight of the guard. Disposed per the adjudication-economics rule (mechanically re-provable criterion): the redundant `IS NULL OR` was dropped from the test predicate (`jsonb_typeof(SQL NULL)` is SQL NULL, so the CASE ELSE arm already folds it — semantics identical, verified by the 66-test file), the gate re-run mechanically, and no verifier re-run spawned. The same closeout commit (`9e0c7f80`) fixed the four reviewer-flagged trivial residuals (L-63; the unpinned `state_changing IS NULL` disjunct with a mutation-checked sole-pin arm; StatusStrip's proven-state default; the role-source prose) and corrected the two stated-magnitude comments (L-71, the "62 of 147" figure). Playwright visual baselines — the one unexercised gate both verifiers flagged — were run at HEAD: **4/4 passed**. The two public-payload key removals (`confidence` → `naming_rule`; duplicate `label` suppressed) are called out prominently in WAVE_3_REPORT.md per §10. SCORING_INVARIANTS.md remains tracked (deliberate: it is D1's deliverable); the eight sibling witness docs remain untracked (an accidental `git add -A` staging of them was caught and amended out).
+
+---
+
+# Wave 4 exit sweep (2026-07-28: leg reviews + differential + tier-3 verifier findings)
+
+## L-75 · (found by W4 Leg A review; implementer-disclosed)
+
+The `reach_indeterminate` branch of `_add_reach` publishes `observed_reach_floor_usd = acting_balance_usd` with no `_reach_tvl_state` call and no `reach_tvl_check` at all — the identical L-46 asymmetry one branch further up, fixed on the priced-floor branch this wave. 0 realised locally (0 of 248 rows carry `reach_tvl_check`). **Owner: effects plane, next touch of `_add_reach`** (same one-guard shape as e88ebf3d).
+
+## L-76 · (found by W4 Leg A review)
+
+Trap-note beside L-58's before-figure: 4 of the 248 `effect_verdicts` rows DO carry the KEY `duration_bound_seconds` with a jsonb-null value (ids 169/180/202/243, all freeze_pause/proven) while `duration_bound_source` is absent on all 248 — "0 rows publish a bound" is true under publishes-a-NUMBER. The jsonb-null-vs-key-absence distinction sits inside the headline count; the consumer contract (absent source ⇒ not_determined) already handles it. **Owner: record.**
+
+## L-77 · (found by W4 Leg A review)
+
+The label-corpus gate silently disappears from the offline suite in a fresh worktree whose `.venv/.solc-select` lacks the pinned solc: `tests/test_label_corpus.py:37-38` and `test_label_corpus_discrimination.py:354-355` catch `SolcNotInstalled` and `pytest.skip`, contradicting `tests/support/label_corpus.py:13`'s own "so the gate runs (never skips)" comment — CI runs it, a local run may not, and a green local run is then not the gate it appears to be. (`test_pause_duration_clock_opacity.py` has no such guard — it errors loudly, which is the right direction.) **Owner: Wave-4 deferral register** (make the skip loud or provision-checked; a harness change, not a claim-plane change).
+
+## L-78 · (found by W4 Leg C review)
+
+`workers/selection_worker.py:163` uses `Contract.job_id IS NULL` as a synonym for "never analyzed" when building the analysis candidate pool, but `contracts.job_id` is ON DELETE SET NULL — every contract whose job was deleted re-enters the pool and can be re-analyzed at full Etherscan/OpenRouter/eRPC cost while its policy rows still exist. Locally 511 of 641 contracts sit in that pool, 4 carrying policy rows. This is also the one consumer whose behaviour the L-12 repair changes (a repaired orphan leaves the pool — the correct direction). **Owner: orchestration plane** (cost hazard, not a false published claim — outside the Wave-4 admission test, recorded with cause).
+
+**Reproduction:** `sed -n '160,166p' workers/selection_worker.py; psql: select count(*) from contracts where job_id is null;`
+
+## L-79 · (found by W4 Leg C; implementer-disclosed, reviewer-confirmed)
+
+`reconcile_role_set_drift` (`services/resolution/deferred_reconciler.py:458`) carries the identical orphan blind spot L-12 fixed in its sibling — same `.join(Contract, Contract.job_id == Job.id)` — so role-store drift on an orphaned contract can never be reconciled. Separate population (ROLE_STORE_TRACE_STEP), no ledger item admitted it, leg correctly did not widen scope. **Owner: next reconciler touch** (same one-line rekey as d862a759).
+
+## L-80 · (found by W4 Leg C; implementer-disclosed, reviewer-confirmed)
+
+A parameterised fallback earns a fabricated selector: `has_no_selector('fallback(bytes)')` is False (the sentinel set is exactly `{'fallback()','receive()'}`) while the signature is canonical, so `effective_permissions.py` mints `keccak('fallback(bytes)')[:4] = 0x19198595` for an entry point with no dispatch selector — the L-14 class. 0 realised; structural on the first `fallback(bytes calldata)` contract (valid ≥0.6). Caveat: rests on Slither rendering the signature as `fallback(bytes)`. **Owner: predicate/effects producer plane.**
+
+## L-81 · (found by W4 Leg C; implementer-disclosed, reviewer-confirmed)
+
+The persisted fallback()/receive() rows still carry the pre-Wave-1 fabricated selectors (3× `0x552079dc`, 4× `0xa3e76c0f` in psat): the producer is fixed (empty-string sentinel), so the next real policy run rewrites them; until then `_selector_key` folds those rows onto the fabricated identity, not the documented sentinel. **Owner: record — resolves on the next pipeline run** (writing the DB by hand is out of bounds).
+
+## L-82 · (found by W4 Leg C; implementer-disclosed, reviewer-confirmed — L-67 family)
+
+`tests/test_resolution_worker.py`'s teardown deletes Job/Artifact/JobDependency but never Contract, so every run manufactures L-12's exact orphan shape in the test DB via the SET NULL FK — any population assertion against a reused test DB is harness-contaminated. **Owner: next touch of that conftest** (same idempotence shape as 52126cf9).
+
+## L-83 · (found by W4 Leg B review + both tier-3 verifiers — STANDING METHOD CAUTION, supersedes every seed-grouping claim)
+
+**The pre-fix (base) tree plane was never reproducible under PYTHONHASHSEED pinning**: the `_operand_for_value` tie-break varied run-to-run at a FIXED seed (allocation history participates in `hash()` of the Source set) — cid 537 yields two distinct byte forms across three runs at seed 0; 19/92 units flicker across fresh processes at one seed. Consequences, binding on any future reader: (1) every BASE-side tree count in the Wave 1–4 differentials is one sample of a distribution, not a measurement (the head side after 3655d3e1/f3c0da4b IS byte-stable — verified across seeds and processes); (2) commit 3655d3e1's "flips at seeds 2/3 vs 0" grouping and the "12 verdicts on 6 units" magnitude (persisted in two db/ comments, corrected at final closeout) are sample-dependent restatements of the right diagnosis (L-39/L-42 class); (3) the L-25 noise bucket is now provably empty at HEAD rather than bucketed.
+
+## L-84 · (found by W4 Leg B review)
+
+Pre-existing guard-word mislabel: `_facts._classify_constraining_leaf`'s `via_derived` branch returns the literal `"hash_commitment"` UNCONDITIONALLY for equality/comparison leaves bound through `derived_from` — no hashing need appear (observed on a SafeTransferLib `require(success)` returndata check publishing `guard: hash_commitment`). Reaches the published surface (claimsVocab renders the guard word); the hedge is right (`pins` capped at null for derived_from bindings), the word is wrong. The L-25 settle retired the observed instance by picking a different operand; the class is live wherever a computed operand's derived_from names a parameter on a require-shaped mandatory leaf. **Owner: claims/matchers plane, post-effort** (a guard-vocabulary fix with corpus arms).
+
+## L-85 · (found by W4 Leg B; implementer-disclosed, count re-derived by reviewer)
+
+`effects.py _own_selector` publishes keccak of the DECLARED signature in the effects record's `selector` field whose docstring claims msg.sig semantics — false for **317 of 2,247** function records on the 88 replayable units (every enum/interface/struct-typed parameter), and the same declared-form value feeds `effective_functions.selector`. L-17 correctly added `abi_selector` beside it rather than rewriting; the root fabrication survives with its docstring. **Owner: effects-record producer, post-effort** (L-27/L-72-family; the L-72 refutation shows the *policy* writer canonicalizes correctly — this is the artifact-plane sibling).
+
+## L-86 · (found by W4 Leg B review)
+
+Surviving nondeterminism in a published predicate-tree field at HEAD, outside L-25's surface: `trees.<sig>.leaf.expression` carries the Slither SSA temp name (`return result_3` at seed 0 vs `result_2` at seed 1 on cid 568), stable within a seed, and PYTHONHASHSEED is pinned nowhere in production (Dockerfile/fly.toml/workflows grep clean) — this will pollute future predicate-tree differentials the way L-25 did. **Owner: predicate-extraction plane, post-effort** (same family as L-4/L-25; consider pinning the seed in production images as the cheap half).
+
+## L-87 · (found by W4 tier-3 verifier lens 2)
+
+Committed perf figures restated: f3c0da4b's "back at 24.3s on cid 537" does not reproduce paired on a quiet machine — base 17.2s vs head 19.6–21.3s on the heaviest unit, a real +15–25% on that unit, not parity (figures were presumably taken under concurrent-leg load). The substantive claims hold: no minutes-scale blow-up, the lru_cache storm is gone, the full 92-unit sweep completes on both sides. **Owner: record** (restatement, not a defect).
+
+## L-88 · (final-closeout corrections — CLOSED in the Wave 4 closeout commit)
+
+Driving-agent direct fixes after the Wave-4 verdicts: the "12 verdicts on 6 units" magnitude in `db/effect_cache.py` and `db/contract_materializations.py` restated as base-sample-dependent per L-83 (both verifiers demanded it); `policy_caller.sol`'s stale "derives nothing" inline comment updated to the post-L-17 truth. Also recorded here: 8c7b8fdf's commit body says "120 added lines, 2 removed" where numstat disagrees (bookkeeping only), and L-58's "0 of 248 publish a bound" carries the L-76 nuance.
+
+## Adjudication record — Wave 4 closeout (2026-07-28)
+
+All three legs accepted within cap (A and C round 1, B round 2 — per the workflow log). Exit PASS: gate green (suite 5,439 / vitest 615 / determinism both classes / R5 v32→v34 ordinal with one reason each), both tier-3 verdicts PASS with controls held and the differential reconciled line-by-line (179 operand-plane leaf diffs all attributed to L-25's settle; +2,220 `abi_selector` keys to L-17; 0 published-claims / controller-tracking / summary diffs; the one initially-unattributed row resolved to L-86's expression-field noise). Outcome notes: **L-38 closed by attribution** — the producer fix had already landed in Wave 1 (`a96b2ca3`); Wave 4 added the four mutation-checked pin arms and the source-quoted attribution; the two StrategyManager rows read `constrained/mapping_allowlist` at base AND head, so the ledger's "false unconstrained_proven on real rows" was stale against the merged branch. **L-72 REFUTED on data** (`eeee8a31`): no empty-selector named row exists in any local DB; the population-level invariant is now pinned instead. **L-34 corrected** (`47e1a234`): the legacy token was never persisted, so the rename shipped without a data migration and the legacy enum member was dropped. **L-12 landed as reachability + honest deferral**: the rekeyed join makes orphaned marker rows reachable in principle, but both orphaned contracts have zero jobs at their address, so convergence needs a fresh analysis job (cost boundary) — deferral cause verified true by lens 1.

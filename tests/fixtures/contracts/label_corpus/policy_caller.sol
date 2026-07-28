@@ -65,7 +65,9 @@ contract PolicyCaller {
         IVault(vault).deposit(amount);
     }
 
-    // Body call, resolvable, derives nothing — see the header.
+    // Body call, resolvable; the callee takes an interface-typed parameter, so
+    // this derives flow.out only through the canonical abi_selector join key
+    // (the declared-signature keccak misses) — see the header.
     function recoverVia(address token, address to, uint256 amount) external onlyOwner {
         IRecovery(recovery).sweepTo(token, to, amount);
     }

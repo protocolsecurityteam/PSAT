@@ -449,16 +449,20 @@ logger = logging.getLogger(__name__)
 # on the winning ``computed`` operand and mints the constraint fragment published
 # as ``target_constraint`` (flows) / ``destination_constraint``
 # (exec.arbitrary, delegatecall) — the v11 destination witness the probe shapes
-# its inner call from. Measured with ONE code side over base-vs-head trees so the
-# settle is the only variable: 12 verdicts on 6 units (cids 74/78/87/89/90/456,
-# ``claimFees(ERC20)`` param 0, value_flow and external_call modes) move
-# ``constrained``/``hash_commitment``/``derived_from`` -> ``not_determined``.
+# its inner call from. The movement's MAGNITUDE is base-sample-dependent and
+# must not be re-cited as a measurement: the pre-fix tie-break varies run-to-run
+# even at a fixed PYTHONHASHSEED (allocation history participates), so one
+# captured base sample showed 12 verdicts on 6 units moving
+# ``constrained``/``hash_commitment``/``derived_from`` -> ``not_determined``
+# while another base sample shows 0. What IS a property of the code: every
+# possible move retreats FROM a proof state (the settle picks one canonical
+# winner and the honest verdict for a coin-flip witness is not_determined).
 # No bump, on three measured grounds: (a) every move retreats FROM a proof state
 # and no unit in the 88 moves toward a stronger one (the 18 slots that gain a
 # parameter origin — ``manage(address,bytes,uint256)`` param 0 on cids
 # 22/47/76/80-84/94/95 — produce zero verdict change); (b) the pre-fix
-# ``constrained`` was seed-luck, not evidence (four distinct base digests
-# observed for the deciding slot across seeds), so a cached row would hold a
+# ``constrained`` was sample-luck, not evidence (four distinct base digests
+# observed for the deciding slot across runs), so a cached row would hold a
 # coin-flip the settle merely stops re-rolling; (c) nothing persisted serves the
 # fragment — 0 local effective_functions.claims rows carry a constraint verdict,
 # and the settle leaves every effects artifact byte-identical (the full-leg

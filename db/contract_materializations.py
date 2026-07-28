@@ -107,8 +107,9 @@ logger = logging.getLogger(__name__)
 # byte form. The tree SCHEMA gains and loses no key, but WHICH computed source
 # wins a slot changes, and ``derived_from`` on the winner is a witness input:
 # ``claims/matchers/_facts.param_constraints`` reads it to mint the
-# destination-constraint fragment. The measured verdict movement (12 verdicts
-# on 6 units, all retreating from a proof state) and the cache non-bump
+# destination-constraint fragment. The verdict movement is retreat-from-proof
+# by construction (its magnitude is base-sample-dependent — the pre-fix
+# tie-break varies even at a fixed seed); that and the cache non-bump
 # decision are recorded at ``EFFECT_CACHE_SCHEMA_VERSION``
 # (db/effect_cache.py), where the probe-input consumers live. Noted per the
 # same-unreleased-version precedent rather than minting a version no row was
