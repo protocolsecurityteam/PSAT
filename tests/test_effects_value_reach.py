@@ -406,3 +406,97 @@ def test_a_truncated_holdings_list_names_truncation_as_the_reason():
     # whole, is a genuine absence and says so instead.
     eff2 = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=1.0)
     assert eff2.concrete["observed_reach_unvalued_reasons"] == ["unrecorded_asset"]
+
+
+def test_two_logs_of_one_asset_out_of_one_holder_attribute_that_holding_once():
+    """The attributed figure is a holder's WHOLE recorded balance for an asset, so a
+    second ``Transfer`` log of the same asset out of the same holder must contribute
+    nothing.
+
+    Summing per LOG published a MULTIPLE of the entire balance under
+    ``observed_reach_value_usd`` — the field whose own docstring calls it "a
+    conservative upper bound (a holder's full on-chain balance attributed when value
+    provably leaves it)". Two logs made a $100 holding read as $200 of reach: not an
+    upper bound, a new over-claim on a published money figure, in the same field and
+    the same direction as the defect A2 exists to remove. The triggering shape is the
+    one ``_resolve_destination_shape`` names verbatim — "a withdrawal that emits
+    several Transfer logs (burn + send, or send + fee to the same address)"."""
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
+    one_log = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    send_and_fee = SimResult(
+        calls=(
+            SimCallResult(
+                True,
+                "0x",
+                None,
+                (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, CONTRACT, HOLDER, 1)),
+            ),
+        )
+    )
+    single = _value_out([one_log], holders=holdings, floor=0.0)
+    doubled = _value_out([send_and_fee], holders=holdings, floor=0.0)
+
+    assert single.concrete["observed_reach_value_usd"] == 100.0
+    assert doubled.concrete["observed_reach_value_usd"] == 100.0, (
+        "a second log of the same asset added the balance again"
+    )
+    assert doubled.concrete["observed_reach_holders"] == [CONTRACT]
+    assert doubled.concrete["observed_reach_assets"] == [TOKEN]
+    # POSITIVE CONTROL: distinct (holder, asset) pairs DO sum — the dedup is on the
+    # pair, not a cap on the total.
+    two_assets = SimResult(
+        calls=(
+            SimCallResult(
+                True,
+                "0x",
+                None,
+                (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5)),
+            ),
+        )
+    )
+    summed = _value_out(
+        [two_assets],
+        holders=(AssetHolding(CONTRACT, TOKEN, 100.0), AssetHolding(CONTRACT, EETH, 25.0)),
+        floor=0.0,
+    )
+    assert summed.concrete["observed_reach_value_usd"] == 125.0
+    assert summed.concrete["observed_reach_assets"] == sorted([TOKEN, EETH])
+
+
+def test_the_partial_floor_and_the_tvl_ceiling_both_read_the_deduped_sum():
+    """Two knock-ons of the per-log sum, pinned so neither returns.
+
+    (a) ``observed_reach_priced_usd`` is published as a partial FLOOR on the unvalued
+    branch and inherited the same inflation. (b) An inflated sum can trip the TVL
+    ceiling, publishing ``exceeds_protocol_tvl`` + ``reach_determined: false`` for a
+    row that is legitimately within TVL — the envelope refusing a figure only its own
+    arithmetic broke."""
+    logs = (
+        transfer_log(TOKEN, CONTRACT, PAYEE, 5),
+        transfer_log(TOKEN, CONTRACT, HOLDER, 1),
+        transfer_log(EETH, CONTRACT, PAYEE, 5),
+    )
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    # EETH has no holding row at all → the total is not determined and the priced part
+    # is the floor. It must be the TOKEN holding once, not twice.
+    partial = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0)
+    assert partial.concrete["reach_determined"] is False
+    assert partial.concrete["observed_reach_priced_usd"] == 100.0
+
+    # The ceiling: $100 of reach under a $150 TVL is within it. Per-log summing made
+    # the same call read as $200 and the row was refused.
+    priced = SimResult(
+        calls=(
+            SimCallResult(
+                True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, CONTRACT, HOLDER, 1))
+            ),
+        )
+    )
+    within = _value_out([priced], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0, tvl=150.0)
+    assert within.concrete["reach_tvl_check"] == "within_protocol_tvl"
+    assert within.concrete["reach_determined"] is True
+    assert within.concrete["observed_reach_value_usd"] == 100.0
+    # NEGATIVE CONTROL: the ceiling still fires on a sum that genuinely exceeds TVL.
+    over = _value_out([priced], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0, tvl=50.0)
+    assert over.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
+    assert over.concrete["reach_determined"] is False

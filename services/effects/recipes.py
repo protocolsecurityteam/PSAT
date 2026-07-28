@@ -1599,7 +1599,12 @@ def _add_reach(
     match (the fix the handoff proposed and G7 refuted — a synthetic native log has
     no token emitter, so that would have matched nothing and under-claimed 100%). The
     INPUT changed: holdings arrive per asset, native included, keyed on the emitter
-    the node actually uses."""
+    the node actually uses.
+
+    ONE ADD PER (HOLDER, ASSET), never per LOG. The attributed figure is a whole
+    recorded balance, so a second Transfer log of the same asset out of the same
+    holder must contribute nothing: summing per log published a MULTIPLE of the
+    balance in the field that documents itself as an upper bound."""
     if not value_holders:
         return
     priced_usd = 0.0
@@ -1617,27 +1622,36 @@ def _add_reach(
     # ABSENT from ``known`` for that holder is a real absence or an unfetched one.
     complete: dict[str, bool] = {h.holder.lower(): h.holdings_complete for h in value_holders}
     unvalued_reasons: set[str] = set()
+    # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
+    # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
+    # recorded balance for that asset (the documented conservative upper bound), and a
+    # single call legitimately emits several Transfer logs of the same asset out of the
+    # same holder — the shape ``_resolve_destination_shape`` names one screen up, "a
+    # withdrawal that emits several Transfer logs (burn + send, or send + fee to the
+    # same address)". Adding once per LOG published a MULTIPLE of the entire balance
+    # and called it an upper bound; two logs made a $100 holding read as $200 reach.
+    moved: set[tuple[str, str]] = set()
     for holder in sorted({h.holder.lower() for h in value_holders}):
         for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
-            reach_holders.add(holder)
-            reach_assets.add(asset)
-            if (holder, asset) not in known:
-                # No balance row at all for this (holder, asset): value left in an
-                # asset we never recorded. G6-11 — absence there conflates "holds
-                # nothing", "not fetched" and "fetch failed", so it is not a zero, and
-                # a holder at the fetcher's page cap gets the more specific reason.
-                unvalued_assets.add(asset)
-                unvalued_reasons.add(
-                    "unrecorded_asset" if complete.get(holder, True) else "holdings_possibly_truncated"
-                )
-                continue
-            usd = known[(holder, asset)]
-            if usd is None:
-                unvalued_assets.add(asset)  # held, but unpriced
-                unvalued_reasons.add("unpriced_holding")
-            else:
-                priced_usd += usd
-                priced_any = True
+            moved.add((holder, asset))
+    for holder, asset in sorted(moved):
+        reach_holders.add(holder)
+        reach_assets.add(asset)
+        if (holder, asset) not in known:
+            # No balance row at all for this (holder, asset): value left in an
+            # asset we never recorded. G6-11 — absence there conflates "holds
+            # nothing", "not fetched" and "fetch failed", so it is not a zero, and
+            # a holder at the fetcher's page cap gets the more specific reason.
+            unvalued_assets.add(asset)
+            unvalued_reasons.add("unrecorded_asset" if complete.get(holder, True) else "holdings_possibly_truncated")
+            continue
+        usd = known[(holder, asset)]
+        if usd is None:
+            unvalued_assets.add(asset)  # held, but unpriced
+            unvalued_reasons.add("unpriced_holding")
+        else:
+            priced_usd += usd
+            priced_any = True
     if not reach_holders:
         concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
