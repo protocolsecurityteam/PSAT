@@ -25,16 +25,26 @@ function usdCell(row) {
 // `holdings_coverage.state` is two-valued by construction — the backend cannot
 // prove completeness (see company_overview) — so this only ever answers
 // "cannot rule truncation out".
+// TWO INDEPENDENT FACTS, and both are disclosed when both hold (L-66). Truncation is
+// about assets that were never read; unvalued rows are about assets that were read and
+// could not be priced. Returning the first and skipping the second — which this did —
+// silently dropped the pricing disclosure for exactly the contracts where the total is
+// least trustworthy: locally 7 of 7 at-the-cap contracts also carry unvalued rows.
 function coverageNote(machine) {
   const cov = machine?.holdings_coverage;
   if (!cov) return null;
+  const parts = [];
   if (cov.state === "may_be_incomplete") {
-    return `Holdings may be incomplete: the fetch returned a full page (${cov.page_cap}). Assets beyond it were never read, so this list and any total from it are lower bounds.`;
+    parts.push(
+      `Holdings may be incomplete: the fetch returned a full page (${cov.page_cap}). Assets beyond it were never read, so this list and any total from it are lower bounds.`,
+    );
   }
   if (cov.unvalued_rows > 0) {
-    return `${cov.unvalued_rows} of ${cov.rows} holdings have no determined USD value, so the total below counts only the priced ones.`;
+    parts.push(
+      `${cov.unvalued_rows} of ${cov.rows} holdings have no determined USD value, so the total below counts only the priced ones.`,
+    );
   }
-  return null;
+  return parts.length ? parts.join(" ") : null;
 }
 
 export function BalanceTable({ machine }) {

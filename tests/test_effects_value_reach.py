@@ -396,6 +396,82 @@ def test_no_tvl_snapshot_skips_the_ceiling_out_loud():
     assert eff.concrete["observed_reach_value_usd"] == 100.0
 
 
+def _partial_floor(*, floor_usd: float, tvl: float | None):
+    """One ``value_out`` on the PARTIAL-FLOOR branch: two assets leave the holder,
+    only one of them has a priced holding, so the total is not determined and
+    ``observed_reach_priced_usd`` is the floor. ``floor_usd`` is that floor."""
+    logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5))
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    return _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, floor_usd),), floor=0.0, tvl=tvl)
+
+
+def test_a_priced_floor_above_protocol_tvl_is_refused_like_a_measured_figure():
+    """L-46. The ceiling used to guard only the measured branch: the unvalued branch
+    set ``observed_reach_priced_usd`` and RETURNED above ``_reach_tvl_state``, so a
+    floor above the protocol's own measured TVL was publishable with no
+    ``reach_tvl_check`` at all — the same contradiction the ceiling exists to catch,
+    on the sibling key, and worse here than on a measured total: the floor is a LOWER
+    bound over a SUBSET of the assets that moved, so exceeding the ceiling cannot be
+    explained away by an upper bound being loose.
+
+    The unvalued-asset disclosure is an INDEPENDENT fact and survives the refusal —
+    value did leave the holder; what was refused is the priced part's USD."""
+    eff = _partial_floor(floor_usd=3_488_955_156.06, tvl=3_297_344_734.00)
+
+    assert eff.concrete["reach_determined"] is False
+    assert eff.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
+    assert "observed_reach_priced_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_rejected_usd"] == 3_488_955_156.06
+    assert eff.concrete["protocol_tvl_usd"] == 3_297_344_734.00
+    assert eff.concrete["observed_reach_unvalued_assets"] == [EETH]
+    assert eff.concrete["observed_reach_unvalued_reasons"] == ["asset_not_in_recorded_holdings"]
+    # NOT the measured key, and not the never-witnessed floor either: this row's three
+    # states stay exactly where they were.
+    assert "observed_reach_value_usd" not in eff.concrete
+    assert "reach_indeterminate" not in eff.concrete
+
+
+def test_a_priced_floor_within_protocol_tvl_is_published_and_says_it_was_checked():
+    """POSITIVE CONTROL for the refusal above: the floor branch keeps publishing its
+    floor, and the ceiling's outcome is now visible on it (it was absent entirely)."""
+    eff = _partial_floor(floor_usd=100.0, tvl=1_000.0)
+
+    assert eff.concrete["reach_determined"] is False
+    assert eff.concrete["reach_tvl_check"] == "within_protocol_tvl"
+    assert eff.concrete["observed_reach_priced_usd"] == 100.0
+    assert eff.concrete["observed_reach_unvalued_assets"] == [EETH]
+
+
+def test_a_priced_floor_with_no_tvl_snapshot_skips_the_ceiling_out_loud():
+    """R2 on this branch too: no ``defillama_tvl`` means the ceiling did not run, and
+    the floor is published with the skip beside it rather than looking checked."""
+    eff = _partial_floor(floor_usd=100.0, tvl=None)
+
+    assert eff.concrete["reach_tvl_check"] == "skipped_no_tvl"
+    assert eff.concrete["observed_reach_priced_usd"] == 100.0
+
+
+def test_an_unvalued_branch_with_nothing_priced_publishes_no_ceiling_outcome():
+    """The fourth input shape, and the one that must NOT gain a key: no asset that
+    moved had a priced holding, so there is no figure for a ceiling to bear on.
+    ``within_protocol_tvl`` over an absent number would read as a check that passed
+    on a figure nobody published."""
+    logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5))
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    # A holding row exists for TOKEN but carries no price (usd_value None) → unpriced,
+    # and EETH has no row at all. Nothing priced.
+    eff = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, None),), floor=0.0, tvl=1_000.0)
+
+    assert eff.concrete["reach_determined"] is False
+    assert "reach_tvl_check" not in eff.concrete
+    assert "observed_reach_priced_usd" not in eff.concrete
+    assert "observed_reach_rejected_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_unvalued_assets"] == sorted([TOKEN, EETH])
+    assert eff.concrete["observed_reach_unvalued_reasons"] == sorted(
+        ["unpriced_holding", "asset_not_in_recorded_holdings"]
+    )
+
+
 def test_a_truncated_holdings_list_names_truncation_as_the_reason():
     """G6-11 consumer rule: a truncated fetch must LOWER CONFIDENCE, never produce a
     confident low value. An asset absent from a capped list may simply never have been

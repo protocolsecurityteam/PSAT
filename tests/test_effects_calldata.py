@@ -55,10 +55,18 @@ def _leaf(
     *operands: dict[str, Any],
     authority_role: str | None = None,
     absorbed: list[dict[str, Any]] | None = None,
+    operator: str | None = None,
 ) -> dict[str, Any]:
     leaf: dict[str, Any] = {"operands": list(operands)}
     if authority_role is not None:
         leaf["authority_role"] = authority_role
+    if operator is not None:
+        # ``operands`` is the comparison's two slots in IR left-right order and the
+        # operator says which side the constant bounds — both are load-bearing for the
+        # pause-window harvest (L-58). Every leaf the production builder emits carries
+        # an operator (5,089/5,089 persisted leaves locally); set it wherever a test
+        # asserts a resolved window, and leave it off to exercise the undecidable case.
+        leaf["operator"] = operator
     if absorbed is not None:
         # The sub-operands a two-slot comparison discarded (``absorbed_operands``,
         # stamped by the predicate builder). Only set where a test exercises them,
@@ -194,7 +202,6 @@ def _candidate(
         selector=selector,
         function_name="f",
         authority_public=authority_public,
-        effect_targets=("slot0",),
         principal_addresses=principals,
         input_token_addresses=holdings,
     )
@@ -927,19 +934,76 @@ def test_guarded_functions_matches_a_namespaced_latch_across_member_paths():
     assert cd.guarded_functions(trees, {("OTHER_SLOT", None)}) == []
 
 
-def test_max_pause_duration_read_from_a_timestamp_guard_constant():
+def _timestamp() -> dict[str, Any]:
+    return {"source": "block_context", "block_context_kind": "timestamp"}
+
+
+def _const(value: str) -> dict[str, Any]:
+    return {"source": "constant", "constant_value": value}
+
+
+def test_max_pause_duration_needs_a_comparison_SHAPE_not_three_facts_in_one_leaf():
+    """INVERTED at Wave 4 (L-58). It used to assert ``(2592000, "guard_constant")``
+    for a leaf holding the latch, the clock and the constant as three DIRECT operands
+    — an arrangement no Solidity comparison produces (two slots) and one in which
+    "which side is the constant on" has no answer at all. Since the harvest is now
+    side- and operator-aware, that leaf is honestly undecidable.
+
+    The three facts still resolve in the arrangement a compiler DOES emit, which the
+    second half asserts: the clock-and-latch difference on one side, the constant on
+    the other. So the inversion costs no real coverage — it removes a positive that
+    could only ever be reached by a hand-built leaf, and 560 of the 5,089 persisted
+    leaves locally really do carry three or more operands (threshold/oracle shapes),
+    so admitting the arity was not free."""
+    three_slots = _token_facts(
+        trees={
+            "unpause()": _and(
+                _leaf(
+                    _state("TIMED_SLOT", "pausedUntil"),
+                    _timestamp(),
+                    _const("2592000"),
+                    operator="lt",
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(three_slots, {"TIMED_SLOT"}) == (None, "not_determined")
+
+    # The same three facts as solc lowers them: ``block.timestamp - pausedUntil <
+    # 2592000`` — two slots, the clock recovered from ``absorbed_operands``.
+    compiled_shape = _token_facts(
+        trees={
+            "unpause()": _and(
+                _leaf(
+                    _state("TIMED_SLOT", "pausedUntil"),
+                    _const("2592000"),
+                    absorbed=[_timestamp(), _state("TIMED_SLOT", "pausedUntil")],
+                    operator="lt",
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(compiled_shape, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+
+
+def test_max_pause_duration_is_not_determined_when_the_leaf_has_no_operator():
+    """A leaf with no ``operator`` cannot say which side the constant bounds, so the
+    harvest declines. Measured before relying on it: every one of the 5,089 predicate
+    leaves persisted in the local database carries an operator, so this refuses
+    nothing real — it keeps a hand-built or future partially-built leaf from being
+    read as a proof by defaulting the direction."""
     facts = _token_facts(
         trees={
             "unpause()": _and(
                 _leaf(
                     _state("TIMED_SLOT", "pausedUntil"),
-                    {"source": "block_context", "block_context_kind": "timestamp"},
-                    {"source": "constant", "constant_value": "2592000"},
+                    _const("2592000"),
+                    absorbed=[_timestamp(), _state("TIMED_SLOT", "pausedUntil")],
                 )
             )
         }
     )
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (None, "not_determined")
 
 
 def test_max_pause_duration_treats_every_clock_spelling_as_a_clock():
@@ -981,15 +1045,19 @@ def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
         }
     )
     assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined")
-    # ``now`` IS the seconds clock, so the identical shape with the pre-0.7
-    # spelling resolves the window.
+    # ``now`` IS the seconds clock, so the same guard one clock spelling over — the
+    # difference-and-ceiling shape, as solc lowers it — resolves the window.
     now_facts = _token_facts(
         trees={
             "transfer(address)": _and(
                 _leaf(
                     _state("LATCH_SLOT", "pausedUntil"),
-                    {"source": "block_context", "block_context_kind": "now"},
-                    {"source": "constant", "constant_value": "2592000"},
+                    _const("2592000"),
+                    absorbed=[
+                        {"source": "block_context", "block_context_kind": "now"},
+                        _state("LATCH_SLOT", "pausedUntil"),
+                    ],
+                    operator="lt",
                 )
             )
         }
@@ -997,39 +1065,122 @@ def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
     assert cd.read_max_pause_duration(now_facts, {"LATCH_SLOT"}) == (2592000, "guard_constant")
 
 
-def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
-    """THE POSITIVE CASE ON REAL COMPILER OUTPUT (A7 / L-16, R4).
-
-    A Solidity comparison lowers to a leaf with two operands, so
-    ``block.timestamp < pausedUntil + MAX_PAUSE`` records ``{timestamp,
-    MAX_PAUSE}`` and the latch is gone. The three facts the reader needs never fit
-    in two slots, which made its positive branch unreachable from ANY compiled
-    source — the hand-built leaf in the test above was the only thing that ever
-    reached it. ``absorbed_operands`` is the sibling list the leaf builder now
-    records, and this is the shape it produces: the latch and the constant arrive
-    there, the clock stays on ``operands``, and the window is readable.
-
-    Measured over 11 compiled guard shapes: 0/11 resolved before, 10/11 after (the
-    11th is ``pausedUntil < block.timestamp``, which carries no window at all and
-    must stay unresolved)."""
+def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
+    """L-60: a leaf whose operand union carries BOTH a seconds clock and
+    ``block.number`` cannot say which clock its constant is denominated against, and
+    the seconds clock alone used to be enough to enter the harvest — so 216000 blocks
+    (~30 days) would publish as 216000 seconds (2.5 days), the fabricated mitigating
+    credit the units trap exists to stop. No single compiled comparison produces this
+    (one comparison holds one comparison); operand ABSORPTION across a mixed
+    expression is what makes it reachable, which is why it is built by hand here."""
     facts = _token_facts(
         trees={
-            "transferTimed(address,uint256)": _and(
+            "transfer(address)": _and(
                 _leaf(
-                    {"source": "block_context", "block_context_kind": "timestamp"},
-                    _state("MAX_PAUSE"),
+                    _state("LATCH_SLOT", "pausedUntil"),
+                    _const("216000"),
                     absorbed=[
-                        _state("TIMED_SLOT", "pausedUntil"),
-                        {"source": "state_variable", "state_variable_name": "MAX_PAUSE", "constant_value": "2592000"},
+                        _timestamp(),
+                        {"source": "block_context", "block_context_kind": "number"},
+                        _state("LATCH_SLOT", "pausedUntil"),
                     ],
+                    operator="lt",
                 )
             )
         }
     )
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+    assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined")
+
+
+def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
+    """THE POSITIVE CASE ON REAL COMPILER OUTPUT (A7 / L-16, R4), narrowed at Wave 4
+    to the shape it can actually PROVE (L-58).
+
+    A Solidity comparison lowers to a leaf with two operands and the reader needs
+    three facts, so ``absorbed_operands`` is the sibling list that recovers the third.
+    What the union alone does NOT say is which side each fact sat on and with which
+    sign — and the harvest used to take the largest plausible constant out of it, so
+    ``require(block.timestamp + 3600 < pausedUntil)`` published 3600 as the freeze
+    window (a LEAD TIME) and ``require(block.timestamp > pausedUntil + 300)``
+    published 300 (a COOLDOWN offset), for latches whose real expiry is a storage
+    timestamp. Both are severity REDUCERS, which is the direction that matters.
+
+    The provable shape, and the only one admitted: the CLOCK and the LATCH sit in the
+    same absorbed additive group (so the compared side is their signed time
+    difference — which no lossy two-slot list can fake and both subtraction orders
+    bound identically) and the constant is that difference's ceiling by side and
+    operator. Three compiled variants of it, all asserted below.
+
+    ``require(block.timestamp < pausedUntil + MAX_PAUSE)`` — absorbed group
+    ``{latch, constant}`` — is the recall this narrowing costs, and it is a MISSING
+    PRODUCER FACT rather than a judgment: ``predicates._stamp_absorbed_operands``
+    sorts both inner operands of an ADDITION or a SUBTRACTION into one list and keeps
+    neither the sign nor the side, so ``pausedUntil + MAX_PAUSE`` and
+    ``pausedUntil - MAX_PAUSE`` are byte-identical here and only the first makes the
+    constant a window. Stamping the sign in the static plane restores it provably.
+    Pinned as ``not_determined`` below so the day that lands, this test is what
+    records the change."""
+    latch = _state("TIMED_SLOT", "pausedUntil")
+    difference = [_timestamp(), _state("TIMED_SLOT", "pausedUntil")]
+
+    # `block.timestamp - pausedUntil < 2592000` → constant on the right under `lt`.
+    right = _token_facts(
+        trees={
+            "transferTimed(address,uint256)": _and(_leaf(latch, _const("2592000"), absorbed=difference, operator="lt"))
+        }
+    )
+    assert cd.read_max_pause_duration(right, {"TIMED_SLOT"}) == (2592000, "guard_constant")
+    # `2592000 > block.timestamp - pausedUntil` → the same fact, mirrored.
+    left = _token_facts(
+        trees={
+            "transferTimed(address,uint256)": _and(_leaf(_const("2592000"), latch, absorbed=difference, operator="gt"))
+        }
+    )
+    assert cd.read_max_pause_duration(left, {"TIMED_SLOT"}) == (2592000, "guard_constant")
     # NEGATIVE CONTROL: the absorbed operands are still scoped to the latch, so a
     # different latch in the same contract inherits nothing.
-    assert cd.read_max_pause_duration(facts, {"OTHER_SLOT"}) == (None, "not_determined")
+    assert cd.read_max_pause_duration(right, {"OTHER_SLOT"}) == (None, "not_determined")
+
+    # `block.timestamp - pausedUntil > 600` — the SAME operand union, the operator
+    # flipped: a MINIMUM elapsed (a cooldown), not a window ceiling.
+    cooldown = _token_facts(
+        trees={"transferTimed(address,uint256)": _and(_leaf(latch, _const("600"), absorbed=difference, operator="gt"))}
+    )
+    assert cd.read_max_pause_duration(cooldown, {"TIMED_SLOT"}) == (None, "not_determined")
+
+    # `block.timestamp + 3600 < pausedUntil` (L-58a): the absorbed group is
+    # {clock, constant} — a lead time on the CLOCK, and the latch is the other slot.
+    lead_time = _token_facts(
+        trees={
+            "transferTimed(address,uint256)": _and(
+                _leaf(
+                    {"source": "computed", "computed_kind": "BinaryType.ADDITION"},
+                    latch,
+                    absorbed=[_timestamp(), _const("3600")],
+                    operator="lt",
+                )
+            )
+        }
+    )
+    assert cd.read_max_pause_duration(lead_time, {"TIMED_SLOT"}) == (None, "not_determined")
+
+    # `block.timestamp > pausedUntil + 300` (L-58b) and
+    # `block.timestamp < pausedUntil + MAX_PAUSE` (the deferred family): absorbed group
+    # {latch, constant}, sign unrecorded → undecidable either way.
+    for operator, constant in (("gt", "300"), ("lt", "2592000")):
+        offset = _token_facts(
+            trees={
+                "transferTimed(address,uint256)": _and(
+                    _leaf(
+                        _timestamp(),
+                        latch,
+                        absorbed=[_const(constant), _state("TIMED_SLOT", "pausedUntil")],
+                        operator=operator,
+                    )
+                )
+            }
+        )
+        assert cd.read_max_pause_duration(offset, {"TIMED_SLOT"}) == (None, "not_determined"), operator
 
 
 def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
@@ -1130,7 +1281,9 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
         {"source": "block_context", "block_context_kind": "timestamp"},
         _state("pausedUntil"),
     ]
-    leaf = _leaf(_state("pausedUntil"), {"source": "constant", "constant_value": "2592000"}, absorbed=absorbed)
+    leaf = _leaf(
+        _state("pausedUntil"), {"source": "constant", "constant_value": "2592000"}, absorbed=absorbed, operator="lt"
+    )
     post = _token_facts(trees={"transfer(address,uint256)": _and(leaf)})
     assert cd.read_max_pause_duration(post, {"pausedUntil"}) == (2592000, "guard_constant")
 
@@ -1261,7 +1414,6 @@ def test_synthesize_pause_entry_points_fixtures_and_denominator(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1294,7 +1446,6 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1356,7 +1507,6 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1386,7 +1536,6 @@ def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -1547,7 +1696,6 @@ def _eeth_candidate(session, latch_var: str) -> tuple[Candidate, dict[str, int]]
         selector=cd._selector_of("pause()"),
         function_name="pause",
         authority_public=False,
-        effect_targets=(latch_var,),
         principal_addresses=(OPERATING_MULTISIG,),
         deployment_address=EETH_PROXY,
     )
@@ -1609,7 +1757,6 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
         selector=cd._selector_of(victim),
         function_name="mintShares",
         authority_public=False,
-        effect_targets=(PAUSABLE_SLOT,),
         principal_addresses=(LIQUIDITY_POOL,),
         deployment_address=EETH_PROXY,
     )
@@ -1708,7 +1855,6 @@ def test_acceptance_liquidity_pool_withdraw_value_out():
         selector=selector,
         function_name="withdraw",
         authority_public=False,
-        effect_targets=("x",),
         principal_addresses=("0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",),
         deployment_address=LIQUIDITY_POOL,
     )
@@ -2174,7 +2320,6 @@ def test_synthesize_pause_emits_token_seed_fixtures(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)
@@ -2206,7 +2351,6 @@ def test_synthesize_pause_without_token_slots_is_unchanged(db_session):
         selector=PAUSE_SEL,
         function_name="pause",
         authority_public=False,
-        effect_targets=("paused",),
         principal_addresses=(PRINCIPAL,),
     )
     spec = cd.synthesize_pause(db_session, candidate, facts, fn)

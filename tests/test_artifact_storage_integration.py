@@ -54,6 +54,43 @@ def api_with(monkeypatch, db_session, storage_bucket):
     return api_module
 
 
+@pytest.fixture()
+def materialization_key(db_session):
+    """Claim a ``(chain, bytecode_keccak)`` for a test that INSERTS a
+    ``ContractMaterialization``, removing any row already there and removing this
+    test's row afterwards.
+
+    ``contract_materializations`` is keyed on ``(chain, bytecode_keccak)`` — a
+    composite PRIMARY KEY — and these tests use FIXED keys deliberately: the blob keys
+    the assertions read are derived from the keccak (``cm._blob_key``), so randomizing
+    it would stop exercising the real key shape. Nothing else in the file was
+    self-cleaning, so a second run against the same database died on the primary key
+    before the test body ran (L-67) — two named tests, reproduced by accident, and
+    hidden by the documented drop-and-recreate workflow. A test suite whose greenness
+    depends on the DB having been dropped first cannot be trusted to be idempotent
+    anywhere else either.
+
+    Cleanup runs on both sides: BEFORE so a leftover row (from a crash, or from the
+    run this fix was written against) does not fail the insert, and AFTER so the file
+    leaves the database as it found it.
+    """
+    from db.models import ContractMaterialization
+
+    claimed: list[tuple[str, str]] = []
+
+    def purge() -> None:
+        for chain, keccak in claimed:
+            db_session.query(ContractMaterialization).filter_by(chain=chain, bytecode_keccak=keccak).delete()
+        db_session.commit()
+
+    def claim(chain: str, *keccaks: str) -> None:
+        claimed.extend((chain, keccak) for keccak in keccaks)
+        purge()
+
+    yield claim
+    purge()
+
+
 def _completed_job(session, name: str, address: str = "0xabcdef0000000000000000000000000000000001"):
     from db.models import JobStage, JobStatus
     from db.queue import create_job
@@ -938,7 +975,7 @@ def test_source_files_written_under_a_foreign_prefix_are_still_readable(db_sessi
 
 
 def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable(
-    db_session, storage_bucket, preview_prefix
+    db_session, storage_bucket, preview_prefix, materialization_key
 ):
     """Columns 3-5/5 — contract_materializations.{analysis,tracking_plan,predicate_trees}_blob_key.
 
@@ -951,6 +988,7 @@ def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable
     from db.models import ContractMaterialization
 
     chain, keccak = "1", "0x" + "ab" * 32
+    materialization_key(chain, keccak)
     payloads = {
         "analysis": {"functions": ["pauseContract()"]},
         "tracking_plan": {"events": ["Paused"]},
@@ -1213,7 +1251,7 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     assert get_source_files(db_session, empty.id) == {}
 
 
-def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_bucket):
+def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_bucket, materialization_key):
     """R1 for ``contract_materializations``. ``_hydrate`` returned ``None`` for
     all three, and ``services/resolution/recursive`` writes ``or {}`` over it —
     so a bucket outage rendered as "this contract has no analysis, no plan and
@@ -1224,6 +1262,8 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     from workers.retry_policy import classify
 
     chain, keccak = "1", "0x" + "ef" * 32
+    keyless_keccak = "0x" + "cc" * 32
+    materialization_key(chain, keccak, keyless_keccak)
     key = cm._blob_key(chain, keccak, "analysis")
     cm._put_blob(storage_bucket, key, {"functions": ["pauseContract()"]})
     row = ContractMaterialization(
@@ -1237,7 +1277,7 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     keyless = ContractMaterialization(
         chain=chain,
         address="0x" + "34" * 20,
-        bytecode_keccak="0x" + "cc" * 32,
+        bytecode_keccak=keyless_keccak,
         status="failed",
         analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
     )

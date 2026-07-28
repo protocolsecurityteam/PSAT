@@ -362,25 +362,30 @@ def _timed_latch_facts():
     )
 
 
-def test_the_pause_duration_reader_resolves_the_timed_latch_and_only_it():
-    """A7 landed: the asymmetry this fixture was built to gate (timed ⇒ 2592000,
-    indefinite ⇒ no bound) is now what the reader produces from real compiler
-    output. REPLACES ``test_the_pause_duration_reader_finds_no_bound_in_real_
-    compiler_output``, which asserted ``None`` for BOTH latches, per that test's own
-    instruction ("it must be updated to assert the asymmetry rather than deleted").
+def test_the_pause_duration_reader_tells_the_three_latch_states_apart():
+    """The asymmetry this fixture was built to gate, on real compiler output. The
+    THREE states are the point, not the number: the indefinite latch is
+    ``no_time_reference`` (PROVEN — a lowered guard reads it and no clock sits beside
+    it), a latch no lowered leaf reads is ``not_determined``, and only the first may
+    ever be rendered as "indefinite latch, no self-recovery".
 
-    Why it used to be ``None``: a Solidity comparison lowers to a leaf with exactly
-    TWO operands and the reader needs three facts (clock, latch, window), so when
-    one side is arithmetic the operand recorder kept one sub-operand and discarded
-    the rest. ``block.timestamp < pausedUntil + MAX_PAUSE`` recorded
-    ``{timestamp, MAX_PAUSE}`` — the latch gone. The predicate builder now also
-    records what the comparison absorbed (``absorbed_operands``), and the reader
-    takes the union.
+    CHANGED at Wave 4 (L-58): ``pausedUntil`` asserted ``(2592000,
+    "guard_constant")`` here and now asserts ``not_determined``. The guard is
+    ``require(block.timestamp < pausedUntil + MAX_PAUSE)`` — absorbed group
+    ``{latch, constant}`` — and the harvest is now side/operator-aware, because
+    reading the largest plausible constant out of the operand union published a lead
+    time (``block.timestamp + 3600 < pausedUntil`` → 3600) and a cooldown offset
+    (``block.timestamp > pausedUntil + 300`` → 300) as freeze windows. This shape's
+    constant IS its window, but the evidence for that is not in the artifact: the
+    recorder sorts both inner operands of an ADDITION *or* a SUBTRACTION into one
+    list, so ``pausedUntil + MAX_PAUSE`` and ``pausedUntil - MAX_PAUSE`` are
+    indistinguishable here and only the first makes MAX_PAUSE a bound. Stamping the
+    additive sign in the static plane recovers it provably; until then the honest
+    answer is that the window was not established.
 
-    The three-state answer is the point, not just the number: the indefinite latch
-    is ``no_time_reference`` (PROVEN — a lowered guard reads it and no clock sits
-    beside it), a latch no lowered leaf reads is ``not_determined``, and only the
-    first may ever be rendered as "indefinite latch, no self-recovery".
+    The fixture still discriminates — three latch names, three different states — and
+    a compiled positive for ``guard_constant`` still exists, on the difference shape
+    (``test_pause_duration_clock_opacity.py::AbsorbedWindow`` and its two spellings).
     """
     facts = _timed_latch_facts()
     assert facts.trees, "the corpus latch produced no predicate trees"
@@ -388,11 +393,12 @@ def test_the_pause_duration_reader_resolves_the_timed_latch_and_only_it():
 
     from services.effects import calldata as cd
 
-    assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (2592000, "guard_constant")
+    assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (None, "not_determined")
     # The indefinite latch must never inherit the timed one's bound — before or
     # after the fix — and its ``None`` is the PROVEN kind.
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
-    # A latch name no leaf reads: unknown, never indefinite.
+    # A latch name no leaf reads: unknown, never indefinite. Same ``None``, different
+    # state, and this is the pair the whole reader exists to keep apart.
     assert cd.read_max_pause_duration(facts, {"neitherLatch"}) == (None, "not_determined")
 
 

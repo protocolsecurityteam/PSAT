@@ -57,7 +57,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
 # 4: ``claims[].witness`` and ``predicate_tree`` pinned per function (W0-7).
-GOLDEN_SCHEMA_VERSION = 4
+# 5: per-function ``action_summary`` pinned — the PROSE copy of the labels, which a
+# narrowed structured witness does not move (L-18).
+GOLDEN_SCHEMA_VERSION = 5
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
 # small synthetic source that reproduces one real-world claim SHAPE — either a
@@ -551,6 +553,14 @@ def _flatten_record(
                 "full_name": full_name,
                 "selector": selector,
                 "effect_labels": sorted(info.get("effect_labels") or []),
+                # The PROSE COPY of the labels/targets, and the version a reader
+                # quotes (``summaries._action_summary``). Pinned because a witness
+                # narrowed in the structured plane leaves this sentence intact: the
+                # corpus already holds functions whose ``destination_kind`` is
+                # ``not_determined`` while this string says "Executes arbitrary
+                # external calldata from the contract." (L-18), and the gate could see
+                # only the former. Empty string, never None, so presence is uniform.
+                "action_summary": str(info.get("action_summary") or ""),
                 # Plane-1 claims: claim_id, tier AND the full witness. The
                 # witness is where the evidence lives — which parameter a call
                 # target bound to, which gate corroborated a selector, whether a

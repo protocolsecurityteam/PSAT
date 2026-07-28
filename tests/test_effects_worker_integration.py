@@ -130,7 +130,6 @@ def _candidate(address: str, function_id: int, contract_id: int = 0) -> Candidat
         selector="0x40c10f19",
         function_name="f",
         authority_public=False,
-        effect_targets=("slot0",),
         principal_addresses=(PRINCIPAL,),
         value_at_stake_usd=Decimal("1"),
     )

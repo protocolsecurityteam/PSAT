@@ -106,7 +106,6 @@ def _candidate(address: str, function_id: int, contract_id: int) -> Candidate:
         selector=SELECTOR,
         function_name="withdraw",
         authority_public=False,
-        effect_targets=("slot0",),
         principal_addresses=(PRINCIPAL,),
         value_at_stake_usd=Decimal("1"),
     )
