@@ -322,7 +322,11 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
     entry = _build_company_function_entry(cast(Any, ef), [])
     assert entry["authority_public"] is True
     assert entry["controllers"] == []
-    assert entry["authority_roles"] == []
+    # The column's ``None`` rides through. (Inverts the earlier ``== []`` pin,
+    # which asserted the very fold that erased the three states — ``[]`` is
+    # "proven not role-gated", the NEGATION of the column's "role not
+    # determined", not a coarsening of it.)
+    assert entry["authority_roles"] is None
     assert entry["direct_owner"] is None
     # No principals, so no terminal marking is fabricated at the function level.
     assert "terminal" not in entry
