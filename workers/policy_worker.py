@@ -33,6 +33,7 @@ from services.policy.principal_enrichment import load_protocol_deployer_groups, 
 from services.policy.principal_history import build_principal_history
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
+from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim, resolve_claim_precedence
@@ -685,6 +686,25 @@ class PolicyWorker(BaseWorker):
             if refreshed_graph:
                 resolved_control_graph = refreshed_graph
                 store_artifact(session, job.id, "resolved_control_graph", data=refreshed_graph)
+                # Rewrite the CGN/CGE tables to the refreshed graph too — the
+                # same scoped replace the resolution stage used. Rewriting only
+                # the artifact left the table plane a strict subset: every
+                # ``role_principal`` edge (projected here, because it needs the
+                # effective_permissions computed this stage) was structurally
+                # unreachable in ``control_graph_edges``, so the effects value
+                # closure (``role_principal`` is in CONTROL_EDGE_RELATIONS — a
+                # scorer input), Surface, chat, and enrollment all read a graph
+                # missing authority the artifact plane asserted — while every
+                # row still carried ``graph_max_depth`` as if the walk that
+                # produced it were the complete one.
+                if contract_row:
+                    replace_control_graph_rows(
+                        session,
+                        contract_id=contract_row.id,
+                        deployment_address=deployment_address,
+                        resolved_graph=refreshed_graph,
+                    )
+                    session.commit()
                 # Persist any newly materialized nested artifacts (rare — most come
                 # from resolution stage already).
                 new_addresses = set(refreshed_nested) - set(nested_artifacts)
