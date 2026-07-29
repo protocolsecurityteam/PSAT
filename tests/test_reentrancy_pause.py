@@ -763,3 +763,44 @@ def test_uint_latch_read_through_helper_in_modifier_detected(tmp_path):
     # from computed values and gates nothing through a modifier).
     assert "_paused" in detected
     assert "totalShares" not in detected
+
+
+_UINT_INLINE_LATCH = """
+pragma solidity ^0.8.19;
+contract UInline {
+    address public owner;
+    uint256 private pausedStatus;
+    function setPaused(uint256 p) external { require(msg.sender == owner, "no"); pausedStatus = p; }
+    function act(uint256 v) external { require(pausedStatus == 0, "paused"); }
+    function act2(uint256 v) external { require(pausedStatus == 0, "paused"); }
+}
+"""
+
+
+def test_uint_latch_parameter_written_inline_require_detected(tmp_path):
+    """R4 positive control for the third flag-evidence arm: a uint latch
+    that is PARAMETER-written (no constant toggle) and gated by an INLINE
+    ``require(pausedStatus == 0)`` in ordinary function bodies (no
+    modifier) satisfies neither of the first two arms — dropping it
+    published the affirmative ``is_pausable=False`` on a genuinely
+    pausable contract. The equality-vs-CONSTANT revert read is the flag
+    evidence: ``_minDelay``'s revert read is relational against a
+    parameter and stays out (the two tests above)."""
+    sl = _compile(tmp_path, _UINT_INLINE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "UInline")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"pausedStatus"}
+
+
+def test_uint_latch_parameter_written_inline_require_publishes_true(tmp_path):
+    """End-to-end on the published surface: all three planes run and the
+    inline uint latch publishes the affirmative ``is_pausable=True`` —
+    not ``False`` (a proven-absence claim the detector cannot make here)
+    and not ``None``."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_INLINE_LATCH)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["pausedStatus"]
+    assert "setPaused(uint256)" in pausability["pause_functions"]

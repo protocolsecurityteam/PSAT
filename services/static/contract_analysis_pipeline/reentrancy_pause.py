@@ -48,6 +48,7 @@ try:
     from slither.slithir.operations import (  # type: ignore[import]
         Assignment,
         Binary,
+        BinaryType,
         InternalCall,
         LibraryCall,
         SolidityCall,
@@ -277,7 +278,14 @@ class PauseAnalyzer:
             duration/delay setter assigns a parameter or derived value; or
           - a modifier reads the var inside a require/revert (the
             EigenLayer shape: ``uint256 _paused`` written from a parameter
-            but gating via ``whenNotPaused``-style modifiers).
+            but gating via ``whenNotPaused``-style modifiers); or
+          - a non-writer reverts on the var compared for EQUALITY against
+            a CONSTANT (``require(pausedStatus == 0)`` inline in a function
+            body — parameter-written, no modifier). A latch is checked
+            against a distinguished value; a governed quantity's revert
+            read is RELATIONAL against a parameter (``_minDelay`` under
+            ``require(delay >= getMinDelay())``), which never matches the
+            ``==``/``!=``-vs-constant fingerprint.
         """
         type_name = str(getattr(sv, "type", ""))
         if type_name == "bool":
@@ -287,6 +295,36 @@ class PauseAnalyzer:
         for modifier in getattr(self.contract, "modifiers", []) or []:
             if self._reads_with_revert(modifier, var_name):
                 return True
+        if self._has_constant_equality_revert_read(var_name, writers):
+            return True
+        return False
+
+    def _has_constant_equality_revert_read(self, var_name: str, writers: list[Any]) -> bool:
+        """Some non-writer function has a require/revert-carrying node whose
+        Binary compares the var itself ``==``/``!=`` a Constant. Direct
+        operands only — a compare reached through arithmetic or a helper
+        call is out (the modifier arm covers the helper shapes)."""
+        writer_ids = {id(w) for w in writers}
+        for fn in self.contract.functions:
+            if fn.is_constructor or id(fn) in writer_ids:
+                continue
+            for n in getattr(fn, "nodes", []) or []:
+                irs = list(getattr(n, "irs_ssa", None) or getattr(n, "irs", []) or [])
+                if not any(_ir_is_require_or_revert(ir) for ir in irs):
+                    continue
+                for ir in irs:
+                    if not isinstance(ir, Binary):
+                        continue
+                    if getattr(ir, "type", None) not in (BinaryType.EQUAL, BinaryType.NOT_EQUAL):
+                        continue
+                    for var_op, other_op in (
+                        (ir.variable_left, ir.variable_right),
+                        (ir.variable_right, ir.variable_left),
+                    ):
+                        if _base_state_var_name(var_op) != var_name:
+                            continue
+                        if type(other_op).__name__ == "Constant":
+                            return True
         return False
 
     def _has_constant_write(self, var_name: str, writers: list[Any]) -> bool:
