@@ -1234,6 +1234,9 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
         def scalar_one_or_none(self):
             return self._scalar
 
+        def scalar_one(self):
+            return self._scalar
+
         def scalars(self):
             return self
 
@@ -1243,6 +1246,7 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
     mock_session.execute.side_effect = [
         Result(scalar=protocol),
         Result(scalars=[target_contract]),
+        Result(scalar=0),  # unfiltered protocol-wide report count
         Result(scalars=[]),
         Result(scalars=[]),
         Result(
@@ -1259,6 +1263,7 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
     body = response.json()
 
     assert body["audit_count"] == 0
+    assert body["scoped_audit_count"] == 0
     vault = body["coverage"][0]
     assert vault["contract_name"] == "Vault"
     assert vault["audit_count"] == 1
@@ -2058,3 +2063,67 @@ def test_analyses_proxy_uses_impl_analysis_when_proxy_has_none(mock_session_cls)
     proxy_entry = next((e for e in entries if e.get("job_id") == str(proxy_job_id)), None)
     if proxy_entry is not None:
         assert proxy_entry.get("contract_name") == "ImplName"
+
+
+# ============================================================================
+# 13. /audit_coverage top-level counts — unfiltered vs scoped
+# ============================================================================
+
+
+def test_audit_coverage_count_is_unfiltered_reports_on_file(api_client, db_session):
+    """The top-level ``audit_count`` on /audit_coverage counts every report on
+    file — it must equal /audits' count (the hero stat renders one, a click
+    opens the modal rendering the other) and the chat plane's protocol_brief.
+    The scope-extraction filter lives only on ``scoped_audit_count``.
+    """
+    from db.models import AuditReport, Protocol
+    from services.chat.data import protocol_brief
+
+    name = f"covcount-{uuid.uuid4().hex[:8]}"
+    proto = Protocol(name=name)
+    db_session.add(proto)
+    db_session.commit()
+    db_session.add_all(
+        [
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/scoped.pdf",
+                auditor="FirmA",
+                title="Scoped report",
+                scope_extraction_status="success",
+            ),
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/skipped.pdf",
+                auditor="FirmB",
+                title="Report on file, scope extraction skipped",
+                scope_extraction_status="skipped",
+            ),
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/pending.pdf",
+                auditor="FirmC",
+                title="Report on file, scope extraction not attempted",
+                scope_extraction_status=None,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    cov = api_client.get(f"/api/company/{name}/audit_coverage").json()
+    aud = api_client.get(f"/api/company/{name}/audits").json()
+
+    assert aud["audit_count"] == 3
+    assert cov["audit_count"] == 3, (
+        "top-level audit_count must be the unfiltered reports-on-file total; "
+        "a scope-extraction-filtered value under this name renders a hero "
+        "number that contradicts the modal one click away"
+    )
+    assert cov["audit_count"] == aud["audit_count"]
+    assert cov["scoped_audit_count"] == 1
+    assert protocol_brief(db_session, name)["audit_count"] == 3
+
+    # audit_reports.protocol_id is ON DELETE CASCADE; dropping the protocol
+    # removes the seeded reports with it.
+    db_session.execute(text("DELETE FROM protocols WHERE id = :p"), {"p": proto.id})
+    db_session.commit()

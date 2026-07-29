@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Response
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
 from db.models import AuditContractCoverage, AuditReport, Contract, Protocol
@@ -214,6 +214,19 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
     (nulls last, then id desc to break ties). Each audit entry carries
     ``match_type`` + ``match_confidence`` so the UI can flag low-confidence
     links differently.
+
+    Two top-level counts, deliberately distinct:
+
+    - ``audit_count`` — every audit report on file for the protocol,
+      unfiltered. Must equal ``/api/company/{name}/audits``'s count and the
+      chat plane's ``protocol_brief`` count: the hero stat renders this
+      number and one click opens the reports modal, so the two surfaces must
+      agree.
+    - ``scoped_audit_count`` — the subset with
+      ``scope_extraction_status == 'success'``, i.e. the reports whose
+      contract scope was extracted and which can therefore contribute
+      coverage rows below. A report can be on file (counted above) while its
+      scope extraction was skipped or failed.
     """
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -229,6 +242,9 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
 
         contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
 
+        total_audit_count = session.execute(
+            select(func.count(AuditReport.id)).where(AuditReport.protocol_id == protocol_row.id)
+        ).scalar_one()
         audit_rows = (
             session.execute(
                 select(AuditReport)
@@ -351,7 +367,8 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
             "company": company_name,
             "protocol_id": protocol_row.id,
             "contract_count": len(coverage),
-            "audit_count": len(audit_rows),
+            "audit_count": total_audit_count,
+            "scoped_audit_count": len(audit_rows),
             "coverage": coverage,
         }
     _log_endpoint(
@@ -360,7 +377,8 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
         started=started,
         outcome="success",
         contract_count=len(coverage),
-        audit_count=len(audit_rows),
+        audit_count=total_audit_count,
+        scoped_audit_count=len(audit_rows),
         coverage_row_count=len(coverage_rows) + len(inherited_rows),
     )
     return result

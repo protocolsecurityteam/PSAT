@@ -417,6 +417,10 @@ def protocol_brief(session, name: str) -> dict[str, Any]:
     ]
     contracts = session.execute(select(Contract).where(Contract.job_id.in_(job_ids))).scalars().all() if job_ids else []
     proxy_count = sum(1 for c in contracts if c.is_proxy)
+    # Unfiltered reports-on-file count — must stay in step with
+    # /api/company/{name}/audits and /audit_coverage's top-level
+    # ``audit_count`` (all three surfaces publish the same total; the
+    # scope-extraction-filtered subset is ``scoped_audit_count`` there).
     audit_count = session.execute(
         select(func.count(AuditReport.id)).where(AuditReport.protocol_id == proto.id)
     ).scalar_one()
