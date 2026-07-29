@@ -2,14 +2,15 @@
 
 Exercises the real ``poll_for_state_changes`` production path against the real
 test DB (via the shared ``db_session`` fixture) with only the RPC wire
-(``rpc_batch_request``) stubbed — never the repo classes. Covers:
+(``rpc_batch_request_with_status``) stubbed — never the repo classes. Covers:
 
   - rotation order (``last_polled_at ASC NULLS FIRST``) + slice cap
   - chunk packing at ``MAX_BATCH_SIZE`` keeping a contract's calls together
-  - per-chunk commit durability (a mid-pass chunk failure persists the
-    earlier chunk, leaves the failed chunk unstamped, still runs the later
-    chunk, and reports ``partial``)
-  - a failed chunk's contracts sorting first on the next pass (retry-first)
+  - per-entry poll status: errored calls publish ``error`` in
+    ``last_poll_status``, never touch ``last_known_state``, and mark the
+    pass ``partial``; a transport-failed chunk stamps with every entry
+    ``error`` (NOT retry-first — always-reverting entries exist in
+    persisted plans and would otherwise pin the rotation)
   - scanner-duplicate suppression, first-observation baseline, and
     ``last_known_state`` updates surviving the driver rewrite
 """
@@ -81,11 +82,13 @@ def _seed(
 
 
 def _make_mock(returns: Mapping[str, str | None], fail_on: set[int] | None = None):
-    """Build a ``rpc_batch_request`` stub that records each batch's calls and
-    returns per-``to``-address values from *returns*.
+    """Build a ``rpc_batch_request_with_status`` stub that records each
+    batch's calls and returns per-``to``-address ``(value, had_error)``
+    pairs from *returns*.
 
-    *fail_on* is a set of 1-based invocation indexes that raise, simulating a
-    chunk whose batch RPC fails.
+    *fail_on* is a set of 1-based invocation indexes whose whole batch
+    comes back as ``(None, True)`` slots — exactly how the real helper
+    reports a wholesale transport failure (it never raises).
     """
     batches: list[list] = []
     state = {"n": 0}
@@ -94,11 +97,11 @@ def _make_mock(returns: Mapping[str, str | None], fail_on: set[int] | None = Non
         state["n"] += 1
         batches.append(calls)
         if fail_on and state["n"] in fail_on:
-            raise RuntimeError("boom")
-        out: list[str | None] = []
+            return [(None, True)] * len(calls)
+        out: list[tuple[str | None, bool]] = []
         for method, params in calls:
             to = params[0]["to"] if method == "eth_call" else params[0]
-            out.append(returns.get(to.lower()))
+            out.append((returns.get(to.lower()), False))
         return out
 
     return _mock, batches
@@ -123,7 +126,7 @@ def test_rotation_orders_nulls_first_then_ascending_and_caps_slice(db_session, m
     d = _seed(db_session, 4, plan=plan, last_polled_at=datetime(2022, 1, 1, tzinfo=timezone.utc))
 
     mock, _ = _make_mock({})  # returns None everywhere -> no events, just rotation
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert events == []
@@ -163,7 +166,7 @@ def test_chunking_keeps_one_contracts_entries_together(db_session, monkeypatch):
     )
 
     mock, batches = _make_mock({})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         poll_for_state_changes(db_session, "http://rpc")
 
     assert len(batches) == 2
@@ -177,7 +180,7 @@ def test_chunking_keeps_one_contracts_entries_together(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Per-chunk commit durability + partial reporting
+# Per-entry status + partial reporting
 # ---------------------------------------------------------------------------
 
 
@@ -209,7 +212,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
     returns = {ADDR(1): _word(ADDR(190)), ADDR(3): _word(ADDR(192))}
     # Order is a, b, c (by last_polled_at); MAX_BATCH_SIZE=1 -> one chunk each.
-    # Chunk 2 (contract b) fails.
+    # Chunk 2 (contract b) fails transport-wholesale: every slot (None, True).
     mock, _ = _make_mock(returns, fail_on={2})
     captured: list[tuple] = []
 
@@ -217,14 +220,14 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
         captured.append((process, status, detail))
 
     with (
-        patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock),
         patch("services.monitoring.record_heartbeat", side_effect=_cap),
     ):
         events = poll_for_state_changes(db_session, "http://rpc")
 
-    assert len(events) == 2  # a and c detected; b failed
+    assert len(events) == 2  # a and c detected; b's call errored
 
-    # Durability: a fresh connection sees the earlier chunk's committed rows,
+    # Durability: a fresh connection sees each chunk's committed rows,
     # proving the commit happened per chunk and not as one pass-wide transaction.
     engine = create_engine(os.environ["TEST_DATABASE_URL"])
     with SASession(engine) as fresh:
@@ -234,10 +237,17 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
         assert ra is not None and rb is not None and rc is not None
         assert ra.last_polled_at is not None and ra.last_polled_at > RECENT  # chunk 1 stamped + persisted
         assert ra.last_known_state and ra.last_known_state["trackedAddr"] == ADDR(190)
-        assert rb.last_polled_at == datetime(2021, 1, 1, tzinfo=timezone.utc)  # chunk 2 unstamped
-        assert rb.last_known_state and rb.last_known_state["trackedAddr"] == ADDR(91)  # unchanged
+        assert ra.last_poll_status == {"trackedAddr": "ok"}
+        # The errored chunk is stamped too — the outcome is published as
+        # per-entry status, not silence, and the contract rotates normally
+        # (an unstamped-on-error rule would pin always-reverting entries
+        # to the front of the rotation forever).
+        assert rb.last_polled_at is not None and rb.last_polled_at > RECENT
+        assert rb.last_known_state and rb.last_known_state["trackedAddr"] == ADDR(91)  # value plane untouched
+        assert rb.last_poll_status == {"trackedAddr": "error"}
         assert rc.last_polled_at is not None and rc.last_polled_at > RECENT  # chunk 3 still processed
         assert rc.last_known_state and rc.last_known_state["trackedAddr"] == ADDR(192)
+        assert rc.last_poll_status == {"trackedAddr": "ok"}
 
         evt_types = {
             (e.monitored_contract_id, e.event_type) for e in fresh.execute(select(MonitoredEvent)).scalars().all()
@@ -249,12 +259,17 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
     detail = captured[-1][2]
     assert detail["partial"] is True
-    assert detail["chunks_failed"] == 1
+    assert detail["chunks_failed"] == 0  # no chunk rolled back — the error is per-entry
+    assert detail["entry_errors"] == 1
     assert detail["chunks"] == 3
     assert detail["contracts_selected"] == 3
 
 
-def test_failed_chunk_contracts_sort_first_next_pass(db_session, monkeypatch):
+def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, monkeypatch):
+    """A transport-failed chunk stamps its contracts (statuses all
+    ``error``) instead of holding them at the front of the rotation —
+    persisted plans contain always-reverting entries, and retry-first on
+    RPC error would let them crowd out every other contract's slot."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -265,23 +280,74 @@ def test_failed_chunk_contracts_sort_first_next_pass(db_session, monkeypatch):
         db_session, 2, plan=[_entry("trackedAddr", "0xbb01")], last_polled_at=datetime(2021, 1, 1, tzinfo=timezone.utc)
     )
 
-    # Pass 1: a stamped, b's chunk (invocation 2) fails -> b stays at 2021.
+    # Pass 1: a stamped ok; b's chunk (invocation 2) transport-fails ->
+    # b is stamped as well, with the error published per entry.
     mock1, _ = _make_mock({}, fail_on={2})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock1):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock1):
         poll_for_state_changes(db_session, "http://rpc")
 
     db_session.expire_all()
     assert db_session.get(MonitoredContract, a.id).last_polled_at > RECENT
-    assert db_session.get(MonitoredContract, b.id).last_polled_at == datetime(2021, 1, 1, tzinfo=timezone.utc)
+    rb = db_session.get(MonitoredContract, b.id)
+    assert rb.last_polled_at > RECENT
+    assert rb.last_poll_status == {"trackedAddr": "error"}
 
-    # Pass 2 with cap=1: b (2021) is now the oldest -> selected first (retry-first).
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "1")
+    # Pass 2: b's status heals to ok once the call succeeds again.
+    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     mock2, _ = _make_mock({})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock2):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock2):
         poll_for_state_changes(db_session, "http://rpc")
 
     db_session.expire_all()
-    assert db_session.get(MonitoredContract, b.id).last_polled_at > RECENT
+    assert db_session.get(MonitoredContract, b.id).last_poll_status == {"trackedAddr": "ok"}
+
+
+def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch):
+    """Three states end-to-end: a value entry is ``ok``, a reverting one is
+    ``error``, and an entry the loop can't dispatch (unrecognized kind)
+    stays absent from the map — not-polled, never conflated with either."""
+    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
+    plan = [
+        _entry("good", "0xaa01"),
+        _entry("dead", "0xaa02"),
+        {"field": "weird", "kind": "future_kind"},
+    ]
+    mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    def _mock(url, calls):
+        # Plan order: good, dead (the future_kind entry produced no call).
+        assert len(calls) == 2
+        return [(_word(ADDR(190)), False), (None, True)]
+
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_mock):
+        poll_for_state_changes(db_session, "http://rpc")
+
+    db_session.expire_all()
+    reloaded = db_session.get(MonitoredContract, mc.id)
+    assert reloaded.last_poll_status == {"good": "ok", "dead": "error"}
+    assert "weird" not in reloaded.last_poll_status
+    assert reloaded.last_known_state == {"good": ADDR(190)}
+
+
+def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_client, monkeypatch):
+    """The status map reaches the published surface: GET
+    /api/monitored-contracts serves per-entry ok/error alongside the
+    value plane, so a reverting entry is visible as such."""
+    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
+    plan = [_entry("good", "0xaa01"), _entry("dead", "0xaa02")]
+    mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    def _mock(url, calls):
+        return [(_word(ADDR(190)), False), (None, True)]
+
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_mock):
+        poll_for_state_changes(db_session, "http://rpc")
+
+    resp = api_client.get("/api/monitored-contracts")
+    assert resp.status_code == 200
+    row = next(r for r in resp.json() if r["id"] == str(mc.id))
+    assert row["last_poll_status"] == {"good": "ok", "dead": "error"}
+    assert row["last_known_state"] == {"good": ADDR(190)}
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +366,7 @@ def test_value_change_emits_event_updates_state_and_stamps(db_session, monkeypat
     )
 
     mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert len(events) == 1
@@ -322,7 +388,7 @@ def test_first_observation_updates_state_without_event(db_session, monkeypatch):
     )
 
     mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert events == []  # old_value None -> baseline, no event
@@ -354,7 +420,7 @@ def test_suppression_when_scanner_already_detected(db_session, monkeypatch):
     db_session.commit()
 
     mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert events == []  # suppressed by the recent scanner event
@@ -397,7 +463,7 @@ def test_implementation_change_writes_proxy_upgrade_event(db_session, monkeypatc
     )
 
     mock, _ = _make_mock({ADDR(1): _word(ADDR(170))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert len(events) == 1
@@ -416,7 +482,7 @@ def test_contract_without_poll_entries_still_rotates(db_session, monkeypatch):
     mc = _seed(db_session, 1, plan=[], last_polled_at=None)
 
     mock, batches = _make_mock({})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert events == []

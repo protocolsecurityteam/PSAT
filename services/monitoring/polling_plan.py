@@ -210,12 +210,17 @@ _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
 def selector_for(target_name: str) -> str:
     """Return the 4-byte selector for a no-arg getter named *target_name*.
 
-    All ``read_spec``-derived poll entries are getters compiled from
-    public state vars (Solidity auto-generates a no-arg getter) or
-    discovered no-parameter view functions (the static pipeline's
-    ``_build_getter_index`` only keeps functions with empty
-    parameters). So ``keccak(name + "()")[:4]`` is correct for every
-    entry the analyzer emits.
+    ``read_spec``-derived poll entries are admitted only for
+    ``strategy == "getter_call"`` specs (``_is_poll_decodable``), whose
+    target the analyzer resolved to a compiled getter: a public state
+    var's auto-getter or a discovered no-parameter view function
+    (``_build_getter_index`` only keeps parameterless functions). A var
+    with no getter carries ``strategy == "unknown"`` and never reaches
+    here. ``keccak(name + "()")[:4]`` is therefore the selector of a
+    real function for every entry built from a current-schema plan;
+    plans persisted before the ``unknown`` strategy existed may still
+    name a private var as a getter target, and the poll loop surfaces
+    those as per-entry ``error`` status rather than silence.
     """
     return "0x" + keccak(text=f"{target_name}()").hex()[:8]
 

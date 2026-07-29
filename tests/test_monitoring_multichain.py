@@ -88,9 +88,9 @@ def test_poll_sends_base_contract_to_base_rpc(db_session, monkeypatch):
 
     def _mock(url, calls):
         seen_urls.append(url)
-        return [None] * len(calls)
+        return [(None, False)] * len(calls)
 
-    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_batch_request", _mock)
+    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_batch_request_with_status", _mock)
     poll_for_state_changes(db_session, MAINNET_SEED)
 
     assert seen_urls == [BASE_URL]

@@ -1171,6 +1171,16 @@ class MonitoredContract(Base):
     last_known_state: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
+    # Per polling-plan ``field``: how that entry's most recent dispatched
+    # poll call ended — "ok" (the RPC call returned a result) or "error"
+    # (per-call JSON-RPC error, e.g. a revert). Absent field = not polled;
+    # NULL = no poll pass since the column landed. Keeps the three states
+    # apart: ``last_known_state`` holds only successfully decoded values,
+    # so without this map a reverting entry is indistinguishable from a
+    # never-polled one. Overwritten wholesale each completed poll pass.
+    last_poll_status: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     last_scanned_block: Mapped[int] = mapped_column(BigInteger, default=0)
     # Stable block at which monitoring began for this contract — seeded once at
     # enrollment and never advanced (unlike last_scanned_block, which tracks the

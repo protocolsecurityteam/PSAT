@@ -275,3 +275,127 @@ def test_writer_emits_event_promotes_tracking_mode(tmp_path):
     target = by_id["state_variable:owner"]
     assert target["tracking_mode"] == "event_plus_state"
     assert any(e["name"] == "OwnershipTransferred" for e in target["associated_events"])
+
+
+# ---------------------------------------------------------------------------
+# read_spec getter honesty — a getter_call claim requires an actual getter
+# ---------------------------------------------------------------------------
+
+
+def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_path):
+    """A private state var with no public getter cannot be read by any
+    function call. Its read_spec must not claim ``getter_call`` (which
+    would mint ``keccak('_admin()')`` — a selector of a function that
+    does not exist), and it must produce no polling-plan entry."""
+    from services.monitoring.polling_plan import build_polling_plan
+
+    source = """
+    pragma solidity ^0.8.19;
+    contract Admined {
+        address private _admin;
+        modifier onlyAdmin() {
+            require(msg.sender == _admin, "no");
+            _;
+        }
+    }
+    contract C is Admined {
+        uint256 public value;
+        function setValue(uint256 v) external onlyAdmin {
+            value = v;
+        }
+    }
+    """
+    targets = _build(tmp_path, source)
+    by_id = {t["controller_id"]: t for t in targets}
+    assert "state_variable:_admin" in by_id, list(by_id.keys())
+    read_spec = by_id["state_variable:_admin"]["read_spec"]
+    assert isinstance(read_spec, dict)
+    assert read_spec["strategy"] == "unknown"
+    assert read_spec["state_variable_name"] == "_admin"
+    # Type info survives so type-shape guards downstream keep their inputs.
+    assert read_spec["type_kind"] == "address"
+
+    plan = build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={"tracked_controllers": targets},
+        tracked_topics=None,
+    )
+    assert not any(e.get("field") == "_admin" or e.get("target") == "_admin" for e in plan)
+
+
+def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
+    """POSITIVE ARM: a private var whose same-contract view getter was
+    discovered keeps ``getter_call`` — pointed at the getter, never the
+    var."""
+    from services.monitoring.polling_plan import build_polling_plan, selector_for
+
+    source = """
+    pragma solidity ^0.8.19;
+    contract Ownable {
+        address private _owner;
+        modifier onlyOwner() {
+            require(msg.sender == _owner, "not owner");
+            _;
+        }
+        function owner() public view returns (address) {
+            return _owner;
+        }
+    }
+    contract C is Ownable {
+        uint256 public value;
+        function setValue(uint256 v) external onlyOwner {
+            value = v;
+        }
+    }
+    """
+    targets = _build(tmp_path, source)
+    by_id = {t["controller_id"]: t for t in targets}
+    read_spec = by_id["state_variable:_owner"]["read_spec"]
+    assert read_spec["strategy"] == "getter_call"
+    assert read_spec["target"] == "owner"
+
+    plan = build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={"tracked_controllers": targets},
+        tracked_topics=None,
+    )
+    entry = next(e for e in plan if e.get("field") == "_owner")
+    assert entry["target"] == "owner"
+    assert entry["selector"] == selector_for("owner")
+
+
+def test_public_underscore_var_keeps_its_auto_getter(tmp_path):
+    """DISCRIMINATING CONTROL: the underscore prefix is not the
+    discriminator — a PUBLIC ``_roleRegistry`` has a compiled auto-getter
+    named after itself and stays pollable through it."""
+    from services.monitoring.polling_plan import build_polling_plan, selector_for
+
+    source = """
+    pragma solidity ^0.8.19;
+    contract C {
+        address public _roleRegistry;
+        uint256 public value;
+        constructor(address rr) { _roleRegistry = rr; }
+        function setValue(uint256 v) external {
+            require(msg.sender == _roleRegistry, "no");
+            value = v;
+        }
+    }
+    """
+    targets = _build(tmp_path, source)
+    by_id = {t["controller_id"]: t for t in targets}
+    assert "state_variable:_roleRegistry" in by_id, list(by_id.keys())
+    read_spec = by_id["state_variable:_roleRegistry"]["read_spec"]
+    assert read_spec["strategy"] == "getter_call"
+    assert read_spec["target"] == "_roleRegistry"
+
+    plan = build_polling_plan(
+        contract_type="regular",
+        proxy_type=None,
+        tracking_plan={"tracked_controllers": targets},
+        tracked_topics=None,
+    )
+    entry = next(e for e in plan if e.get("field") == "_roleRegistry")
+    assert entry["selector"] == selector_for("_roleRegistry")
