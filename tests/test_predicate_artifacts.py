@@ -328,6 +328,60 @@ def test_artifact_serializes_cleanly_to_json(tmp_path):
     assert "mint(uint256)" in decoded["trees"]
 
 
+def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
+    """A guarded function whose comparison operand derives from a low-level
+    ``.staticcall`` through a built-in's ``arg_origins``: Slither's
+    ``LowLevelCall.function_name`` is a ``Constant``, and before it was
+    stringified at the provenance layer it reached the published
+    ``derived_from`` operands and crashed the ``json.dumps`` workspace write
+    on 4 real contracts (PriceProvider, EmissionsController, StrategyManager,
+    DelegationManager — PR-161, failed_terminal with 'Object of type Constant
+    is not JSON serializable')."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public target;
+            uint256 public x;
+            function guarded(bytes32 expected, uint256 v) external {
+                (bool ok, bytes memory data) = target.staticcall(
+                    abi.encodeWithSignature("check(address)", msg.sender)
+                );
+                require(ok, "call failed");
+                require(keccak256(data) == expected, "bad witness");
+                x = v;
+            }
+        }
+    """,
+    )
+    artifact = build_predicate_artifacts(_contract(sl))
+    decoded = json.loads(json.dumps(artifact))
+    tree = decoded["trees"]["guarded(bytes32,uint256)"]
+    # The low-level call's kind must have survived as a plain string in the
+    # published provenance (not been dropped to make serialization pass).
+    def _iter(node):
+        if node.get("op") == "LEAF":
+            yield node.get("leaf") or {}
+            return
+        for child in node.get("children") or []:
+            yield from _iter(child)
+
+    def _operands(leaf):
+        for op in leaf.get("operands") or []:
+            yield op
+            for nested in op.get("derived_from") or []:
+                yield nested
+
+    callees = {
+        op.get("callee")
+        for leaf in _iter(tree)
+        for op in _operands(leaf)
+        if op.get("callee") is not None
+    }
+    assert any(isinstance(c, str) and "staticcall" in c for c in callees), callees
+
+
 def test_artifact_writer_gate_runs_on_full_contract(tmp_path):
     """Writer-gate pass needs every function's tree to evaluate
     writer authority. The artifact builder runs it AFTER collecting

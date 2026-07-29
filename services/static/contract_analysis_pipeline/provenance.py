@@ -744,7 +744,10 @@ class ProvenanceEngine:
         builder can route on it."""
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
+        # Same Constant-not-str hazard as the low-level arm: when the callee
+        # symbol is unresolved the fallback ``function_name`` is a Constant.
+        raw_callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
+        callee_name = str(raw_callee_name) if raw_callee_name is not None else None
         callee_signature = _callee_signature(ir)
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         result = frozenset(
@@ -784,7 +787,11 @@ class ProvenanceEngine:
         """
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        kind = getattr(ir, "function_name", None) or "low_level_call"
+        # ``LowLevelCall.function_name`` is a Slither ``Constant``, not a str;
+        # it flows into ``Source.callee`` and from there into the published
+        # ``derived_from`` operands, where a raw Constant crashed the
+        # ``predicate_trees.json`` write on 4 real contracts.
+        kind = str(getattr(ir, "function_name", None) or "low_level_call")
         dest_sources = self._sources_for_value(getattr(ir, "destination", None))
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         # delegatecall is special — we tag it as external_call (it's still
