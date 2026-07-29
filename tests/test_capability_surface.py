@@ -250,9 +250,9 @@ def test_role_grants_not_determined_when_the_gate_was_never_lowered():
 
     12 of 1,159 ether.fi rows on the PR-161 preview carried the contradiction
     (``authority_roles=[]`` beside ``authority_openness='not_determined'``),
-    among them two ``grantRole`` entry points gated through an unresolved
-    ``RoleRegistry.canCall`` — role-gated by construction, published as proven
-    not role-gated."""
+    among them two ``grantRole`` entry points whose whole gate is an external
+    view probe that was never lowered — nothing read about it, published as
+    proven not role-gated."""
     from services.policy.capability_surface import capability_role_grants
 
     probe = {
