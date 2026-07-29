@@ -475,6 +475,226 @@ def test_enrich_does_not_adopt_on_the_protocol_name_alone(monkeypatch):
     assert result["reports"][0]["url"] == md_url
 
 
+def test_enrich_does_not_adopt_when_the_title_is_only_the_protocol_name(monkeypatch):
+    """'EtherFi Draft Audit' is a real corpus title that survives generic-token
+    stripping as the bare protocol name. Matching it against a folder in the
+    protocol's own repo matches on nothing the folder does not already share."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            {
+                "title": "Certora EtherFi BeHype Audit",
+                "auditor": "Certora",
+                "pdf_url": "https://raw.githubusercontent.com/etherfi-protocol/beHYPE/"
+                "master/audit/Certora%20EtherFi%20BeHype%20Audit.pdf",
+                "source_repo": "etherfi-protocol/beHYPE",
+                "source_path": "audit/Certora EtherFi BeHype Audit.pdf",
+            }
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://raw.githubusercontent.com/etherfi-protocol/beHYPE/master/audit/behype.md",
+                "auditor": "Unknown",
+                "title": "EtherFi Draft Audit",
+                "source_repo": "etherfi-protocol/beHYPE",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    assert result["reports"][0].get("pdf_url") is None
+    assert result["reports"][0]["auditor"] == "Unknown"
+
+
+def test_enrich_does_not_adopt_when_the_title_is_only_the_reports_own_auditor(monkeypatch):
+    """A firm publishes many reports into one folder, so its name tells them
+    apart from nothing — the exact shape that gave NM-0217's .md an Omniscia
+    PDF, re-run with the right firm and still the wrong document."""
+    _stub_repo_folder(monkeypatch, _ETHERFI_AUDIT_FOLDER)
+
+    result = {
+        "reports": [
+            {
+                "url": _NM_MD_URL,
+                "auditor": "Nethermind",
+                "title": "Nethermind Audit",
+                "source_repo": "etherfi-protocol/smart-contracts",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    report = result["reports"][0]
+    assert report.get("pdf_url") is None
+    assert report["url"] == _NM_MD_URL
+
+
+def test_enrich_adopts_when_the_title_keeps_a_token_beyond_the_two_names(monkeypatch):
+    """Positive control for the same gate: 'EtherFi Deposit Adapter Contract'
+    (a real corpus title) leads with the protocol's name, but 'deposit adapter'
+    survives it, so the report still earns its own document."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            *_ETHERFI_AUDIT_FOLDER,
+            {
+                "title": "EtherFi Deposit Adapter Contract",
+                "auditor": "Nethermind",
+                "pdf_url": "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/"
+                "master/audits/NM-0350%20-%20EtherFi%20Deposit%20Adapter.pdf",
+                "source_repo": "etherfi-protocol/smart-contracts",
+                "source_path": "audits/NM-0350 - EtherFi Deposit Adapter.pdf",
+            },
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://nethermind.example/reports/etherfi-deposit-adapter",
+                "auditor": "Nethermind",
+                "title": "EtherFi Deposit Adapter Contract",
+                "source_repo": "etherfi-protocol/smart-contracts",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    assert result["reports"][0]["pdf_url"].endswith("NM-0350%20-%20EtherFi%20Deposit%20Adapter.pdf")
+
+
+def test_enrich_does_not_adopt_on_a_component_that_is_only_the_protocol_name(monkeypatch):
+    """The component tier answers to the same gate as the title tier: a
+    dependency whose name is the protocol's own picks out no document."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            {
+                "title": "Certora EtherFi BeHype Audit",
+                "auditor": "Certora",
+                "pdf_url": "https://raw.githubusercontent.com/etherfi-protocol/beHYPE/"
+                "master/audit/Certora%20EtherFi%20BeHype%20Audit.pdf",
+                "source_repo": "etherfi-protocol/beHYPE",
+                "source_path": "audit/Certora EtherFi BeHype Audit.pdf",
+            }
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://auditor.example.com/view/etherfi",
+                "auditor": "Unknown",
+                "source_repo": "etherfi-protocol/beHYPE",
+                "dependency_component": "EtherFi",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    assert result["reports"][0].get("pdf_url") is None
+
+
+def test_enrich_does_not_adopt_on_the_run_together_spelling_of_the_protocol(monkeypatch):
+    """The protocol is registered as 'ether.fi' but titled 'EtherFi'; the two
+    spellings are the same name, so neither one corroborates."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            {
+                "title": "Certora EtherFi BeHype Audit",
+                "auditor": "Certora",
+                "pdf_url": "https://raw.githubusercontent.com/etherfi-protocol/beHYPE/"
+                "master/audit/Certora%20EtherFi%20BeHype%20Audit.pdf",
+                "source_repo": "etherfi-protocol/beHYPE",
+                "source_path": "audit/Certora EtherFi BeHype Audit.pdf",
+            }
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://raw.githubusercontent.com/etherfi-protocol/beHYPE/master/audit/behype.md",
+                "auditor": "Unknown",
+                "title": "EtherFi Audit",
+                "source_repo": "etherfi-protocol/beHYPE",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "ether.fi")
+
+    assert result["reports"][0].get("pdf_url") is None
+
+
+def test_enrich_does_not_adopt_on_a_title_of_only_generic_audit_vocabulary(monkeypatch):
+    """'Audit Report' names no document. It is a substring of most candidate
+    titles, so without the generic-vocabulary strip it would corroborate the
+    lone candidate in any folder."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            {
+                "title": "ether.fi Audit Report",
+                "auditor": "Zellic",
+                "pdf_url": "https://raw.githubusercontent.com/Zellic/publications/"
+                "master/ether.fi%20-%20Zellic%20Audit%20Report.pdf",
+                "source_repo": "Zellic/publications",
+                "source_path": "ether.fi - Zellic Audit Report.pdf",
+            }
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://raw.githubusercontent.com/Zellic/publications/master/etherfi.md",
+                "auditor": "Unknown",
+                "title": "Audit Report",
+                "source_repo": "Zellic/publications",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    assert result["reports"][0].get("pdf_url") is None
+
+
+def test_enrich_does_not_adopt_on_a_title_too_short_to_identify_a_document(monkeypatch):
+    """What survives stripping has to be long enough to name something: a bare
+    version fragment matches any candidate that mentions the same version."""
+    _stub_repo_folder(
+        monkeypatch,
+        [
+            {
+                "title": "Liquid Vault v3 Audit",
+                "auditor": "Certora",
+                "pdf_url": "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/"
+                "master/audits/2025.01.10%20-%20Certora%20-%20Liquid%20Vault%20v3.pdf",
+                "source_repo": "etherfi-protocol/smart-contracts",
+                "source_path": "audits/2025.01.10 - Certora - Liquid Vault v3.pdf",
+            }
+        ],
+    )
+
+    result = {
+        "reports": [
+            {
+                "url": "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/x.md",
+                "auditor": "Certora",
+                "title": "Audit v3",
+                "source_repo": "etherfi-protocol/smart-contracts",
+            }
+        ]
+    }
+    ae.enrich_audit_reports(result, "etherfi")
+
+    assert result["reports"][0].get("pdf_url") is None
+
+
 def test_enrich_infers_repo_from_raw_github_pdf(monkeypatch):
     monkeypatch.setattr(ae, "_fetch_html", lambda url, debug=False: None)
 

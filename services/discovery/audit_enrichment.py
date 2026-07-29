@@ -242,13 +242,39 @@ def _auditor_key(value: Any) -> str:
     return "" if text in _UNKNOWN_AUDITORS else text
 
 
-def _distinctive_title(value: Any) -> str:
-    """Normalized title with the generic audit vocabulary removed.
+def _shared_name_tokens(protocol: Any, auditor: Any) -> frozenset[str]:
+    """Tokens a whole folder of candidates can be expected to share: the
+    protocol's own name (every file in the protocol's repo carries it) and the
+    report's own auditor (a firm publishes many reports into one folder).
+
+    Both the tokenized and the run-together spellings are included, so
+    ``"ether.fi"`` covers a title token ``"etherfi"`` as well as ``"ether"``
+    and ``"fi"``.
+    """
+    tokens: set[str] = set()
+    for value in (protocol, auditor):
+        parts = _normalize_text(value).split()
+        tokens.update(parts)
+        if len(parts) > 1:
+            tokens.add("".join(parts))
+    tokens.discard("")
+    return frozenset(tokens)
+
+
+def _distinctive_title(value: Any, shared_tokens: frozenset[str] = frozenset()) -> str:
+    """Normalized title, minus generic audit vocabulary, kept only when what
+    survives can tell one document from another.
 
     ``"Hats Finance Audit"`` -> ``"hats finance"``; ``"Audit Report"`` -> ``""``.
+    A title is also discarded when every surviving token is one ``shared_tokens``
+    names, because such a title distinguishes nothing within the folder it would
+    be matched against: with ``shared_tokens={"etherfi", "nethermind"}``,
+    ``"EtherFi Draft Audit"`` -> ``""`` and ``"Nethermind Audit"`` -> ``""``.
     An empty result carries no document identity and must never corroborate.
     """
     tokens = [t for t in _normalize_text(value).split() if t not in _GENERIC_TITLE_TOKENS]
+    if not any(token not in shared_tokens for token in tokens):
+        return ""
     joined = " ".join(tokens)
     return joined if len(joined) >= 4 else ""
 
@@ -270,20 +296,24 @@ def _contradicts_auditor(report_auditor: str, candidate: dict[str, Any], haystac
     return report_auditor not in haystack
 
 
-def _corroborated_pdf_candidate(report: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _corroborated_pdf_candidate(
+    report: dict[str, Any], candidates: list[dict[str, Any]], protocol: Any = ""
+) -> dict[str, Any] | None:
     """Pick the one candidate PDF that is evidently *this* report's document.
 
     Adoption must be earned by the report's own identity: its distinctive
     title, or the dependency component it was discovered for. Position in the
     folder listing, the protocol's name (which every file in the protocol's own
     repo carries), and the auditor's name alone (a firm can publish many
-    reports in one folder) are not evidence of document identity. Ambiguity —
-    two candidates corroborating equally — is not evidence either, so it
-    adopts nothing.
+    reports in one folder) are not evidence of document identity — hence
+    ``_shared_name_tokens``, which strikes exactly those two names out of what
+    a title or component is allowed to be made of. Ambiguity — two candidates
+    corroborating equally — is not evidence either, so it adopts nothing.
     """
     report_auditor = _auditor_key(report.get("auditor"))
-    title = _distinctive_title(report.get("title"))
-    component = _normalize_text(report.get("dependency_component"))
+    shared = _shared_name_tokens(protocol, report.get("auditor"))
+    title = _distinctive_title(report.get("title"), shared)
+    component = _distinctive_title(report.get("dependency_component"), shared)
 
     by_title: list[dict[str, Any]] = []
     by_component: list[dict[str, Any]] = []
@@ -334,7 +364,7 @@ def _prefer_repo_audit_pdf(report: dict[str, Any], repos: list[str], protocol: s
             candidates = [r for r in extracted.get("reports", []) if r.get("pdf_url")]
             if not candidates:
                 continue
-            preferred = _corroborated_pdf_candidate(report, candidates)
+            preferred = _corroborated_pdf_candidate(report, candidates, protocol)
             if preferred is None:
                 _debug_log(
                     debug,
