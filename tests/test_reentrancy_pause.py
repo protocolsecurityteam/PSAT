@@ -804,3 +804,86 @@ def test_uint_latch_parameter_written_inline_require_publishes_true(tmp_path):
     assert pausability["is_pausable"] is True
     assert pausability["pause_variables"] == ["pausedStatus"]
     assert "setPaused(uint256)" in pausability["pause_functions"]
+
+
+_UINT_CUSTOM_ERROR_LATCH = """
+pragma solidity ^0.8.19;
+contract CE {
+    error Paused();
+    address public admin;
+    uint8 private pausedFlag;
+    function setPaused(uint8 s) external { require(msg.sender == admin, "no"); pausedFlag = s; }
+    function act() external { if (pausedFlag != 0) revert Paused(); }
+}
+"""
+
+
+def test_uint_latch_custom_error_if_revert_detected(tmp_path):
+    """R4 positive control: the mainstream post-0.8.4 gate shape
+    ``if (pausedFlag != 0) revert Paused();`` — the revert lives in a
+    SEPARATE node from the comparison, so a same-node IR scan never sees
+    both together. The predicate builder polarity-folds the if/revert
+    gate into an ``eq``-vs-constant leaf, which is where the flag test
+    must look."""
+    sl = _compile(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "CE")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"pausedFlag"}
+
+
+def test_uint_latch_custom_error_if_revert_publishes_true(tmp_path):
+    """End-to-end on the published surface for the custom-error shape:
+    ``is_pausable=True`` with the latch var — not the fabricated
+    proven-absence ``False``."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["pausedFlag"]
+    assert "setPaused(uint8)" in pausability["pause_functions"]
+
+
+def test_uint_latch_read_through_getter_inline_detected(tmp_path):
+    """R4 positive control: the revert read reaches the latch through a
+    GETTER (``require(pausedStatus() == 0)`` with ``_paused`` read inside
+    the getter, no modifier anywhere). The leaf plane resolves the hop to
+    the underlying state var; the same-node IR scan sees only a TMP."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract G {
+            address public admin;
+            uint256 private _paused;
+            function pausedStatus() public view returns (uint256) { return _paused; }
+            function setPaused(uint256 s) external { require(msg.sender == admin, "no"); _paused = s; }
+            function act() external { require(pausedStatus() == 0, "paused"); }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "G")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"_paused"}
+
+
+def test_uint_latch_inline_mask_no_modifier_detected(tmp_path):
+    """R4 positive control: bit-mask latch read inline in a function body
+    (``require(_paused & 1 == 0)``, no modifier). The equality's direct
+    operand is the mask TMP, not the var — the leaf plane folds the
+    arithmetic and pairs the var with the constant."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract IM {
+            address public pauser;
+            uint256 private _paused;
+            function pause(uint256 s) external { require(msg.sender == pauser, "no"); _paused = s; }
+            function deposit() external { require(_paused & 1 == 0, "paused"); }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "IM")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"_paused"}

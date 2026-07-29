@@ -285,7 +285,15 @@ class PauseAnalyzer:
             against a distinguished value; a governed quantity's revert
             read is RELATIONAL against a parameter (``_minDelay`` under
             ``require(delay >= getMinDelay())``), which never matches the
-            ``==``/``!=``-vs-constant fingerprint.
+            ``==``/``!=``-vs-constant fingerprint. Tested on the
+            predicate-LEAF plane (``_flag_read_with_revert``), where
+            ``build_predicate_tree`` has already polarity-folded the gate
+            and resolved indirection — so ``if (flag != 0) revert
+            Paused()``, ``require(pausedStatus() == 0)`` (getter hop) and
+            ``require(_paused & 1 == 0)`` (mask arithmetic) all surface as
+            an ``eq``/``ne`` leaf pairing the state var with a constant.
+            A same-node IR scan remains only as the fallback for functions
+            whose tree degraded.
         """
         type_name = str(getattr(sv, "type", ""))
         if type_name == "bool":
@@ -295,15 +303,40 @@ class PauseAnalyzer:
         for modifier in getattr(self.contract, "modifiers", []) or []:
             if self._reads_with_revert(modifier, var_name):
                 return True
-        if self._has_constant_equality_revert_read(var_name, writers):
+        if self._flag_read_with_revert(var_name, writers):
             return True
         return False
 
+    def _flag_read_with_revert(self, var_name: str, writers: list[Any]) -> bool:
+        """Some non-writer reads the var under a revert compared for
+        EQUALITY against a CONSTANT — checked on the same predicate-leaf
+        plane ``_read_with_revert_in_others`` traverses (leaves only exist
+        on RevertGate paths by construction, and the builder normalizes
+        custom-error if/revert gates, getter hops, and mask arithmetic
+        into an ``eq``/``ne`` leaf with a state-variable operand and a
+        constant operand). A governed quantity's revert read publishes a
+        RELATIONAL leaf (``comparison``/``gte`` against a parameter) and
+        never matches. Falls back to the stricter same-node IR scan for
+        functions whose tree degraded to None/unsupported."""
+        writer_ids = {id(w) for w in writers}
+        for fn in self.contract.functions:
+            if fn.is_constructor or id(fn) in writer_ids:
+                continue
+            full_name = getattr(fn, "full_name", None)
+            if not isinstance(full_name, str):
+                continue
+            tree = self.predicate_trees.get(full_name)
+            if tree is not None and _tree_has_constant_equality_on_var(tree, var_name):
+                return True
+        return self._has_constant_equality_revert_read(var_name, writers)
+
     def _has_constant_equality_revert_read(self, var_name: str, writers: list[Any]) -> bool:
-        """Some non-writer function has a require/revert-carrying node whose
-        Binary compares the var itself ``==``/``!=`` a Constant. Direct
-        operands only — a compare reached through arithmetic or a helper
-        call is out (the modifier arm covers the helper shapes)."""
+        """IR-plane fallback for ``_flag_read_with_revert`` when no
+        predicate tree carries the read: a non-writer function has a
+        require/revert-carrying node whose Binary compares the var itself
+        ``==``/``!=`` a Constant. Direct operands only — a compare reached
+        through arithmetic or a helper call is covered by the leaf-plane
+        test (or, for modifier shapes, the modifier arm)."""
         writer_ids = {id(w) for w in writers}
         for fn in self.contract.functions:
             if fn.is_constructor or id(fn) in writer_ids:
@@ -487,6 +520,27 @@ def _tree_has_state_var_operand(tree: PredicateTree, var_name: str) -> bool:
         return False
     for child in tree.get("children") or []:
         if _tree_has_state_var_operand(child, var_name):
+            return True
+    return False
+
+
+def _tree_has_constant_equality_on_var(tree: PredicateTree, var_name: str) -> bool:
+    """True iff some leaf pairs a read of state-variable ``var_name`` with a
+    CONSTANT under an ``eq``/``ne`` operator — the latch fingerprint on the
+    leaf plane. The builder emits leaves only from RevertGate paths, so a
+    match is a revert-gated equality-vs-constant read by construction."""
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if leaf is None:
+            return False
+        if leaf.get("operator") not in ("eq", "ne"):
+            return False
+        operands = leaf.get("operands") or []
+        reads_var = any(op.get("state_variable_name") == var_name for op in operands)
+        has_constant = any(op.get("source") == "constant" for op in operands)
+        return reads_var and has_constant
+    for child in tree.get("children") or []:
+        if _tree_has_constant_equality_on_var(child, var_name):
             return True
     return False
 
