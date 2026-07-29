@@ -301,6 +301,7 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
                 "event_signature": "RolesUpdated(address,uint256)",
                 "event_name": "RolesUpdated",
                 "key_position": 0,
+                "key_positions_by_index": {0: 0},
                 "indexed_positions": [0],
                 "direction": "add",
                 "writer_function": "grantRoles(address,uint256)",
