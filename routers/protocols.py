@@ -40,6 +40,7 @@ def list_protocol_monitoring(protocol_id: int) -> list[dict[str, Any]]:
                 "contract_type": c.contract_type,
                 "monitoring_config": c.monitoring_config,
                 "last_known_state": c.last_known_state,
+                "last_poll_status": c.last_poll_status,
                 "last_scanned_block": c.last_scanned_block,
                 "enrollment_block": c.enrollment_block,
                 "needs_polling": c.needs_polling,

@@ -147,9 +147,9 @@ def _run_poll(session, observed_impl: str) -> None:
     """Drive the real ``poll_for_state_changes`` with only the wire stubbed."""
 
     def _mock(_url, calls):
-        return [_word(observed_impl) for _ in calls]
+        return [(_word(observed_impl), "ok") for _ in calls]
 
-    with patch("services.monitoring.unified_watcher.rpc_batch_request", side_effect=_mock):
+    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_mock):
         poll_for_state_changes(session, "http://rpc")
 
 

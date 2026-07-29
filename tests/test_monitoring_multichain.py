@@ -11,7 +11,7 @@ what actually reaches the wire — the thing M1.1 makes true:
   - ``enroll_protocol_contracts`` keys a base proxy's WatchedProxy on ``chain="base"``
     and seeds its block from the base RPC
 
-Only the wire is stubbed (``rpc_batch_request`` / ``rpc_request`` / the Etherscan
+Only the wire is stubbed (``rpc_batch_request_classified`` / ``rpc_request`` / the Etherscan
 balance helpers) — never the production classes — matching the hermetic offline
 suite.
 """
@@ -88,9 +88,9 @@ def test_poll_sends_base_contract_to_base_rpc(db_session, monkeypatch):
 
     def _mock(url, calls):
         seen_urls.append(url)
-        return [None] * len(calls)
+        return [(None, "ok")] * len(calls)
 
-    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_batch_request", _mock)
+    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_batch_request_classified", _mock)
     poll_for_state_changes(db_session, MAINNET_SEED)
 
     assert seen_urls == [BASE_URL]

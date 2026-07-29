@@ -860,18 +860,38 @@ def _state_var_read_spec(
     getter_by_var: dict[str, str],
     member_path: tuple[str, ...] | None = None,
 ) -> ControllerReadSpec:
+    """Build the read spec for a state-var controller. Three getter states:
+
+    * public var — Solidity compiles an auto-getter named after the var:
+      ``strategy=getter_call, target=<name>``.
+    * private/internal var with a discovered same-contract getter
+      (``_build_getter_index``) — ``strategy=getter_call, target=<getter>``.
+    * private/internal var with NO getter — the var is not readable by
+      any function call, so no getter target exists to claim:
+      ``strategy=unknown`` (``target`` keeps the var name purely as an
+      identifier). The monitoring plane's selector-minting consumer
+      (``polling_plan._is_poll_decodable``) skips these. The RESOLUTION
+      plane's ``_getter_target`` does NOT skip: it falls back to
+      ``source`` (the same var name) and still probes the nonexistent
+      getter — the revert path there records the honest third state
+      (``value=None, observed_via="eth_call_error"`` + record_degraded),
+      so no false value publishes, but the probe is wasted; tightening
+      that consumer is a recorded follow-up, not this function's claim.
+      The type fields stay populated so type-shape guards (struct skip,
+      primitive-scalar snapshot skip) keep their inputs.
+    """
     sv = state_vars_by_name.get(name)
     type_obj = getattr(sv, "type", None) if sv is not None else None
     type_str = str(type_obj) if type_obj is not None else ""
     is_public = bool(getattr(sv, "visibility", None) == "public") if sv is not None else False
-    getter_name = name if is_public else getter_by_var.get(name, name)
+    getter_name = name if is_public else getter_by_var.get(name)
     components = _type_components(type_obj)
     projected_component = _component_for_member_path(components, member_path)
     spec: ControllerReadSpec = cast(
         ControllerReadSpec,
         {
-            "strategy": "getter_call",
-            "target": getter_name,
+            "strategy": "getter_call" if getter_name else "unknown",
+            "target": getter_name or name,
             "kind": "state_variable",
             "state_variable_name": name,
             "type": projected_component["type"] if projected_component is not None else type_str,

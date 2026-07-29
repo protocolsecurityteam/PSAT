@@ -396,11 +396,87 @@ _CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
 }
 
 
-def _classify_from_writes(writes: list[str] | set[str] | None) -> str | None:
+# Per-canonical-family corroboration vocabulary. A canonical event_type is
+# a semantic claim about what THIS event announces — so the event's own ABI
+# must corroborate the family before the type may be minted. The emitter's
+# write set alone is not that evidence: a multi-write emitter (an
+# ``initialize()`` that seeds ``_owner``, ``_paused`` and four config slots)
+# donates its whole slot set to every event it emits, so writes-only
+# classification stamps ``ownership_transferred`` on ``Initialized(uint8)``
+# and ``initialized`` on ``EEthSet(address)``.
+#
+# ``name`` hints are lowercase substrings of the event name; the arg-shape
+# check requires the signature's parameter list to carry the family's
+# payload type (the semantic-key fill for the address families reads an
+# address arg — a family claim over a signature with no address arg would
+# alias a non-address value into ``old_owner``/``new_owner``).
+_CANONICAL_NAME_HINTS: dict[str, tuple[str, ...]] = {
+    "ownership_transferred": ("owner",),
+    "ownership_transfer_started": ("owner",),
+    "authority_updated": ("auth",),
+    # Curve/Vyper's 2-step admin transfer announces the ``future_admin`` /
+    # ``admin`` write as CommitOwnership/ApplyOwnership — ownership
+    # vocabulary corroborates the admin family too.
+    "admin_changed": ("admin", "owner"),
+    "initialized": ("initial",),
+    "signer_updated": ("owner", "signer"),
+    "threshold_changed": ("threshold",),
+    "upgraded": ("upgrad", "implementation", "beacon"),
+}
+
+# Families whose parsed payload is an address (semantic keys / delegate
+# target). ``initialized`` carries a version uint (or nothing) and
+# ``threshold_changed`` a uint — no address required.
+_CANONICAL_ADDRESS_ARG_FAMILIES = frozenset(
+    {
+        "ownership_transferred",
+        "ownership_transfer_started",
+        "authority_updated",
+        "admin_changed",
+        "signer_updated",
+        "upgraded",
+    }
+)
+_CANONICAL_UINT_ARG_FAMILIES = frozenset({"threshold_changed"})
+
+
+def _event_corroborates(event_type: str, signature: str | None) -> bool:
+    """True when the event's own signature corroborates the canonical
+    family claim *event_type*: name hint present AND the parameter list
+    carries the family's payload type.
+
+    An absent/empty signature is the not-determined state — it cannot
+    corroborate anything, so no canonical type is minted from it.
+    """
+    hints = _CANONICAL_NAME_HINTS.get(event_type)
+    if hints is None:
+        return False
+    sig = signature or ""
+    name, _, params = sig.partition("(")
+    name = name.strip().lower()
+    if not name:
+        return False
+    if not any(h in name for h in hints):
+        return False
+    params = params.lower()
+    if event_type in _CANONICAL_ADDRESS_ARG_FAMILIES:
+        return "address" in params
+    if event_type in _CANONICAL_UINT_ARG_FAMILIES:
+        return "int" in params  # matches uint*/int*
+    return True
+
+
+def _classify_from_writes(writes: list[str] | set[str] | None, signature: str | None = None) -> str | None:
     """Derive a canonical event_type from the state vars an event's emitter
-    writes. Returns None when no canonical type matches — caller falls
-    back to controller_id or the terminal ``<stem>:<id>`` form
-    (see :func:`_resolve_event_type`).
+    writes, corroborated by the event's own signature. Returns None when
+    no corroborated canonical type matches — caller falls back to the
+    terminal ``<stem>:<id>`` form (see :func:`_resolve_event_type`).
+
+    A family is minted only when BOTH hold: the emitter writes one of the
+    family's slots AND the event's own name/arg-shape corroborate the
+    family (:func:`_event_corroborates`). The write set alone is donated
+    by the emitter to every event it emits, so on its own it is not
+    evidence of what this event announces.
 
     Priority order resolves multi-write emitters:
       1. ``owner`` / ``_owner`` — commit-phase ownership transfer wins
@@ -418,7 +494,11 @@ def _classify_from_writes(writes: list[str] | set[str] | None) -> str | None:
         return None
     write_set = set(writes)
     # Explicit priority — owner wins over pendingOwner so Ownable2Step
-    # commit phase classifies correctly when both are written.
+    # commit phase classifies correctly when both are written. A family
+    # the signature does not corroborate is skipped, so a multi-write
+    # emitter's event lands on the family it actually announces
+    # (``Initialized(uint8)`` from an owner-seeding initializer passes
+    # over ``ownership_transferred`` and classifies ``initialized``).
     for canonical, candidates in (
         ("ownership_transferred", ("owner", "_owner")),
         ("ownership_transfer_started", ("pendingOwner", "_pendingOwner")),
@@ -428,23 +508,25 @@ def _classify_from_writes(writes: list[str] | set[str] | None) -> str | None:
         ("signer_updated", ("owners",)),
         ("threshold_changed", ("threshold",)),
     ):
-        if write_set & set(candidates):
+        if write_set & set(candidates) and _event_corroborates(canonical, signature):
             return canonical
     return None
 
 
-def _classify_from_tags(effect_tags: dict | None) -> str | None:
+def _classify_from_tags(effect_tags: dict | None, signature: str | None = None) -> str | None:
     """Tag-driven event_type derivation. Tries writes first, then falls
     back to the is_initializer flag for cases where the slot isn't named
-    ``_initialized`` (rare but possible in OZ forks)."""
+    ``_initialized`` (rare but possible in OZ forks). Every canonical
+    outcome requires the event's own signature to corroborate the family
+    (:func:`_event_corroborates`)."""
     if not isinstance(effect_tags, dict):
         return None
-    by_writes = _classify_from_writes(effect_tags.get("writes"))
+    by_writes = _classify_from_writes(effect_tags.get("writes"), signature)
     if by_writes:
         return by_writes
-    if effect_tags.get("is_initializer"):
+    if effect_tags.get("is_initializer") and _event_corroborates("initialized", signature):
         return "initialized"
-    if effect_tags.get("delegates"):
+    if effect_tags.get("delegates") and _event_corroborates("upgraded", signature):
         # Bare delegatecall in the emitter body (not just storing an
         # impl slot) means the function pivots delegate execution
         # itself — proxy fallback patterns, custom upgrade choreography.
@@ -526,17 +608,24 @@ def _resolve_event_type(
     effect_tags: dict | None = None,
     *,
     authority_provenance: str | None = None,
+    signature: str | None = None,
 ) -> str:
     """Pick the canonical event_type for a tracked event.
 
     Resolution order:
-      1. ``effect_tags`` — primary signal. The emitter's state writes are
-         deterministic and ABI-independent, so e.g. Compound's
-         ``NewAdmin`` and OZ's ``OwnershipTransferred`` classify
-         correctly without per-ABI rules once their emitters are tagged.
+      1. ``effect_tags`` — primary signal, corroborated by *signature*.
+         The emitter's state writes say which slots the surrounding
+         function touches; the event's own name/arg-shape say what THIS
+         event announces. A canonical family type is minted only when
+         both agree (:func:`_classify_from_tags`) — a write set alone is
+         donated by a multi-write emitter to every event it emits and is
+         not evidence of the event's meaning.
       2. ``_CONTROLLER_ID_TO_EVENT_TYPE`` — back-compat path for legacy
          specs without effect_tags (older monitoring_config rows). Falls
-         away once everything re-enrolls.
+         away once everything re-enrolls. Same corroboration bar: the
+         controller_id names the tracked slot, not the event, so the
+         canonical family it maps to must also be corroborated by the
+         event's own signature.
       3. Terminal fallback — the event is recorded but not semantically
          classified, so the published type says only what is earned:
 
@@ -556,15 +645,16 @@ def _resolve_event_type(
          stays in the tracking plan for anyone who needs the three
          states apart.
     """
-    by_tags = _classify_from_tags(effect_tags)
+    by_tags = _classify_from_tags(effect_tags, signature)
     if by_tags:
         return by_tags
     stem = "controller_changed" if authority_provenance == _PROVEN_CONTROLLER_PROVENANCE else "state_changed"
     cid = (controller_id or "").strip()
     if not cid:
         return stem
-    if cid in _CONTROLLER_ID_TO_EVENT_TYPE:
-        return _CONTROLLER_ID_TO_EVENT_TYPE[cid]
+    legacy = _CONTROLLER_ID_TO_EVENT_TYPE.get(cid)
+    if legacy is not None and _event_corroborates(legacy, signature):
+        return legacy
     return f"{stem}:{cid}"
 
 
@@ -614,6 +704,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
                     controller_id,
                     effect_tags,
                     authority_provenance=tc.get("authority_provenance"),
+                    signature=ev.get("signature"),
                 ),
                 "controller_id": controller_id,
                 "inputs": list(ev.get("inputs") or []),

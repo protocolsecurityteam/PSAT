@@ -179,8 +179,8 @@ def test_poll_rotation_records_no_block_rather_than_the_stale_one(db_session, su
     _monitored(db_session, subject)
 
     with patch(
-        "services.monitoring.unified_watcher.rpc_batch_request",
-        side_effect=lambda _url, calls: [_word(NEW_EOA) for _ in calls],
+        "services.monitoring.unified_watcher.rpc_batch_request_classified",
+        side_effect=lambda _url, calls: [(_word(NEW_EOA), "ok") for _ in calls],
     ):
         poll_for_state_changes(db_session, "http://rpc")
     db_session.commit()

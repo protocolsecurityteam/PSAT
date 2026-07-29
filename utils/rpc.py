@@ -755,24 +755,35 @@ def rpc_batch_request(
     return results
 
 
-def rpc_batch_request_with_status(
+def rpc_batch_request_classified(
     rpc_url: str,
     calls: list[tuple[str, list[Any]]],
     headers: Mapping[str, str] | None = None,
     *,
     chain_id: int | None = None,
-) -> list[tuple[Any, bool]]:
-    """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
-    legitimate ``None`` result."""
+) -> list[tuple[Any, str]]:
+    """Batch JSON-RPC where every slot reports HOW it ended, keeping the
+    two failure shapes apart. Returns ``(result, status)`` per call:
+
+      * ``"ok"`` — the node answered this call with a result.
+      * ``"error"`` — the node answered this call with a per-call
+        JSON-RPC error (e.g. a revert): an observed, earned negative.
+      * ``"transport"`` — the batch round-trip for this slot never got a
+        usable answer (HTTP/connection failure, unusable payload shape,
+        or a response that skipped this id). The call's outcome was
+        never observed; liveness is unknown.
+
+    Never raises for wire failures; ``result`` is ``None`` for both
+    non-``ok`` statuses.
+    """
     if not calls:
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
 
-    # Default to (None, True) so any chunk that fails wholesale leaves
-    # its slots flagged as errored — matches the sequential path's
-    # behavior of raising on any RPC failure.
-    results: list[tuple[Any, bool]] = [(None, True)] * len(calls)
+    # Default to "transport" so any slot the wire never answers stays
+    # marked unobserved rather than inheriting an earned-looking error.
+    results: list[tuple[Any, str]] = [(None, "transport")] * len(calls)
 
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
         chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
@@ -791,10 +802,9 @@ def rpc_batch_request_with_status(
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            # Whole-chunk failure — leave defaults as (None, True). This
-            # is the conservative choice: caller will skip caching and
-            # treat results as transient. Degraded-but-continuing, so
-            # WARNING (not ERROR) with the chunk offset for correlation.
+            # Whole-chunk failure — leave defaults as (None, "transport").
+            # Degraded-but-continuing, so WARNING (not ERROR) with the
+            # chunk offset for correlation.
             logger.warning(
                 "rpc batch chunk failed wholesale — slots flagged transient",
                 extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
@@ -806,7 +816,8 @@ def rpc_batch_request_with_status(
             payload = [payload]
         if not isinstance(payload, list):
             # Unexpected shape (some providers refuse batches with a
-            # non-list error object) — flag every slot in this chunk.
+            # non-list error object) — every slot in this chunk stays
+            # "transport": nothing per-call was observed.
             continue
 
         for item in payload:
@@ -816,11 +827,33 @@ def rpc_batch_request_with_status(
             if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
                 continue
             if item.get("error"):
-                results[idx] = (None, True)
+                results[idx] = (None, "error")
             else:
-                results[idx] = (item.get("result"), False)
+                results[idx] = (item.get("result"), "ok")
 
     return results
+
+
+def rpc_batch_request_with_status(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    headers: Mapping[str, str] | None = None,
+    *,
+    chain_id: int | None = None,
+) -> list[tuple[Any, bool]]:
+    """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
+    legitimate ``None`` result.
+
+    Collapses ``rpc_batch_request_classified``'s per-call ``"error"`` and
+    wholesale ``"transport"`` outcomes into a single ``had_error=True`` —
+    conservative for callers that only need "don't trust/cache this slot".
+    Callers that must tell an observed revert from an unobserved outcome
+    (e.g. anything publishing a negative) use the classified form directly.
+    """
+    return [
+        (result, status != "ok")
+        for result, status in rpc_batch_request_classified(rpc_url, calls, headers, chain_id=chain_id)
+    ]
 
 
 class EthCallResult(NamedTuple):
