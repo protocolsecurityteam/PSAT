@@ -180,10 +180,22 @@ def _eth_call_raw(
     return raw
 
 
+# Single-word ABI returns must be EXACTLY one 32-byte word. ``eth_abi.decode``
+# reads the first word and silently ignores trailing bytes, so a catch-all
+# fallback (or a struct/tuple getter) answering with a longer blob would still
+# "decode" as a plausible uint256/address — returndata-length discipline is the
+# cheap half of the duck-typing defence (the negative-control probe is the
+# other). ``address`` padding-byte validation is already strict in eth_abi
+# (NonEmptyPaddingBytes); the length check closes the trailing-bytes hole.
+_EXACT_WORD_ABI_TYPES = frozenset({"address", "uint256", "bytes32"})
+
+
 def _decode_abi_value(raw_value: str, abi_type: str):
     data = bytes.fromhex(_normalize_hex(raw_value)[2:])
     if not data:
         raise RuntimeError("Empty ABI data")
+    if abi_type in _EXACT_WORD_ABI_TYPES and len(data) != 32:
+        raise RuntimeError(f"{abi_type} return must be exactly 32 bytes, got {len(data)}")
     value = decode([abi_type], data)[0]
     if abi_type == "address":
         return str(value).lower()
@@ -309,14 +321,27 @@ def read_contract_controllers(
     controllers: list[str] = []
     seen: set[str] = set()
     had_probe_error = False
+    # The last call is the negative control (same batch — no extra round trip):
+    # an address that ANSWERS a selector nothing implements answers everything,
+    # so its getter "answers" are not evidence of a control plane. See
+    # _negative_control_probe for the same discipline on the classifier.
     calls = [{"to": address, "data": _selector(signature)} for signature in _CONTROLLER_GETTER_SIGS]
+    calls.append({"to": address, "data": _selector(_NEGATIVE_CONTROL_SIG)})
     try:
         results = _eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
     except Exception:
         return None
     if len(results) != len(calls):
         return None
-    for outcome in results:
+    control = results[-1]
+    if control.success and _normalize_hex(control.return_data) not in {"0x", "0x0"}:
+        # Catch-all fallback: the canonical getters cannot be dispositively
+        # read on this address — not determined, never a plane set.
+        return None
+    if not control.success and not _is_definitive_revert(control):
+        # The control itself could not be established — incomplete witness.
+        had_probe_error = True
+    for outcome in results[: len(_CONTROLLER_GETTER_SIGS)]:
         if not outcome.success:
             if _is_definitive_revert(outcome):
                 # The getter is genuinely not a control plane on this contract.
@@ -372,6 +397,54 @@ def _is_definitive_revert(outcome: Any) -> bool:
         return True
     message = str(getattr(outcome, "error_message", "") or "").lower()
     return any(marker in message for marker in _REVERT_MESSAGE_MARKERS)
+
+
+# A signature no real contract implements (name chosen for selector-collision
+# improbability; selector 0xaa2fed30). Its ONLY use is as a negative control:
+# an address that ANSWERS it answers every selector (an unverified catch-all
+# fallback), so none of its per-selector answers is evidence of an interface.
+_NEGATIVE_CONTROL_SIG = "psatNegativeControlProbeW62()"
+
+
+def _eth_call_tristate(
+    rpc_url: str, address: str, signature: str, block_tag: str, *, chain_id: int | None = None
+) -> tuple[str | None, str]:
+    """One lazy ``eth_call`` with the revert/transport discriminator single
+    probes otherwise lack: ``(raw, "answered")`` on a non-empty return,
+    ``(None, "silent")`` on an empty return or a definitive revert (the EVM
+    answered: the selector is not implemented), ``(None, "error")`` when the
+    read did not dispositively happen (transport/OOG — retryable)."""
+    try:
+        raw = _eth_call_raw(rpc_url, address, signature, block_tag, chain_id=chain_id)
+    except Exception as exc:
+        message = str(exc).lower()
+        if any(marker in message for marker in _REVERT_MESSAGE_MARKERS):
+            return None, "silent"
+        return None, "error"
+    if _normalize_hex(raw) in {"0x", "0x0"}:
+        return None, "silent"
+    return raw, "answered"
+
+
+def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> str:
+    """Fire the negative control. ``"passed"`` — the address reverts on (or
+    returns nothing for) a selector nothing implements, so its positive probe
+    answers select real interfaces; ``"failed"`` — it ANSWERS the nonsense
+    selector, so every duck-typed match is worthless (catch-all fallback);
+    ``"error"`` — the control could not be established (not determined:
+    concrete types are withheld and the classification is not cached).
+
+    Invoked lazily, at most once per classification, and only when a
+    duck-typed arm (safe/timelock/UPGRADE_INTERFACE_VERSION) has already
+    matched — the common eoa/plain-contract classifications never pay for it.
+    """
+    raw, state = _eth_call_tristate(rpc_url, address, _NEGATIVE_CONTROL_SIG, block_tag, chain_id=chain_id)
+    del raw
+    if state == "silent":
+        return "passed"
+    if state == "answered":
+        return "failed"
+    return "error"
 
 
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
@@ -485,9 +558,19 @@ def _classify_uncached_batched(
         return v
 
     had_error = any(p is _PROBE_ERROR for p in probes)
+    # Negative control (lazy, at most one extra eth_call): a concrete duck-typed
+    # kind is published only when the address does NOT answer a selector nothing
+    # implements. See _negative_control_probe.
+    control_state: list[str | None] = [None]
+
+    def _duck_type_permitted() -> bool:
+        if control_state[0] is None:
+            control_state[0] = _negative_control_probe(rpc_url, normalized, block_tag, chain_id=chain_id)
+        return control_state[0] == "passed"
+
     safe_owners = _ok(safe_owners_raw)
     safe_threshold = _ok(safe_threshold_raw)
-    if safe_owners is not None and safe_threshold is not None:
+    if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
         return (
             "safe",
             {
@@ -501,7 +584,7 @@ def _classify_uncached_batched(
     min_delay = _ok(min_delay_a)
     if min_delay is None:
         min_delay = _ok(min_delay_b)
-    if min_delay is not None:
+    if min_delay is not None and _duck_type_permitted():
         owner = _ok(owner_raw)
         details: dict[str, object] = {"address": normalized, "delay": _coerce_int(min_delay)}
         if owner is not None:
@@ -509,7 +592,7 @@ def _classify_uncached_batched(
         return "timelock", details, had_error
 
     upgrade_interface_version = _ok(upgrade_iv)
-    if upgrade_interface_version is not None:
+    if upgrade_interface_version is not None and _duck_type_permitted():
         owner = _ok(owner_raw)
         details = {
             "address": normalized,
@@ -523,6 +606,13 @@ def _classify_uncached_batched(
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
+        had_error = True
+    if control_state[0] == "failed":
+        # A definitive observation, published so a consumer can tell "plain
+        # contract" from "answers every selector, duck typing withheld".
+        details["duck_type_negative_control"] = "failed"
+    elif control_state[0] == "error":
+        # The control could not be established — not determined, uncached.
         had_error = True
     return "contract", details, had_error
 
@@ -572,9 +662,18 @@ def _classify_uncached(
             return None
         return result
 
+    # Same lazy negative-control gate as the batched path (see
+    # _negative_control_probe): no duck-typed concrete kind without it.
+    control_state: list[str | None] = [None]
+
+    def _duck_type_permitted() -> bool:
+        if control_state[0] is None:
+            control_state[0] = _negative_control_probe(rpc_url, normalized, block_tag, chain_id=chain_id)
+        return control_state[0] == "passed"
+
     safe_owners = _probe("getOwners()", "address[]")
     safe_threshold = _probe("getThreshold()", "uint256")
-    if safe_owners is not None and safe_threshold is not None:
+    if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
         return (
             "safe",
             {
@@ -588,7 +687,7 @@ def _classify_uncached(
     min_delay = _probe("getMinDelay()", "uint256")
     if min_delay is None:
         min_delay = _probe("delay()", "uint256")
-    if min_delay is not None:
+    if min_delay is not None and _duck_type_permitted():
         owner = _probe("owner()", "address")
         details: dict[str, object] = {"address": normalized, "delay": _coerce_int(min_delay)}
         if owner is not None:
@@ -596,7 +695,7 @@ def _classify_uncached(
         return "timelock", details, had_error
 
     upgrade_interface_version = _probe("UPGRADE_INTERFACE_VERSION()", "string")
-    if upgrade_interface_version is not None:
+    if upgrade_interface_version is not None and _duck_type_permitted():
         owner = _probe("owner()", "address")
         details = {
             "address": normalized,
@@ -610,6 +709,10 @@ def _classify_uncached(
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
+        had_error = True
+    if control_state[0] == "failed":
+        details["duck_type_negative_control"] = "failed"
+    elif control_state[0] == "error":
         had_error = True
     return "contract", details, had_error
 
