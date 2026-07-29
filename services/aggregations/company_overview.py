@@ -720,25 +720,61 @@ def _prefetch_child_tables(
         return local, rows
 
     def _upgrade_count(s: Session) -> tuple[dict[int, int], int]:
+        """Upgrade TRANSACTIONS per contract, not Upgraded logs.
+
+        The payload's ``upgrade_count`` renders as literal "N upgrades" text,
+        so the unit must be exercises of upgrade authority. One transaction can
+        emit several ``Upgraded`` logs against the same proxy (a within-tx
+        swap-and-restore emits two), and a per-log count published "7 upgrades"
+        over 5 transactions. Distinct ``tx_hash`` is the honest cardinality
+        that the persisted rows can actually support — counting distinct
+        *resting-implementation changes* would need old→new impl continuity,
+        and ``old_impl`` is NULL on every backfill-written row. Rows with NULL
+        ``tx_hash`` (the poll writer detects a slot change without a tx) are
+        each their own observed upgrade: they cannot be grouped by
+        transaction, and folding them together would undercount.
+        """
         local: dict[int, int] = {}
-        for cid, count in s.execute(
-            select(UpgradeEvent.contract_id, func.count(UpgradeEvent.id))
+        for cid, distinct_tx, null_tx in s.execute(
+            select(
+                UpgradeEvent.contract_id,
+                func.count(func.distinct(UpgradeEvent.tx_hash)),
+                func.count(UpgradeEvent.id).filter(UpgradeEvent.tx_hash.is_(None)),
+            )
             .where(UpgradeEvent.contract_id.in_(id_list))
             .group_by(UpgradeEvent.contract_id)
         ).all():
-            local[cid] = count
+            local[cid] = distinct_tx + null_tx
         return local, len(local)
 
     def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
+        """Block + timestamp of THE last upgrade event — one row, both fields.
+
+        Formerly two independent ``MAX`` aggregates over the same group, which
+        can name two different events the moment a poll-detected row (NULL
+        ``block_number`` by design) coexists with a block-carrying one. The
+        published pair describes "the last upgrade", so both halves must come
+        from the same qualifying row. Ordering mirrors the chat plane's
+        documented total order (services/chat/data.py): timestamp leads
+        because every writer sets it; block NULLS FIRST under DESC so a
+        poll-detected latest row wins over an older block-carrying one; ``id``
+        makes the order total.
+        """
         local: dict[int, dict[str, Any]] = {}
         for cid, last_block, last_ts in s.execute(
             select(
                 UpgradeEvent.contract_id,
-                func.max(UpgradeEvent.block_number),
-                func.max(UpgradeEvent.timestamp),
+                UpgradeEvent.block_number,
+                UpgradeEvent.timestamp,
             )
             .where(UpgradeEvent.contract_id.in_(id_list))
-            .group_by(UpgradeEvent.contract_id)
+            .order_by(
+                UpgradeEvent.contract_id,
+                UpgradeEvent.timestamp.desc().nullslast(),
+                UpgradeEvent.block_number.desc().nullsfirst(),
+                UpgradeEvent.id.desc(),
+            )
+            .distinct(UpgradeEvent.contract_id)
         ).all():
             local[cid] = {"block": last_block, "timestamp": last_ts}
         return local, len(local)

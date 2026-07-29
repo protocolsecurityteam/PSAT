@@ -2292,3 +2292,153 @@ def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session
     # narrowing cannot have removed the strongest evidence path.
     proven = _cov(match_confidence="low", equivalence_status="proven", proof_kind="bytecode_match")
     assert _current_status(db_session, proxy, [unbounded, proven]) == "audited"
+
+
+def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
+    """``upgrade_count`` renders as literal "N upgrades" text, so its unit is
+    exercises of upgrade authority. A within-tx swap-and-restore emits two
+    ``Upgraded`` logs in ONE transaction — it must count once. A poll-detected
+    row (NULL ``tx_hash``) is its own observed upgrade and must still count.
+    """
+    p = _add_protocol(db_session, f"upgcount-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgc")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    swap_tx = "0x" + "a" * 64
+    genuine_tx = "0x" + "b" * 64
+    events = [
+        # Genuine upgrade, its own tx.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=100,
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            tx_hash=genuine_tx,
+            source="backfill",
+        ),
+        # Swap-and-restore: two Upgraded logs, one transaction.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i2"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        # Poll-detected: no tx known, still one observed upgrade.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i3"),
+            block_number=None,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            tx_hash=None,
+            source="poll",
+        ),
+    ]
+    db_session.add_all(events)
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 3, (
+        "4 Upgraded rows across 2 transactions + 1 poll detection must "
+        f"publish 3 upgrades, got {entry['upgrade_count']}"
+    )
+
+
+def test_last_upgrade_pair_comes_from_one_event(db_session):
+    """``last_upgrade_block`` / ``last_upgrade_timestamp`` describe THE last
+    upgrade, so both halves must come from the same row. With a poll-detected
+    row (NULL block by design) newer than a block-carrying one, two
+    independent MAX aggregates would pair the OLD row's block with the poll
+    row's timestamp — a composite describing no event that happened.
+    """
+    p = _add_protocol(db_session, f"upglast-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgl")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j1"),
+                block_number=500,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "c" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j2"),
+                block_number=None,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+                tx_hash=None,
+                source="poll",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
+    assert entry["last_upgrade_block"] is None, (
+        "the newest upgrade is poll-detected (block not determined); pairing "
+        "the older event's block 500 with the poll timestamp fabricates a "
+        f"composite event, got block {entry['last_upgrade_block']}"
+    )
+
+
+def test_last_upgrade_pair_block_carrying_control(db_session):
+    """Positive control for the pair-coherence fix: when the newest event
+    carries a block, both halves publish from it unchanged."""
+    p = _add_protocol(db_session, f"upgctl-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgx")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k1"),
+                block_number=700,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "d" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k2"),
+                block_number=900,
+                timestamp=datetime(2024, 9, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "e" * 64,
+                source="backfill",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 2
+    assert entry["last_upgrade_block"] == 900
+    assert entry["last_upgrade_timestamp"] == "2024-09-01T00:00:00+00:00"
