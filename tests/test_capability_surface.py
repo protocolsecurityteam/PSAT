@@ -278,17 +278,46 @@ def test_role_grants_not_determined_when_no_named_role_member_is_readable():
     address filter: role-keyed with the holders not determined, never the
     proven-absent ``[]``. (0 realised on the corpus — every role-witnessing
     trace there carries a well-formed member — structural on the first that
-    does not.)"""
-    from services.policy.capability_surface import capability_role_grants
+    does not.)
 
-    cap = {
+    Pinned on COMPOSITES whose sibling lowers the gate, because that is the
+    only place the ``if grants`` arm decides anything. Standing alone the
+    malformed node's own openness is already ``not_determined``, so the value
+    would leave through the openness gate on the next line and the arm could
+    be deleted with every assertion still passing. Under an OR with a public
+    sibling the openness is ``open``; under an AND with a readable sibling it
+    is ``restricted`` — the gate is lowered, and without this arm both publish
+    the ``[]`` that says "proven not role-gated" about a named role."""
+    from services.policy.capability_surface import (
+        capability_role_grants,
+        capability_surface_openness,
+        project_capability_surface,
+    )
+
+    unreadable_role = {
         "kind": "finite_set",
         "members": ["not-an-address"],
         "membership_quality": "exact",
         "confidence": "enumerable",
         "trace": [{"step": "solmate_roles_authority", "roles": [2]}],
     }
-    assert capability_role_grants(cap) is None
+    public_sibling = {"kind": "conditional_universal", "conditions": []}
+    readable_sibling = {
+        "kind": "finite_set",
+        "members": [ADDR_A],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+    }
+
+    for label, cap, expected_openness in (
+        ("OR with a public sibling", {"kind": "OR", "children": [unreadable_role, public_sibling]}, "open"),
+        ("AND with a readable sibling", {"kind": "AND", "children": [unreadable_role, readable_sibling]}, "restricted"),
+    ):
+        # Guards the test itself: if the openness verdict ever drifts back to
+        # ``not_determined`` here, the assertion below stops discriminating and
+        # this line says so instead of quietly passing for the wrong reason.
+        assert capability_surface_openness(cap, project_capability_surface(cap)) == expected_openness, label
+        assert capability_role_grants(cap) is None, label
 
 
 def test_a_witnessed_role_grant_is_never_reached_by_the_openness_downgrade():
