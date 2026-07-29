@@ -471,6 +471,13 @@ logger = logging.getLogger(__name__)
 # ``delegated_authority`` — auth-oracle facts minted from calls that gate
 # nothing. Every movement retreats from that fabricated proof state
 # (delegated_authority → business); no input moves toward a stronger claim.
+# v35 (same version, second reason): the policy stage now persists
+# ``role_principal`` edges to ``control_graph_edges`` (previously artifact-only),
+# so the authority closure ``build_authority_graph`` hands a ``resource_cap`` run
+# contains candidates a v34 row's probe queue could never reach. Order decides
+# which candidates that run visits (the v21 precedent), so a v34 row records a
+# traversal of the thinner persisted graph, not the one the corrected closure
+# produces.
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
