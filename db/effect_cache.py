@@ -498,6 +498,13 @@ logger = logging.getLogger(__name__)
 # republish it, which is why the constant does not move: no persisted v35 row
 # exists outside this branch's own local runs, and the laundering makes the
 # residual carriers unreadable rather than wrong.
+# v35 (same version, fifth reason): ``auto_expiry`` joins
+# ``DEPLOYMENT_PLANE_KEYS`` by the same mechanism and for the same reason as
+# ``pause_effective`` — it records a fork observation about ONE deployment's
+# latch (whether the pause expired under time warp there), and 4 deployed
+# v34 rows carry it. Stated here so a reader of a v34-era residue knows
+# which key set it was written under; the same unreadable-not-wrong
+# laundering applies.
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than

@@ -631,8 +631,12 @@ def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
         "pre_pause_succeeding": ["transfer(address,uint256)"],
         "observed_blast_radius": [],
         "scored_denominator": ["transfer(address,uint256)"],
-        # Empty blast radius -> the expiry warp never ran; the stored JSON null
-        # ("not probed") must survive the self-hit as null, not become absent.
+        # The realized null shape on deployed rows is a PROVEN verdict whose
+        # max_pause_duration is None (duration_bound_seconds JSON null,
+        # duration_bound_source not_determined); the empty-blast branch emits
+        # no auto_expiry key at all. This fixture pins the MECHANISM — a
+        # stored JSON null ("not probed") must survive the self-hit as null,
+        # not become absent — on a synthetic row, not a recipe-produced one.
         "auto_expiry": None,
     }
     stripped = {k: v for k, v in full.items() if k not in effect_cache.DEPLOYMENT_PLANE_KEYS}
@@ -652,9 +656,12 @@ def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
 
 @requires_postgres
 def test_cache_served_rewrite_lets_a_present_incoming_key_win(clean_effects):
-    """Incoming keys win where present: a payload that DOES carry a deployment-plane
-    key (the audited-hit enrichment) overrides the stored value instead of being
-    shadowed by it."""
+    """Incoming keys win where present — DEFENSIVE semantics with no live
+    caller: every production path that sets ``witness_from_cache=True`` passes
+    a payload laundered through ``code_plane_details`` (deployment-plane keys
+    stripped), and the audited-hit paths pass ``witness_from_cache=False``.
+    Pinned so a future caller that does carry such a key gets override, not
+    shadowing, without anyone re-deriving the merge order."""
     session = clean_effects
     _write_burn(session, witness=dict(FULL_WITNESS))
     row = _write_burn(session, witness={**STRIPPED_WITNESS, "input_seeded": False}, witness_from_cache=True)
