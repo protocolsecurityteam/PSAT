@@ -203,14 +203,118 @@ def _append_classified_commit(report: dict[str, Any], sha: str, provenance: str)
     report["classified_commits"] = entries
 
 
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+# Vocabulary shared by nearly every audit filename; a title made only of these
+# words identifies no particular document.
+_GENERIC_TITLE_TOKENS = frozenset(
+    {
+        "audit",
+        "audits",
+        "report",
+        "reports",
+        "security",
+        "assessment",
+        "review",
+        "final",
+        "draft",
+        "smart",
+        "contract",
+        "contracts",
+        "protocol",
+        "the",
+        "of",
+        "and",
+        "for",
+        "v",
+    }
+)
+
+_UNKNOWN_AUDITORS = frozenset({"", "unknown", "n a", "na", "none", "anonymous", "unnamed", "tbd"})
+
+
+def _auditor_key(value: Any) -> str:
+    """Normalized auditor name, or ``""`` when the value is a not-determined
+    sentinel rather than a firm."""
+    text = _normalize_text(value)
+    return "" if text in _UNKNOWN_AUDITORS else text
+
+
+def _distinctive_title(value: Any) -> str:
+    """Normalized title with the generic audit vocabulary removed.
+
+    ``"Hats Finance Audit"`` -> ``"hats finance"``; ``"Audit Report"`` -> ``""``.
+    An empty result carries no document identity and must never corroborate.
+    """
+    tokens = [t for t in _normalize_text(value).split() if t not in _GENERIC_TITLE_TOKENS]
+    joined = " ".join(tokens)
+    return joined if len(joined) >= 4 else ""
+
+
+def _candidate_haystack(candidate: dict[str, Any]) -> str:
+    filename = unquote(str(candidate.get("pdf_url") or "").rsplit("/", 1)[-1])
+    parts = (candidate.get("title"), filename, candidate.get("source_path"), candidate.get("auditor"))
+    return _normalize_text(" ".join(str(part or "") for part in parts))
+
+
+def _contradicts_auditor(report_auditor: str, candidate: dict[str, Any], haystack: str) -> bool:
+    """True when the candidate PDF is attributable to a *different* firm than
+    the report names for itself."""
+    if not report_auditor:
+        return False
+    candidate_auditor = _auditor_key(candidate.get("auditor"))
+    if not candidate_auditor or candidate_auditor == report_auditor:
+        return False
+    return report_auditor not in haystack
+
+
+def _corroborated_pdf_candidate(report: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the one candidate PDF that is evidently *this* report's document.
+
+    Adoption must be earned by the report's own identity: its distinctive
+    title, or the dependency component it was discovered for. Position in the
+    folder listing, the protocol's name (which every file in the protocol's own
+    repo carries), and the auditor's name alone (a firm can publish many
+    reports in one folder) are not evidence of document identity. Ambiguity —
+    two candidates corroborating equally — is not evidence either, so it
+    adopts nothing.
+    """
+    report_auditor = _auditor_key(report.get("auditor"))
+    title = _distinctive_title(report.get("title"))
+    component = _normalize_text(report.get("dependency_component"))
+
+    by_title: list[dict[str, Any]] = []
+    by_component: list[dict[str, Any]] = []
+    for candidate in candidates:
+        haystack = _candidate_haystack(candidate)
+        if _contradicts_auditor(report_auditor, candidate, haystack):
+            continue
+        if title and title in haystack:
+            by_title.append(candidate)
+        elif component and component in haystack:
+            by_component.append(candidate)
+
+    for tier in (by_title, by_component):
+        if not tier:
+            continue
+        return tier[0] if len(tier) == 1 else None
+    return None
+
+
 def _prefer_repo_audit_pdf(report: dict[str, Any], repos: list[str], protocol: str, debug: bool = False) -> None:
+    """Attach a repo-hosted PDF to a PDF-less report — only when the PDF is
+    corroborated as this report's own document (see
+    :func:`_corroborated_pdf_candidate`). An uncorroborated report keeps no
+    ``pdf_url``: PDF-less is the honest state, and it also keeps the report's
+    ``url`` unique, which the ``(protocol_id, url)`` audit-report upsert needs
+    to persist it as its own row.
+    """
     if report.get("pdf_url") and _is_pdf_url(str(report.get("pdf_url"))):
         return
     if not repos:
         return
-    title = str(report.get("title") or "").lower()
-    component = str(report.get("dependency_component") or "").lower()
-    needles = [value for value in (component, protocol.lower()) if value]
     for repo_ref in repos[:3]:
         repo = _source_repo(repo_ref)
         if not repo:
@@ -230,15 +334,15 @@ def _prefer_repo_audit_pdf(report: dict[str, Any], repos: list[str], protocol: s
             candidates = [r for r in extracted.get("reports", []) if r.get("pdf_url")]
             if not candidates:
                 continue
-            preferred = candidates[0]
-            for candidate in candidates:
-                haystack = f"{candidate.get('title') or ''} {candidate.get('pdf_url') or ''}".lower()
-                if title and title in haystack:
-                    preferred = candidate
-                    break
-                if needles and any(needle in haystack for needle in needles):
-                    preferred = candidate
-                    break
+            preferred = _corroborated_pdf_candidate(report, candidates)
+            if preferred is None:
+                _debug_log(
+                    debug,
+                    f"Audit enrichment: no corroborated PDF for {report.get('title')!r} "
+                    f"(auditor {report.get('auditor')!r}) among {len(candidates)} candidate(s) "
+                    f"in {repo}/{folder['path']}; leaving it PDF-less",
+                )
+                continue
             report["pdf_url"] = preferred.get("pdf_url")
             report["url"] = preferred.get("pdf_url") or report.get("url")
             report.setdefault("source_repo", preferred.get("source_repo") or repo)
