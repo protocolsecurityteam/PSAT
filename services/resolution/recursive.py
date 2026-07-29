@@ -776,6 +776,44 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
     return sorted(serialized, key=lambda item: str(item["address"]))
 
 
+# Only these leaf roles prove that being IN the mapping confers authority;
+# same set as the static plane's caller-gate promotion (`_AUTHORITY_LEAF_ROLES`
+# in services/static/contract_analysis_pipeline/tracking.py).
+_MAPPING_HARVEST_AUTHORITY_ROLES = frozenset({"caller_authority", "delegated_authority"})
+
+
+def _mapping_leaf_confers_authority(leaf: Mapping[str, Any]) -> bool:
+    """Does *leaf* prove that membership in its mapping CONFERS authority?
+
+    The harvest publishes every enumerated member as a ``mapping_member``
+    control edge — a member of CONTROL_EDGE_RELATIONS, i.e. a scorer input and
+    a published control claim — so it must not out-claim the leaf the static
+    plane lowered. Three discriminators, all read from that same leaf:
+
+    - ``authority_role``: only an authority-bearing role qualifies. A
+      ``business`` membership read (a duplicate-registration guard, an
+      accounting map) says nothing about who controls the contract. An ABSENT
+      role is a pre-schema tree — not-determined, so no authority is earned
+      and nothing is harvested from it.
+    - polarity: ``operator == "falsy"`` means the gate passes when the caller
+      is NOT in the set (a denylist, an already-enrolled guard). Members of
+      such a set are the blocked population, the exact opposite of
+      authorities.
+    - ``confidence``: an explicit ``"low"`` from the static plane disqualifies
+      (today unreachable for authority roles — ``_derive_confidence`` floors
+      them at medium — but the harvest must not depend on that staying true).
+      Absent confidence is not lowered evidence and does not disqualify on
+      its own.
+    """
+    if leaf.get("authority_role") not in _MAPPING_HARVEST_AUTHORITY_ROLES:
+        return False
+    if leaf.get("operator") == "falsy":
+        return False
+    if leaf.get("confidence") == "low":
+        return False
+    return True
+
+
 def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any] | None) -> list[WriterEventSpec]:
     if not isinstance(predicate_trees, Mapping):
         return []
@@ -800,6 +838,8 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
 
         leaf = node.get("leaf")
         if not isinstance(leaf, dict):
+            return
+        if not _mapping_leaf_confers_authority(leaf):
             return
         descriptor = leaf.get("set_descriptor")
         if not isinstance(descriptor, dict):
@@ -950,6 +990,21 @@ def _replay_mapping_principals(
 
     for principal in enumerated:
         member_addr = principal["address"]
+        if member_addr.lower() == address.lower():
+            # A contract enumerated as a member of its OWN mapping (e.g. a
+            # timelock granting itself a Solady `_roles` role) is real on-chain
+            # state, but as a control edge it is degenerate: X->X asserts
+            # nothing, yet the raw graph plane serves it verbatim through the
+            # analysis-detail API, and the _ensure_node call below would merge
+            # principal fields (controller_label/mapping_name/...) onto the
+            # contract's own node and clobber its label with the mapping name.
+            # Skip the self edge. (The value closure and the Surface
+            # indirect-path index each drop self loops on their own.)
+            logger.debug(
+                "mapping_enumerator: skipping self-membership edge",
+                extra={"address": address, "mapping_name": principal["mapping_name"]},
+            )
+            continue
         _ensure_node(
             nodes,
             address=member_addr,
