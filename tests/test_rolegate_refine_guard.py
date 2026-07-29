@@ -903,16 +903,21 @@ contract C {
 
 
 def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
-    """The value-movement carve-out (an earned-public feature, so flag-ON): an
-    effectful external call required to succeed stays
-    conditional_universal(self_service) — this is the ``is_permissionless_caller_shape``
-    class the guard's non-permissionless conjunct must never gate, protecting
-    the 11 legitimate permissionless rows."""
+    """The value-movement class the guard's non-permissionless conjunct must
+    never gate, protecting the 11 legitimate permissionless rows. Since the
+    static classifier applies the gate-shape discriminator (Wave 5 B2), an
+    effectful ``require(token.transferFrom(msg.sender, …))`` arrives as a
+    BUSINESS leaf — it never reaches the authority-leaf carve-out, and the
+    function is open via the business side-condition path instead of
+    conditional_universal(self_service). Same openness, coarser condition
+    typing; restoring the self_service/permit_sig badge from the mutability
+    now stamped on the leaf is a resolution-plane follow-up."""
     contract = _compile(tmp_path, _EFFECTFUL_PERMISSIONLESS, "C")
     trees = _build_pipeline(contract)
     cap = evaluate_tree(trees["wrap(uint256)"])
     assert cap.kind == "conditional_universal", f"value movement must stay open, got {cap.kind}"
-    assert any(c.kind == "self_service" for c in cap.conditions)
+    assert cap.conditions, "the external call must surface as a condition, not silently vanish"
+    assert all(c.kind in ("self_service", "business") for c in cap.conditions)
 
 
 # ---------------------------------------------------------------------------
