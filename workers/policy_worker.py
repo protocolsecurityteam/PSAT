@@ -690,12 +690,15 @@ class PolicyWorker(BaseWorker):
                 # same scoped replace the resolution stage used. Rewriting only
                 # the artifact left the table plane a strict subset: every
                 # ``role_principal`` edge (projected here, because it needs the
-                # effective_permissions computed this stage) was structurally
+                # effective_permissions computed this stage) and a set of
+                # refresh-only ``controller_value`` edges were structurally
                 # unreachable in ``control_graph_edges``, so the effects value
-                # closure (``role_principal`` is in CONTROL_EDGE_RELATIONS — a
-                # scorer input), Surface, chat, and enrollment all read a graph
-                # missing authority the artifact plane asserted — while every
-                # row still carried ``graph_max_depth`` as if the walk that
+                # closure (both relations are in CONTROL_EDGE_RELATIONS — a
+                # scorer input; the value movement rides the controller_value
+                # edges, the role_principal rows carry authority structure),
+                # Surface, chat, and enrollment all read a graph missing
+                # authority the artifact plane asserted — while every row
+                # still carried ``graph_max_depth`` as if the walk that
                 # produced it were the complete one.
                 if contract_row:
                     replace_control_graph_rows(

@@ -14,10 +14,15 @@ artifact, so the table plane was a strict subset of the artifact plane: every
 time) lived in the artifact and in ``principal_labels`` but was structurally
 unreachable in ``control_graph_edges`` — while every row still carried the
 walk's ``graph_max_depth``, a completeness assertion the rows did not support.
-``role_principal`` is a member of ``db.models.CONTROL_EDGE_RELATIONS``, so the
-missing rows silently dropped authority from the effects value closure (a
-scorer input) and from every thin-plane consumer (Surface, chat, enrollment)
-that reads the tables instead of the artifact.
+The missing rows spanned ``role_principal`` (154) and ``controller_value``
+(87) among others; both are members of ``db.models.CONTROL_EDGE_RELATIONS``,
+so the table plane dropped authority structure from the effects value closure
+(a scorer input) and from every thin-plane consumer (Surface, chat,
+enrollment) that reads the tables instead of the artifact. Measured on the
+PR-161 corpus, the closure's value-at-stake movement rides almost entirely on
+a missing ``controller_value`` edge (RoleRegistry proxy -> WeETH); the
+``role_principal`` rows contribute negligible value but carry the role-holder
+authority structure.
 
 The write is a scoped replace — delete + insert under
 ``(contract_id, deployment_scope(deployment_address))`` — so it is idempotent:
