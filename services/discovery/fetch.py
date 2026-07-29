@@ -225,6 +225,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         "source_format": "standard_json" if bundle else "flat",
         "source_file_count": len(sources),
         "remappings": remappings,
+        # The verification fact, carried from the payload being scaffolded so the
+        # static pipeline states it instead of guessing at the project layout
+        # (``core._source_verified``). ``get_source`` raises on an empty
+        # ``SourceCode``, so through ``fetch()`` this is always True — it is read off
+        # the payload rather than hardcoded because that is what makes it a fact about
+        # THIS result, and because ``scaffold`` accepts any result dict.
+        "source_verified": bool(result.get("SourceCode")),
     }
     (project_dir / "contract_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
 

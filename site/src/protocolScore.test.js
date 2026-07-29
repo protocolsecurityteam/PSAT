@@ -103,6 +103,49 @@ describe("computeProtocolScore", () => {
     expect(axis(computeProtocolScore([contract], [], verifiedCoverage), "audits")).toBe(1);
   });
 
+  it("tells an unverified contract apart from one whose verification was never recorded", () => {
+    // `contract_summaries.source_verified` is nullable and the API serves all three
+    // values. One filter (`!== true`) labelled both the FALSE row and the NULL row
+    // "Source is not marked verified." / "source unverified" — an assertion about a
+    // contract nobody checked. (The producer's own FALSE was itself a Foundry-layout
+    // glob, fixed at services/static/contract_analysis_pipeline/core.py.)
+    const contract = (address, name, verified) => ({
+      address,
+      name,
+      source_verified: verified,
+      is_proxy: false,
+      functions: [{ function: "poke()", controllers: [{ principals: [EOA] }] }],
+    });
+    const score = computeProtocolScore({
+      contracts: [
+        contract("0xverified", "Verified", true),
+        contract("0xunverified", "Unverified", false),
+        contract("0xunknown", "NotRecorded", null),
+      ],
+    }, null);
+    const tooltip = score.axes.find((entry) => entry.key === "data").tooltip;
+    // Every example a contract is named in, not the last one: a filter that catches
+    // both states emits TWO chips for the same contract, and a last-wins lookup would
+    // hide the wrong one.
+    const detailsFor = (address) =>
+      tooltip.negativeExamples.filter((example) => example.contractAddress === address).map((e) => e.detail);
+
+    expect(detailsFor("0xunverified")).toEqual(["Source is not verified."]);
+    expect(detailsFor("0xunknown")).toEqual([
+      "Source verification was not recorded for this contract.",
+    ]);
+    // POSITIVE CONTROL: the verified contract is named by neither sentence, and the
+    // headline count only ever counts a proven true.
+    expect(detailsFor("0xverified")).toEqual([]);
+    expect(tooltip.positive).toContain("1/3 contracts have verified source");
+    expect(
+      tooltip.negativeExamples.find((example) => example.contractAddress === "0xunverified").meta,
+    ).toContain("source unverified");
+    expect(
+      tooltip.negativeExamples.find((example) => example.contractAddress === "0xunknown").meta,
+    ).toContain("verification not recorded");
+  });
+
   it("labels the strict audit axis as audit", () => {
     const score = computeProtocolScore({ contracts: [contractWithUnpause(SAFE_4_OF_7)] }, null);
     const auditAxis = score.axes.find((entry) => entry.key === "audits");

@@ -111,6 +111,34 @@ def _guard_vyper_version(project_dir: Path, meta: dict) -> None:
         )
 
 
+def _source_verified(meta: Mapping[str, Any]) -> bool | None:
+    """Whether the SOURCE this pipeline is reading came back verified, in three states.
+
+    The fact is the FETCH's, and both scaffolders carry it in ``contract_meta.json``:
+    ``services.discovery.fetch.scaffold`` from the Etherscan payload it is scaffolding,
+    ``static_worker._scaffold_project`` from ``contracts.source_verified``. ``None``
+    when the key is absent — an older workspace, a hand-built project dir, or a meta
+    file that could not be read — and it means "not recorded here", never "not
+    verified": the nullable ``contract_summaries.source_verified`` column and the
+    ``/api/company`` payload both have that third state, and the frontend's data
+    tooltip now says which of the two it is.
+
+    THIS IS NOT DERIVED FROM THE PROJECT TREE. It used to be
+    ``bool(project_dir.rglob("src/**/*.sol"))`` — whether the scaffolder happened to
+    write a Foundry ``src/`` layout, which is decided by the paths Etherscan's own
+    verification bundle uses (``contracts/``, ``@openzeppelin/``, ``lib/`` are all
+    normal). On the 2026-07-28 run that published FALSE for 9 of 90 contracts —
+    UpgradeableBeacon, EndpointV2, OneSig, two TimelockControllers, FiatTokenV2_2,
+    EtherfiL1SyncPoolETH, WithdrawalQueueERC721 and Lido — every one of them
+    Etherscan-verified, analysed from that verified source in the same job, and
+    ``contracts.source_verified = TRUE`` on all nine. The frontend renders the field
+    as a data-confidence penalty and names the contract as an example of unverified
+    source, so a layout accident scored and published as a fact about the contract.
+    """
+    value = meta.get("source_verified")
+    return value if isinstance(value, bool) else None
+
+
 def _slither_target(project_dir: Path, meta: dict) -> str:
     """For Vyper projects, hand Slither the main ``.vy`` file path
     instead of the project directory. The scaffolder writes a
@@ -316,7 +344,7 @@ def collect_contract_analysis_with_artifacts(
             "address": meta.get("address", ""),
             "name": subject_contract.name,
             "compiler_version": meta.get("compiler_version", ""),
-            "source_verified": bool(list(project_dir.rglob("src/**/*.sol"))),
+            "source_verified": _source_verified(meta),
         },
         "analysis_status": {
             "static_analysis_completed": True,

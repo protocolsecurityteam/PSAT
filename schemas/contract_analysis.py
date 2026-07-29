@@ -60,7 +60,13 @@ class Subject(TypedDict):
     address: str
     name: str
     compiler_version: str
-    source_verified: bool
+    # THREE STATES. ``True``/``False`` are the fetch's answer about this address
+    # (Etherscan served verified source, or it did not); ``None`` is "the fetch fact
+    # did not reach this pipeline run", which is not the same claim and must not be
+    # rendered as one. It rides straight into the nullable
+    # ``contract_summaries.source_verified`` column and out onto
+    # ``/api/company/<slug>``.
+    source_verified: bool | None
 
 
 class AnalysisStatus(TypedDict):
