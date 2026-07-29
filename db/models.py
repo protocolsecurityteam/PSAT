@@ -1172,11 +1172,13 @@ class MonitoredContract(Base):
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
     # Per polling-plan ``field``: how that entry's most recent ANSWERED
-    # poll call ended — "ok" (result decoded, and only those values reach
-    # last_known_state), "error" (the node answered this call with a
-    # per-call JSON-RPC error, e.g. a revert), or "no_value" (answered
-    # without error but returned nothing decodable — empty 0x from a
-    # codeless address / permissive fallback, zero word). Absent field =
+    # poll call ended — "ok" (result parsed as the entry's declared type,
+    # including the type's conventional empty such as the zero address;
+    # only non-empty values reach last_known_state), "error" (the node
+    # answered this call with a per-call JSON-RPC error, e.g. a revert),
+    # or "no_value" (answered without error but returned nothing that
+    # parses as the declared type — empty 0x from a codeless address /
+    # permissive fallback, short body). Absent field =
     # not polled; NULL = no completed poll pass since the column landed.
     # Written only from batches the node actually answered: a wholesale
     # transport failure publishes nothing and leaves last_polled_at

@@ -8,12 +8,15 @@ test DB (via the shared ``db_session`` fixture) with only the RPC wire
   - chunk packing at ``MAX_BATCH_SIZE`` keeping a contract's calls together
   - per-entry poll status: an answered call publishes ``ok`` / ``error``
     (per-call JSON-RPC error, e.g. a revert) / ``no_value`` (answered but
-    nothing decodable) in ``last_poll_status``; only decoded values touch
-    ``last_known_state``; errored chunks stamp and rotate normally (NOT
-    retry-first — always-reverting entries exist in persisted plans and
-    would otherwise pin the rotation); a transport-failed chunk publishes
-    NOTHING and is left unstamped (retry-first for outages); any errored /
-    valueless / unanswered entry marks the pass ``partial``
+    nothing parseable) in ``last_poll_status``; an answered zero word on
+    an address getter parses to the type's conventional empty and is
+    ``ok`` (an observed value), not ``no_value``; only non-empty values
+    touch ``last_known_state``; errored chunks stamp and rotate normally
+    (NOT retry-first — always-reverting entries exist in persisted plans
+    and would otherwise pin the rotation); a transport-failed chunk
+    publishes NOTHING and is left unstamped (retry-first for outages);
+    any errored / unparseable / unanswered entry marks the pass
+    ``partial`` — an observed value never does
   - scanner-duplicate suppression, first-observation baseline, and
     ``last_known_state`` updates surviving the driver rewrite
 """
@@ -422,6 +425,49 @@ def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch
     detail = captured[-1][2]
     assert detail["partial"] is True
     assert detail["entries_no_value"] == 1
+    assert detail["entry_errors"] == 0
+
+
+def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatch):
+    """A call the node answers with a 32-byte zero word on an address
+    getter (``owner()`` on a renounced contract) is an OBSERVED value:
+    published ``ok``, never ``no_value``, and a pass made only of such
+    reads is healthy — ``partial`` False, heartbeat ``running``, never
+    ``degraded``. The basis for a negative must be a failure to observe,
+    not the decoder's convention about the value zero. The zero itself
+    still stays out of ``last_known_state`` (``decode_poll_outcome``'s
+    inherited storage convention — the value plane is unchanged)."""
+    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
+    plan = [_entry("owner", "0x8da5cb5b"), _entry("guardian", "0xaa02")]
+    mc = _seed(db_session, 1, plan=plan, last_polled_at=RECENT)
+
+    captured: list[tuple] = []
+
+    def _cap(process, *, status, detail):
+        captured.append((process, status, detail))
+
+    def _mock(url, calls):
+        # Plan order: owner (answered zero word), guardian (nonzero) —
+        # the nonzero control proves the same pass tells the two apart.
+        assert len(calls) == 2
+        return [("0x" + "0" * 64, "ok"), (_word(ADDR(190)), "ok")]
+
+    with (
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_mock),
+        patch("services.monitoring.record_heartbeat", side_effect=_cap),
+    ):
+        poll_for_state_changes(db_session, "http://rpc")
+
+    db_session.expire_all()
+    row = db_session.get(MonitoredContract, mc.id)
+    assert row.last_poll_status == {"owner": "ok", "guardian": "ok"}
+    assert row.last_known_state == {"guardian": ADDR(190)}  # zero never stored
+    assert row.last_polled_at > RECENT
+
+    process, status, detail = captured[-1]
+    assert status == "running"  # nothing failed, nothing was unobserved
+    assert detail["partial"] is False
+    assert detail["entries_no_value"] == 0
     assert detail["entry_errors"] == 0
 
 

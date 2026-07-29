@@ -54,7 +54,7 @@ from services.monitoring.event_topics import (
     parse_any_log,
     parse_tracked_log,
 )
-from services.monitoring.polling_plan import decode_poll_value
+from services.monitoring.polling_plan import decode_poll_outcome
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.chains import UnknownChainError, chain_by_name
@@ -1422,20 +1422,25 @@ def _apply_poll_result(
     framing moved from a single flat loop to per-chunk dispatch.
 
     Only answered, error-free RPC results reach here — the poll loop routes
-    errored calls to the contract's ``last_poll_status`` map instead — so a
-    None decode below means exactly "the call returned nothing decodable"
-    (empty ``0x`` / zero word), never a swallowed revert.
+    errored calls to the contract's ``last_poll_status`` map instead — so an
+    unparsed decode below means exactly "the call returned nothing
+    parseable" (empty ``0x`` / short body / undecodable type), never a
+    swallowed revert.
 
-    Returns True iff a value decoded (whatever it did downstream); False is
-    the caller's signal to publish the entry as ``no_value`` rather than
-    ``ok``.
+    Returns True iff the response parsed as the entry's declared type — an
+    observed outcome. That includes a parse to the type's conventional
+    empty (the zero address), which by ``decode_poll_outcome``'s contract
+    stays out of ``last_known_state``: an answered zero is a value the
+    wire delivered, not a missing one. False means the answer contained
+    nothing parseable and is the caller's signal to publish the entry as
+    ``no_value`` rather than ``ok``.
     """
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
         return False
-    new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
+    new_value, parsed = decode_poll_outcome(raw, entry.get("type_kind"), entry.get("type"))
     if new_value is None:
-        return False
+        return parsed
 
     state = dict(mc.last_known_state or {})
     old_value = state.get(field_name)
@@ -1584,15 +1589,18 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     Per-entry outcomes are published: an answered chunk overwrites each of
     its contracts' ``last_poll_status`` with
     ``{field: "ok" | "error" | "no_value"}`` for every entry dispatched
-    this pass — ``ok`` = the call answered and its value decoded (only
-    those values reach ``last_known_state``); ``error`` = the node
-    answered THIS call with a per-call JSON-RPC error (e.g. a revert on a
-    getter the address doesn't expose); ``no_value`` = the call answered
-    without error but returned nothing the entry can decode (empty ``0x``
-    from a codeless address or permissive fallback, zero word / zero
-    address, undecodable type). A field absent from the map was not
-    polled. The status map is what keeps a dead entry distinguishable
-    from a never-polled one.
+    this pass — ``ok`` = the call answered and its body parsed as the
+    entry's declared type, INCLUDING the type's conventional empty (a
+    zero-address ``owner()`` on a renounced contract is an observed
+    value, published ``ok``, even though ``decode_poll_outcome``'s
+    storage convention keeps it out of ``last_known_state``); ``error`` =
+    the node answered THIS call with a per-call JSON-RPC error (e.g. a
+    revert on a getter the address doesn't expose); ``no_value`` = the
+    call answered without error but returned nothing that parses as the
+    declared type (empty ``0x`` from a codeless address or permissive
+    fallback, short body, undecodable type). A field absent from the map
+    was not polled. The status map is what keeps a dead entry
+    distinguishable from a never-polled one.
 
     Statuses are written only from batches the node actually answered. A
     wholesale transport failure (``rpc_batch_request_classified`` reports
@@ -1604,8 +1612,10 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     always-reverting entries exist in persisted pre-``unknown``-strategy
     plans, and an unstamped-on-revert rule would pin their contracts to
     the front of the rotation forever — their outcome is published, not
-    retried. Any errored, valueless, or transport-failed entry marks the
-    pass ``partial``.
+    retried. Any errored, unparseable, or transport-failed entry marks
+    the pass ``partial``; an answered conventional-empty does not — it
+    is a successful observation, and a pass made only of those is a
+    healthy (``running``) pass.
 
     A chunk whose write side deadlocks against the scanner's cohort UPDATE
     is rolled back and left unstamped so its contracts sort first next pass
@@ -1839,10 +1849,13 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         contracts_scanned=len(contracts),
         blocks_scanned=0,
         events_found=len(new_events),
-        # A pass with any failed or valueless poll call is partial: some
-        # dispatched entry produced no value this tick, whether the chunk
-        # rolled back (deadlock), was never answered (transport), a call
-        # errored, or an answered call decoded to nothing.
+        # A pass is partial iff some dispatched entry produced no
+        # observation this tick: the chunk rolled back (deadlock), was
+        # never answered (transport), a call errored, or an answered call
+        # parsed to nothing (``no_value``). An answered conventional-empty
+        # (zero address) counts as ``ok`` upstream and does NOT mark the
+        # pass partial — the basis for ``partial`` is a failure to
+        # observe, never the observed value itself.
         partial=chunks_failed > 0 or chunks_transport_failed > 0 or entry_errors > 0 or entries_no_value > 0,
         extra_detail={
             "contracts_selected": len(contracts),

@@ -5,11 +5,13 @@ Revises: d3f1a86c204b
 Create Date: 2026-07-29
 
 ``last_poll_status`` records, per polling-plan ``field``, how that entry's
-most recent ANSWERED poll call ended: ``"ok"`` (the call returned a result
-that decoded into ``last_known_state``), ``"error"`` (the node answered
-this call with a per-call JSON-RPC error, e.g. a revert), or ``"no_value"``
-(the call answered without error but returned nothing decodable — empty
-``0x`` / zero word). A field absent from the map was not polled. The map is
+most recent ANSWERED poll call ended: ``"ok"`` (the result parsed as the
+entry's declared type — including the type's conventional empty such as
+the zero address; only non-empty values reach ``last_known_state``),
+``"error"`` (the node answered this call with a per-call JSON-RPC error,
+e.g. a revert), or ``"no_value"`` (the call answered without error but
+returned nothing that parses as the declared type — empty ``0x`` / short
+body). A field absent from the map was not polled. The map is
 written only from batches the node actually answered — a wholesale
 transport failure publishes nothing and leaves the row unstamped — so it
 never reports liveness the poller did not observe. This keeps the states
