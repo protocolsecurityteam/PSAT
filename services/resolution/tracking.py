@@ -447,13 +447,113 @@ def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain
     return "error"
 
 
+# ERC-1967 implementation slot (keccak256("eip1967.proxy.implementation") - 1).
+_ERC1967_IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+
+
+def _get_storage_at(
+    rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None
+) -> str:
+    """Raw ``eth_getStorageAt``; raises on transport/malformed response.
+    Module-level (like ``_get_code``) so tests can stub the wire."""
+    raw = _rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block_tag], chain_id=chain_id)
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise RuntimeError(f"Unexpected eth_getStorageAt result: {raw!r}")
+    return raw
+
+
+def _read_erc1967_implementation(
+    rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None
+) -> object:
+    """The ERC-1967 implementation slot: an implementation address when the
+    slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
+    ``_PROBE_ERROR`` when the read did not dispositively happen."""
+    try:
+        raw = _get_storage_at(rpc_url, address, _ERC1967_IMPLEMENTATION_SLOT, block_tag, chain_id=chain_id)
+    except Exception:
+        return _PROBE_ERROR
+    word = raw[2:].lower().rjust(64, "0")
+    if len(word) != 64 or set(word) - set("0123456789abcdef"):
+        return _PROBE_ERROR
+    if set(word) == {"0"}:
+        return None
+    return "0x" + word[-40:]
+
+
+def _resolve_uiv_shape(
+    rpc_url: str,
+    normalized: str,
+    block_tag: str,
+    upgrade_interface_version: object,
+    owner: object | None,
+    *,
+    chain_id: int | None = None,
+) -> tuple[str, dict[str, object], bool]:
+    """Type an address whose ``UPGRADE_INTERFACE_VERSION()`` answered.
+
+    A successful UIV read selects the OZ-v5 UPGRADE MACHINERY, not a proxy
+    admin: the constant is compiled into ``UUPSUpgradeable`` — so it is
+    answered THROUGH every OZ-v5 UUPS proxy via delegatecall and by every bare
+    UUPS implementation — and into the v5 ``ProxyAdmin`` alike, while the v4
+    ``ProxyAdmin`` (the corpus's genuine one) does not implement it at all.
+    Publishing ``proxy_admin`` off UIV alone therefore typed PROXIES as proxy
+    admins (chain-verified: 5/5 published proxy_admin nodes carried a nonzero
+    ERC-1967 implementation slot; the genuine ProxyAdmin reverts on UIV).
+
+    Discriminators, each earned per read:
+      * ERC-1967 implementation slot nonzero → the address IS a proxy →
+        ``contract`` (NON-terminal: the terminal-principal walk continues
+        through the proxy — its owner()/authority()/admin() delegatecall to the
+        implementation — to the real upgrade authority), details carry the
+        witnessed ``erc1967_implementation``.
+      * slot zero + ``proxiableUUID()`` answers → a bare UUPS implementation →
+        ``contract`` with ``details.uups_implementation``.
+      * slot zero + no ``proxiableUUID()`` + ``owner()`` answered → the OZ-v5
+        ``ProxyAdmin`` shape → ``proxy_admin``, earned.
+      * any discriminator read failing (transport) → ``contract`` with
+        ``had_error`` so the not-determined classification is never cached.
+
+    Returns ``(kind, details, had_probe_error)``.
+    """
+    details: dict[str, object] = {
+        "address": normalized,
+        "upgrade_interface_version": str(upgrade_interface_version),
+    }
+    if owner is not None:
+        details["owner"] = owner
+    impl = _read_erc1967_implementation(rpc_url, normalized, block_tag, chain_id=chain_id)
+    if impl is _PROBE_ERROR:
+        return "contract", details, True
+    if impl is not None:
+        details["erc1967_implementation"] = impl
+        return "contract", details, False
+    raw, state = _eth_call_tristate(rpc_url, normalized, "proxiableUUID()", block_tag, chain_id=chain_id)
+    if state == "error":
+        return "contract", details, True
+    if state == "answered":
+        try:
+            decoded = _decode_abi_value(raw, "bytes32")
+        except Exception:
+            decoded = None
+        if decoded is not None:
+            details["uups_implementation"] = True
+            return "contract", details, False
+        # Answered but not a bytes32 word — not the UUPS shape, and not the
+        # ProxyAdmin shape either (a v5 ProxyAdmin has no proxiableUUID at
+        # all). Stay a plain contract.
+        return "contract", details, False
+    if owner is not None:
+        return "proxy_admin", details, False
+    return "contract", details, False
+
+
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
 _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
     ("getOwners()", "address[]"),  # 0: Safe
     ("getThreshold()", "uint256"),  # 1: Safe
     ("getMinDelay()", "uint256"),  # 2: Timelock primary
     ("delay()", "uint256"),  # 3: Timelock fallback
-    ("UPGRADE_INTERFACE_VERSION()", "string"),  # 4: ProxyAdmin
+    ("UPGRADE_INTERFACE_VERSION()", "string"),  # 4: OZ-v5 upgrade machinery (see _resolve_uiv_shape)
     ("owner()", "address"),  # 5: Timelock + ProxyAdmin secondary
 )
 
@@ -593,14 +693,10 @@ def _classify_uncached_batched(
 
     upgrade_interface_version = _ok(upgrade_iv)
     if upgrade_interface_version is not None and _duck_type_permitted():
-        owner = _ok(owner_raw)
-        details = {
-            "address": normalized,
-            "upgrade_interface_version": str(upgrade_interface_version),
-        }
-        if owner is not None:
-            details["owner"] = owner
-        return "proxy_admin", details, had_error
+        kind, details, uiv_err = _resolve_uiv_shape(
+            rpc_url, normalized, block_tag, upgrade_interface_version, _ok(owner_raw), chain_id=chain_id
+        )
+        return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
     try:
@@ -697,13 +793,10 @@ def _classify_uncached(
     upgrade_interface_version = _probe("UPGRADE_INTERFACE_VERSION()", "string")
     if upgrade_interface_version is not None and _duck_type_permitted():
         owner = _probe("owner()", "address")
-        details = {
-            "address": normalized,
-            "upgrade_interface_version": str(upgrade_interface_version),
-        }
-        if owner is not None:
-            details["owner"] = owner
-        return "proxy_admin", details, had_error
+        kind, details, uiv_err = _resolve_uiv_shape(
+            rpc_url, normalized, block_tag, upgrade_interface_version, owner, chain_id=chain_id
+        )
+        return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
     try:

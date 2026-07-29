@@ -37,12 +37,15 @@ def _isolated_cache():
 def _stub_batch_probe_rpc(monkeypatch):
     """Offline: the batched classify probe hits the wire. Return all-error so the
     code falls back to the sequential classifier, which uses the per-call probes
-    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock."""
+    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock. The
+    lazy negative-control probe rides ``_eth_call_raw`` — an empty return means
+    the control passes, keeping these cache-behavior tests type-neutral."""
     monkeypatch.setattr(
         tracking,
         "_rpc_batch_request_with_status",
         lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
     )
+    monkeypatch.setattr(tracking, "_eth_call_raw", lambda *a, **k: "0x")
 
 
 def test_clear_empties_process_cache(monkeypatch):
