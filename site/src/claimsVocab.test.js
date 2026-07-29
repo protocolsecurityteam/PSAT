@@ -2025,3 +2025,179 @@ describe("delegatecall.execute — where the foreign code comes from", () => {
     expect(CLAIM_VOCAB["delegatecall.execute"].legacy).not.toBe(CLAIM_VOCAB["upgrade.implementation"].legacy);
   });
 });
+
+describe("synthesis qualifiers — a seeded verdict never renders as a live one", () => {
+  // `input_seeded` / `contract_balance_seeded` travel on the behavioral witness
+  // and both weaken it (services/effects/recipes.py `value_out`). Before this the
+  // renderer received them and said nothing: 13 verdicts in the PR-161 corpus
+  // showed a measured "Reach (upper bound)" figure, and 2 showed a proven outflow
+  // whose payout only executed once the contract's own balance was overridden,
+  // with the same sentence and the same "observed" provenance word as a verdict
+  // witnessed in live state.
+  function outflow(observed, extra = {}) {
+    return {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          direction: "out",
+          flows: [{ target_kind: { kind: "msg_sender" } }],
+          observed: { reach_determined: true, observed_reach_value_usd: 55_200_000, ...observed },
+          ...extra,
+        },
+      }],
+    };
+  }
+
+  // The exact rendering of the SAME payload with no qualifier — the byte-identical
+  // control every arm below is diffed against.
+  const UNSEEDED_FACTS = [
+    { label: "Destination", value: "msg.sender (the caller)" },
+    { label: "Reach (upper bound)", value: "up to ~$55.2M" },
+  ];
+  const UNSEEDED_ACTION = "moves value out (caller-chosen destination)";
+  const UNSEEDED_LABEL = "moves value out (caller-chosen destination) · observed";
+
+  it("renders an unseeded verdict exactly as before — absent AND explicitly false", () => {
+    // Absence is contractually "no seeding was needed" (claims_bridge.py), and an
+    // explicit `false` is the same statement said out loud. Neither may produce a
+    // clause, so both must be byte-identical to the pre-change rendering.
+    for (const observed of [{}, { input_seeded: false, contract_balance_seeded: false }]) {
+      const fn = outflow(observed);
+      expect(claimWitnessFacts(fn)).toEqual(UNSEEDED_FACTS);
+      expect(compactActionSummary(fn)).toBe(UNSEEDED_ACTION);
+      expect(claimSummaryLine(fn).label).toBe(UNSEEDED_LABEL);
+    }
+  });
+
+  it("discloses seeded inputs on the reach line, the sentence and the tier word", () => {
+    const fn = outflow({ input_seeded: true });
+    expect(claimWitnessFacts(fn)).toEqual([
+      { label: "Destination", value: "msg.sender (the caller)" },
+      { label: "Reach (upper bound)", value: "up to ~$55.2M; with seeded inputs" },
+    ]);
+    expect(compactActionSummary(fn)).toBe(
+      "moves value out (caller-chosen destination; with seeded inputs)",
+    );
+    expect(claimSummaryLine(fn).label).toBe(
+      "moves value out (caller-chosen destination; with seeded inputs) · observed (seeded)",
+    );
+  });
+
+  it("gives contract_balance_seeded its own capability wording, and lets it dominate", () => {
+    // The producer's semantics differ in kind: this verdict means "would move
+    // value IF THE CONTRACT WERE FUNDED", not "moves value in current state", so
+    // it must not share the input-seeding phrase. Both flags together is the
+    // corpus shape (verdicts 180 / 242) and the weaker reading wins.
+    const only = outflow({ contract_balance_seeded: true });
+    const both = outflow({ input_seeded: true, contract_balance_seeded: true });
+    for (const fn of [only, both]) {
+      expect(claimWitnessFacts(fn)).toContainEqual({
+        label: "Reach (upper bound)",
+        value: "up to ~$55.2M; only if the contract were funded",
+      });
+      expect(compactActionSummary(fn)).toBe(
+        "moves value out (caller-chosen destination; only if the contract were funded)",
+      );
+      expect(claimSummaryLine(fn).label).toBe(
+        "moves value out (caller-chosen destination; only if the contract were funded) · observed (seeded)",
+      );
+    }
+  });
+
+  it("qualifies a reach line that carries no figure, and one with no other qualifier", () => {
+    // The corpus's two contract-balance-seeded rows (recoverETH) land on the
+    // unvalued branch, so the clause has to reach every reach branch — not only
+    // the measured one.
+    const unvalued = outflow({
+      reach_determined: false,
+      observed_reach_value_usd: undefined,
+      observed_reach_unvalued_assets: ["0xeee"],
+      contract_balance_seeded: true,
+    });
+    expect(claimWitnessFacts(unvalued)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 asset(s) of unknown value; only if the contract were funded",
+    });
+    // No destination lattice at all: the clause stands as the whole parenthetical
+    // rather than being dropped for want of something to append to.
+    const bare = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: { effect_verdict_id: 1, observed: { input_seeded: true } },
+      }],
+    };
+    expect(compactActionSummary(bare)).toBe("moves value out (with seeded inputs)");
+  });
+
+  it("does not let a seeded mint's backing read as backing observed in live state", () => {
+    // A supply verdict carries the flags top-level AND inside `backing`; a payload
+    // written before the producer mirrored them onto `details` has only the latter.
+    const mint = (backing, observed = {}) => ({
+      claims: [
+        { claim_id: "flow.in", tier: "behavioral_observed", witness: { effect_verdict_id: 2, observed: {} } },
+        {
+          claim_id: "supply.mint",
+          tier: "behavioral_observed",
+          witness: { effect_verdict_id: 2, observed: { backing, ...observed } },
+        },
+      ],
+    });
+    const seeded = mint({ inflow_observed: true, input_seeded: true });
+    expect(claimWitnessFacts(seeded)).toContainEqual({
+      label: "Backing",
+      value: "matching asset inflow observed (backed); with seeded inputs",
+    });
+    expect(compactActionSummary(seeded)).toBe("moves value in (backed; with seeded inputs)");
+
+    // CONTROL: the same shape with the flags explicitly false renders unchanged.
+    const plain = mint({ inflow_observed: true, input_seeded: false, contract_balance_seeded: false });
+    expect(claimWitnessFacts(plain)).toEqual([
+      { label: "Backing", value: "matching asset inflow observed (backed)" },
+    ]);
+    expect(compactActionSummary(plain)).toBe("moves value in (backed)");
+  });
+
+  it("attributes the clause to the seeded claim, never to an unseeded sibling", () => {
+    // Corpus function 1820: a STATIC flow.in is the primary claim (priority 6) and
+    // the seeded verdict is the behavioral flow.out. The inflow sentence is not a
+    // seeded observation and must stay unqualified; the reach row and the
+    // provenance word, which do come from the seeded claim, carry the disclosure.
+    const fn = {
+      claims: [
+        { claim_id: "flow.in", tier: "standard_exact", witness: {} },
+        {
+          claim_id: "flow.out",
+          tier: "behavioral_observed",
+          witness: {
+            effect_verdict_id: 3,
+            observed: { reach_determined: true, observed_reach_value_usd: 8_471_736.29, input_seeded: true },
+          },
+        },
+      ],
+    };
+    expect(compactActionSummary(fn)).toBe("moves value in");
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach (upper bound)",
+      value: "up to ~$8.5M; with seeded inputs",
+    });
+    expect(claimSummaryLine(fn).label).toBe(
+      "moves value in · moves value out · observed (seeded) + standard",
+    );
+  });
+
+  it("never qualifies a static tier word — only an observation can be seeded", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "standard_exact",
+        witness: { direction: "out", flows: [{ target_kind: { kind: "msg_sender" } }], observed: { input_seeded: true } },
+      }],
+    };
+    expect(claimSummaryLine(fn).label).toBe(
+      "moves value out (caller-chosen destination; with seeded inputs) · standard",
+    );
+  });
+});

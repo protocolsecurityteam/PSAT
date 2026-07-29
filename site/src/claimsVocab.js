@@ -415,6 +415,15 @@ const TIER_LABEL = {
   policy_derived: "policy",
 };
 
+// The provenance word, qualified when the observation it names was synthesised
+// (see the synthesis-qualifier block below). `seeded` only ever reaches the
+// observed tier — a static tier is not an observation and cannot be seeded.
+function tierLabelFor(tier, seeded) {
+  const label = TIER_LABEL[tier];
+  if (!label) return label;
+  return seeded && tier === OBSERVED_TIER ? `${label} (seeded)` : label;
+}
+
 // behavioral_observed (effects plane) outranks every static tier: a witnessed
 // state transition on real forked state is the strongest provenance a claim can
 // carry. Mirrors services/static/claims/types.py.
@@ -650,8 +659,16 @@ export function claimSummaryLine(fn) {
     const at = Math.max(0, phrases.indexOf(primaryPhrase));
     phrases[at] = `${phrases[at]} ${qualifier}`;
   }
-  const tierLabel = TIER_LABEL[bestTier];
-  const weakLabel = TIER_LABEL[worstTier];
+  // "observed" on its own asserts a live-state observation. When the observed
+  // claim's verdict was synthesised — the caller funded, the contract's balance
+  // overridden — the tier is qualified in place, so the provenance word can never
+  // read stronger than the witness behind it. Only the observed tier can carry
+  // this; the static tiers have no such synthesis.
+  const seeded = Boolean(
+    seedClauseForClaims(claims, (c) => c.tier === OBSERVED_TIER),
+  );
+  const tierLabel = tierLabelFor(bestTier, seeded);
+  const weakLabel = tierLabelFor(worstTier, seeded);
   const text = phrases.join(" · ");
   // Both tiers named when they differ, so the weakest provenance on the line is
   // never hidden behind the strongest.
@@ -1011,6 +1028,80 @@ function pauseQualifier(claims) {
   return null;
 }
 
+// ── Synthesis qualifiers ─────────────────────────────────────────────────────
+//
+// `input_seeded` / `contract_balance_seeded` ride on the behavioral witness and
+// both WEAKEN the verdict they travel with (services/effects/recipes.py, the
+// `value_out` docstring; services/effects/claims_bridge.py's consumer contract).
+// The producer forwards them precisely so a consumer cannot read the claim as
+// stronger than the observation, so the renderer states them beside the fact
+// they qualify rather than dropping them:
+//   * `input_seeded` — the acting principal was GIVEN the asset the function
+//     pulls. The effect is still fully observed; what is not claimed is that this
+//     principal holds the asset today.
+//   * `contract_balance_seeded` — the TARGET CONTRACT's own ETH balance was
+//     overridden before the payout ran, so the verdict is a capability of the
+//     code ("would move value if the contract were funded"), NOT a live outflow
+//     of present treasury. It is the stronger weakener and therefore dominates.
+// Three states, kept apart: true → the clause; false → nothing; ABSENT → nothing,
+// because absence contractually means no seeding was NEEDED, never "seeded but
+// undisclosed". Only `=== true` may produce a clause.
+const SEED_CLAUSE_INPUT = "with seeded inputs";
+const SEED_CLAUSE_CONTRACT_BALANCE = "only if the contract were funded";
+
+// A supply verdict written before the producer mirrored these onto `details`
+// carries them ONLY inside `backing`, so both places are read; a `backing` whose
+// flags are explicitly false is an unseeded observation and stays silent.
+function seedClauseOfObserved(observed) {
+  if (!observed || typeof observed !== "object") return null;
+  const backing = observed.backing;
+  if (
+    observed.contract_balance_seeded === true ||
+    (backing && backing.contract_balance_seeded === true)
+  )
+    return SEED_CLAUSE_CONTRACT_BALANCE;
+  if (
+    observed.input_seeded === true ||
+    (backing && backing.input_seeded === true)
+  )
+    return SEED_CLAUSE_INPUT;
+  return null;
+}
+
+const isOutflowClaim = (c) =>
+  c.claim_id === "flow.out" || c.claim_id === "value_router";
+const isMintClaim = (c) => c.claim_id === "supply.mint";
+
+// Worst case across the claims a rendered fact is built from: the contract-balance
+// clause dominates because it is the strictly weaker verdict.
+function seedClauseForClaims(claims, accept) {
+  let clause = null;
+  for (const c of claims) {
+    if (!accept(c)) continue;
+    const found = seedClauseOfObserved(c.witness && c.witness.observed);
+    if (found === SEED_CLAUSE_CONTRACT_BALANCE) return found;
+    if (found) clause = found;
+  }
+  return clause;
+}
+
+// Fold the clause into an existing parenthetical rather than opening a second
+// one — same shape as "(caller-chosen destination; gate not analysed)". A null
+// clause returns the qualifier untouched, byte for byte.
+function withSeedClause(qualifier, clause) {
+  if (!clause) return qualifier;
+  if (!qualifier) return `(${clause})`;
+  return qualifier.endsWith(")")
+    ? `${qualifier.slice(0, -1)}; ${clause})`
+    : `${qualifier} (${clause})`;
+}
+
+// Same clause, appended to a verbose inspector row. Kept to one separator so a
+// row that already contains an em-dash or a parenthetical does not grow a second.
+function withSeedNote(value, clause) {
+  return clause ? `${value}; ${clause}` : value;
+}
+
 // The fork-observed mint-backing object (behavioral tier only).
 function mintBacking(claims) {
   for (const c of claims) {
@@ -1048,30 +1139,51 @@ function mintQualifier(claims) {
 // co-occurring mint's backing qualifier onto the chip — "moves value in (backed)"
 // — instead of dropping it. Pure-mint (supply.mint primary, no flow.in) is
 // unchanged and still handled by the supply.mint case below.
+//
+// The synthesis clause rides along on every branch, read from the SAME claims the
+// branch's own qualifier is built from, so it is never attributed to a sibling
+// claim that was not seeded. The `default` branch reads the primary's own witness:
+// only `value_out` and `supply` recipes stamp these flags today, and a branch
+// that returned a bare null would silently drop the qualifier the day another
+// effect class starts carrying one.
 export function qualifierForClaims(fn) {
   const primary = primaryClaim(fn);
   if (!primary) return null;
   const claims = claimsOf(fn);
+  const primarySeed = seedClauseOfObserved(
+    primary.witness && primary.witness.observed,
+  );
   switch (primary.claim_id) {
     case "flow.out":
     // A routed outflow answers the same destination question, so it takes the
     // same qualifier; flowOutTargetSummary already admits only outbound routes.
     case "value_router":
-      return flowOutQualifier(claims);
+      return withSeedClause(
+        flowOutQualifier(claims),
+        seedClauseForClaims(claims, isOutflowClaim),
+      );
     case "exec.arbitrary":
-      return execTargetConstraint(claims);
+      return withSeedClause(execTargetConstraint(claims), primarySeed);
     case "delegatecall.execute":
-      return delegatecallDestination(claims);
+      return withSeedClause(delegatecallDestination(claims), primarySeed);
     case "pause.set":
-      return pauseQualifier(claims);
+      return withSeedClause(pauseQualifier(claims), primarySeed);
     case "supply.mint":
-      return mintQualifier(claims);
+      return withSeedClause(
+        mintQualifier(claims),
+        seedClauseForClaims(claims, isMintClaim),
+      );
     case "flow.in":
       // Only a co-occurring, at-bar mint-backing witness qualifies a value-in
       // chip; a plain inflow (no mint, or mint without backing) stays unqualified.
-      return mintQualifier(claims);
+      // The seeding clause comes from the same mint claim — a "(backed)" read off
+      // a seeded execution must not present as a backing observed in live state.
+      return withSeedClause(
+        mintQualifier(claims),
+        seedClauseForClaims(claims, isMintClaim),
+      );
     default:
-      return null;
+      return withSeedClause(null, primarySeed);
   }
 }
 
@@ -1373,19 +1485,25 @@ export function claimWitnessFacts(fn) {
     facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
+  // Every reach branch below states what an exercise of this function can touch,
+  // and a seeded verdict is exactly the case where that figure is not a statement
+  // about live state. The branch builds its row, the clause is appended once, and
+  // an unseeded row is pushed byte-identical to before.
+  const reachSeedClause = seedClauseForClaims(claims, isOutflowClaim);
+  let reachFact = null;
   if (reachRejected) {
     // The corroborating ceiling refused this row's USD. When the row is ALSO the
     // partial-floor shape (assets moved whose value is unknown), that is an
     // independent fact and the refusal must not swallow it — one early-returning
     // sentence hiding a second disclosure is the same defect the balance table
     // had. Compose both.
-    facts.push({
+    reachFact = {
       label: "Reach",
       value:
         reachUnvalued > 0
           ? `not determined — ${unvaluedText(reachUnvalued, reachUnvaluedKeyed)}, and the priced floor exceeded protocol TVL and was refused`
           : "not determined (measured figure exceeded protocol TVL and was refused)",
-    });
+    };
   } else if (reachUnvalued > 0) {
     // Witnessed, not valued. Naming the count keeps this apart from both the
     // measured row (a number) and the not-witnessed row (a floor on own balance).
@@ -1403,21 +1521,21 @@ export function claimWitnessFacts(fn) {
     // holder the figure came from, so the figure is shown as unattributed rather
     // than as the priced part of the assets just named.
     else if (priced) pricedClause = `, priced part ${priced} (holder attribution not recorded)`;
-    facts.push({
+    reachFact = {
       label: "Reach",
       value: `value not determined — ${unvalued}${pricedClause}`,
-    });
+    };
   } else if (reachIndeterminate) {
     // NOT measured. Name the floor for what it is and never as the reach: the
     // acting contract's own balance is a lower bound on what an exercise of this
     // function can touch, and a zero floor says nothing about the money it moves.
     const floor = formatUsdUpperBound(reachFloor);
-    facts.push({
+    reachFact = {
       label: "Reach",
       value: floor
         ? `not determined (own balance floor ${floor})`
         : "not determined (no downstream holder observed)",
-    });
+    };
   } else if (reachDetermined === true) {
     // MEASURED. A zero here is a measurement — every asset that moved had a priced
     // holding and the total came out at nothing — and it used to render as silence,
@@ -1426,11 +1544,9 @@ export function claimWitnessFacts(fn) {
     // `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only this
     // renderer was blind.
     const reach = formatUsdUpperBound(reachValue);
-    facts.push(
-      reach
-        ? { label: "Reach (upper bound)", value: reach }
-        : { label: "Reach", value: "$0 — measured, no priced value reachable" },
-    );
+    reachFact = reach
+      ? { label: "Reach (upper bound)", value: reach }
+      : { label: "Reach", value: "$0 — measured, no priced value reachable" };
   } else {
     // `reach_determined` absent: an older payload, where a 0 may be the acting
     // deployment's own (zero) balance published as the reach rather than a
@@ -1438,8 +1554,13 @@ export function claimWitnessFacts(fn) {
     // re-mint the "$0 reach for a function that may move millions" sentence the
     // floor key removed. A never-attempted reach stays silent, as before.
     const reach = formatUsdUpperBound(reachValue);
-    if (reach) facts.push({ label: "Reach (upper bound)", value: reach });
+    if (reach) reachFact = { label: "Reach (upper bound)", value: reach };
   }
+  if (reachFact)
+    facts.push({
+      label: reachFact.label,
+      value: withSeedNote(reachFact.value, reachSeedClause),
+    });
 
   // pause.set — freeze blast radius, auto-expiry + duration (fork-observed).
   const observed = pauseObserved(claims);
@@ -1489,15 +1610,24 @@ export function claimWitnessFacts(fn) {
   // supply.mint — backing inflow (fork-observed).
   const backing = mintBacking(claims);
   if (backing) {
+    // The backing answer is read off the SAME seeded execution, so "backed" here
+    // is not a statement that the mint is backed in live state either.
+    const mintSeedClause = seedClauseForClaims(claims, isMintClaim);
     if (backing.inflow_observed === true) {
       facts.push({
         label: "Backing",
-        value: "matching asset inflow observed (backed)",
+        value: withSeedNote(
+          "matching asset inflow observed (backed)",
+          mintSeedClause,
+        ),
       });
     } else if (backing.inflow_observed === false) {
       facts.push({
         label: "Backing",
-        value: "no matching inflow — supply rose alone (dilution)",
+        value: withSeedNote(
+          "no matching inflow — supply rose alone (dilution)",
+          mintSeedClause,
+        ),
       });
     }
   }
