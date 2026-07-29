@@ -29,6 +29,8 @@ from typing import Any, cast
 
 from eth_utils.crypto import keccak
 
+from .shared import external_bool_leaf_is_gate_shape
+
 try:
     from slither.core.declarations import SolidityVariable  # type: ignore[import]
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
@@ -1979,7 +1981,23 @@ def _try_external_auth_oracle(
         operands=operands,
         gate=gate,
     )
-    leaf["authority_role"] = "delegated_authority"
+    # Same discriminator as ``_build_external_bool_leaf``: a result-checked
+    # EFFECTFUL call whose args include the caller
+    # (``require(bEIGEN.transferFrom(msg.sender, …) == true)``) moves the
+    # caller's own value — not an authorization oracle. Only a gate-shaped
+    # callee may publish delegated_authority. The mutability is stamped on
+    # the leaf so downstream (permissionless_shapes, tracking) can apply the
+    # identical judgment instead of reading an absent key as not-determined.
+    callee_mutability = _callee_state_mutability(call_ir)
+    callee_signature = _callee_signature(call_ir)
+    leaf["callee_state_mutability"] = callee_mutability
+    if callee_signature is not None:
+        leaf["callee_signature"] = callee_signature
+    leaf["gate_kind"] = gate.kind
+    if external_bool_leaf_is_gate_shape(callee_mutability, gate.kind, callee_signature):
+        leaf["authority_role"] = "delegated_authority"
+    else:
+        leaf["authority_role"] = "business"
     return leaf
 
 
@@ -2192,7 +2210,17 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
         any(s.kind in ("msg_sender", "tx_origin", "signature_recovery") for s in _sources_for_value(a, prov))
         for a in getattr(ir, "arguments", ())
     )
-    if has_state_target and has_caller_arg:
+    # The state-target + caller-arg fingerprint alone is not authority
+    # evidence: ``vault.enter(msg.sender, …)``, ``token.permit(msg.sender,
+    # …)`` and ``eETH.burnShares(msg.sender, …)`` all match it while the
+    # msg.sender argument is the funds/burn subject. Only a gate-shaped
+    # callee (see ``external_bool_leaf_is_gate_shape``) may publish the
+    # delegated-authority claim and its resolvable descriptor.
+    if (
+        has_state_target
+        and has_caller_arg
+        and external_bool_leaf_is_gate_shape(leaf.get("callee_state_mutability"), gate.kind, callee_signature)
+    ):
         leaf["authority_role"] = "delegated_authority"
         descriptor = _build_generic_external_set_descriptor(
             callee_name=callee_name,

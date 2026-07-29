@@ -146,13 +146,14 @@ def test_value_movement_transfer_from_stays_open(tmp_path, earned_public):
 
 def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
     """A state-var/immutable-target ``require(token.transferFrom(msg.sender,
-    …))`` classifies delegated_authority and resolved GATED on the legacy
-    path — a measured false-gate (the corpus labels every such row public:
-    EarlyAdopterPool claim/withdraw token transfers). Under the flag the
-    value-movement exclusion opens it: an effectful external call required
-    to succeed moves the caller's own assets. This is the one deliberate
-    legacy-gated→open class of the refactor — checked against the
-    labeled corpus, not an accident."""
+    …))`` is a value-movement call, not a gate (the corpus labels every such
+    row public: EarlyAdopterPool claim/withdraw token transfers). It used to
+    classify delegated_authority and resolve GATED on the legacy path — a
+    measured false-gate the earned-public flag opened. Since the classifier
+    itself applies the gate-shape discriminator (Wave 5 B2: an effectful
+    callee with a msg.sender funds-subject argument never earns
+    delegated_authority), the row is open on BOTH paths — the flag no longer
+    changes this class."""
     src = """
         pragma solidity ^0.8.19;
         interface IERC20 { function transferFrom(address f, address t, uint256 a) external returns (bool); }
@@ -179,7 +180,7 @@ def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
             os.environ.pop("PSAT_AUTHORITY_EARNED_PUBLIC", None)
         else:
             os.environ["PSAT_AUTHORITY_EARNED_PUBLIC"] = prior
-    assert off.kind == "external_check_only"
+    assert off.kind == "conditional_universal"
     assert on.kind == "conditional_universal"
 
 

@@ -31,6 +31,7 @@ from .shared import (
     _contract_functions,
     _declaring_contract_name,
     _source_evidence,
+    external_bool_leaf_is_gate_shape,
 )
 
 
@@ -366,6 +367,25 @@ def _collect_state_var_operands(predicate_trees: Mapping[str, Any] | None) -> se
 _AUTHORITY_LEAF_ROLES = frozenset({"caller_authority", "delegated_authority"})
 
 
+def _leaf_asserts_caller_gate(leaf: Mapping[str, Any]) -> bool:
+    """Belt-and-braces twin of the classifier's discriminator: an
+    ``external_bool`` leaf may contribute a variable to ``caller_gate``
+    provenance only when its callee is gate-shaped. The classifier no longer
+    stamps ``delegated_authority`` on non-gate shapes, so on same-version
+    trees this never fires; it exists so a drifted or hand-built tree cannot
+    mint a control edge from a value-movement call
+    (``vault.enter(msg.sender, …)``) through the harvest alone."""
+    if leaf.get("kind") != "external_bool":
+        return True
+    descriptor = leaf.get("set_descriptor")
+    descriptor_signature = descriptor.get("callee_signature") if isinstance(descriptor, dict) else None
+    return external_bool_leaf_is_gate_shape(
+        leaf.get("callee_state_mutability"),
+        leaf.get("gate_kind"),
+        leaf.get("callee_signature") or descriptor_signature,
+    )
+
+
 def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None) -> dict[str, set[str]]:
     """Map each state-variable operand name to the set of ``authority_role``
     values of the leaves that reference it (direct operand reference only).
@@ -384,6 +404,13 @@ def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None
     def visit(leaf: dict[str, Any]) -> None:
         role = leaf.get("authority_role")
         if not isinstance(role, str):
+            return
+        if role in _AUTHORITY_LEAF_ROLES and not _leaf_asserts_caller_gate(leaf):
+            # An authority role on a non-gate-shaped external call must not
+            # make its state-var operands read as gated-on: the operands of
+            # ``vault.enter(msg.sender, ERC20(nativeWrapper), …)`` include
+            # the wrapper token, and counting the leaf's role for them minted
+            # WETH as a caller_gate controller of the Teller.
             return
         for operand in leaf.get("operands") or []:
             if isinstance(operand, dict) and operand.get("source") == "state_variable":
@@ -436,6 +463,16 @@ def _collect_authority_state_vars(predicate_trees: Mapping[str, Any] | None) -> 
     authority_vars: set[str] = set()
 
     def visit(leaf: dict[str, Any]) -> None:
+        # Only a leaf that itself asserts an authority check may promote its
+        # descriptor's contract into the caller-gate set: the descriptor names
+        # WHERE the check would live, the role says THAT a check was proven.
+        # A business/pause/reentrancy leaf carrying a descriptor (or an
+        # authority-role leaf whose callee is not gate-shaped) is not caller-
+        # gate evidence.
+        if leaf.get("authority_role") not in _AUTHORITY_LEAF_ROLES:
+            return
+        if not _leaf_asserts_caller_gate(leaf):
+            return
         descriptor = leaf.get("set_descriptor") or {}
         if not isinstance(descriptor, dict):
             return
