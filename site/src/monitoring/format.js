@@ -115,6 +115,10 @@ export function eventKind(evt) {
   for (const wt of writes) {
     if (WRITE_TARGET_TO_KIND[wt]) return WRITE_TARGET_TO_KIND[wt];
   }
+  // Producer's neutral terminal fallback (`state_changed:<controller_id>`):
+  // a tracked slot was written and nothing classified it. "State change" is
+  // what that says; it stays out of every control/authority kind.
+  if (String(event?.event_type || "").startsWith("state_changed")) return "state";
   return "other";
 }
 
@@ -317,6 +321,23 @@ export function decodeEvent(evt) {
         )
         .join(" · ")
     : null;
+
+  // The producer's terminal fallback (services/monitoring/event_topics.py
+  // `_resolve_event_type`) carries the tracked controller_id after the stem.
+  // The stem is the claim and must survive verbatim into the prose: only
+  // `controller_changed:` says an authority binding moved;
+  // `state_changed:` says a tracked slot was written and nothing more.
+  // Mangling the whole type string (`replace(/_/g, " ")`) turned the second
+  // into the first's wording, so match the stem explicitly.
+  const terminal = /^(controller|state)_changed:(.+)$/.exec(type);
+  if (terminal) {
+    const slot = terminal[2].split(":").pop();
+    return {
+      title: terminal[1] === "controller" ? `Controller changed: ${slot}` : `State changed: ${slot}`,
+      sub,
+    };
+  }
+
   return { title: type.replace(/_/g, " "), sub };
 }
 

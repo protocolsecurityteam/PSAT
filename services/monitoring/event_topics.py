@@ -399,7 +399,8 @@ _CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
 def _classify_from_writes(writes: list[str] | set[str] | None) -> str | None:
     """Derive a canonical event_type from the state vars an event's emitter
     writes. Returns None when no canonical type matches — caller falls
-    back to controller_id or ``controller_changed:<id>``.
+    back to controller_id or the terminal ``<stem>:<id>`` form
+    (see :func:`_resolve_event_type`).
 
     Priority order resolves multi-write emitters:
       1. ``owner`` / ``_owner`` — commit-phase ownership transfer wins
@@ -511,9 +512,20 @@ def _assign_semantic_keys(
         event[new_key] = args_in_order[new_idx]
 
 
+# The one ``authority_provenance`` value that PROVES a tracked write target
+# is a controller: a lowered predicate leaf requires the caller to equal / be
+# a member of it (schemas/contract_analysis.py ``ControllerProvenance``).
+# ``call_target`` — "called, and no gate was proven" — is not that proof, and
+# an absent key is the third state, not determined. Only the proven value may
+# mint the ``controller_changed`` claim.
+_PROVEN_CONTROLLER_PROVENANCE = "caller_gate"
+
+
 def _resolve_event_type(
     controller_id: str | None,
     effect_tags: dict | None = None,
+    *,
+    authority_provenance: str | None = None,
 ) -> str:
     """Pick the canonical event_type for a tracked event.
 
@@ -525,18 +537,35 @@ def _resolve_event_type(
       2. ``_CONTROLLER_ID_TO_EVENT_TYPE`` — back-compat path for legacy
          specs without effect_tags (older monitoring_config rows). Falls
          away once everything re-enrolls.
-      3. ``controller_changed:<id>`` — terminal fallback. Persisted but
-         not semantically classified.
+      3. Terminal fallback — the event is recorded but not semantically
+         classified, so the published type says only what is earned:
+
+           * ``controller_changed:<id>`` when *authority_provenance*
+             proves the write target gates callers. This is a positive
+             claim that an authority binding moved.
+           * ``state_changed:<id>`` for every other input — a proven
+             ``call_target``, and a not-determined (absent) provenance
+             alike. It claims only "this tracked slot was written",
+             which is true whether or not the slot controls anything;
+             it is not a claim that the slot is *not* a controller.
+
+         Both non-proven inputs collapse onto the neutral form on
+         purpose: the neutral form asserts nothing about control in
+         either direction, so nothing downstream can read the
+         not-determined state as a proven one. The discriminator itself
+         stays in the tracking plan for anyone who needs the three
+         states apart.
     """
     by_tags = _classify_from_tags(effect_tags)
     if by_tags:
         return by_tags
+    stem = "controller_changed" if authority_provenance == _PROVEN_CONTROLLER_PROVENANCE else "state_changed"
     cid = (controller_id or "").strip()
     if not cid:
-        return "controller_changed"
+        return stem
     if cid in _CONTROLLER_ID_TO_EVENT_TYPE:
         return _CONTROLLER_ID_TO_EVENT_TYPE[cid]
-    return f"controller_changed:{cid}"
+    return f"{stem}:{cid}"
 
 
 def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
@@ -578,7 +607,14 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             spec: dict = {
                 "topic0": topic0,
                 "signature": ev.get("signature"),
-                "event_type": _resolve_event_type(controller_id, effect_tags),
+                # ``authority_provenance`` is absent on a plan whose target
+                # never earned the gate proof — pass it through as-is so the
+                # resolver sees the same three states the plan carries.
+                "event_type": _resolve_event_type(
+                    controller_id,
+                    effect_tags,
+                    authority_provenance=tc.get("authority_provenance"),
+                ),
                 "controller_id": controller_id,
                 "inputs": list(ev.get("inputs") or []),
             }
@@ -622,7 +658,9 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
         return None
 
     event: dict = {
-        "event_type": spec.get("event_type", "controller_changed"),
+        # A spec with no event_type was never classified at all, so the
+        # neutral stem is the only earned answer here too.
+        "event_type": spec.get("event_type") or "state_changed",
         "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
         "tx_hash": log.get("transactionHash"),
         "log_index": _hex_to_int(log.get("logIndex", "0x0")),
