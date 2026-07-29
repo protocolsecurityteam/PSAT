@@ -115,6 +115,17 @@ def test_scraper_finds_the_known_statuses():
     vocabulary = _scrape_status_vocabulary()
     missing = _SCRAPER_SANITY_FLOOR - vocabulary
     assert not missing, f"status scraper lost known members {sorted(missing)} — it no longer reads the producer"
+    # Constant-indirection blindness guard: the scraper only sees literals in
+    # the covered assignment shapes, so a refactor that moves ONE emission
+    # behind a helper or module constant could drop just that member while
+    # the floor above still passes. Every incomplete_* string literal in the
+    # producer module must therefore be in the scraped set.
+    import re
+
+    module_source = _PRODUCER.read_text()
+    literal_members = set(re.findall(r'"(incomplete_[a-z_]+)"', module_source))
+    escaped = literal_members - vocabulary
+    assert not escaped, f"incomplete_* literals outside the scraper's reach: {sorted(escaped)}"
 
 
 @requires_postgres
@@ -165,7 +176,7 @@ def test_truncated_status_displaces_a_prior_complete_row(_l2):
 
 
 @requires_postgres
-def test_oversized_status_raises_instead_of_leaving_the_stale_row(_l2):
+def test_oversized_status_raises_instead_of_silently_leaving_the_stale_row(_l2):
     """A status the column genuinely cannot hold must be loud.
 
     The WARN-swallow in ``upsert`` is for transient DB trouble, where
