@@ -534,6 +534,7 @@ def test_a_cache_row_never_stores_a_per_deployment_observation(clean_effects):
             "contract_balance_seeded": True,
             "backing": {"inflow_observed": True},
             "pause_effective": True,
+            "auto_expiry": True,
         },
     )
     stored = row.details or {}
@@ -630,13 +631,22 @@ def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
         "pre_pause_succeeding": ["transfer(address,uint256)"],
         "observed_blast_radius": [],
         "scored_denominator": ["transfer(address,uint256)"],
+        # Empty blast radius -> the expiry warp never ran; the stored JSON null
+        # ("not probed") must survive the self-hit as null, not become absent.
+        "auto_expiry": None,
     }
     stripped = {k: v for k, v in full.items() if k not in effect_cache.DEPLOYMENT_PLANE_KEYS}
     _write_burn(session, effect_class="freeze_pause", verdict="unknown", witness=full)
     row = _write_burn(
         session, effect_class="freeze_pause", verdict="unknown", witness=stripped, witness_from_cache=True
     )
-    for key in ("pre_pause_succeeding", "observed_blast_radius", "scored_denominator", "pause_effective"):
+    for key in (
+        "pre_pause_succeeding",
+        "observed_blast_radius",
+        "scored_denominator",
+        "pause_effective",
+        "auto_expiry",
+    ):
         assert row.witness[key] == full[key], key
 
 
@@ -660,7 +670,9 @@ def test_cache_served_rewrite_never_resurrects_across_a_verdict_change(clean_eff
     session = clean_effects
     _write_burn(session, witness=dict(FULL_WITNESS))
     row = _write_burn(
-        session, verdict="unknown", witness={"reason": "no_supply_delta", "observation": "executed"},
+        session,
+        verdict="unknown",
+        witness={"reason": "no_supply_delta", "observation": "executed"},
         witness_from_cache=True,
     )
     assert "input_seeded" not in row.witness

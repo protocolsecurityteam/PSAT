@@ -820,12 +820,16 @@ _KERNEL_SIGNATURE_KEYS = (
 # seeding qualifiers as B's own witness. Measured before this split: 74 of 150 cache
 # rows carried at least one of these (29 freeze_pause, 21 supply, 20 value_out, 4).
 #
-# Stripped on WRITE, so a hit cannot serve them and they are ABSENT on the hit
-# deployment's witness — absent, not ``null`` and not ``false`` (R1). The producing
-# deployment keeps the full payload on its own ``effect_verdicts.witness`` row, which is
-# where per-deployment observations belong. Consumers already have to treat absence as
+# Stripped on WRITE, so the cache never re-serves one deployment's observation as
+# another's. What the hit deployment's ``effect_verdicts.witness`` row then carries
+# depends on the hit path: an AUDITED hit re-simulated this deployment, so
+# ``effects_worker._details_with_fresh_deployment_plane`` re-attaches the fresh
+# probe's own deployment-plane keys; a plain SELF-hit keeps the producing write's
+# stored keys (``merge_witness`` in ``record_effect_verdict``); only a TWIN's first
+# plain hit publishes absence — absent, not ``null`` and not ``false`` (R1), read as
+# "no observation of my own". Consumers already have to treat absence as
 # "unproven lower bound" (``claims_bridge._observed_summary`` states it for
-# ``observed_blast_radius`` verbatim); the difference is that the absence is now HONEST
+# ``observed_blast_radius`` verbatim); the difference is that the absence is honest
 # rather than replaced by another contract's number.
 DEPLOYMENT_PLANE_KEYS = (
     "observed_blast_radius",
@@ -840,6 +844,14 @@ DEPLOYMENT_PLANE_KEYS = (
     # twin must not inherit them. Not a kernel-signature key, so stripping it
     # never changes the self-audit comparison.
     "pause_effective",
+    # ``observed_blast.issubset(expiry_succeeding)`` over THIS fork's succeeding
+    # sets (``anvil.pause_recipe``): a predicate on the deployment-plane blast
+    # radius above, so it moves with it. Keeping it on the cache row would pair a
+    # hit's freshly measured freeze scope with another deployment's expiry answer
+    # — and ``auto_expiry is True`` is the sole gate on rendering the duration
+    # bound as a severity reducer (``claimsVocab.pauseQualifier``). Not a
+    # kernel-signature key either.
+    "auto_expiry",
 )
 
 

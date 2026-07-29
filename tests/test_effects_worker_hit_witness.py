@@ -69,11 +69,17 @@ def _candidate() -> Candidate:
     )
 
 
-def _cache_row(session, *, details: dict[str, Any] | None, audit_status: str | None = None) -> EffectBehaviorCache:
+def _cache_row(
+    session,
+    *,
+    details: dict[str, Any] | None,
+    audit_status: str | None = None,
+    effect_class: str = "supply",
+) -> EffectBehaviorCache:
     return upsert_cached_verdict(
         session,
         behavior_hash=BEHAVIOR_HASH,
-        effect_class="supply",
+        effect_class=effect_class,
         scope="kernel",
         verdict="proven",
         tier="tier1",
@@ -83,10 +89,16 @@ def _cache_row(session, *, details: dict[str, Any] | None, audit_status: str | N
     )
 
 
-def _item(cached: EffectBehaviorCache, *, needs_audit: bool, probed: ObservedEffect | None = None) -> _Item:
+def _item(
+    cached: EffectBehaviorCache,
+    *,
+    needs_audit: bool,
+    probed: ObservedEffect | None = None,
+    effect_class: str = "supply",
+) -> _Item:
     return _Item(
         candidate=_candidate(),
-        effect_class="supply",
+        effect_class=effect_class,
         scope="kernel",
         gate_ref="",
         behavior_hash=BEHAVIOR_HASH,
@@ -150,6 +162,51 @@ def test_audited_hit_with_an_unseeded_fresh_probe_publishes_absence(clean_effect
 
 
 @requires_postgres
+def test_audited_hit_attaches_the_fresh_probes_auto_expiry(clean_effects):
+    """The rendered freeze pair must come from ONE observation. ``auto_expiry``
+    is a subset predicate over this fork's own blast radius, and it is the sole
+    gate on rendering the duration bound as a severity reducer
+    (``claimsVocab.pauseQualifier``) — so the audited hit's published witness
+    must carry the fresh probe's answer next to the fresh probe's freeze scope,
+    never the cache's answer beside an enlarged scope it was not measured on."""
+    session = clean_effects
+    cold = {
+        "observation": "executed",
+        "latch_flip": True,
+        "pause_effective": True,
+        "pre_pause_succeeding": ["a()"],
+        "observed_blast_radius": ["a()"],
+        "scored_denominator": ["a()", "b()"],
+        "auto_expiry": True,
+        "duration_bound_seconds": 2592000,
+        "duration_bound_source": "guard_constant",
+    }
+    cached = _cache_row(session, details=effect_cache.code_plane_details(dict(cold)), effect_class="freeze_pause")
+    # The write-side strip already kept the expiry answer off the cache row.
+    assert cached.details is not None and "auto_expiry" not in cached.details
+    fresh = ObservedEffect(
+        effect_class="freeze_pause",
+        verdict="proven",
+        tier="tier1",
+        reason="pause_froze_entry_points",
+        details={
+            **cold,
+            "pre_pause_succeeding": ["a()", "b()"],
+            "observed_blast_radius": ["a()", "b()"],
+            "auto_expiry": False,
+        },
+    )
+    _, _, _, details, _, disc, witness_from_cache = _resolve(
+        session, _item(cached, needs_audit=True, probed=fresh, effect_class="freeze_pause")
+    )
+    assert disc is None
+    assert details is not None
+    assert details["observed_blast_radius"] == ["a()", "b()"]
+    assert details["auto_expiry"] is False
+    assert witness_from_cache is False
+
+
+@requires_postgres
 def test_plain_hit_declares_its_witness_cache_shaped(clean_effects):
     """No re-simulation happened, so the flag tells the verdict upsert that the
     payload's missing deployment-plane keys are structural, not measured."""
@@ -178,11 +235,12 @@ def test_plain_hit_launders_a_stale_deployment_plane_key(clean_effects):
         details={"observation": "executed", "supply_delta_sign": "burn"},
         audit_status=effect_cache.AUDIT_PASSED,
     )
-    # Simulate the stale row: the write-side strip did not know the key yet.
-    cached.details = {**cached.details, "pause_effective": True}
+    # Simulate the stale row: the write-side strip did not know the keys yet.
+    cached.details = {**(cached.details or {}), "pause_effective": True, "auto_expiry": True}
     session.flush()
     _, _, _, details, _, _, _ = _resolve(session, _item(cached, needs_audit=False))
     assert details is not None and "pause_effective" not in details
+    assert "auto_expiry" not in details
 
 
 @requires_postgres
