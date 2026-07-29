@@ -47,9 +47,10 @@ _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
 _CLASSIFY_CACHE_MUTABLE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_MUTABLE_TTL_S", "60"))
 
-# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay) — a
-# 'latest' classification carrying any of them is served only briefly.
-_MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay"})
+# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay,
+# a proxy's ERC-1967 implementation) — a 'latest' classification carrying any
+# of them is served only briefly.
+_MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay", "erc1967_implementation"})
 
 # Single-batch classify probes (default ON); falls back to sequential on whole-batch failure. Toggle
 # PSAT_CLASSIFY_BATCH=0 to force sequential.
