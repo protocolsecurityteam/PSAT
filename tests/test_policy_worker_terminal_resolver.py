@@ -44,15 +44,14 @@ def test_resolver_returns_all_controller_planes(monkeypatch):
     assert [s["address"] for s in steps] == [OWNER, AUTHORITY]
 
 
-def test_resolver_returns_empty_when_probed_clean_with_no_controller(monkeypatch):
-    """INVERTED (was ``test_resolver_returns_none_when_no_controller``, which
-    pinned the proven-absence/probe-failure collapse): ``[]`` from
-    ``read_contract_controllers`` means every canonical getter answered cleanly
-    and named no controller — a PROVEN absence (a renounced / ownerless
-    contract). Mapping it onto ``None`` here published "we could not look" over
-    "there is no owner", which is why ``terminal_principal.status`` was
-    ``unknown_unfetched`` on 180/180 armed rows. It now propagates as ``[]`` so
-    the walk reports ``no_controller``."""
+def test_resolver_returns_empty_when_canonical_getters_are_silent(monkeypatch):
+    """``[]`` from ``read_contract_controllers`` means every canonical getter
+    answered cleanly and named nothing — probe-set SILENCE, distinct from a
+    probe error (``None``) but NOT proof of absence: the finite getter set
+    cannot prove no controller exists (unpauser()/kernel()/*_admin()/
+    ERC-1967-admin contracts return the same []). The resolver propagates it
+    as ``[]`` so the walk reports ``controllers_not_determined`` with its
+    basis, never a proven absence and never "we could not look"."""
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: [])
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None
