@@ -54,18 +54,19 @@ def _contract(sl: Slither, name: str):
     return next(c for c in sl.contracts if c.name == name)
 
 
-def _leaves(tree):
-    if tree is None:
+def _leaves(tree) -> list[dict]:
+    if not isinstance(tree, dict):
         return []
     if tree.get("op") == "LEAF":
-        return [tree["leaf"]] if tree.get("leaf") else []
-    out = []
+        leaf = tree.get("leaf")
+        return [leaf] if isinstance(leaf, dict) else []
+    out: list[dict] = []
     for child in tree.get("children") or []:
         out.extend(_leaves(child))
     return out
 
 
-def _fn_leaves(contract, full_name: str):
+def _fn_leaves(contract, full_name: str) -> list[dict]:
     fn = next(f for f in contract.functions if f.full_name == full_name)
     return _leaves(build_predicate_tree(fn))
 
