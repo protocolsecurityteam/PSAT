@@ -145,9 +145,7 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
     # ERC-1967 slot read (the UIV-arm discriminator): zero word unless the
     # scenario provides one under the "storage" key.
-    monkeypatch.setattr(
-        tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64)
-    )
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
@@ -192,9 +190,7 @@ def _mock_batched(
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    monkeypatch.setattr(
-        tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64)
-    )
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
@@ -567,9 +563,7 @@ def _run_multicall(
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    monkeypatch.setattr(
-        tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64)
-    )
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(rpc_mod, "rpc_request", _fake_rpc_request)
     return _classify_uncached_batched("https://rpc.example", "0x" + "ab" * 20, "latest")

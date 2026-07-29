@@ -459,9 +459,7 @@ def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain
 _ERC1967_IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
 
-def _get_storage_at(
-    rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None
-) -> str:
+def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None) -> str:
     """Raw ``eth_getStorageAt``; raises on transport/malformed response.
     Module-level (like ``_get_code``) so tests can stub the wire."""
     raw = _rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block_tag], chain_id=chain_id)
@@ -470,9 +468,7 @@ def _get_storage_at(
     return raw
 
 
-def _read_erc1967_implementation(
-    rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None
-) -> object:
+def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
     """The ERC-1967 implementation slot: an implementation address when the
     slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
     ``_PROBE_ERROR`` when the read did not dispositively happen."""
@@ -538,7 +534,7 @@ def _resolve_uiv_shape(
     raw, state = _eth_call_tristate(rpc_url, normalized, "proxiableUUID()", block_tag, chain_id=chain_id)
     if state == "error":
         return "contract", details, True
-    if state == "answered":
+    if state == "answered" and raw is not None:
         try:
             decoded = _decode_abi_value(raw, "bytes32")
         except Exception:
