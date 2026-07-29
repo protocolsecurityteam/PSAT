@@ -392,6 +392,11 @@ function auditScore(contracts, coverageByAddress) {
 function dataConfidenceScore(contracts, actions) {
   const contractRows = contracts.map((contract) => {
     const checks = [
+      // Deliberate collapse, and only on THIS axis: `false` (the fetch says the
+      // source is not verified) and `null` (the fetch fact never reached the
+      // summary) both score 0 because the axis measures how much is KNOWN about
+      // the contract, and neither state is knowledge that it is verified. They are
+      // kept apart everywhere they are stated in words — see buildDataTooltip.
       contract.source_verified === true ? 1 : 0,
       asArray(contract.functions).length > 0 ? 1 : 0,
     ];
@@ -840,9 +845,19 @@ function buildDataTooltip(contracts, actions) {
       : "Proxy and principal metadata is mostly present.";
 
   const negativeExamples = [
+    // Two states, two sentences. `false` is the fetch's answer about the contract;
+    // `null` is the absence of that answer, and calling it "unverified" asserts
+    // something nobody measured — the payload serves both (81 true / 9 false on the
+    // 2026-07-28 corpus, plus nulls) and one chip labelled every non-true row
+    // "source unverified".
     ...contracts
-      .filter((contract) => contract.source_verified !== true)
-      .map((contract) => contractExample(contract, "Source is not marked verified.", "source unverified")),
+      .filter((contract) => contract.source_verified === false)
+      .map((contract) => contractExample(contract, "Source is not verified.", "source unverified")),
+    ...contracts
+      .filter((contract) => contract.source_verified == null)
+      .map((contract) =>
+        contractExample(contract, "Source verification was not recorded for this contract.", "verification not recorded"),
+      ),
     ...contracts
       .filter((contract) => asArray(contract.functions).length === 0)
       .map((contract) => contractExample(contract, "No callable functions were discovered.", "functions missing")),

@@ -590,3 +590,148 @@ def test_the_partial_floor_and_the_tvl_ceiling_both_read_the_deduped_sum():
     over = _value_out([priced], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0, tvl=50.0)
     assert over.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
     assert over.concrete["reach_determined"] is False
+
+
+# ---------------------------------------------------------------------------
+# 5. The disclosure is keyed the way the arithmetic is: per (holder, asset)
+# ---------------------------------------------------------------------------
+
+# PR-161 verdict 198 in miniature — PriorityWithdrawalQueue.requestWithdrawWithWeETH
+# (0x35e7d6fe…/0x27957a42, value_out/proven). weETH left TWO holders in one call: the
+# queue, which has three recorded balance rows and none for weETH, and the BoringVault,
+# whose weETH row is $8,471,736.29. The published residue named weETH as the only asset
+# that moved AND as the only asset that could not be valued, beside
+# ``observed_reach_priced_usd: 8471736.29`` — the vault's row, under a disclosure that
+# said no such row existed. Replay of the persisted row reproduced it byte-identically.
+_VAULT_WEETH_USD = 8_471_736.29
+
+
+def _two_holders_move_one_asset(vault_usd: float | None, tvl: float | None = 3_322_211_996.00):
+    """``CONTRACT`` (no recorded row for ``TOKEN``) and ``HOLDER`` both move ``TOKEN``."""
+    logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, HOLDER, PAYEE, 7))
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    holdings = (AssetHolding(CONTRACT, EETH, 0.0), AssetHolding(HOLDER, TOKEN, vault_usd))
+    return _value_out([moved], holders=holdings, floor=0.0, tvl=tvl)
+
+
+def test_an_asset_one_holder_prices_is_not_published_as_unvaluable_for_every_holder():
+    """The reproduction. One asset, two holders, one priced row: the row must not say
+    "this asset could not be valued" while publishing a figure made of it."""
+    eff = _two_holders_move_one_asset(_VAULT_WEETH_USD)
+
+    assert eff.concrete["reach_determined"] is False
+    assert eff.concrete["observed_reach_assets"] == [TOKEN]
+    assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT, HOLDER])
+    # The disclosure, keyed on the pair the arithmetic used: ONE pair is unvalued, and
+    # it is the holder with no row — not the asset.
+    assert eff.concrete["observed_reach_unvalued_pairs"] == [
+        {"holder": CONTRACT, "asset": TOKEN, "reason": "asset_not_in_recorded_holdings"}
+    ]
+    assert eff.concrete["observed_reach_unvalued_reasons"] == ["asset_not_in_recorded_holdings"]
+    # EARNED EMPTY, published rather than omitted: every asset that moved was priced
+    # for at least one holder. This is the key that carried the contradiction.
+    assert eff.concrete["observed_reach_unvalued_assets"] == []
+    # The figure now names its own subjects.
+    assert eff.concrete["observed_reach_priced_usd"] == _VAULT_WEETH_USD
+    assert eff.concrete["observed_reach_priced_holders"] == [HOLDER]
+    assert eff.concrete["reach_tvl_check"] == "within_protocol_tvl"
+    # The invariant the published row broke, asserted directly: no asset is
+    # simultaneously named as moved-and-priced and as unvaluable.
+    assert not set(eff.concrete["observed_reach_assets"]) & set(eff.concrete["observed_reach_unvalued_assets"])
+
+
+def test_a_fully_priced_two_holder_move_is_untouched_by_the_pair_keying():
+    """NEGATIVE CONTROL — the same two holders and the same asset, and this time BOTH
+    have a priced row. Every pair that moved is priced, so this is the measured branch
+    and the payload is exactly what it was before the keying changed: neither new key
+    appears, because ``reach_determined: True`` already says every named holder was
+    priced. Asserted as a whole-dict equality so a new key cannot slip in unnoticed."""
+    logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, HOLDER, PAYEE, 7))
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0), AssetHolding(HOLDER, TOKEN, _VAULT_WEETH_USD))
+    eff = _value_out([moved], holders=holdings, floor=0.0, tvl=3_322_211_996.00)
+
+    assert eff.concrete == {
+        "destination": PAYEE,
+        "observed_reach_holders": sorted([CONTRACT, HOLDER]),
+        "observed_reach_assets": [TOKEN],
+        "reach_determined": True,
+        "reach_tvl_check": "within_protocol_tvl",
+        "observed_reach_value_usd": 100.0 + _VAULT_WEETH_USD,
+    }
+
+
+def test_an_asset_no_holder_could_value_is_still_named_as_unvaluable():
+    """POSITIVE CONTROL for the narrowed key: it must still fire. Both holders move the
+    asset and NEITHER has a priced row for it, so the asset genuinely contributed
+    nothing to any figure and is named — and with nothing priced there is no figure,
+    no priced holders, and no ceiling outcome."""
+    eff = _two_holders_move_one_asset(None)
+
+    assert eff.concrete["observed_reach_unvalued_assets"] == [TOKEN]
+    assert eff.concrete["observed_reach_unvalued_pairs"] == [
+        {"holder": HOLDER, "asset": TOKEN, "reason": "unpriced_holding"},
+        {"holder": CONTRACT, "asset": TOKEN, "reason": "asset_not_in_recorded_holdings"},
+    ]
+    assert eff.concrete["observed_reach_unvalued_reasons"] == sorted(
+        ["unpriced_holding", "asset_not_in_recorded_holdings"]
+    )
+    assert "observed_reach_priced_usd" not in eff.concrete
+    assert "observed_reach_priced_holders" not in eff.concrete
+    assert "reach_tvl_check" not in eff.concrete
+
+
+def test_a_refused_partial_floor_still_names_the_holders_the_figure_came_from():
+    """The ceiling refuses the figure; the refusal records a contradiction, and a
+    contradiction whose subjects are not named cannot be inspected. ``priced_holders``
+    is published on the refused arm too, beside ``observed_reach_rejected_usd``."""
+    eff = _two_holders_move_one_asset(_VAULT_WEETH_USD, tvl=1_000.0)
+
+    assert eff.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
+    assert eff.concrete["observed_reach_rejected_usd"] == _VAULT_WEETH_USD
+    assert "observed_reach_priced_usd" not in eff.concrete
+    assert eff.concrete["observed_reach_priced_holders"] == [HOLDER]
+    assert eff.concrete["observed_reach_unvalued_pairs"] == [
+        {"holder": CONTRACT, "asset": TOKEN, "reason": "asset_not_in_recorded_holdings"}
+    ]
+
+
+def test_the_single_holder_partial_floor_publishes_the_pair_it_could_not_value():
+    """The common shape (one holder, two assets, one priced) gains the pair key and
+    keeps the asset key: with one holder the two say the same thing, and the asset-level
+    negative is earned because that holder is the only one who moved it."""
+    logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5))
+    moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
+    eff = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0, tvl=1_000.0)
+
+    assert eff.concrete["observed_reach_unvalued_pairs"] == [
+        {"holder": CONTRACT, "asset": EETH, "reason": "asset_not_in_recorded_holdings"}
+    ]
+    assert eff.concrete["observed_reach_unvalued_assets"] == [EETH]
+    assert eff.concrete["observed_reach_priced_usd"] == 100.0
+    assert eff.concrete["observed_reach_priced_holders"] == [CONTRACT]
+
+
+def test_every_reach_key_the_producer_publishes_reaches_the_row_and_the_claim():
+    """The two allowlists are the only path these keys have to a published surface:
+    ``workers.effects_worker._RESIDUE_JSON_KEYS`` gates what lands in
+    ``effect_verdicts.observed_residue`` and ``claims_bridge._REACH_KEYS`` gates what
+    the claim's witness carries. A key the producer publishes but neither list names is
+    computed and then dropped — silently, and indistinguishably from never computed.
+    Pinned over ALL FOUR branches so the next key added has to travel."""
+    from services.effects.claims_bridge import _REACH_KEYS
+    from workers.effects_worker import _RESIDUE_JSON_KEYS
+
+    branches = (
+        _two_holders_move_one_asset(_VAULT_WEETH_USD),  # partial floor, figure published
+        _two_holders_move_one_asset(_VAULT_WEETH_USD, tvl=1_000.0),  # partial floor, refused
+        _two_holders_move_one_asset(None),  # partial floor, nothing priced
+        _value_out([_native_transfer_out()], holders=(AssetHolding(CONTRACT, NATIVE, 42.0),), floor=1.0),  # measured
+        _value_out([SimResult(calls=(SimCallResult(True, "0x", None, ()),))], floor=7.0),  # indeterminate
+    )
+    published = {
+        key for eff in branches for key in eff.concrete if key.startswith(("observed_reach", "reach_", "protocol_tvl"))
+    }
+    assert {"observed_reach_unvalued_pairs", "observed_reach_priced_holders"} <= published
+    assert published - set(_RESIDUE_JSON_KEYS) == set()
+    assert published - set(_REACH_KEYS) == set()

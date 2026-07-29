@@ -1574,18 +1574,43 @@ def _add_reach(
       means "measured reach" is ABSENT.
     * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
       ``observed_reach_holders`` / ``observed_reach_assets`` /
-      ``observed_reach_unvalued_assets`` — value WAS witnessed leaving a holder and
-      its USD is not determined, because at least one asset that moved has no priced
-      holding on record. ``observed_reach_priced_usd`` carries the part that IS
-      priced (a partial floor); it is omitted when that part is nothing AND when the
-      TVL ceiling refuses it (``reach_tvl_check: exceeds_protocol_tvl`` +
-      ``observed_reach_rejected_usd`` + ``protocol_tvl_usd`` then record the
-      contradiction, exactly as on the measured branch). This is the
-      unpriced-asset case: 1001 of 1376 local ``contract_balances`` rows are unpriced,
-      and the recoverETH row moved native ETH out of a deployment with no native
-      balance row at all — "holds nothing", "not fetched" and "fetch failed" are one
-      shape there, so the only honest USD is *unknown*.
+      ``observed_reach_unvalued_pairs`` — value WAS witnessed leaving a holder and
+      its USD is not determined, because at least one (holder, asset) pair that moved
+      has no priced holding on record. ``observed_reach_priced_usd`` carries the part
+      that IS priced (a partial floor), with ``observed_reach_priced_holders`` naming
+      whose holdings it came from; both are omitted when that part is nothing, and the
+      figure is withheld when the TVL ceiling refuses it
+      (``reach_tvl_check: exceeds_protocol_tvl`` + ``observed_reach_rejected_usd`` +
+      ``protocol_tvl_usd`` then record the contradiction, exactly as on the measured
+      branch). This is the unpriced-asset case: 1001 of 1376 local
+      ``contract_balances`` rows are unpriced, and the recoverETH row moved native ETH
+      out of a deployment with no native balance row at all — "holds nothing", "not
+      fetched" and "fetch failed" are one shape there, so the only honest USD is
+      *unknown*.
     * every key absent — no holder set was supplied, so nothing was even attempted.
+
+    THE UNVALUED DISCLOSURE IS KEYED THE WAY THE ARITHMETIC IS — per (holder, asset).
+    It used to be a set of ASSETS while the pricing loop ran per pair, so an asset
+    priced for holder A and unrecorded for holder B was published as unvaluable
+    *tout court* beside a concrete USD figure computed from A. On three PR-161 rows
+    that produced a payload asserting both halves of a contradiction: verdict 198
+    (``PriorityWithdrawalQueue.requestWithdrawWithWeETH``) named weETH as the ONLY
+    asset that moved, named weETH as the ONLY asset that could not be valued, and
+    published ``observed_reach_priced_usd: 8471736.29`` — every dollar of it the
+    BoringVault holder's weETH row, a holder the disclosure never connected to the
+    figure. Three keys keep the two facts apart now:
+
+    * ``observed_reach_unvalued_pairs`` — the disclosure proper: one
+      ``{holder, asset, reason}`` per pair whose USD is not known.
+    * ``observed_reach_unvalued_assets`` — the assets NO holder priced (an asset that
+      moved and contributed nothing to the figure). Published on this branch even when
+      EMPTY, because on this branch it is computed: ``[]`` is the earned negative
+      "every asset that moved was priced for at least one holder", and absence of the
+      key means the branch never ran.
+    * ``observed_reach_priced_holders`` — whose holdings the figure is made of,
+      published beside every figure this branch publishes. It is deliberately absent
+      on the measured branch, where ``reach_determined: True`` already says every
+      holder in ``observed_reach_holders`` was priced.
 
     Writes to ``concrete``, NOT ``details``. Every value here is
     per-deployment — the holders are addresses and the USD is this protocol's
@@ -1618,7 +1643,13 @@ def _add_reach(
         return
     priced_usd = 0.0
     priced_any = False
-    unvalued_assets: set[str] = set()
+    # Both sides of the disclosure are accumulated per (holder, asset) — the key the
+    # arithmetic uses. Publishing the unvalued side per ASSET is what let one asset be
+    # named as the only thing that moved AND the only thing that could not be valued,
+    # next to a figure made of a different holder's balance.
+    unvalued_pairs: list[dict[str, str]] = []
+    priced_holders: set[str] = set()
+    priced_assets: set[str] = set()
     reach_holders: set[str] = set()
     reach_assets: set[str] = set()
     # (holder, asset) -> the priced holding, or None when we hold it unpriced. A
@@ -1633,7 +1664,6 @@ def _add_reach(
     # so the reason an absent asset gets is "not in the holdings we recorded, which
     # are not provably all of them", never "this holder does not hold it".
     completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
-    unvalued_reasons: set[str] = set()
     # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
     # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
     # recorded balance for that asset (the documented conservative upper bound), and a
@@ -1657,16 +1687,20 @@ def _add_reach(
             # ``holdings_at_page_cap`` when the holder's stored rows reach the
             # fetcher's one-page cap (assets are probably missing), otherwise
             # ``asset_not_in_recorded_holdings`` — recorded, not proven-complete.
-            unvalued_assets.add(asset)
-            unvalued_reasons.add(_UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)])
+            reason = _UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)]
+            unvalued_pairs.append({"holder": holder, "asset": asset, "reason": reason})
             continue
         usd = known[(holder, asset)]
         if usd is None:
-            unvalued_assets.add(asset)  # held, but unpriced
-            unvalued_reasons.add("unpriced_holding")
+            # Held, but unpriced. Per PAIR: this says nothing about another holder's
+            # holding of the same asset, and it never did — the old asset-keyed set
+            # said it anyway.
+            unvalued_pairs.append({"holder": holder, "asset": asset, "reason": "unpriced_holding"})
         else:
             priced_usd += usd
             priced_any = True
+            priced_holders.add(holder)
+            priced_assets.add(asset)
     if not reach_holders:
         concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
@@ -1674,12 +1708,21 @@ def _add_reach(
         return
     concrete["observed_reach_holders"] = sorted(reach_holders)
     concrete["observed_reach_assets"] = sorted(reach_assets)
-    if unvalued_assets:
+    if unvalued_pairs:
         # Witnessed, and NOT valued. The priced part is a floor, never the answer.
         concrete["reach_determined"] = False
-        concrete["observed_reach_unvalued_assets"] = sorted(unvalued_assets)
-        concrete["observed_reach_unvalued_reasons"] = sorted(unvalued_reasons)
+        # Sorted by (holder, asset) already: the loop above walks ``sorted(moved)``.
+        concrete["observed_reach_unvalued_pairs"] = unvalued_pairs
+        # The assets NO holder priced. An asset that IS priced for some holder is not
+        # one of them, however many other holders moved it unvalued — that is the whole
+        # correction, and ``[]`` here is the earned negative, not a missing answer.
+        concrete["observed_reach_unvalued_assets"] = sorted({p["asset"] for p in unvalued_pairs} - priced_assets)
+        concrete["observed_reach_unvalued_reasons"] = sorted({p["reason"] for p in unvalued_pairs})
         if priced_any:
+            # WHOSE holdings the figure is. Published beside the figure on both arms
+            # below — a refused figure is still a figure, and the contradiction the
+            # ceiling records is only inspectable if its subjects are named.
+            concrete["observed_reach_priced_holders"] = sorted(priced_holders)
             # The CEILING applies to the partial floor too. It used to guard only
             # the branch below, so a floor ABOVE the protocol's own measured TVL was
             # publishable with no ``reach_tvl_check`` at all — the same contradiction on
@@ -1692,11 +1735,12 @@ def _add_reach(
             concrete["reach_tvl_check"] = tvl_state
             if tvl_state == REACH_TVL_EXCEEDED:
                 logger.warning(
-                    "reach floor %.2f exceeds protocol TVL %.2f — refusing the figure; holders=%s unvalued=%s",
+                    "reach floor %.2f exceeds protocol TVL %.2f — refusing the figure; "
+                    "priced_holders=%s unvalued_pairs=%s",
                     priced_usd,
                     protocol_tvl_usd or 0.0,
-                    sorted(reach_holders),
-                    sorted(unvalued_assets),
+                    sorted(priced_holders),
+                    [(p["holder"], p["asset"]) for p in unvalued_pairs],
                 )
                 concrete["observed_reach_rejected_usd"] = priced_usd
                 concrete["protocol_tvl_usd"] = protocol_tvl_usd

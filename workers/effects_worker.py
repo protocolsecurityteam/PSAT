@@ -221,13 +221,19 @@ _RESIDUE_JSON_KEYS = (
     # millions. Omitting either key here would drop it before it reaches the row.
     "reach_determined",
     "observed_reach_floor_usd",
-    # Which ASSETS the reach was measured over, and the ones whose USD is not
-    # known. Per-deployment observations, so they ride the state plane with the
-    # figures they qualify.
+    # Which ASSETS the reach was measured over, and the (holder, asset) pairs whose
+    # USD is not known. Per-deployment observations, so they ride the state plane with
+    # the figures they qualify. ``observed_reach_unvalued_pairs`` and
+    # ``observed_reach_priced_holders`` are what keep the disclosure and the figure on
+    # the same key: dropping either here would restore the row that named one asset as
+    # the only thing that moved AND the only thing that could not be valued, beside a
+    # concrete USD figure computed from another holder's balance.
     "observed_reach_assets",
+    "observed_reach_unvalued_pairs",
     "observed_reach_unvalued_assets",
     "observed_reach_unvalued_reasons",
     "observed_reach_priced_usd",
+    "observed_reach_priced_holders",
     # The reach-vs-TVL ceiling's OUTCOME, including "skipped_no_tvl". A check whose
     # result is dropped before the consumer is indistinguishable from no check.
     "reach_tvl_check",

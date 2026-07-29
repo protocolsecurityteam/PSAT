@@ -914,6 +914,13 @@ class StaticWorker(BaseWorker):
             "source_format": contract_row.source_format or "flat",
             "source_file_count": contract_row.source_file_count or len(sources),
             "remappings": list(contract_row.remappings or []),
+            # Carried, not defaulted: the discovery fetch already answered this and
+            # the column keeps all three answers (TRUE 230 / FALSE 1 / NULL 410 on the
+            # 2026-07-28 corpus). ``or``-ing a default here would erase the NULL, which
+            # is the state that says the fetch fact never reached this row. Consumed by
+            # ``core._source_verified`` and published as
+            # ``contract_summaries.source_verified``.
+            "source_verified": contract_row.source_verified,
         }
         build_settings = {
             "evm_version": contract_row.evm_version or "shanghai",

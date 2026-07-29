@@ -135,6 +135,15 @@ logger = logging.getLogger(__name__)
 # revert read is RELATIONAL against a parameter — is no longer classified as
 # a pause var, and its comparison leaves lose the ``authority_role='pause'``
 # stamp v4 trees carried.
+# Same v5 window: ``subject.source_verified`` carries the FETCH's verification fact
+# out of ``contract_meta.json`` and has three states, where a v4 row holds a two-state
+# boolean computed as ``bool(project_dir.rglob("src/**/*.sol"))`` — a Foundry-layout
+# glob that published FALSE for 9 of 90 Etherscan-verified contracts on the 2026-07-28
+# run (Lido, WithdrawalQueueERC721, two TimelockControllers, …), all of them analysed
+# from that verified source in the same job. Serving a cached v4 subject would keep
+# republishing that FALSE into ``contract_summaries.source_verified`` and the
+# frontend's data-confidence axis; the version was already minted on this unreleased
+# branch and this rides it.
 ANALYSIS_SCHEMA_VERSION = 5
 
 

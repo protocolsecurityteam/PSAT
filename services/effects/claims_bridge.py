@@ -298,12 +298,18 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     value read as a proven zero.
 #   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
 #     observed leaving a holder and its USD is NOT determined, because at least one
-#     asset that moved has no priced holding on record
-#     (``observed_reach_unvalued_assets`` names them; ``observed_reach_priced_usd``
-#     is the priced part, a partial floor). Reach is measured PER ASSET, and
-#     1001 of 1376 local balance rows are unpriced, so this state is common and must
-#     lower confidence rather than produce a small number.
-#     ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
+#     (holder, asset) pair that moved has no priced holding on record.
+#     ``observed_reach_unvalued_pairs`` names those pairs — holder, asset and reason
+#     each — and ``observed_reach_priced_usd`` is the priced part, a partial floor,
+#     with ``observed_reach_priced_holders`` naming whose holdings it is made of. Read
+#     the pair key literally: an asset can be priced for one holder and unknown for
+#     another, and the two statements do not contradict each other.
+#     ``observed_reach_unvalued_assets`` is the narrower fact — the assets NO holder
+#     priced — and is published even when EMPTY on this branch, where ``[]`` is the
+#     earned negative and absence of the key means the branch never ran. Reach is
+#     measured PER (HOLDER, ASSET), and 1001 of 1376 local balance rows are unpriced,
+#     so this state is common and must lower confidence rather than produce a small
+#     number. ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
 #     the holder does not hold the asset: ``unpriced_holding`` (we have the row, no
 #     price), ``holdings_at_page_cap`` (the holder's stored rows reach the fetcher's
 #     one-page cap, so assets are probably missing), ``asset_not_in_recorded_holdings``
@@ -335,9 +341,11 @@ _REACH_KEYS = (
     "reach_determined",
     "observed_reach_floor_usd",
     "observed_reach_assets",
+    "observed_reach_unvalued_pairs",
     "observed_reach_unvalued_assets",
     "observed_reach_unvalued_reasons",
     "observed_reach_priced_usd",
+    "observed_reach_priced_holders",
     "reach_tvl_check",
     "observed_reach_rejected_usd",
     "protocol_tvl_usd",
