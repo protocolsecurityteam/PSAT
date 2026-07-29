@@ -541,9 +541,15 @@ def test_classify_resolved_address_detects_timelock(monkeypatch):
 
 
 def test_classify_resolved_address_detects_proxy_admin(monkeypatch):
+    # The OZ-v5 ProxyAdmin shape: UIV answers, the ERC-1967 implementation slot
+    # is ZERO (a nonzero slot means the address is itself a proxy — typed
+    # 'contract', see test_classify_uiv_shape.py), proxiableUUID() is absent,
+    # owner() answers.
     def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_getCode":
             return "0x6000"
+        if method == "eth_getStorageAt":
+            return "0x" + "0" * 64
         if method == "eth_call":
             data = params[0]["data"]
             if data == "0xad3cb1cc":

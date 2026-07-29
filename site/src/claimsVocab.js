@@ -1525,7 +1525,11 @@ export function terminalControllerNote(principal) {
       const planes = Array.isArray(tp.controllers) ? tp.controllers : [];
       return { kind: "ambiguous", planes };
     }
-    // cycle | depth_exceeded | unknown_unfetched → honestly unresolved.
+    // cycle | depth_exceeded | unknown_unfetched | controllers_not_determined
+    // (canonical getters silent — NOT proof of no controller; the record
+    // carries probes_silent/undetermined_at as the basis) | legacy
+    // no_controller rows persisted before the proven-absence claim was
+    // retired → all honestly unresolved, with the true status carried through.
     return { kind: "unresolved", status: tp.status || "unknown" };
   }
 

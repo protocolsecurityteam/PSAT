@@ -123,10 +123,12 @@ def _make_terminal_controller_resolver(
             # walk as ``unknown_unfetched``.
             return None
         if not controllers:
-            # Every canonical getter answered cleanly and named no controller —
-            # a proven absence, which the walk reports as ``no_controller``.
-            # Collapsing it into ``None`` here published "we could not look"
-            # over "there is no owner".
+            # Every canonical getter answered cleanly and named nothing —
+            # probe-set silence, which the walk reports as
+            # ``controllers_not_determined`` with its basis. Kept distinct from
+            # ``None`` (probe error): the two are different not-determined
+            # states, but NEITHER is a proven absence — the finite getter set
+            # cannot prove no controller exists.
             return []
         steps: list[dict[str, object]] = []
         for owner in controllers:

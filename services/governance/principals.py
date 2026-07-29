@@ -29,6 +29,18 @@ DEFAULT_TERMINAL_MAX_DEPTH = 4
 # exponential: a plane that itself forks fails closed instead of re-branching.
 _MAX_CONTROLLER_PLANES = 3
 
+# The canonical control getters the production resolver probes
+# (services/resolution/tracking._CONTROLLER_GETTER_SIGS derives its signatures
+# from these names; a test pins the two in sync). Named here because the walk
+# publishes them as the BASIS of a ``controllers_not_determined`` record:
+# silence from this finite probe set is evidence that THESE getters named
+# nothing — never proof that no controller exists. Chain-verified
+# counterexamples with the same silent-probes outcome: a PauserRegistry
+# controlled via ``unpauser()``, Lido's stETH via ``kernel()``, Curve admin
+# planes via ``ownership_admin()``/``emergency_admin()``, and transparent
+# proxies via the ERC-1967 admin slot — all invisible to this set.
+CANONICAL_CONTROLLER_GETTERS: tuple[str, ...] = ("owner", "authority", "admin")
+
 
 def is_terminal_principal_type(resolved_type: str | None) -> bool:
     """Whether *resolved_type* names a settled controlling key / recognized
@@ -49,8 +61,9 @@ def resolve_terminal_principal(
 
     ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
     a sequence of already-classified ``{"address", "resolved_type", "details"}``
-    mappings (owner/authority/admin order), ``[]`` when every control-plane
-    getter answered cleanly and named none (a PROVEN absence), or ``None`` when
+    mappings (owner/authority/admin order), ``[]`` when every canonical getter
+    (``CANONICAL_CONTROLLER_GETTERS``) answered cleanly and named none
+    (probe-set SILENCE — see below, not proof of absence), or ``None`` when
     the planes could not be dispositively read (a probe error — not determined).
     The injected callable is the only wire this function
     touches (integration callers back it with on-chain owner reads + classify;
@@ -62,17 +75,35 @@ def resolve_terminal_principal(
     ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
     unknown`` fallback the witness bar requires, never a guessed key.
 
-    **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
-    ``depth_exceeded`` / ``no_controller`` / ``unknown_unfetched`` (record shape
-    unchanged, no extra keys). ``no_controller`` and ``unknown_unfetched`` are
-    the split of one old undifferentiated answer: the resolver returns ``None``
-    when it could not dispositively read the control planes (a transient probe
-    error — retryable) and an EMPTY SEQUENCE when it probed every canonical
-    getter cleanly and the contract has no controlling key (renounced /
-    unowned — a proven absence, and a FACT about the contract). Both fail closed
-    to ``terminal=False`` / ``resolved_type="unknown"``, so nothing downstream
-    can read either as a key; a consumer that must not present "no owner" as
-    "we could not look" now has the distinction.
+    **Status taxonomy** (the full vocabulary of ``status``; every consumer of
+    ``terminal_principal`` reads from this list):
+
+    * ``terminated`` — the walk reached a ``TERMINAL_PRINCIPAL_TYPES`` member.
+    * ``cycle`` / ``depth_exceeded`` — bounded-walk fail-closed outcomes.
+    * ``multi_plane`` / ``ambiguous_controllers`` — parallel control planes
+      (see below).
+    * ``controllers_not_determined`` — the resolver's canonical getters were
+      ALL silent at the hop named by ``undetermined_at`` (basis recorded in
+      ``probes_silent``). Silence from a finite probe set is evidence those
+      getters named nothing, NEVER proof that no controller exists: contracts
+      governed via non-canonical getters (``unpauser()``, ``kernel()``,
+      Curve's ``*_admin()`` family) or the ERC-1967 admin slot produce exactly
+      this outcome while demonstrably controlled. Not determined — retryable
+      only with a wider probe basis.
+    * ``unknown_unfetched`` — the planes could not be dispositively read (a
+      transient probe error, or steps returned without a usable address) —
+      not determined, retryable next run.
+    * ``no_controller`` — a PROVEN absence of any controlling key. DECLARED
+      BUT CURRENTLY UNMINTABLE: no producer exists, because no basis available
+      to the resolver can earn it — the canonical-getter probe set can prove
+      only what it probed, and a genuinely-ownerless contract (WETH9, the ETH2
+      DepositContract) is indistinguishable from a non-canonically-governed
+      one on that evidence. The member stays documented so a future producer
+      with a real proof basis (and consumers) can adopt it; nothing may mint
+      it until then (zero-realised by design).
+
+    Every non-``terminated`` outcome fails closed to ``terminal=False`` /
+    ``resolved_type="unknown"``, so nothing downstream can read it as a key.
 
     When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
     ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
@@ -159,9 +190,19 @@ def _walk_terminal(
             # not-determined, retryable next run.
             return _unknown("unknown_unfetched")
         if not steps:
-            # Every canonical getter answered cleanly and named no controller:
-            # a PROVEN absence of a controlling key, not a failure to look.
-            return _unknown("no_controller")
+            # Every canonical getter answered cleanly and named nothing —
+            # probe-set SILENCE, not proof of absence (see the status taxonomy:
+            # unpauser()/kernel()/*_admin()/ERC-1967-admin contracts produce
+            # exactly this outcome while demonstrably controlled). Published
+            # with its basis, and attributed to the hop whose getters were
+            # silent (``undetermined_at``) — on a multi-hop walk the chain may
+            # already carry REAL controllers, so the status must not read as a
+            # statement about the principal the record is published on.
+            return _unknown(
+                "controllers_not_determined",
+                probes_silent=list(CANONICAL_CONTROLLER_GETTERS),
+                undetermined_at=current,
+            )
         distinct = _distinct_controllers(steps)
         if not distinct:
             # Steps were returned but none carried a usable address — fetched,

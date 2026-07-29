@@ -1084,13 +1084,14 @@ def _build_principal_lookup(
     #   payload wins — this pass adds the fact where it is missing, never
     #   overwrites one that arrived with the row.
     #
-    # Post-fix status distribution is UNMEASURED: all 180 persisted records carry
-    # ``unknown_unfetched`` (the only status the producer has ever written), for
-    # which the note reads identically to the ``resolved_type == "contract"``
-    # fall-through already in place, so the realised render delta today is ZERO.
-    # The other five statuses — ``terminated`` (an ultimate key), ``multi_plane``,
-    # ``ambiguous_controllers``, ``cycle``, ``depth_exceeded`` — need a policy run
-    # to appear, which is outside this session's cost boundary.
+    # Status vocabulary: see ``services.governance.principals`` (the single
+    # declaration point). Non-terminated statuses all render through
+    # ``terminalControllerNote``'s honest "unresolved (<status>)" fall-through,
+    # including ``controllers_not_determined`` — the canonical-getter-silence
+    # state that replaced the refuted ``no_controller`` proven-absence claim
+    # (persisted pre-fix rows may still carry the old token until the next
+    # policy run rewrites them; the renderer folds it into the same unresolved
+    # copy, so no reader can mistake either for a settled key).
     for address, record in (terminal_walk_by_address or {}).items():
         entry = lookup.get(address)
         if entry is None:

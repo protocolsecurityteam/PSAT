@@ -127,10 +127,12 @@ def test_reverting_getter_is_not_a_control_plane_not_an_error(monkeypatch):
     assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
 
 
-def test_all_getters_reverting_is_a_proven_absence(monkeypatch):
-    # The ownerless contract (mainnet's Beacon DepositContract is the canonical
-    # one): every getter reverts, so the answer is "no controlling key", NOT
-    # "we could not look". ``[]`` is what makes the walk report no_controller.
+def test_all_getters_reverting_is_canonical_getter_silence(monkeypatch):
+    # Every getter reverting is the EVM answering "these three getters name
+    # nothing" — probe-set SILENCE, distinct from a transport failure but NOT
+    # proof of no controller: an ownerless DepositContract and a
+    # kernel()/unpauser()-governed contract produce the identical []. The walk
+    # publishes it as ``controllers_not_determined`` with this basis.
     _stub(monkeypatch, {"owner()": "revert", "authority()": "revert", "admin()": "revert"})
     assert read_contract_controllers("http://rpc", CONTRACT) == []
 
@@ -146,17 +148,41 @@ def test_revert_with_data_is_also_definitive(monkeypatch):
 
 def test_unrecognised_failure_stays_indeterminate(monkeypatch):
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
-        # No revert data and no revert marker: fail closed rather than call it
-        # a proven absence.
+        # No revert data and no revert marker: fail closed (None) rather than
+        # call it canonical-getter silence ([]).
         return [EthCallResult(False, "0x", None, "out of gas") for _ in calls]
 
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
     assert read_contract_controllers("http://rpc", CONTRACT) is None
 
 
-def test_undecodable_success_is_not_a_plane_and_not_an_error(monkeypatch):
+def test_answers_every_selector_is_indeterminate_not_a_plane_set(monkeypatch):
+    # INVERTED from `test_undecodable_success_is_not_a_plane_and_not_an_error`
+    # (which pinned []): an address that answers EVERY call — including the
+    # negative-control selector — is a catch-all fallback, so none of its
+    # getter answers is a witnessed plane and the set is not dispositively
+    # readable. None, never [] (the [] token belongs to canonical-getter
+    # silence on an honestly-dispatching contract).
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
         return [EthCallResult(True, "0x1234", None, None) for _ in calls]
+
+    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
+    assert read_contract_controllers("http://rpc", CONTRACT) is None
+
+
+def test_undecodable_success_with_honest_control_is_not_a_plane(monkeypatch):
+    # The original arm, preserved with an honest negative control: getters
+    # answer garbage but the nonsense selector reverts → the reads happened,
+    # nothing decodes as an address → canonical-getter silence ([]).
+    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
+        control_selector = selector(tracking._NEGATIVE_CONTROL_SIG)
+        out = []
+        for call in calls:
+            if call["data"] == control_selector:
+                out.append(EthCallResult(False, "0x", None, "execution reverted"))
+            else:
+                out.append(EthCallResult(True, "0x1234", None, None))
+        return out
 
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
     assert read_contract_controllers("http://rpc", CONTRACT) == []
