@@ -921,8 +921,8 @@ def _enroll_controller_addresses(
                 tracked_topics=None,
             )
             # No analysis was ever run on this address, so nothing here has
-            # read a tracking plan for it. The empty tracked_topics is the
-            # absence of a question, not the absence of governance events.
+            # read a tracking plan for it: the config carries the
+            # contract_not_analyzed token and no tracked_topics key at all.
             config = _build_monitoring_config(
                 None, [], monitored_type, None, polling_plan, plan_not_determined="contract_not_analyzed"
             )

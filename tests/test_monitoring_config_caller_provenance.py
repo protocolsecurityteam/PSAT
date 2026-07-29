@@ -1,21 +1,23 @@
 """A caller-authored ``monitoring_config`` may not read as an analysis result.
 
 ``services/monitoring/enrollment._build_monitoring_config`` gives
-``monitored_contracts.monitoring_config`` a three-way tracking-plan discriminant,
-stated in its own docstring:
+``monitored_contracts.monitoring_config`` a tracking-plan discriminant that is
+always a positive token, stated in its own docstring:
 
-* ``tracked_topics`` present            — the analysis produced a plan;
-* ``tracking_plan_not_determined``      — the plan was not read; the token says why;
-* NEITHER key                           — the plan WAS read and named nothing.
-  "Absent key = we read the plan; the empty ``tracked_topics`` is then a finding
-  and may be relied on."
+* ``tracked_topics`` present (possibly ``[]``) — the plan was read; an empty
+  list is the witnessed "read and named nothing" finding and may be relied on;
+* ``tracking_plan_not_determined``             — the plan was not read; the
+  token says why.
+
+The builder never emits neither key; a row carrying neither predates this
+discriminant (or, before the route fix below, was caller-authored).
 
 ``POST /api/protocols/{id}/monitoring`` and ``PATCH /api/monitored-contracts/{id}``
-never called that builder — they stored the caller's dict verbatim — so every
-caller-enrolled row landed in the third bucket. On the PR-161 preview all 3
-``enrollment_source='surface_alert'`` rows carried neither key, i.e. read as
-"the analysis looked and found nothing to track" for contracts no tracking-plan
-artifact was ever consulted for.
+never called that builder — they stored the caller's dict verbatim — so
+caller-enrolled rows carried neither key and were indistinguishable from
+analyzer output. On the PR-161 preview all 3 ``enrollment_source='surface_alert'``
+rows had that shape, for contracts no tracking-plan artifact was ever
+consulted for.
 
 The siblings that give it teeth are the two keys the live monitor ACTS on, and
 nothing checked where either came from:
