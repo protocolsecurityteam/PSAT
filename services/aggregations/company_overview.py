@@ -769,7 +769,7 @@ def _prefetch_child_tables(
 
         The terminal-controller walk (``services/governance/principals.resolve_terminal_principal``)
         is persisted ONLY on ``principal_labels.details`` — 1,556 rows written, and
-        the one consumer that handles all six of its statuses correctly,
+        the one consumer that handles its whole status vocabulary correctly,
         ``claimsVocab.terminalControllerNote``, could never receive it because
         ``_build_principal_lookup`` never joined the table. A permanently
         disconnected plane, not a rare shape.
@@ -1442,9 +1442,11 @@ def build_governance_view(
                         # and this payload must not pretend otherwise.
                         "usd_value_state": "measured" if usd is not None else "not_determined",
                         # Kept for continuity, and NOT a money fact: the producer
-                        # writes 0 for "no price known" on 1,007 local rows, so a
-                        # consumer reading this column directly reads them as
-                        # worthless. Read ``usd_value`` / ``usd_value_state``.
+                        # writes 0 for "no price known" on 1,001 local rows (a
+                        # further 6 rows hold a real sub-1e-8 price truncated to
+                        # 0 by Numeric(20,8) — 0 is ambiguous even between those
+                        # two), so a consumer reading this column directly reads
+                        # them as worthless. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                     }
                 )

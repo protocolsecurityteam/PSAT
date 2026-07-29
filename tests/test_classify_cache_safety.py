@@ -199,6 +199,14 @@ def test_mutable_safe_details_use_short_ttl(monkeypatch):
     assert details2["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]  # short TTL forced a re-probe
 
 
+def test_erc1967_implementation_is_a_mutable_detail():
+    """The ERC-1967 implementation slot moves on every upgrade, so a
+    classification witnessing it must age on the short TTL like owners/
+    threshold/delay — a long-TTL entry would serve the pre-upgrade
+    implementation as current for up to 30 minutes."""
+    assert "erc1967_implementation" in tracking._MUTABLE_DETAIL_KEYS
+
+
 def test_pinned_block_mutable_details_keep_long_ttl(monkeypatch):
     """A pinned-block read is immutable at that block, so even a 'safe' entry keeps the
     long TTL — only block_tag='latest' reads use the short TTL."""

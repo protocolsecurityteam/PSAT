@@ -392,8 +392,8 @@ def _is_definitive_revert(outcome: Any) -> bool:
     ``_PROBE_ERROR``, so a contract with NO ``authority()`` — which is most of
     them — tripped the incomplete-witness guard and the whole plane set came back
     ``None``. Measured consequence: ``terminal_principal.status`` is
-    ``unknown_unfetched`` on 180/180 armed rows and 5 of the 6 statuses have
-    never fired. Verified against mainnet (see the commit message): both the
+    ``unknown_unfetched`` on 180/180 armed rows with the rest of the status
+    vocabulary never firing. Verified against mainnet (see the commit message): both the
     ownerless Beacon DepositContract AND a contract that demonstrably HAS an
     owner returned ``None`` before this split.
 

@@ -334,7 +334,7 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
 
 # ---------------------------------------------------------------------------
 # The producer half: "no such controller" and "the read failed" were one
-# answer. 5 of the 6 statuses never fired; 1,556 rows were written.
+# answer. Only one status ever fired; 1,556 rows were written.
 # (Consumer wiring lives elsewhere and is deliberately NOT covered here.)
 # ---------------------------------------------------------------------------
 
