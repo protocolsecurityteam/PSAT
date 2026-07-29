@@ -77,6 +77,30 @@ class ProtocolSubscribeRequest(BaseModel):
         return v
 
 
+def _reject_analyzer_owned_tracking_keys(value: dict | None) -> dict | None:
+    """``tracked_topics`` is not a caller-settable flag.
+
+    ``services/monitoring/unified_watcher._scan_topics_union`` unions
+    ``monitoring_config->'tracked_topics'`` over every active row straight into
+    the live scan filter, so a caller-supplied entry decides what the scanner
+    decodes chain-wide. It is an ANALYSIS output — the governance topics
+    ``enrollment._load_tracking_plan_artifacts`` read off the tracking-plan
+    artifact — and a caller has no witnessed value for it.
+
+    Rejected rather than dropped precisely because of that side effect: a
+    silently discarded list would leave the caller believing those topics are
+    being scanned. ``tracking_plan_not_determined`` is NOT rejected here — the
+    route overwrites it (``routers.monitored._stamp_caller_supplied``), which
+    defeats forgery without breaking a read-modify-write of a stamped row.
+    """
+    if isinstance(value, dict) and "tracked_topics" in value:
+        raise ValueError(
+            "monitoring_config.tracked_topics is derived from the contract's tracking-plan "
+            "artifact and cannot be supplied by a caller; it feeds the live scan filter"
+        )
+    return value
+
+
 class UpsertMonitoredContractRequest(BaseModel):
     address: str = Field(min_length=42, max_length=42)
     chain: str = "ethereum"
@@ -91,6 +115,11 @@ class UpsertMonitoredContractRequest(BaseModel):
         if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
             raise ValueError("address must be a 20-byte hex address")
         return value.lower()
+
+    @field_validator("monitoring_config")
+    @classmethod
+    def validate_monitoring_config(cls, value: dict | None) -> dict | None:
+        return _reject_analyzer_owned_tracking_keys(value)
 
 
 class AddAuditRequest(BaseModel):
@@ -107,6 +136,13 @@ class UpdateMonitoredContractRequest(BaseModel):
     monitoring_config: dict | None = Field(default=None, description="Updated monitoring config flags")
     is_active: bool | None = Field(default=None, description="Toggle monitoring on/off")
     needs_polling: bool | None = Field(default=None, description="Toggle storage-slot polling")
+
+    @field_validator("monitoring_config")
+    @classmethod
+    def validate_monitoring_config(cls, value: dict | None) -> dict | None:
+        # Same rule as the upsert: PATCH replaces the config wholesale, so it is
+        # the same door into the scan filter.
+        return _reject_analyzer_owned_tracking_keys(value)
 
 
 class AddressLabelUpsert(BaseModel):
