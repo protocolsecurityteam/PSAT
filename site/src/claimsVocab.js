@@ -1167,6 +1167,14 @@ function formatUsdUpperBound(value) {
   return `up to ~${text}`;
 }
 
+// How the unvalued half of a partial reach floor is counted. A current payload
+// keys it per (holder, asset) — the key the USD arithmetic uses — and the phrase
+// says so; a pre-fix payload only has the asset-level set and cannot claim more
+// than "some holder could not value this asset".
+function unvaluedText(count, keyed) {
+  return keyed ? `${count} holder/asset pair(s) of unknown value` : `${count} asset(s) of unknown value`;
+}
+
 // What a mandatory revert gate proved about a caller-named destination. Reads
 // the flow claims' `target_constraint` and the exec claim's
 // `destination_constraint` — the same three-state verdict on two witnesses.
@@ -1275,6 +1283,8 @@ export function claimWitnessFacts(fn) {
   let reachIndeterminate = false;
   let reachFloor = null;
   let reachUnvalued = 0;
+  let reachUnvaluedKeyed = false;
+  let reachPricedHolders = 0;
   let reachPriced = null;
   let reachRejected = false;
   for (const c of claims) {
@@ -1323,10 +1333,23 @@ export function claimWitnessFacts(fn) {
       if (typeof observed.observed_reach_floor_usd === "number")
         reachFloor = observed.observed_reach_floor_usd;
       // Value WAS observed leaving a holder, in an asset whose USD we do not
-      // have (unpriced, or no balance row for it at all). Its own state: neither a
-      // reach figure nor a floor on the acting contract.
-      if (Array.isArray(observed.observed_reach_unvalued_assets))
+      // have for THAT holder (unpriced, or no balance row for the pair at all). Its
+      // own state: neither a reach figure nor a floor on the acting contract. Counted
+      // per (holder, asset) pair, which is how it is measured — the same asset can be
+      // priced for one holder and unknown for another, and reading the old
+      // asset-keyed key as if it covered every holder is what let this renderer show
+      // "1 asset of unknown value" beside a priced figure of $8.47M drawn from a
+      // holder it never named.
+      if (Array.isArray(observed.observed_reach_unvalued_pairs)) {
+        reachUnvalued = observed.observed_reach_unvalued_pairs.length;
+        reachUnvaluedKeyed = true;
+      } else if (Array.isArray(observed.observed_reach_unvalued_assets)) {
+        // Pre-fix payload: asset-keyed, so a priced part on it cannot be attributed
+        // to any holder and must not be shown as though it could.
         reachUnvalued = observed.observed_reach_unvalued_assets.length;
+      }
+      if (Array.isArray(observed.observed_reach_priced_holders))
+        reachPricedHolders = observed.observed_reach_priced_holders.length;
       if (typeof observed.observed_reach_priced_usd === "number")
         reachPriced = observed.observed_reach_priced_usd;
       // The corroborating ceiling refused this figure: it exceeded the protocol's own
@@ -1360,19 +1383,29 @@ export function claimWitnessFacts(fn) {
       label: "Reach",
       value:
         reachUnvalued > 0
-          ? `not determined — ${reachUnvalued} asset(s) of unknown value, and the priced floor exceeded protocol TVL and was refused`
+          ? `not determined — ${unvaluedText(reachUnvalued, reachUnvaluedKeyed)}, and the priced floor exceeded protocol TVL and was refused`
           : "not determined (measured figure exceeded protocol TVL and was refused)",
     });
   } else if (reachUnvalued > 0) {
     // Witnessed, not valued. Naming the count keeps this apart from both the
     // measured row (a number) and the not-witnessed row (a floor on own balance).
+    // The priced part is only ever shown WITH its subjects: it is a sum over the
+    // (holder, asset) pairs that were priced, and the pairs that were not are the
+    // clause beside it — the two must not read as statements about the same thing.
     const priced = formatUsdUpperBound(reachPriced);
-    const assets = `${reachUnvalued} asset(s) of unknown value`;
+    const unvalued = unvaluedText(reachUnvalued, reachUnvaluedKeyed);
+    let pricedClause = "";
+    if (priced && reachUnvaluedKeyed)
+      pricedClause = reachPricedHolders
+        ? `, priced part ${priced} across ${reachPricedHolders} holder(s)`
+        : `, priced part ${priced}`;
+    // Pre-fix payload: the unvalued set is asset-keyed and nothing records which
+    // holder the figure came from, so the figure is shown as unattributed rather
+    // than as the priced part of the assets just named.
+    else if (priced) pricedClause = `, priced part ${priced} (holder attribution not recorded)`;
     facts.push({
       label: "Reach",
-      value: priced
-        ? `value not determined — ${assets}, priced part ${priced}`
-        : `value not determined — ${assets}`,
+      value: `value not determined — ${unvalued}${pricedClause}`,
     });
   } else if (reachIndeterminate) {
     // NOT measured. Name the floor for what it is and never as the reach: the

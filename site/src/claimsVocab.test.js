@@ -1188,10 +1188,14 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
           effect_verdict_id: 1,
           observed: {
             reach_determined: false,
+            observed_reach_unvalued_pairs: [
+              { holder: "0x" + "c0".repeat(20), asset: "0x" + "ee".repeat(20), reason: "asset_not_in_recorded_holdings" },
+            ],
             observed_reach_unvalued_assets: ["0x" + "ee".repeat(20)],
             observed_reach_unvalued_reasons: ["asset_not_in_recorded_holdings"],
             reach_tvl_check: "exceeds_protocol_tvl",
             observed_reach_rejected_usd: 3_488_955_156.06,
+            observed_reach_priced_holders: ["0x" + "c0".repeat(20)],
             protocol_tvl_usd: 3_297_344_734,
           },
         },
@@ -1199,7 +1203,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     const reach = claimWitnessFacts(fn).filter((f) => f.label === "Reach");
     expect(reach).toHaveLength(1);
-    expect(reach[0].value).toContain("1 asset(s) of unknown value");
+    expect(reach[0].value).toContain("1 holder/asset pair(s) of unknown value");
     expect(reach[0].value).toContain("refused");
     // Still never the number.
     expect(reach[0].value).not.toContain("3.5B");
@@ -1220,6 +1224,13 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
             reach_determined: false,
             observed_reach_holders: ["0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee"],
             observed_reach_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+            observed_reach_unvalued_pairs: [
+              {
+                holder: "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+                asset: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                reason: "asset_not_in_recorded_holdings",
+              },
+            ],
             observed_reach_unvalued_assets: ["0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
           },
         },
@@ -1227,11 +1238,79 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "value not determined — 1 asset(s) of unknown value",
+      value: "value not determined — 1 holder/asset pair(s) of unknown value",
     });
   });
 
-  it("shows the priced part of an unvalued reach as a partial floor", () => {
+  it("shows the priced part of an unvalued reach as a partial floor, with its holders", () => {
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 1,
+          observed: {
+            reach_determined: false,
+            observed_reach_unvalued_pairs: [
+              { holder: "0x" + "c0".repeat(20), asset: "0x" + "9d".repeat(20), reason: "unpriced_holding" },
+            ],
+            observed_reach_unvalued_assets: ["0x" + "9d".repeat(20)],
+            observed_reach_priced_usd: 759.15,
+            observed_reach_priced_holders: ["0x" + "c0".repeat(20)],
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 holder/asset pair(s) of unknown value, priced part up to ~$759 across 1 holder(s)",
+    });
+  });
+
+  it("does not present a priced part as if it covered the assets it names", () => {
+    // PR-161 verdict 198 (PriorityWithdrawalQueue.requestWithdrawWithWeETH): weETH
+    // left TWO holders, only the BoringVault has a weETH balance row. The producer
+    // published weETH as the ONLY asset that moved AND the ONLY asset that could not
+    // be valued, beside observed_reach_priced_usd: 8,471,736.29 — the vault's row.
+    // This renderer read the asset-keyed set at face value and printed "1 asset(s) of
+    // unknown value, priced part up to ~$8.5M", i.e. a second priced asset that does
+    // not exist. Keyed per pair, the sentence is about the pair that is unknown and
+    // the holder the figure came from.
+    const queue = "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa";
+    const vault = "0xf0bb20865277abd641a307ece5ee04e79073416c";
+    const weeth = "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee";
+    const fn = {
+      claims: [{
+        claim_id: "flow.out",
+        tier: "behavioral_observed",
+        witness: {
+          effect_verdict_id: 198,
+          observed: {
+            reach_determined: false,
+            observed_reach_holders: [queue, vault],
+            observed_reach_assets: [weeth],
+            observed_reach_unvalued_pairs: [
+              { holder: queue, asset: weeth, reason: "asset_not_in_recorded_holdings" },
+            ],
+            // Earned empty: weETH IS priced, for the vault.
+            observed_reach_unvalued_assets: [],
+            observed_reach_priced_usd: 8_471_736.29,
+            observed_reach_priced_holders: [vault],
+            reach_tvl_check: "within_protocol_tvl",
+          },
+        },
+      }],
+    };
+    expect(claimWitnessFacts(fn)).toContainEqual({
+      label: "Reach",
+      value: "value not determined — 1 holder/asset pair(s) of unknown value, priced part up to ~$8.5M across 1 holder(s)",
+    });
+  });
+
+  it("shows a pre-fix asset-keyed payload's priced part as unattributed", () => {
+    // Rows written before the pair keying carry only the asset-level set, and their
+    // figure cannot be tied to any holder — the renderer says so instead of implying
+    // the named assets are what was priced.
     const fn = {
       claims: [{
         claim_id: "flow.out",
@@ -1248,7 +1327,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
     };
     expect(claimWitnessFacts(fn)).toContainEqual({
       label: "Reach",
-      value: "value not determined — 1 asset(s) of unknown value, priced part up to ~$759",
+      value: "value not determined — 1 asset(s) of unknown value, priced part up to ~$759 (holder attribution not recorded)",
     });
   });
 

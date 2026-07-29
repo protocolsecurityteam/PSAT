@@ -478,6 +478,17 @@ logger = logging.getLogger(__name__)
 # which candidates that run visits (the v21 precedent), so a v34 row records a
 # traversal of the thinner persisted graph, not the one the corrected closure
 # produces.
+# v35 (same version, third reason): the partial-floor reach payload's unvalued
+# disclosure is keyed per (holder, asset) — ``observed_reach_unvalued_pairs``, with
+# ``observed_reach_priced_holders`` beside the figure — where a v34 row published a set
+# of ASSETS while the pricing loop ran per pair. Three PR-161 rows therefore named one
+# asset as the only thing that moved AND the only thing that could not be valued, next
+# to a concrete ``observed_reach_priced_usd`` made entirely of a different holder's
+# balance (verdict 198: weETH in both sets, $8,471,736.29, all of it the BoringVault's
+# row). Reach rides ``observed_residue`` (state plane, never a cache key) so no cache
+# row holds this shape and a HIT publishes no reach keys at all — the version is
+# already minted for this unreleased window and this change rides it, stated here so a
+# reader of a v34-era residue knows which key set it was written under.
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
