@@ -1927,7 +1927,10 @@ def _try_external_auth_oracle(
 
     EIP-1271 specifically: the magic value 0x1626ba7e identifies
     the comparison as an isValidSignature check; emit signature_auth.
-    Generic case: emit external_bool with delegated_authority.
+    Generic case: emit external_bool; delegated_authority only when the
+    callee is gate-shaped (``external_bool_leaf_is_gate_shape``) — a
+    result-checked EFFECTFUL call whose args include the caller moves
+    the caller's own value and is published as business.
     """
     left = ir.variable_left
     right = ir.variable_right
@@ -2197,9 +2200,10 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     # from a void merkle-witness verification.
     leaf["gate_kind"] = gate.kind
     leaf["callee_signature"] = callee_signature
-    # Authority classification for external_bool: delegated_authority
-    # if the call target traces to a state_variable AND any arg
-    # traces to msg_sender or signature_recovery.
+    # Inputs to the authority classification below: does the call target
+    # trace to a state_variable, and does any arg trace to msg_sender /
+    # signature_recovery? That fingerprint alone never decides — the
+    # gate-shape branch below is the contract.
     target_sources = _sources_from_destination(ir, prov)
     has_state_target = any(s.kind == "state_variable" for s in target_sources)
     target_state_var = next(
