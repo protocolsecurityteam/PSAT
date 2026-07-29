@@ -1578,3 +1578,197 @@ def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
     states = {node["address"]: node.get("analysis_state") for node in graph["nodes"]}
     assert states[root_address] == "analyzed"
     assert states[eoa_address] == "not_analyzable"
+
+
+def _role_principal_bundle(root_address: str, principal_address: str, resolved_type) -> dict:
+    """Root bundle whose effective_permissions grant role 1 to *principal_address*
+    with the given ``resolved_type`` value PRESENT in the payload (the shape a
+    policy-stage refresh feeds back in)."""
+    return _bundle(
+        root_address,
+        "Vault",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "block_number": 1,
+            "controller_values": {},
+        },
+        effective_permissions={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "functions": [
+                {
+                    "function": "manage(address,bytes,uint256)",
+                    "selector": "0x12345678",
+                    "authority_public": False,
+                    "authority_roles": [
+                        {
+                            "role": 1,
+                            "principals": [
+                                {
+                                    "address": principal_address,
+                                    # Key PRESENT with the given value — a .get
+                                    # default never fires on this shape.
+                                    "resolved_type": resolved_type,
+                                    "details": {"address": principal_address},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def test_null_resolved_type_role_principal_is_not_determined_not_not_analyzable(monkeypatch):
+    """R1/R4 positive case for the ``str(None)`` -> ``"None"`` ->
+    ``not_analyzable`` fabrication: a principal whose ``resolved_type`` is
+    PRESENT with value ``None`` and whose classification does not answer must
+    publish the not-determined pair (``unknown``, ``analysis_state=None``) —
+    never the fabricated token, never the positive ``not_analyzable`` claim."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    principal_address = "0xcea8039076e35a825854c5c2f85659430b06ec96"
+
+    def fake_classify(rpc_url, address, block_tag="latest", **_kw):
+        if address == principal_address:
+            return "unknown", {"address": address}
+        return "contract", {"address": address}
+
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: fake_classify(rpc_url, address, block_tag),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, _role_principal_bundle(root_address, principal_address, None)),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=3,
+    )
+
+    nodes = {node["address"]: node for node in graph["nodes"]}
+    principal_node = nodes[principal_address]
+    assert principal_node["resolved_type"] == "unknown"
+    assert principal_node.get("analysis_state") is None
+    # The fabricated token appears nowhere in the published graph.
+    assert all(node["resolved_type"] != "None" for node in graph["nodes"])
+    # The role edge itself is still published — the fix must not drop the edge.
+    assert (
+        f"address:{root_address}",
+        "role_principal",
+        f"address:{principal_address}",
+    ) in {(edge["from_id"], edge["relation"], edge["to_id"]) for edge in graph["edges"]}
+
+
+def test_null_resolved_type_role_principal_recovers_via_classification(monkeypatch):
+    """A present-but-null ``resolved_type`` used to mint ``"None"`` which,
+    being != "unknown", also BYPASSED classification. Coerced to ``unknown``
+    it now reaches the classifier; a determined non-analyzable answer (eoa)
+    then legitimately publishes ``not_analyzable`` — the proven-firing control
+    for the sentinel."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    principal_address = "0xcccccccccccccccccccccccccccccccccccccccc"
+
+    def fake_classify(rpc_url, address, block_tag="latest", **_kw):
+        if address == principal_address:
+            return "eoa", {"address": address}
+        return "contract", {"address": address}
+
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address",
+        lambda rpc_url, address, block_tag="latest", **_kw: fake_classify(rpc_url, address, block_tag),
+    )
+    monkeypatch.setattr(
+        "services.resolution.recursive.classify_resolved_address_with_status",
+        lambda rpc_url, address, block_tag="latest", **_kw: (*fake_classify(rpc_url, address, block_tag), True),
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, _role_principal_bundle(root_address, principal_address, None)),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=3,
+    )
+
+    nodes = {node["address"]: node for node in graph["nodes"]}
+    principal_node = nodes[principal_address]
+    assert principal_node["resolved_type"] == "eoa"
+    assert principal_node.get("analysis_state") == "not_analyzable"
+
+
+def test_analysis_state_treats_fabricated_none_token_as_undetermined():
+    """Defence in depth: a stored graph written before the producer fix can
+    still carry the literal ``"None"`` into the policy refresh's recompute.
+    ``_analysis_state`` must read it as undetermined, never as the positive
+    ``not_analyzable`` claim — while a genuinely determined non-analyzable
+    type still fires the sentinel."""
+    node_none = {"analyzed": False, "details": {}, "resolved_type": "None", "depth": 1}
+    node_eoa = {"analyzed": False, "details": {}, "resolved_type": "eoa", "depth": 1}
+    node_empty = {"analyzed": False, "details": {}, "resolved_type": "", "depth": 1}
+    assert recursive._analysis_state(cast(ResolvedGraphNode, node_none), 6) is None
+    assert recursive._analysis_state(cast(ResolvedGraphNode, node_empty), 6) is None
+    assert recursive._analysis_state(cast(ResolvedGraphNode, node_eoa), 6) == "not_analyzable"
+
+
+def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):
+    """The refresh path pre-seeds from the persisted artifact; a pre-fix
+    artifact node carrying ``resolved_type="None"`` must come out of the walk
+    as the not-determined pair, and must not outrank a later concrete answer
+    (`"None"` would have ranked as a specific type)."""
+    root_address = "0x1111111111111111111111111111111111111111"
+    stale_address = "0xdddddddddddddddddddddddddddddddddddddddd"
+
+    initial_graph = {
+        "schema_version": "0.1",
+        "root_contract_address": root_address,
+        "max_depth": 3,
+        "nodes": [
+            {
+                "id": f"address:{stale_address}",
+                "address": stale_address,
+                "node_type": "principal",
+                "resolved_type": "None",
+                "label": "role principal",
+                "contract_name": None,
+                "depth": 1,
+                "analyzed": False,
+                "analysis_state": "not_analyzable",
+                "details": {"address": stale_address},
+                "artifacts": {},
+            }
+        ],
+        "edges": [],
+    }
+
+    root_bundle = _bundle(
+        root_address,
+        "Vault",
+        snapshot={
+            "schema_version": "0.1",
+            "contract_address": root_address,
+            "contract_name": "Vault",
+            "block_number": 1,
+            "controller_values": {},
+        },
+    )
+
+    graph, _nested = resolve_control_graph(
+        root_artifacts=cast(LoadedArtifacts, root_bundle),
+        rpc_url="http://rpc.example",
+        chain_id=1,
+        max_depth=3,
+        initial_graph=cast(recursive.ResolvedControlGraph, initial_graph),
+    )
+
+    nodes = {node["address"]: node for node in graph["nodes"]}
+    stale_node = nodes[stale_address]
+    assert stale_node["resolved_type"] == "unknown"
+    # The recompute at the end of the walk replaces the stale positive claim.
+    assert stale_node.get("analysis_state") is None
