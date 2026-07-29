@@ -154,9 +154,9 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
     which analysis_detail does not do."""
     job, _contract = three_state_rows
 
-    company = _by_signature(api_client.get(f"/api/company/{COMPANY}/functions").json()["functions"][
-        f"ethereum::{ADDR.lower()}"
-    ])
+    company = _by_signature(
+        api_client.get(f"/api/company/{COMPANY}/functions").json()["functions"][f"ethereum::{ADDR.lower()}"]
+    )
     analyses = _by_signature(api_client.get(f"/api/analyses/{job.id}").json()["effective_permissions"]["functions"])
 
     def state(value: Any) -> str:
@@ -180,20 +180,21 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
 def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_rows):
     """``mapped_column(JSONB)`` without ``none_as_null`` writes a Python ``None``
     as the jsonb SCALAR ``null``, so ``IS NULL`` never finds the undetermined
-    rows. This is what the column comment tells a reader to use instead."""
+    rows. This is what the column comment tells a reader to use instead.
+
+    Both predicates share one statement deliberately: it is the discriminating
+    form ``test_jsonb_null_predicates`` exempts, and running them side by side
+    over the same rows is the comparison."""
     _job, contract = three_state_rows
 
-    sql_null = db_session.execute(
-        text("SELECT count(*) FROM effective_functions WHERE contract_id = :c AND authority_roles IS NULL"),
-        {"c": contract.id},
-    ).scalar_one()
-    jsonb_null = db_session.execute(
+    sql_null, jsonb_null = db_session.execute(
         text(
-            "SELECT count(*) FROM effective_functions "
-            "WHERE contract_id = :c AND jsonb_typeof(authority_roles) = 'null'"
+            "SELECT count(*) FILTER (WHERE authority_roles IS NULL),"
+            "       count(*) FILTER (WHERE jsonb_typeof(authority_roles) = 'null') "
+            "FROM effective_functions WHERE contract_id = :c"
         ),
         {"c": contract.id},
-    ).scalar_one()
+    ).one()
 
     assert sql_null == 0
     assert jsonb_null == 1
