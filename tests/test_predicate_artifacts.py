@@ -358,6 +358,7 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
     artifact = build_predicate_artifacts(_contract(sl))
     decoded = json.loads(json.dumps(artifact))
     tree = decoded["trees"]["guarded(bytes32,uint256)"]
+
     # The low-level call's kind must have survived as a plain string in the
     # published provenance (not been dropped to make serialization pass).
     def _iter(node):
@@ -373,12 +374,7 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
             for nested in op.get("derived_from") or []:
                 yield nested
 
-    callees = {
-        op.get("callee")
-        for leaf in _iter(tree)
-        for op in _operands(leaf)
-        if op.get("callee") is not None
-    }
+    callees = {op.get("callee") for leaf in _iter(tree) for op in _operands(leaf) if op.get("callee") is not None}
     assert any(isinstance(c, str) and "staticcall" in c for c in callees), callees
 
 
