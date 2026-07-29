@@ -34,11 +34,24 @@ COMPANY = "three_state_roles_co"
 ADDR = "0x" + "5a" * 20
 ROLE_MEMBER = "0x" + "b1" * 20
 
-# The three column values under test, keyed by the function that carries each.
+# The column values under test, keyed by the function that carries each: the
+# three states plus the unreadable shape (a non-empty list of non-objects),
+# which both surfaces must serve as the not-determined ``None`` — it cannot
+# support the witnessed state it would otherwise read as.
 COLUMN_BY_FUNCTION: dict[str, Any] = {
     "roleGated()": None,  # role-gated, role NOT determined
     "ownerOnly()": [],  # proven not role-gated
     "witnessed()": [{"role": 7, "principals": [{"address": ROLE_MEMBER, "details": {}}]}],
+    "unreadable()": ["admin"],  # non-object members: unreadable, NOT witnessed
+}
+
+# The state each row must publish on BOTH surfaces. For the first three this
+# is the column's own state; the unreadable shape degrades to not-determined.
+EXPECTED_STATE: dict[str, str] = {
+    "roleGated()": "not_determined",
+    "ownerOnly()": "proven_absent",
+    "witnessed()": "witnessed",
+    "unreadable()": "not_determined",
 }
 
 
@@ -133,6 +146,9 @@ def test_company_functions_serves_all_three_authority_roles_states(api_client, t
     witnessed = entries["witnessed()"]["authority_roles"]
     assert isinstance(witnessed, list) and [g["role"] for g in witnessed] == [7]
     assert [p["address"] for g in witnessed for p in g["principals"]] == [ROLE_MEMBER]
+    # Unreadable, not witnessed: a non-empty column of non-objects enriches
+    # to nothing and must serve the not-determined ``None``.
+    assert entries["unreadable()"]["authority_roles"] is None
 
 
 def test_analyses_detail_serves_all_three_authority_roles_states(api_client, three_state_rows):
@@ -145,6 +161,7 @@ def test_analyses_detail_serves_all_three_authority_roles_states(api_client, thr
     assert entries["roleGated()"]["authority_roles"] is None
     assert entries["ownerOnly()"]["authority_roles"] == []
     assert [g["role"] for g in entries["witnessed()"]["authority_roles"]] == [7]
+    assert entries["unreadable()"]["authority_roles"] is None
 
 
 def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
@@ -166,8 +183,10 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
 
     for signature in COLUMN_BY_FUNCTION:
         assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
-        # …and each equals the state the column itself holds.
-        assert state(company[signature]["authority_roles"]) == state(COLUMN_BY_FUNCTION[signature]), signature
+        # …and each equals the expected published state (the column's own
+        # state for the three honest shapes; the unreadable non-object shape
+        # degrades to not-determined on both surfaces).
+        assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
 
 
 # ---------------------------------------------------------------------------
