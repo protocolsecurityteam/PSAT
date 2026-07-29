@@ -339,16 +339,64 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
 # ---------------------------------------------------------------------------
 
 
-def test_probed_clean_with_no_controller_is_a_proven_absence_not_unfetched():
-    """``[]`` from the resolver means every canonical getter answered cleanly
-    and named no controller — a renounced / unowned contract. That is a FACT
-    about the contract, and it must not be reported as "we could not look"."""
+def test_probed_clean_silence_is_controllers_not_determined_with_basis():
+    """INVERTED from ``test_probed_clean_with_no_controller_is_a_proven_absence
+    _not_unfetched`` (which pinned ``no_controller``): ``[]`` from the resolver
+    means the canonical getters were SILENT — evidence those three getters
+    named nothing, never proof that no controller exists (unpauser()/kernel()/
+    *_admin()/ERC-1967-admin contracts produce the same [] while demonstrably
+    controlled). The record carries its basis and stays not-determined."""
     record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: [])
-    assert record["status"] == "no_controller"
-    # Still fails closed: a proven absence is not a settled key.
+    assert record["status"] == "controllers_not_determined"
+    assert record["probes_silent"] == ["owner", "authority", "admin"]
+    assert record["undetermined_at"] == CONTRACT_A
+    # Fails closed: never a settled key, never a proven absence.
     assert record["terminal"] is False
     assert record["resolved_type"] == "unknown"
     assert record["address"] is None
+
+
+def test_no_controller_token_has_no_producer():
+    """R2 zero-realised statement: ``no_controller`` (a PROVEN absence) remains
+    a declared vocabulary member with NO producer — no basis available to the
+    walk can earn it. Sweep every resolver answer shape; none may mint it."""
+    shapes = [
+        lambda _a: [],
+        lambda _a: None,
+        lambda _a: [{"resolved_type": "contract"}],  # unusable steps
+        _dict_resolver({CONTRACT_A.lower(): {"address": EOA, "resolved_type": "eoa", "details": {}}}),
+    ]
+    for resolver in shapes:
+        record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+        assert record["status"] != "no_controller"
+
+
+def test_multi_hop_silence_is_attributed_to_the_silent_hop():
+    """The Curve-pool shape: the walk finds a REAL controller at depth 1
+    (owner() answered) and only THEN goes silent. The record's status must not
+    read as a statement about the starting principal — it names the hop whose
+    getters were silent, while the chain keeps the real controller it found."""
+    resolver = _dict_resolver(
+        {
+            CONTRACT_A.lower(): {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+            CONTRACT_B.lower(): [],
+        }
+    )
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+    assert record["status"] == "controllers_not_determined"
+    assert record["chain"] == [CONTRACT_A, CONTRACT_B]
+    assert record["undetermined_at"] == CONTRACT_B
+    assert record["probes_silent"] == ["owner", "authority", "admin"]
+
+
+def test_canonical_getter_names_pin_the_production_probe_set():
+    """The walk publishes CANONICAL_CONTROLLER_GETTERS as the basis of a
+    controllers_not_determined record; the production resolver's probe set
+    (tracking._CONTROLLER_GETTER_SIGS) must be exactly those getters."""
+    from services.governance.principals import CANONICAL_CONTROLLER_GETTERS
+    from services.resolution.tracking import _CONTROLLER_GETTER_SIGS
+
+    assert tuple(f"{name}()" for name in CANONICAL_CONTROLLER_GETTERS) == _CONTROLLER_GETTER_SIGS
 
 
 def test_probe_error_stays_unknown_unfetched():
@@ -401,9 +449,11 @@ def test_policy_worker_resolver_keeps_error_and_absence_apart():
         pw.classify_resolved_address_with_status = original_classify  # type: ignore[assignment]
 
 
-def test_multi_plane_records_no_controller_per_plane():
-    """A plane whose own walk hits a proven absence reports it as such, so a
-    weakest-path scorer sees "this plane has no key" rather than "unknown"."""
+def test_multi_plane_records_silence_per_plane():
+    """A plane whose own walk goes canonical-getter-silent reports the
+    not-determined state (with its basis) on THAT plane, so a weakest-path
+    scorer sees "this plane's controllers were not determined" rather than a
+    fabricated proven absence."""
     resolver_map = {
         CONTRACT_A: [
             {"address": SAFE, "resolved_type": "safe", "details": {}},
@@ -417,5 +467,8 @@ def test_multi_plane_records_no_controller_per_plane():
 
     record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_resolve)
     assert record["status"] == "multi_plane"
-    statuses = {plane["terminal_record"]["status"] for plane in record["planes"]}
-    assert statuses == {"terminated", "no_controller"}
+    by_status = {plane["terminal_record"]["status"]: plane["terminal_record"] for plane in record["planes"]}
+    assert set(by_status) == {"terminated", "controllers_not_determined"}
+    silent = by_status["controllers_not_determined"]
+    assert silent["undetermined_at"] == CONTRACT_B
+    assert silent["probes_silent"] == ["owner", "authority", "admin"]

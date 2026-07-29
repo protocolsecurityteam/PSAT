@@ -1490,6 +1490,40 @@ describe("terminalControllerNote — non-terminal way-points never read as settl
       expect(note).toEqual({ kind: "unresolved", status });
     }
   });
+
+  it("renders canonical-getter silence as unresolved with the true status carried", () => {
+    // controllers_not_determined = the probes were silent, NOT "no controller
+    // exists". The payload carries the basis (probes_silent / undetermined_at)
+    // and the note must keep the state distinguishable, never fold it into a
+    // settled key or a proven absence.
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: {
+          terminal: false,
+          resolved_type: "unknown",
+          address: null,
+          status: "controllers_not_determined",
+          probes_silent: ["owner", "authority", "admin"],
+          undetermined_at: "0x" + "ec".repeat(20),
+          chain: ["0x" + "dc".repeat(20), "0x" + "ec".repeat(20)],
+        },
+      },
+    });
+    expect(note).toEqual({ kind: "unresolved", status: "controllers_not_determined" });
+  });
+
+  it("keeps legacy persisted no_controller rows unresolved (never a settled key)", () => {
+    const note = terminalControllerNote({
+      resolvedType: "contract",
+      details: {
+        terminal: false,
+        terminal_principal: { terminal: false, resolved_type: "unknown", address: null, status: "no_controller" },
+      },
+    });
+    expect(note).toEqual({ kind: "unresolved", status: "no_controller" });
+  });
 });
 
 describe("signerOverlapNote — attribution context, not org identity", () => {

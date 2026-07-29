@@ -127,10 +127,12 @@ def test_reverting_getter_is_not_a_control_plane_not_an_error(monkeypatch):
     assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
 
 
-def test_all_getters_reverting_is_a_proven_absence(monkeypatch):
-    # The ownerless contract (mainnet's Beacon DepositContract is the canonical
-    # one): every getter reverts, so the answer is "no controlling key", NOT
-    # "we could not look". ``[]`` is what makes the walk report no_controller.
+def test_all_getters_reverting_is_canonical_getter_silence(monkeypatch):
+    # Every getter reverting is the EVM answering "these three getters name
+    # nothing" — probe-set SILENCE, distinct from a transport failure but NOT
+    # proof of no controller: an ownerless DepositContract and a
+    # kernel()/unpauser()-governed contract produce the identical []. The walk
+    # publishes it as ``controllers_not_determined`` with this basis.
     _stub(monkeypatch, {"owner()": "revert", "authority()": "revert", "admin()": "revert"})
     assert read_contract_controllers("http://rpc", CONTRACT) == []
 
@@ -146,8 +148,8 @@ def test_revert_with_data_is_also_definitive(monkeypatch):
 
 def test_unrecognised_failure_stays_indeterminate(monkeypatch):
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
-        # No revert data and no revert marker: fail closed rather than call it
-        # a proven absence.
+        # No revert data and no revert marker: fail closed (None) rather than
+        # call it canonical-getter silence ([]).
         return [EthCallResult(False, "0x", None, "out of gas") for _ in calls]
 
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)

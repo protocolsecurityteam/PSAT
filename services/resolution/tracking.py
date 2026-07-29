@@ -315,8 +315,16 @@ def read_contract_controllers(
     erroring getter, so proceeding on the getters that answered would risk a
     false single-plane terminal. In that case return ``None`` (retryable next
     run) rather than a partial set. Bounded, read-only, caller-independent, through
-    the same ``rpc_request`` wire the offline suite stubs. ``[]`` when every getter
-    cleanly yields no controller.
+    the same ``rpc_request`` wire the offline suite stubs.
+
+    ``[]`` means exactly "every canonical getter answered cleanly and named
+    nothing" — probe-set SILENCE. It is NOT proof that the contract has no
+    controller: this probe set is finite, and contracts governed through
+    non-canonical getters (``unpauser()``, ``kernel()``, Curve's ``*_admin()``
+    family) or the ERC-1967 admin slot return the same ``[]`` while
+    demonstrably controlled. The walk publishes it as
+    ``controllers_not_determined`` (basis recorded); see
+    ``services.governance.principals`` for the status vocabulary.
     """
     controllers: list[str] = []
     seen: set[str] = set()
