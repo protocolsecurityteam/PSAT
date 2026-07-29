@@ -243,6 +243,8 @@ class PauseAnalyzer:
             sv = self._lookup_state_var(var_name)
             if sv is None or not self._is_pause_typed(sv):
                 continue
+            if not self._is_latch_shaped(sv, var_name, writers):
+                continue
             if any(self._writer_is_auth_gated(w) for w in writers):
                 if self._read_with_revert_in_others(var_name, writers):
                     pause_vars.add(var_name)
@@ -258,6 +260,46 @@ class PauseAnalyzer:
         # bool or uint8 typically; we accept both.
         type_name = str(getattr(sv, "type", ""))
         return type_name in ("bool", "uint8", "uint256")
+
+    def _is_latch_shaped(self, sv: Any, var_name: str, writers: list[Any]) -> bool:
+        """A pause latch is a FLAG, not a quantity. The written-by-auth +
+        read-with-revert fingerprint alone also matches a governed NUMERIC
+        parameter — OZ TimelockController's ``uint256 _minDelay`` is written
+        by the auth-gated ``updateDelay`` and read inside ``schedule``'s
+        insufficient-delay revert, and classifying it as a latch published
+        ``is_pausable=true`` on contracts with no pause mechanism at all.
+
+        * ``bool`` — a flag by type; qualifies as-is (covers both
+          constant-toggle ``pause()/unpause()`` pairs and parameter-driven
+          ``setPaused(bool)`` setters).
+        * ``uint8``/``uint256`` — qualifies only on flag evidence:
+          - some writer assigns a CONSTANT to the var (``paused = 1``); a
+            duration/delay setter assigns a parameter or derived value; or
+          - a modifier reads the var inside a require/revert (the
+            EigenLayer shape: ``uint256 _paused`` written from a parameter
+            but gating via ``whenNotPaused``-style modifiers).
+        """
+        type_name = str(getattr(sv, "type", ""))
+        if type_name == "bool":
+            return True
+        if self._has_constant_write(var_name, writers):
+            return True
+        for modifier in getattr(self.contract, "modifiers", []) or []:
+            if self._reads_with_revert(modifier, var_name):
+                return True
+        return False
+
+    def _has_constant_write(self, var_name: str, writers: list[Any]) -> bool:
+        for fn in writers:
+            for node in getattr(fn, "nodes", []) or []:
+                for ir in getattr(node, "irs", []) or []:
+                    if type(ir).__name__ != "Assignment":
+                        continue
+                    if _base_state_var_name(getattr(ir, "lvalue", None)) != var_name:
+                        continue
+                    if type(getattr(ir, "rvalue", None)).__name__ == "Constant":
+                        return True
+        return False
 
     def _writer_is_auth_gated(self, fn: Any) -> bool:
         tree = self.predicate_trees.get(fn.full_name)
@@ -302,7 +344,15 @@ class PauseAnalyzer:
     def _reads_with_revert(self, container: Any, var_name: str) -> bool:
         """Returns True if container has a require/revert that
         reads ``var_name``. Checks Binary, Unary, and direct require
-        of the state-var value."""
+        of the state-var value — and, on a require-carrying node, reads
+        reached through a helper call: EigenLayer's Pausable gates as
+        ``modifier onlyWhenNotPaused(uint8 index) { require(!paused(index)); }``
+        with the ``_paused`` read inside ``paused(index)``, so without the
+        helper hop the real latch is invisible and the detector's only
+        admission for such contracts was a fabricated quantity latch. The
+        latch-shape check (``_is_latch_shaped``) is what keeps this hop
+        safe: a duration read through a getter under a bounds require
+        (TimelockController's ``getMinDelay()``) still fails the flag test."""
         for n in getattr(container, "nodes", []) or []:
             irs = list(getattr(n, "irs_ssa", None) or getattr(n, "irs", []) or [])
             if not any(_ir_is_require_or_revert(ir) for ir in irs):
@@ -325,12 +375,35 @@ class PauseAnalyzer:
                     for a in args:
                         if _base_state_var_name(a) == var_name:
                             return True
+                if isinstance(ir, (InternalCall, LibraryCall)):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and _function_reads_state_var(callee, var_name):
+                        return True
         return False
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _function_reads_state_var(fn: Any, var_name: str, _seen: set[int] | None = None) -> bool:
+    """Does ``fn`` (transitively through internal/library callees) read the
+    named state variable? Bounded recursion with a visited set."""
+    seen = _seen if _seen is not None else set()
+    if id(fn) in seen:
+        return False
+    seen.add(id(fn))
+    for sv in getattr(fn, "state_variables_read", []) or []:
+        if getattr(sv, "name", None) == var_name:
+            return True
+    for node in getattr(fn, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            if isinstance(ir, (InternalCall, LibraryCall)):
+                callee = getattr(ir, "function", None)
+                if callee is not None and _function_reads_state_var(callee, var_name, seen):
+                    return True
+    return False
 
 
 def _base_state_var_name(value: Any) -> str | None:
