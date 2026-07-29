@@ -185,6 +185,144 @@ def test_mapping_writer_specs_include_check_trees():
     ]
 
 
+def _membership_tree(*, operator="truthy", authority_role="caller_authority", confidence=None, mapping="registered"):
+    """One-leaf predicate-tree artifact with an enumeration hint, discriminators overridable."""
+    leaf = {
+        "kind": "membership",
+        "operator": operator,
+        "operands": [{"source": "msg_sender"}],
+        "references_msg_sender": True,
+        "parameter_indices": [],
+        "expression": f"{mapping}[msg.sender]",
+        "basis": [],
+        "set_descriptor": {
+            "kind": "mapping_membership",
+            "storage_var": mapping,
+            "key_sources": [{"source": "msg_sender"}],
+            "enumeration_hint": [
+                {
+                    "topic0": "0xaaa",
+                    "topics_to_keys": {1: 0},
+                    "data_to_keys": {},
+                    "direction": "add",
+                    "event_signature": "Registered(address)",
+                    "event_name": "Registered",
+                    "mapping_name": mapping,
+                    "key_position": 0,
+                    "indexed_positions": [0],
+                    "value_position": None,
+                    "writer_function": "register(address)",
+                }
+            ],
+        },
+    }
+    if authority_role is not None:
+        leaf["authority_role"] = authority_role
+    if confidence is not None:
+        leaf["confidence"] = confidence
+    return {"schema_version": "semantic", "trees": {"f()": {"op": "LEAF", "leaf": leaf}}}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # A business membership read (NodeOperatorManager's `registered`
+        # duplicate-enrolment guard) proves nothing about authority.
+        {"authority_role": "business", "operator": "falsy", "confidence": "low"},
+        # Role gate alone: business + truthy is still not an authority leaf.
+        {"authority_role": "business", "operator": "truthy"},
+        # Polarity gate alone: a falsy membership check is an anti-gate
+        # (denylist / already-enrolled) — its members are the blocked set.
+        {"authority_role": "caller_authority", "operator": "falsy"},
+        # Explicit low confidence from the static plane disqualifies.
+        {"authority_role": "caller_authority", "operator": "truthy", "confidence": "low"},
+        # Absent role is a pre-schema tree: not determined, nothing earned.
+        {"authority_role": None, "operator": "truthy"},
+    ],
+    ids=["business_falsy_low", "business_truthy", "authority_falsy", "authority_low_conf", "role_absent"],
+)
+def test_mapping_writer_specs_skip_non_authority_leaves(shape):
+    assert _mapping_writer_specs_from_predicate_trees(_membership_tree(**shape)) == []
+
+
+def test_mapping_writer_specs_keep_authority_leaf_with_explicit_confidence():
+    # Positive arm of the confidence discriminator: medium/high pass through.
+    specs = _mapping_writer_specs_from_predicate_trees(
+        _membership_tree(authority_role="caller_authority", operator="truthy", confidence="high")
+    )
+    assert [spec["mapping_name"] for spec in specs] == ["registered"]
+
+
+def test_replay_mapping_principals_skips_self_membership(monkeypatch):
+    """A contract enumerated as a member of its own mapping (timelock granting
+    itself a `_roles` role) must not publish a degenerate X->X control edge."""
+    contract = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
+    member = "0xcccccccccccccccccccccccccccccccccccccccc"
+    monkeypatch.setenv("ENVIO_API_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "services.resolution.creation_block_floor.resolve_scan_floor",
+        lambda address, chain_id: 100,
+    )
+
+    def fake_enumerate(address, specs, *, chain, bearer_token, from_block):
+        return {
+            "principals": [
+                # Mixed case on purpose: the skip must normalize.
+                {
+                    "address": contract.upper().replace("0X", "0x"),
+                    "mapping_name": "_roles",
+                    "last_seen_block": 123,
+                    "direction_history": ["add"],
+                },
+                {
+                    "address": member,
+                    "mapping_name": "_roles",
+                    "last_seen_block": 124,
+                    "direction_history": ["add"],
+                },
+            ],
+            "status": "complete",
+            "pages_fetched": 1,
+            "last_block_scanned": 200,
+        }
+
+    monkeypatch.setattr(
+        "services.resolution.mapping_enumerator.enumerate_mapping_allowlist_sync",
+        fake_enumerate,
+    )
+
+    nodes: dict = {}
+    edges: dict = {}
+    status = recursive._replay_mapping_principals(
+        address=contract,
+        mapping_specs=[
+            {
+                "mapping_name": "_roles",
+                "event_signature": "RolesUpdated(address,uint256)",
+                "event_name": "RolesUpdated",
+                "key_position": 0,
+                "indexed_positions": [0],
+                "direction": "add",
+                "writer_function": "grantRoles(address,uint256)",
+                "value_position": None,
+            }
+        ],
+        contract_node_id=f"address:{contract}",
+        depth=0,
+        nodes=nodes,
+        edges=edges,
+        chain_id=1,
+    )
+    assert status == "complete"
+    edge_list = list(edges.values())
+    # Positive arm: the real member IS published.
+    assert [(e["from_id"], e["to_id"], e["relation"]) for e in edge_list] == [
+        (f"address:{contract}", f"address:{member}", "mapping_member")
+    ]
+    # The self member neither edges nor re-enters the node map as a principal.
+    assert f"address:{contract}" not in nodes
+
+
 def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
     root_address = "0x1111111111111111111111111111111111111111"
     authority_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
