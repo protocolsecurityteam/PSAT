@@ -2059,6 +2059,22 @@ describe("synthesis qualifiers — a seeded verdict never renders as a live one"
   const UNSEEDED_ACTION = "moves value out (caller-chosen destination)";
   const UNSEEDED_LABEL = "moves value out (caller-chosen destination) · observed";
 
+  it("cross-claim dominance: the funded-only clause wins over a sibling's seeded-inputs clause in either order", () => {
+    // Two sibling outflow claims seeded differently: one input_seeded-only, one
+    // contract_balance_seeded. The fact line built across both must carry the
+    // strictly weaker "only if the contract were funded" clause regardless of
+    // claim order — the short-circuit in seedClauseForClaims must key on the
+    // CONTRACT_BALANCE clause, not merely on the first clause found.
+    const inputOnly = outflow({ input_seeded: true }).claims[0];
+    const funded = outflow({ contract_balance_seeded: true }).claims[0];
+    for (const claims of [[inputOnly, funded], [funded, inputOnly]]) {
+      const facts = claimWitnessFacts({ claims });
+      const reach = facts.find((f) => f.label.startsWith("Reach"));
+      expect(reach.value).toContain("only if the contract were funded");
+      expect(reach.value).not.toContain("with seeded inputs");
+    }
+  });
+
   it("renders an unseeded verdict exactly as before — absent AND explicitly false", () => {
     // Absence is contractually "no seeding was needed" (claims_bridge.py), and an
     // explicit `false` is the same statement said out loud. Neither may produce a
