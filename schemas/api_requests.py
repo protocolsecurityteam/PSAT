@@ -77,6 +77,59 @@ class ProtocolSubscribeRequest(BaseModel):
         return v
 
 
+#: The ``monitoring_config`` keys ``enrollment._build_monitoring_config`` derives
+#: from analysis and the live monitor then ACTS on. Both are ANALYSIS outputs —
+#: read off the tracking-plan artifact by ``enrollment._load_tracking_plan_artifacts``
+#: / ``polling_plan.build_polling_plan`` — and a caller has no witnessed value for
+#: either. Rejected rather than dropped: each drives the monitor on the wire, so a
+#: silently discarded value would leave the caller believing the monitor is doing
+#: something it is not.
+#:
+#: These are the only two. The remaining keys the builder writes are the ``watch_*``
+#: booleans, which only gate whether an already-detected event notifies
+#: (``unified_watcher._should_watch``) — no wire call, no minted finding, so a
+#: caller preference and settable — and ``tracking_plan_not_determined``, which the
+#: route OWNS by overwriting (``routers.monitored._stamp_caller_supplied``);
+#: overwriting defeats forgery without breaking a read-modify-write of a stamped row.
+_ANALYZER_OWNED_CONFIG_KEYS = {
+    "tracked_topics": (
+        "monitoring_config.tracked_topics is derived from the contract's tracking-plan "
+        "artifact and cannot be supplied by a caller; it feeds the live scan filter"
+    ),
+    "polling_plan": (
+        "monitoring_config.polling_plan is derived from the contract's tracking-plan "
+        "artifact and cannot be supplied by a caller; the poller issues its entries "
+        "as eth_call/eth_getStorageAt and mints state_changed_poll findings from them"
+    ),
+}
+
+
+def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
+    """Neither ``tracked_topics`` nor ``polling_plan`` is a caller-settable flag.
+
+    ``services/monitoring/unified_watcher._scan_topics_union`` unions
+    ``monitoring_config->'tracked_topics'`` over every active row straight into
+    the live scan filter, so a caller-supplied entry decides what the scanner
+    decodes chain-wide.
+
+    ``polling_plan`` goes further — it is acted on, not merely filtered on:
+    ``unified_watcher.poll_for_state_changes`` turns each entry into an
+    ``eth_call``/``eth_getStorageAt`` (``_rpc_call_for_entry``) and
+    ``_apply_poll_result`` mints a ``state_changed_poll`` ``MonitoredEvent``
+    keyed on the entry's own ``field`` name — a published finding on the monitor
+    surface derived from a slot no analyzer witnessed. The caller-provenance
+    stamp cannot substitute for this rejection: the stamp records where the
+    CONFIG came from, while the event the plan produces carries no provenance
+    at all.
+    """
+    if not isinstance(value, dict):
+        return value
+    for key, message in _ANALYZER_OWNED_CONFIG_KEYS.items():
+        if key in value:
+            raise ValueError(message)
+    return value
+
+
 class UpsertMonitoredContractRequest(BaseModel):
     address: str = Field(min_length=42, max_length=42)
     chain: str = "ethereum"
@@ -91,6 +144,11 @@ class UpsertMonitoredContractRequest(BaseModel):
         if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
             raise ValueError("address must be a 20-byte hex address")
         return value.lower()
+
+    @field_validator("monitoring_config")
+    @classmethod
+    def validate_monitoring_config(cls, value: dict | None) -> dict | None:
+        return _reject_analyzer_owned_config_keys(value)
 
 
 class AddAuditRequest(BaseModel):
@@ -107,6 +165,13 @@ class UpdateMonitoredContractRequest(BaseModel):
     monitoring_config: dict | None = Field(default=None, description="Updated monitoring config flags")
     is_active: bool | None = Field(default=None, description="Toggle monitoring on/off")
     needs_polling: bool | None = Field(default=None, description="Toggle storage-slot polling")
+
+    @field_validator("monitoring_config")
+    @classmethod
+    def validate_monitoring_config(cls, value: dict | None) -> dict | None:
+        # Same rule as the upsert: PATCH replaces the config wholesale, so it is
+        # the same door into the scan filter and the poller.
+        return _reject_analyzer_owned_config_keys(value)
 
 
 class AddressLabelUpsert(BaseModel):

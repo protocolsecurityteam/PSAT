@@ -36,9 +36,23 @@ def monitored_contract(
     return live_client.upsert_protocol_monitoring(company_protocol_id, payload)
 
 
+def _caller_keys(config: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+    """The caller's own keys out of a stored config.
+
+    Compared as a subset rather than for equality because the route stamps
+    ``tracking_plan_not_determined="config_supplied_by_caller"`` into every
+    caller-supplied config (``routers/monitored._stamp_caller_supplied``): a
+    config no analyzer produced must not read as "the tracking plan was read and
+    named nothing", which is what the absent key means on the auto-enrollment
+    path. The caller's keys still round-trip untouched.
+    """
+    return {key: config.get(key) for key in expected}
+
+
 def test_monitored_contract_initial_state(monitored_contract):
     assert monitored_contract["is_active"] is True
-    assert monitored_contract["monitoring_config"] == _INITIAL_CONFIG
+    assert _caller_keys(monitored_contract["monitoring_config"], _INITIAL_CONFIG) == _INITIAL_CONFIG
+    assert monitored_contract["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
     # Surface alert is the enrollment source set by routers/monitored.py for
     # ad-hoc POST /api/protocols/{id}/monitoring inserts.
     assert monitored_contract["enrollment_source"] == "surface_alert"
@@ -50,13 +64,14 @@ def test_monitored_contract_patch_monitoring_config(
 ):
     new_config = {"watch_upgrades": False, "watch_ownership": True, "extra_flag": "test-marker"}
     updated = live_client.patch_monitored_contract(monitored_contract["id"], {"monitoring_config": new_config})
-    assert updated["monitoring_config"] == new_config
+    assert _caller_keys(updated["monitoring_config"], new_config) == new_config
 
     # Read-back via listing guards against a PATCH that echoes without committing.
     rows = live_client.list_monitored_contracts(chain="ethereum")
     persisted = next((r for r in rows if r.get("id") == monitored_contract["id"]), None)
     assert persisted is not None, f"PATCH'd row {monitored_contract['id']} disappeared from listing"
-    assert persisted["monitoring_config"] == new_config
+    assert _caller_keys(persisted["monitoring_config"], new_config) == new_config
+    assert persisted["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
 
 
 def test_monitored_contract_patch_toggle_active(

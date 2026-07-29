@@ -406,19 +406,42 @@ def _build_company_function_entry(
         )
         controller_entry["principals"].append(principal_dict)
 
-    authority_roles = list(authority_roles_by_key.values())
-    if not authority_roles and ef.authority_roles:
+    # Three states out, and the COLUMN decides all three whenever the principal
+    # fold witnesses nothing (``principal_type`` is ``controller`` on 100% of
+    # rows, so that is every row): a non-empty list is witnessed role grants,
+    # ``None`` is role-gated with the role not determined, ``[]`` is proven not
+    # role-gated. ``list(authority_roles_by_key.values())`` is a list on every
+    # path, so seeding the result with it published the column's ``None`` as the
+    # ``[]`` that NEGATES it — /api/company/{name}/functions served 0 nulls over
+    # 1,109 ether.fi rows whose pool holds 324, contradicting
+    # /api/analyses/{job} on the same rows. The two frontend coercers
+    # (surface/layout/controlGraph.js, protocolScore.js) still fold to ``[]``
+    # when they iterate, which is fine — a render loop publishes no verdict —
+    # but the payload has to carry the true value for a scorer to read.
+    authority_roles: Any
+    witnessed_roles = list(authority_roles_by_key.values())
+    if witnessed_roles:
+        authority_roles = witnessed_roles
+    elif ef.authority_roles:
         classified_by_address: dict[str, dict[str, Any]] = {}
         for controller_entry in controllers_by_label.values():
             for principal in controller_entry.get("principals", []):
                 address = str((principal or {}).get("address", "")).lower()
                 if address:
                     classified_by_address.setdefault(address, principal)
-        authority_roles = [
+        enriched = [
             _enriched_role_grant(grant, classified_by_address)
             for grant in ef.authority_roles
             if isinstance(grant, dict)
         ]
+        # A non-empty column that enriches to nothing was unreadable, not proven
+        # absent — the one way this branch could still mint the negating ``[]``.
+        # 0 realised: no persisted row carries a non-object grant (measured
+        # across every effective_functions row, jsonb_typeof(grant) <> 'object'
+        # on 0 of the 210 non-empty ones).
+        authority_roles = enriched or None
+    else:
+        authority_roles = ef.authority_roles
 
     controllers = list(controllers_by_label.values())
     has_more_specific_controller = any(
@@ -462,6 +485,9 @@ def _build_company_function_entry(
         # null when the row predates the column.
         "authority_openness": getattr(ef, "authority_openness", None),
         "controllers": controllers,
+        # Three states, same as analysis_detail publishes for the same row: a
+        # non-empty list is witnessed, ``None`` is role-gated with the role not
+        # determined, ``[]`` is proven not role-gated. See the fold above.
         "authority_roles": authority_roles,
         "direct_owner": direct_owner,
         "signature_witnesses": signature_witnesses,

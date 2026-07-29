@@ -164,7 +164,12 @@ def test_patch_monitoring_config(api_client, db_session):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["monitoring_config"] == new_config
+    # The caller's keys round-trip; the route additionally stamps
+    # ``tracking_plan_not_determined`` so a caller-authored config cannot read as
+    # a tracking plan the analysis produced (routers/monitored, and
+    # tests/test_monitoring_config_caller_provenance.py for that rule itself).
+    assert {k: body["monitoring_config"].get(k) for k in new_config} == new_config
+    assert body["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
     assert body["is_active"] is True  # unchanged
     assert body["needs_polling"] is False  # unchanged
 

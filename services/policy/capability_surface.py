@@ -163,6 +163,25 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
     * ``[]`` — proven absent: the gate WAS lowered and no role-keyed authority
       appeared in it (a plain owner equality, a public path).
 
+    ``[]`` requires a lowered gate, and the function that already decides
+    whether one was lowered is :func:`capability_surface_openness`. Its
+    ``not_determined`` is precisely "no public path was earned and no caller set
+    was witnessed" — an ``external_check_only`` probe interface, a
+    ``finite_set`` whose ``empty_reason`` is ``not_read``, an irreducible
+    AND/OR residual. Nothing about such a gate was read, INCLUDING whether it is
+    role-keyed, so the proven-absent ``[]`` is not available there and the answer
+    is ``None``. Walking the tree for role traces alone missed this: only
+    ``unsupported`` nodes and role-dissolving trace steps set the flag, so
+    ``external_check_only`` fell through to ``[]`` — 12 of the 1,159 ether.fi
+    rows on the PR-161 preview asserted "proven not role-gated" for a function
+    whose authority was not determined at all (8 of the 12 ``external_check_only``,
+    3 AND, 1 ``finite_set``), among them two ``grantRole`` entry points whose
+    whole gate is an external view probe that was never lowered.
+
+    A NON-empty grant is kept whatever the openness verdict says: it names a
+    role and its members, which is direct evidence, and ``authority_openness``
+    reports the gate verdict separately.
+
     Reads only the persisted capability shape — no wire, no DB.
     """
     grants: dict[int, list[str]] = {}
@@ -210,7 +229,7 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
     visit(cap_dict)
     if not_determined:
         return None
-    return [
+    witnessed = [
         {
             "role": role,
             "principals": [
@@ -221,6 +240,18 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
         for role, members in sorted(grants.items())
         if members
     ]
+    if witnessed:
+        return witnessed
+    # Nothing witnessed — and that alone does not earn the proven-absent ``[]``.
+    if grants:
+        # A role WAS named and not one member address of it survived the
+        # 0x-prefixed-20-byte filter: role-keyed, holders not determined. 0
+        # realised (every role-witnessing trace on the corpus carries at least
+        # one well-formed member), structural on the first malformed one.
+        return None
+    if capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined":
+        return None
+    return []
 
 
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:

@@ -51,6 +51,40 @@ def _current_head_block(chain: str | None) -> int:
         return 0
 
 
+#: Stamped into every caller-supplied ``monitoring_config``. The auto-enrollment
+#: path (``services/monitoring/enrollment._build_monitoring_config``) encodes the
+#: tracking plan three ways: ``tracked_topics`` present = the analysis produced a
+#: plan; ``tracking_plan_not_determined`` present = the plan was not readable and
+#: the reason token says why; NEITHER key = the plan WAS read and it named
+#: nothing, "a finding [that] may be relied on" per that function's docstring.
+#: A config authored by an API caller has none of that provenance, and storing it
+#: verbatim landed it in the third bucket — proven-absent by a route that never
+#: looked. This token is the fourth honest answer and keeps the other three
+#: earned.
+CALLER_SUPPLIED_TRACKING_PLAN = "config_supplied_by_caller"
+
+
+def _stamp_caller_supplied(monitoring_config: dict[str, Any] | None) -> dict[str, Any]:
+    """The stored config for a caller-authored enrollment, provenance-stamped.
+
+    The route OWNS ``tracking_plan_not_determined`` here: a caller value is
+    overwritten, not merged, so the token cannot be forged into asserting some
+    analyzer reason (``plan_not_readable``, ``contract_not_analyzed``, …) for a
+    config no analyzer produced. Overwriting rather than rejecting also keeps a
+    read-modify-write of an already-stamped row working.
+
+    The two analyzer-owned keys — ``tracked_topics`` and ``polling_plan`` — are
+    rejected upstream in ``schemas.api_requests`` rather than dropped here: each
+    drives the monitor on the wire, so silently discarding one would tell the
+    caller their topics are being scanned / their slots polled. The stamp cannot
+    substitute for that rejection: it marks the CONFIG's provenance, while the
+    event a caller-authored ``polling_plan`` would mint carries none.
+    """
+    stamped = dict(monitoring_config or {})
+    stamped["tracking_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
+    return stamped
+
+
 def _monitored_contract_payload(c: MonitoredContract) -> dict[str, Any]:
     return {
         "id": str(c.id),
@@ -130,7 +164,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
                 protocol_id=protocol_id,
                 contract_id=contract.id if contract else None,
                 contract_type=request.contract_type,
-                monitoring_config=request.monitoring_config,
+                monitoring_config=_stamp_caller_supplied(request.monitoring_config),
                 last_known_state={},
                 last_scanned_block=head_block,
                 enrollment_block=head_block,
@@ -143,7 +177,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
             existing.protocol_id = protocol_id
             existing.contract_id = contract.id if contract else existing.contract_id
             existing.contract_type = request.contract_type
-            existing.monitoring_config = request.monitoring_config
+            existing.monitoring_config = _stamp_caller_supplied(request.monitoring_config)
             existing.needs_polling = request.needs_polling
             existing.is_active = request.is_active
             existing.enrollment_source = existing.enrollment_source or "surface_alert"
@@ -163,7 +197,7 @@ def update_monitored_contract(contract_id: str, request: UpdateMonitoredContract
             raise HTTPException(status_code=404, detail="MonitoredContract not found")
 
         if request.monitoring_config is not None:
-            mc.monitoring_config = request.monitoring_config
+            mc.monitoring_config = _stamp_caller_supplied(request.monitoring_config)
         if request.is_active is not None:
             mc.is_active = request.is_active
         if request.needs_polling is not None:
