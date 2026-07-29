@@ -1880,7 +1880,7 @@
             "root_op": "LEAF",
             "leaf_count": 1,
             "authority_roles": [
-              "delegated_authority"
+              "business"
             ],
             "leaf_kinds": [
               "external_bool"
@@ -1960,7 +1960,7 @@
             "root_op": "LEAF",
             "leaf_count": 1,
             "authority_roles": [
-              "delegated_authority"
+              "business"
             ],
             "leaf_kinds": [
               "external_bool"
@@ -2042,7 +2042,7 @@
             "root_op": "LEAF",
             "leaf_count": 1,
             "authority_roles": [
-              "delegated_authority"
+              "business"
             ],
             "leaf_kinds": [
               "external_bool"
@@ -2139,7 +2139,7 @@
             "root_op": "LEAF",
             "leaf_count": 1,
             "authority_roles": [
-              "delegated_authority"
+              "business"
             ],
             "leaf_kinds": [
               "external_bool"
@@ -2823,8 +2823,7 @@
             "root_op": "AND",
             "leaf_count": 2,
             "authority_roles": [
-              "business",
-              "delegated_authority"
+              "business"
             ],
             "leaf_kinds": [
               "external_bool"
