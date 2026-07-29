@@ -423,7 +423,7 @@ def _serialize_effective_functions(
             # is role-gated with the role not determined (the enumerable
             # role-store dissolves role identity by design), ``[]`` is proven
             # not role-gated. ``or []`` folded the middle into the last.
-            "authority_roles": ef.authority_roles,
+            "authority_roles": _authority_roles_state(ef.authority_roles),
             "direct_owner": direct_owner,
             "signature_witnesses": signature_witnesses,
         }
@@ -439,6 +439,19 @@ def _serialize_effective_functions(
             entry["status"] = status
         out.append(entry)
     return out
+
+
+def _authority_roles_state(column: Any) -> Any:
+    """The ``authority_roles`` column, with one guard: a non-empty list whose
+    members are ALL non-objects was unreadable as role grants, not a witnessed
+    role requirement — serve the not-determined ``None``, exactly as the
+    company serializer does when the same list enriches to nothing
+    (``services/governance/principals.py``), so the two surfaces derive the
+    same state from the same row. 0-realised on observed rows (0 non-object
+    grants of 210 non-empty ones)."""
+    if isinstance(column, list) and column and not any(isinstance(grant, dict) for grant in column):
+        return None
+    return column
 
 
 def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[ControllerValue]) -> dict[str, Any]:

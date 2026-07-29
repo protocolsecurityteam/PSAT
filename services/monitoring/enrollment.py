@@ -615,11 +615,22 @@ def _build_monitoring_config(
 ) -> dict[str, Any]:
     """Build the monitoring_config JSONB based on detected capabilities.
 
-    ``tracking_plan_not_determined`` carries the reason token from
-    ``_load_tracking_plan_artifacts`` whenever the plan was not read, so a
-    config with no ``tracked_topics`` is not later mistaken for a contract the
-    analysis found nothing to track on. Absent key = we read the plan; the
-    empty ``tracked_topics`` is then a finding and may be relied on."""
+    The tracking-plan discriminant is always a POSITIVE token — the builder
+    never signals a state by key absence:
+
+      * ``tracked_topics`` (a list, possibly empty) = the plan was read.
+        A non-empty list is the witnessed plan; ``[]`` is the witnessed
+        "read and named nothing" finding and may be relied on.
+      * ``tracking_plan_not_determined`` = the plan was NOT read; the reason
+        token from ``_load_tracking_plan_artifacts`` (or the enrollment
+        path) says why. ``tracked_topics`` is then absent — we cannot speak
+        about the plan.
+
+    NEITHER key therefore identifies only rows this builder did not produce
+    (pre-discriminant rows; caller-supplied configs are stamped at the route,
+    see ``routers/monitored.py``). Earlier, the read-and-named-nothing state
+    was itself signalled by key absence, making it indistinguishable from
+    those rows."""
     config: dict[str, Any] = {
         "watch_upgrades": contract_type == "proxy",
         "watch_ownership": True,
@@ -635,20 +646,19 @@ def _build_monitoring_config(
         if summary.control_model and "role" in (summary.control_model or "").lower():
             config["watch_roles"] = True
 
-    if tracked_topics:
-        config["tracked_topics"] = tracked_topics
+    if plan_not_determined:
+        config["tracking_plan_not_determined"] = plan_not_determined
+    else:
+        config["tracked_topics"] = list(tracked_topics or [])
         # Default-on the authority flag if any tracked event_type drives it.
         # ``_should_watch`` falls back to True for missing keys, so the
         # explicit set is more documentation than functional — but it keeps
         # the config self-describing on inspection.
-        if any(t.get("event_type") == "authority_updated" for t in tracked_topics):
+        if any(t.get("event_type") == "authority_updated" for t in tracked_topics or []):
             config["watch_authority"] = True
 
     if polling_plan:
         config["polling_plan"] = polling_plan
-
-    if plan_not_determined:
-        config["tracking_plan_not_determined"] = plan_not_determined
 
     return config
 

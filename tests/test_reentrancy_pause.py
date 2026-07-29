@@ -664,6 +664,79 @@ def test_timelock_min_delay_detect_pausability_false_end_to_end(tmp_path):
     assert pausability["unpause_functions"] == []
 
 
+_MODIFIER_RELATIONAL_BOUND = """
+pragma solidity ^0.8.19;
+contract Timelock2 {
+    uint256 private _minDelay;
+    address public admin;
+    mapping(bytes32 => uint256) public timestamps;
+    function updateDelay(uint256 d) external { require(msg.sender == admin, "no"); _minDelay = d; }
+    function getMinDelay() public view returns (uint256) { return _minDelay; }
+    modifier respectsDelay(uint256 delay) { require(delay >= _minDelay, "insufficient delay"); _; }
+    function schedule(bytes32 id, uint256 delay) external respectsDelay(delay) {
+        timestamps[id] = block.timestamp + delay;
+    }
+}
+"""
+
+
+def test_modifier_hosted_relational_bound_is_not_a_latch(tmp_path):
+    """The modifier arm must apply the same flag discipline as the
+    constant-write and inline-equality arms: ``modifier respectsDelay(
+    uint256 delay) { require(delay >= _minDelay); }`` is a RELATIONAL
+    bounds check on a governed duration — hosting it in a modifier must
+    not admit ``_minDelay`` as a latch (byte-for-byte the refuted
+    TimelockController artifact shape, with ``updateDelay`` published as
+    both pause and unpause)."""
+    sl = _compile(tmp_path, _MODIFIER_RELATIONAL_BOUND)
+    contract = next(c for c in sl.contracts if c.name == "Timelock2")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == set()
+
+
+def test_modifier_hosted_relational_bound_publishes_false_end_to_end(tmp_path):
+    """With all three planes run, the modifier-hosted bounds shape
+    publishes the affirmative ``is_pausable=False`` — not ``true`` and
+    not ``None``."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _MODIFIER_RELATIONAL_BOUND)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is False
+    assert pausability["pause_variables"] == []
+    assert pausability["pause_functions"] == []
+    assert pausability["unpause_functions"] == []
+
+
+def test_modifier_hosted_relational_bound_inherited_variant(tmp_path):
+    """Same shape with the latch candidate and modifier declared in an
+    abstract ancestor (private AND internal visibility) — the
+    inheritance-aware modifier walk must apply the same flag discipline."""
+    for vis in ("private", "internal"):
+        sl = _compile(
+            tmp_path,
+            f"""
+            pragma solidity ^0.8.19;
+            abstract contract DelayBase {{
+                uint256 {vis} _minDelay;
+                address public admin;
+                function updateDelay(uint256 d) external {{ require(msg.sender == admin, "no"); _minDelay = d; }}
+                function getMinDelay() public view returns (uint256) {{ return _minDelay; }}
+                modifier respectsDelay(uint256 delay) {{ require(delay >= _minDelay, "insufficient delay"); _; }}
+            }}
+            contract Timelock is DelayBase {{
+                mapping(bytes32 => uint256) public timestamps;
+                function schedule(bytes32 id, uint256 delay) external respectsDelay(delay) {{
+                    timestamps[id] = block.timestamp + delay;
+                }}
+            }}
+        """,
+        )
+        contract = next(c for c in sl.contracts if c.name == "Timelock")
+        trees = _build_trees(contract)
+        assert PauseAnalyzer(contract, trees).run() == set(), vis
+
+
 def test_uint_latch_with_gating_modifier_still_detected(tmp_path):
     """R4 positive control for the latch-shape narrowing: the EigenLayer
     shape — ``uint256 _paused`` written from a PARAMETER (no constant

@@ -40,6 +40,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     PredicateTree,
     SetDescriptor,
 )
+from services.static.contract_analysis_pipeline.shared import external_bool_leaf_is_gate_shape
 from utils.logging import record_stage_metric
 
 from .capabilities import (
@@ -535,12 +536,15 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             # Value movement (§2.3): an effectful EXTERNAL call required to
             # succeed — ``require(token.transfer(msg.sender, …))`` — moves
             # the caller's own assets; any caller moves their own. The
-            # delegated_authority classification (state-var target + caller
-            # arg) is structural noise here: real external ACLs are
-            # view/pure. Effectful LIBRARY calls (own-storage membership
-            # consume) and void merkle-witness verifications keep the gated
-            # path — see is_permissionless_caller_shape; they fall through
-            # to the external_set descriptor/adapter resolution below.
+            # static classifier stamps these leaves ``business`` (see
+            # ``external_bool_leaf_is_gate_shape``: real external ACLs are
+            # view/pure), so they normally resolve as side conditions above;
+            # this arm is the resolution plane's own guard for any
+            # delegated_authority-tagged leaf that still arrives with the
+            # value-movement shape. Effectful LIBRARY calls (own-storage
+            # membership consume) and void merkle-witness verifications keep
+            # the gated path — see is_permissionless_caller_shape; they fall
+            # through to the external_set descriptor/adapter resolution below.
             if _is_permit_family_signature(leaf.get("callee_signature")):
                 # The void EIP-2612/3009 statement call: still an open
                 # self-auth path, but typed as a permit so the badge can say
@@ -2440,6 +2444,22 @@ def _promote_bound_caller_leaf(leaf: dict[str, Any]) -> None:
     if leaf.get("authority_role") != "business":
         return
     if leaf.get("kind") not in {"equality", "membership", "external_bool"}:
+        return
+    if leaf.get("kind") == "external_bool" and not external_bool_leaf_is_gate_shape(
+        leaf.get("callee_state_mutability"),
+        leaf.get("gate_kind"),
+        leaf.get("callee_signature"),
+    ):
+        # An external_bool leaf may only be promoted to proven delegated
+        # authority when the static plane's discriminator says the callee is
+        # gate-shaped (view/pure ACL read, own-storage library consume, or the
+        # void merkle-witness carve-out). A nonview value-movement callee
+        # (``require(token.transferFrom(user, …))`` with ``user``
+        # caller-bound) stays ``business``: the caller-bound argument is the
+        # funds subject, not an authorization subject. A ``None``
+        # (not-determined) mutability likewise stays ``business`` — same as
+        # the discriminator's own (None, nonview) handling: a not-determined
+        # input must not mint the proven delegated-authority state.
         return
     operands = leaf.get("operands") or []
     key_sources = (leaf.get("set_descriptor") or {}).get("key_sources") or []

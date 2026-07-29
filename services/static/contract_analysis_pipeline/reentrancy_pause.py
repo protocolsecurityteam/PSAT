@@ -314,8 +314,13 @@ class PauseAnalyzer:
         # Inheritance-aware for the same reason as ``_lookup_state_var``:
         # the gating modifier is typically declared in the same ancestor as
         # the latch (mirrors ``_detect_pausability``'s ``_all_modifiers``).
+        # Flag-comparison-only: a modifier-hosted RELATIONAL bounds check
+        # (``modifier respectsDelay(uint256 d) { require(d >= _minDelay); }``)
+        # is a governed quantity's read, not flag evidence — the same
+        # discipline the constant-write and inline-equality arms already
+        # apply.
         for modifier in _all_modifiers(self.contract):
-            if self._reads_with_revert(modifier, var_name):
+            if self._reads_with_revert(modifier, var_name, flag_comparison_only=True):
                 return True
         if self._flag_read_with_revert(var_name, writers):
             return True
@@ -426,7 +431,7 @@ class PauseAnalyzer:
                     return True
         return False
 
-    def _reads_with_revert(self, container: Any, var_name: str) -> bool:
+    def _reads_with_revert(self, container: Any, var_name: str, *, flag_comparison_only: bool = False) -> bool:
         """Returns True if container has a require/revert that
         reads ``var_name``. Checks Binary, Unary, and direct require
         of the state-var value — and, on a require-carrying node, reads
@@ -434,10 +439,21 @@ class PauseAnalyzer:
         ``modifier onlyWhenNotPaused(uint8 index) { require(!paused(index)); }``
         with the ``_paused`` read inside ``paused(index)``, so without the
         helper hop the real latch is invisible and the detector's only
-        admission for such contracts was a fabricated quantity latch. The
-        latch-shape check (``_is_latch_shaped``) is what keeps this hop
-        safe: a duration read through a getter under a bounds require
-        (TimelockController's ``getMinDelay()``) still fails the flag test."""
+        admission for such contracts was a fabricated quantity latch.
+
+        ``flag_comparison_only`` (the ``_is_latch_shaped`` modifier arm): a
+        Binary read qualifies only when the require-carrying node compares
+        the var — or a value derived from it — ``==``/``!=`` against a
+        CONSTANT. A relational bounds check (``require(delay >= _minDelay)``
+        in a modifier) is a governed quantity's read, never flag evidence,
+        and admitting it published ``is_pausable=true`` with the delay
+        setter as both pause and unpause. The helper hop is filtered the
+        same way (the callee must carry the flag comparison, not merely
+        read the var). Truthiness reads of the var itself (Unary ``!`` /
+        a direct require argument) are an implicit eq-vs-false — never
+        relational — and keep qualifying. Default ``False`` preserves the
+        permissive traversal for ``_read_with_revert_in_others``, where
+        ``_is_latch_shaped`` has already vetted the shape."""
         for n in getattr(container, "nodes", []) or []:
             irs = list(getattr(n, "irs_ssa", None) or getattr(n, "irs", []) or [])
             if not any(_ir_is_require_or_revert(ir) for ir in irs):
@@ -446,8 +462,10 @@ class PauseAnalyzer:
             # a Binary (require(a == b)), a TMP from a Unary
             # (require(!flag)), or a state-var read directly
             # (require(boolFlag)). We check all three.
+            if flag_comparison_only and _node_constant_equality_on_var(irs, var_name):
+                return True
             for ir in irs:
-                if isinstance(ir, Binary):
+                if isinstance(ir, Binary) and not flag_comparison_only:
                     for operand in (ir.variable_left, ir.variable_right):
                         if _base_state_var_name(operand) == var_name:
                             return True
@@ -462,7 +480,12 @@ class PauseAnalyzer:
                             return True
                 if isinstance(ir, (InternalCall, LibraryCall)):
                     callee = getattr(ir, "function", None)
-                    if callee is not None and _function_reads_state_var(callee, var_name):
+                    if callee is None:
+                        continue
+                    if flag_comparison_only:
+                        if _function_constant_equality_on_var(callee, var_name):
+                            return True
+                    elif _function_reads_state_var(callee, var_name):
                         return True
         return False
 
@@ -487,6 +510,93 @@ def _function_reads_state_var(fn: Any, var_name: str, _seen: set[int] | None = N
             if isinstance(ir, (InternalCall, LibraryCall)):
                 callee = getattr(ir, "function", None)
                 if callee is not None and _function_reads_state_var(callee, var_name, seen):
+                    return True
+    return False
+
+
+def _node_constant_equality_on_var(irs: list[Any], var_name: str) -> bool:
+    """Within one node's (SSA) IR list: is the var — or a temporary derived
+    from it through arithmetic/negation/assignment — compared ``==``/``!=``
+    against a Constant, or back against one of its own derivation operands
+    (the bit-test idiom ``(_paused & mask) == mask``)? Catches the direct
+    latch check (``_paused == 0``) and both mask forms while rejecting
+    relational bounds (``delay >= _minDelay``) and equality of the var
+    against a parameter or unrelated temporary. Taint flows forward only,
+    which matches SSA IR order within a node; each tainted temporary
+    remembers the operand names that fed it."""
+    tainted: dict[str, set[str]] = {}
+
+    def _feeds_of(op: Any) -> set[str] | None:
+        """Feed-set when ``op`` is the var itself (empty set) or a tainted
+        temporary; ``None`` when it does not read the var."""
+        if _base_state_var_name(op) == var_name:
+            return set()
+        name = getattr(op, "name", None)
+        if isinstance(name, str) and name in tainted:
+            return tainted[name]
+        return None
+
+    def _record(ir: Any, feeds: set[str]) -> None:
+        lname = getattr(getattr(ir, "lvalue", None), "name", None)
+        if isinstance(lname, str):
+            tainted[lname] = feeds
+
+    def _merged_feeds(operands: list[Any]) -> set[str]:
+        feeds: set[str] = set()
+        for op in operands:
+            name = getattr(op, "name", None)
+            if isinstance(name, str):
+                feeds.add(name)
+            op_feeds = _feeds_of(op)
+            if op_feeds:
+                feeds |= op_feeds
+        return feeds
+
+    for ir in irs:
+        if isinstance(ir, Binary):
+            left, right = ir.variable_left, ir.variable_right
+            if getattr(ir, "type", None) in (BinaryType.EQUAL, BinaryType.NOT_EQUAL):
+                for var_op, other_op in ((left, right), (right, left)):
+                    feeds = _feeds_of(var_op)
+                    if feeds is None:
+                        continue
+                    if type(other_op).__name__ == "Constant":
+                        return True
+                    other_name = getattr(other_op, "name", None)
+                    if isinstance(other_name, str) and other_name in feeds:
+                        return True
+            if _feeds_of(left) is not None or _feeds_of(right) is not None:
+                _record(ir, _merged_feeds([left, right]))
+        elif isinstance(ir, Unary):
+            rvalue = getattr(ir, "rvalue", None)
+            if _feeds_of(rvalue) is not None:
+                _record(ir, _merged_feeds([rvalue]))
+        elif type(ir).__name__ == "Assignment":
+            rvalue = getattr(ir, "rvalue", None)
+            if _feeds_of(rvalue) is not None:
+                _record(ir, _merged_feeds([rvalue]))
+    return False
+
+
+def _function_constant_equality_on_var(fn: Any, var_name: str, _seen: set[int] | None = None) -> bool:
+    """Helper-hop variant of ``_node_constant_equality_on_var``: does ``fn``
+    (transitively through internal/library callees) carry a constant-
+    equality comparison on the var in any node? Nodes are NOT filtered to
+    require-carrying ones — in the EigenLayer shape the ``paused()`` getter
+    computes the flag test on a return path while the revert lives at the
+    modifier's own require."""
+    seen = _seen if _seen is not None else set()
+    if id(fn) in seen:
+        return False
+    seen.add(id(fn))
+    for node in getattr(fn, "nodes", []) or []:
+        irs = list(getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or [])
+        if _node_constant_equality_on_var(irs, var_name):
+            return True
+        for ir in irs:
+            if isinstance(ir, (InternalCall, LibraryCall)):
+                callee = getattr(ir, "function", None)
+                if callee is not None and _function_constant_equality_on_var(callee, var_name, seen):
                     return True
     return False
 
