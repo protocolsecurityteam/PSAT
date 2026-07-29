@@ -910,7 +910,17 @@ class EffectiveFunction(Base):
     effect_labels: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
     effect_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)), nullable=True)
     action_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    authority_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    authority_public: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment=(
+            "TWO states over a three-state fact: true = a public path was earned; "
+            "false merges 'a caller restriction was witnessed' with 'the authority "
+            "could not be determined at all'. Read authority_openness for the split "
+            "-- this column alone cannot tell a gated function from an unread one."
+        ),
+    )
     # Three-state counterpart to ``authority_public`` (whose ``False`` merges a
     # witnessed caller restriction with "we could not determine the authority"):
     # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
@@ -925,7 +935,18 @@ class EffectiveFunction(Base):
             "this column existed; never read it as any of the three."
         ),
     )
-    authority_roles: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    authority_roles: Mapped[Any | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment=(
+            "Three states, and [] is the NEGATION of null, not a coarsening of it: a "
+            "non-empty list is a witnessed (role, principals) requirement; null is "
+            "role-gated with the role NOT determined; [] is proven not role-gated. "
+            "The null is the JSONB SCALAR null, not SQL NULL -- 'WHERE authority_roles "
+            "IS NULL' matches 0 of the 379 undetermined rows; test "
+            "jsonb_typeof(authority_roles) = 'null' (see db/jsonb.py)."
+        ),
+    )
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)

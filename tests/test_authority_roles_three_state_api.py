@@ -168,3 +168,47 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
         assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
         # …and each equals the state the column itself holds.
         assert state(company[signature]["authority_roles"]) == state(COLUMN_BY_FUNCTION[signature]), signature
+
+
+# ---------------------------------------------------------------------------
+# The storage encoding the column comment asserts. Both halves are load-bearing:
+# a query written against the wrong one returns an empty result that reads as
+# "nothing is undetermined".
+# ---------------------------------------------------------------------------
+
+
+def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_rows):
+    """``mapped_column(JSONB)`` without ``none_as_null`` writes a Python ``None``
+    as the jsonb SCALAR ``null``, so ``IS NULL`` never finds the undetermined
+    rows. This is what the column comment tells a reader to use instead."""
+    _job, contract = three_state_rows
+
+    sql_null = db_session.execute(
+        text("SELECT count(*) FROM effective_functions WHERE contract_id = :c AND authority_roles IS NULL"),
+        {"c": contract.id},
+    ).scalar_one()
+    jsonb_null = db_session.execute(
+        text(
+            "SELECT count(*) FROM effective_functions "
+            "WHERE contract_id = :c AND jsonb_typeof(authority_roles) = 'null'"
+        ),
+        {"c": contract.id},
+    ).scalar_one()
+
+    assert sql_null == 0
+    assert jsonb_null == 1
+
+
+@pytest.mark.parametrize("column", ["authority_public", "authority_roles", "authority_openness"])
+def test_authority_columns_carry_their_column_comment(db_session, column):
+    """The three-state semantics live in the DB, where an operator reading the
+    schema meets them. ``authority_openness`` was commented and the two columns
+    a consumer actually folds were not."""
+    comment = db_session.execute(
+        text(
+            "SELECT col_description(a.attrelid, a.attnum) FROM pg_attribute a "
+            "WHERE a.attrelid = 'effective_functions'::regclass AND a.attname = :n"
+        ),
+        {"n": column},
+    ).scalar_one()
+    assert comment, f"effective_functions.{column} carries no column comment"
