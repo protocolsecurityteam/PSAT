@@ -215,14 +215,17 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
     assert forged.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
     assert forged.json()["monitoring_config"]["watch_pause"] is True
 
-    for rejected in ({"tracked_topics": [{"topic0": TOPIC0}]}, {"polling_plan": [_PLAN_ENTRY]}):
+    for key, payload in (
+        ("tracked_topics", [{"topic0": TOPIC0}]),
+        ("polling_plan", [_PLAN_ENTRY]),
+    ):
         resp = api_client.patch(
             f"/api/monitored-contracts/{contract_id}",
-            json={"monitoring_config": rejected},
+            json={"monitoring_config": {key: payload}},
             headers=admin_headers,
         )
         assert resp.status_code == 422, resp.text
-        assert next(iter(rejected)) in resp.text
+        assert key in resp.text
 
 
 def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):
