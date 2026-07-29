@@ -17,9 +17,17 @@ caller-enrolled row landed in the third bucket. On the PR-161 preview all 3
 "the analysis looked and found nothing to track" for contracts no tracking-plan
 artifact was ever consulted for.
 
-The sibling that gives it teeth: ``unified_watcher._scan_topics_union`` unions
-``monitoring_config->'tracked_topics'`` over every active row into the live scan
-filter, and nothing checked where those topics came from.
+The siblings that give it teeth are the two keys the live monitor ACTS on, and
+nothing checked where either came from:
+
+* ``tracked_topics`` — ``unified_watcher._scan_topics_union`` unions it over
+  every active row into the live scan filter;
+* ``polling_plan``   — ``unified_watcher.poll_for_state_changes`` turns each
+  entry into an ``eth_call``/``eth_getStorageAt`` and ``_apply_poll_result``
+  mints a ``state_changed_poll`` ``MonitoredEvent`` from the result, keyed on
+  the entry's own ``field`` name. That event carries no provenance of its own,
+  so the config stamp cannot mark it: a caller-chosen slot would surface as a
+  monitor finding indistinguishable from an analyzer-derived one.
 """
 
 from __future__ import annotations
@@ -35,6 +43,8 @@ from routers.monitored import CALLER_SUPPLIED_TRACKING_PLAN
 
 ADDR = "0x" + "7d" * 20
 TOPIC0 = "0x" + "e1" * 32
+SLOT = "0x" + "0" * 63 + "7"
+_PLAN_ENTRY = {"kind": "storage_slot", "slot": SLOT, "field": "owner", "type_kind": "address"}
 
 
 @pytest.fixture
@@ -135,6 +145,61 @@ def test_caller_supplied_tracked_topics_are_rejected(api_client, protocol_id, ad
     assert "tracked_topics" in resp.text
 
 
+def test_caller_supplied_polling_plan_is_rejected(api_client, protocol_id, admin_headers):
+    """``polling_plan`` is the second analyzer-owned key, and the more
+    consequential one: the poller does not merely filter on it, it ACTS on it."""
+    resp = _post(api_client, protocol_id, admin_headers, {"polling_plan": [_PLAN_ENTRY]})
+    assert resp.status_code == 422, resp.text
+    assert "polling_plan" in resp.text
+
+
+def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
+    api_client, db_session, protocol_id, admin_headers
+):
+    """The two consequences the rejection exists for, named at the functions that
+    would carry them out.
+
+    ``_rpc_call_for_entry`` shows the entry is one the poller WOULD issue (an
+    ``eth_getStorageAt`` on a slot the caller chose) — a plan the poller ignored
+    would need no rejection. ``_apply_poll_result`` then mints a
+    ``state_changed_poll`` ``MonitoredEvent`` keyed on the entry's own ``field``,
+    and that event carries no provenance, so the caller stamp on the config
+    cannot mark it. Both start from a stored plan; the assertion is that after a
+    422 no row holds one."""
+    from services.monitoring.unified_watcher import _rpc_call_for_entry
+
+    assert _rpc_call_for_entry(ADDR, _PLAN_ENTRY) == ("eth_getStorageAt", [ADDR, SLOT, "latest"])
+
+    assert _post(api_client, protocol_id, admin_headers, {"polling_plan": [_PLAN_ENTRY]}).status_code == 422
+    assert _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True}).status_code == 200
+
+    rows = db_session.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == protocol_id)).scalars()
+    for row in rows:
+        db_session.refresh(row)
+        assert "polling_plan" not in (row.monitoring_config or {})
+
+
+def test_the_watch_flags_stay_caller_settable(api_client, protocol_id, admin_headers):
+    """The negative control on the rejection's reach. ``_build_monitoring_config``
+    also derives the ``watch_*`` booleans, but those only gate whether an
+    already-detected event notifies (``unified_watcher._should_watch``) — no wire
+    call, no minted finding — so they are a caller preference and must survive.
+    Without this, widening the reject-list to every builder-written key would
+    still look correct."""
+    resp = _post(
+        api_client,
+        protocol_id,
+        admin_headers,
+        {"watch_upgrades": False, "watch_ownership": True, "watch_pause": True, "watch_roles": True},
+    )
+    assert resp.status_code == 200, resp.text
+    config = resp.json()["monitoring_config"]
+    assert config["watch_upgrades"] is False
+    assert config["watch_ownership"] is True
+    assert config["watch_pause"] is True
+    assert config["watch_roles"] is True
+
+
 def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers):
     """PATCH replaces the config wholesale, so it is the same door."""
     created = _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True})
@@ -150,12 +215,14 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
     assert forged.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
     assert forged.json()["monitoring_config"]["watch_pause"] is True
 
-    topics = api_client.patch(
-        f"/api/monitored-contracts/{contract_id}",
-        json={"monitoring_config": {"tracked_topics": [{"topic0": TOPIC0}]}},
-        headers=admin_headers,
-    )
-    assert topics.status_code == 422, topics.text
+    for rejected in ({"tracked_topics": [{"topic0": TOPIC0}]}, {"polling_plan": [_PLAN_ENTRY]}):
+        resp = api_client.patch(
+            f"/api/monitored-contracts/{contract_id}",
+            json={"monitoring_config": rejected},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 422, resp.text
+        assert next(iter(rejected)) in resp.text
 
 
 def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):

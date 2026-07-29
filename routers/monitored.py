@@ -73,9 +73,12 @@ def _stamp_caller_supplied(monitoring_config: dict[str, Any] | None) -> dict[str
     config no analyzer produced. Overwriting rather than rejecting also keeps a
     read-modify-write of an already-stamped row working.
 
-    ``tracked_topics`` is rejected upstream in ``schemas.api_requests`` rather
-    than dropped here — see the validator: it has a live side effect, so
-    silently discarding it would tell the caller their topics are being scanned.
+    The two analyzer-owned keys — ``tracked_topics`` and ``polling_plan`` — are
+    rejected upstream in ``schemas.api_requests`` rather than dropped here: each
+    drives the monitor on the wire, so silently discarding one would tell the
+    caller their topics are being scanned / their slots polled. The stamp cannot
+    substitute for that rejection: it marks the CONFIG's provenance, while the
+    event a caller-authored ``polling_plan`` would mint carries none.
     """
     stamped = dict(monitoring_config or {})
     stamped["tracking_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
