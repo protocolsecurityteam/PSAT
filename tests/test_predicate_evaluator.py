@@ -20,6 +20,7 @@ from slither import Slither  # noqa: E402
 
 from services.resolution.predicate_evaluator import (  # noqa: E402
     EvaluationContext,
+    _bind_callee_parameters,
     evaluate_tree,
 )
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
@@ -1103,3 +1104,128 @@ def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
     )
 
     assert captured["from_block"] == 7_000_000 - 1
+
+
+# ---------------------------------------------------------------------------
+# Inlined-frame promotion (_promote_bound_caller_leaf): only gate-shaped
+# leaves may be restored to proven delegated authority after binding.
+# ---------------------------------------------------------------------------
+
+
+def _leaves(tree: Any) -> list[dict[str, Any]]:
+    if not isinstance(tree, dict):
+        return []
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        return [cast(dict[str, Any], leaf)] if isinstance(leaf, dict) else []
+    out: list[dict[str, Any]] = []
+    for child in tree.get("children") or []:
+        out.extend(_leaves(child))
+    return out
+
+
+def test_bound_transferfrom_leaf_stays_business(tmp_path):
+    """A nonview value-movement external_bool leaf whose subject argument gets
+    caller-bound at inlining must stay ``business`` (side condition), never be
+    re-promoted to proven ``delegated_authority``: the caller-bound argument
+    is the funds subject, not an authorization subject."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IERC20 { function transferFrom(address f, address t, uint256 a) external returns (bool); }
+        contract Registry {
+            IERC20 public token;
+            function check(address user) external returns (bool) {
+                require(token.transferFrom(user, address(this), 1), "pull failed");
+                return true;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "Registry")
+    tree = build_predicate_tree(next(f for f in contract.functions if f.full_name == "check(address)"))
+    leaf = _leaves(tree)[0]
+    assert (leaf["kind"], leaf["authority_role"], leaf["callee_state_mutability"]) == (
+        "external_bool",
+        "business",
+        "nonview",
+    )
+    bound = _bind_callee_parameters(cast(PredicateTree, tree), [{"source": "root_caller"}])
+    bound_leaf = _leaves(bound)[0]
+    assert bound_leaf["authority_role"] == "business"
+
+
+def test_bound_view_acl_leaf_promotes_to_delegated_authority(tmp_path):
+    """The positive case: a view ACL read on a parameter that gets
+    caller-bound at inlining IS a caller gate and must still promote."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        interface IACL { function isOperator(address who) external view returns (bool); }
+        contract Registry {
+            IACL public acl;
+            function check(address who) external returns (bool) {
+                require(acl.isOperator(who), "not operator");
+                return true;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "Registry")
+    tree = build_predicate_tree(next(f for f in contract.functions if f.full_name == "check(address)"))
+    leaf = _leaves(tree)[0]
+    assert (leaf["kind"], leaf["authority_role"], leaf["callee_state_mutability"]) == (
+        "external_bool",
+        "business",
+        "view",
+    )
+    bound = _bind_callee_parameters(cast(PredicateTree, tree), [{"source": "root_caller"}])
+    bound_leaf = _leaves(bound)[0]
+    assert bound_leaf["authority_role"] == "delegated_authority"
+    assert bound_leaf["references_msg_sender"] is True
+
+
+def test_bound_equality_leaf_still_promotes(tmp_path):
+    """Direct caller compares (equality leaves) keep promoting — the
+    gate-shape discriminator applies only to external_bool leaves."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract Registry {
+            address public owner;
+            uint256 public x;
+            function check(address who) external {
+                require(who == owner, "not owner");
+                x = 1;
+            }
+        }
+    """,
+    )
+    contract = sl.contracts[0]
+    tree = build_predicate_tree(next(f for f in contract.functions if f.full_name == "check(address)"))
+    leaf = _leaves(tree)[0]
+    assert (leaf["kind"], leaf["authority_role"]) == ("equality", "business")
+    bound = _bind_callee_parameters(cast(PredicateTree, tree), [{"source": "root_caller"}])
+    bound_leaf = _leaves(bound)[0]
+    assert bound_leaf["authority_role"] == "delegated_authority"
+
+
+def test_unknown_mutability_external_bool_stays_business():
+    """Three-state rule: an external_bool leaf whose callee mutability was
+    NOT determined (None) must not mint the proven delegated-authority state
+    — same treatment as the static discriminator's (None, nonview) arm."""
+    from services.resolution.predicate_evaluator import _promote_bound_caller_leaf
+
+    leaf = {
+        "kind": "external_bool",
+        "authority_role": "business",
+        "callee_state_mutability": None,
+        "gate_kind": "require",
+        "callee_signature": "check(address)",
+        "operands": [{"source": "root_caller"}],
+    }
+    _promote_bound_caller_leaf(leaf)
+    assert leaf["authority_role"] == "business"
