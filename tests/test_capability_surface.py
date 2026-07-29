@@ -241,6 +241,95 @@ def test_role_grants_not_determined_on_unsupported():
     )
 
 
+def test_role_grants_not_determined_when_the_gate_was_never_lowered():
+    """``[]`` claims the gate WAS lowered and carries no role-keyed authority.
+    ``capability_surface_openness`` already decides whether one was lowered, and
+    its ``not_determined`` shapes — an ``external_check_only`` probe interface,
+    a ``finite_set`` whose ``empty_reason`` is ``not_read`` — read NOTHING about
+    the gate, including whether it is role-keyed.
+
+    12 of 1,159 ether.fi rows on the PR-161 preview carried the contradiction
+    (``authority_roles=[]`` beside ``authority_openness='not_determined'``),
+    among them two ``grantRole`` entry points gated through an unresolved
+    ``RoleRegistry.canCall`` — role-gated by construction, published as proven
+    not role-gated."""
+    from services.policy.capability_surface import capability_role_grants
+
+    probe = {
+        "kind": "external_check_only",
+        "check": {"extra": {"basis": ["caller_tainted_authority_unresolved"]}, "target_address": "0x" + "9" * 40},
+        "confidence": "check_only",
+        "membership_quality": "exact",
+    }
+    assert capability_role_grants(probe) is None
+
+    not_read = {
+        "kind": "finite_set",
+        "members": [],
+        "confidence": "partial",
+        "empty_reason": "not_read",
+        "membership_quality": "lower_bound",
+    }
+    assert capability_role_grants(not_read) is None
+
+
+def test_role_grants_not_determined_when_no_named_role_member_is_readable():
+    """A role WAS named and not one of its member entries survived the
+    address filter: role-keyed with the holders not determined, never the
+    proven-absent ``[]``. (0 realised on the corpus — every role-witnessing
+    trace there carries a well-formed member — structural on the first that
+    does not.)"""
+    from services.policy.capability_surface import capability_role_grants
+
+    cap = {
+        "kind": "finite_set",
+        "members": ["not-an-address"],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+        "trace": [{"step": "solmate_roles_authority", "roles": [2]}],
+    }
+    assert capability_role_grants(cap) is None
+
+
+def test_a_witnessed_role_grant_is_never_reached_by_the_openness_downgrade():
+    """The downgrade is scoped to the proven-absent ``[]``, and it cannot drop a
+    witness even in principle: witnessing a grant requires a ``finite_set``
+    carrying members, which is exactly what makes the surface's
+    ``principal_rows`` non-empty — so the openness verdict beside any witnessed
+    grant is ``restricted``, never ``not_determined``. Pinned over the composite
+    shapes because a composite is where the two could plausibly come apart."""
+    from services.policy.capability_surface import (
+        capability_role_grants,
+        capability_surface_openness,
+        project_capability_surface,
+    )
+
+    probe = {"kind": "external_check_only", "check": {"extra": {}}, "confidence": "check_only"}
+    for kind in ("OR", "AND"):
+        cap = {"kind": kind, "children": [_solmate_cap([8], [ADDR_A]), probe]}
+        grants = capability_role_grants(cap)
+        assert grants and [g["role"] for g in grants] == [8], kind
+        assert capability_surface_openness(cap, project_capability_surface(cap)) == "restricted", kind
+
+
+def test_role_grants_empty_stays_reachable_for_a_lowered_gate():
+    """R2: the proven-absent ``[]`` must still be realised, or the downgrade has
+    quietly collapsed a three-state field to two. Both lowered-gate verdicts
+    keep it — 657 of the 1,159 PR-161 rows (408 ``open`` + 249 ``restricted``)."""
+    from services.policy.capability_surface import (
+        capability_role_grants,
+        capability_surface_openness,
+        project_capability_surface,
+    )
+
+    for cap, expected_openness in (
+        ({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}, "restricted"),
+        ({"kind": "conditional_universal", "conditions": []}, "open"),
+    ):
+        assert capability_surface_openness(cap, project_capability_surface(cap)) == expected_openness
+        assert capability_role_grants(cap) == []
+
+
 def test_role_grants_public_solmate_capability_is_not_role_gated():
     """``roles: []`` on the trace means no role carries the capability (it is
     public) — nothing witnessed and nothing undetermined."""
