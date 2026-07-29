@@ -125,12 +125,8 @@ def _contract(session, address: str):
 def _rows(session, contract_id: int):
     from db.models import ControlGraphEdge, ControlGraphNode
 
-    nodes = (
-        session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract_id)).scalars().all()
-    )
-    edges = (
-        session.execute(select(ControlGraphEdge).where(ControlGraphEdge.contract_id == contract_id)).scalars().all()
-    )
+    nodes = session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract_id)).scalars().all()
+    edges = session.execute(select(ControlGraphEdge).where(ControlGraphEdge.contract_id == contract_id)).scalars().all()
     return nodes, edges
 
 
@@ -248,15 +244,12 @@ def test_persisted_role_edges_reach_the_authority_closure_relations(pg_session):
     )
     pg_session.commit()
 
-    closure_edges = (
-        pg_session.execute(
-            select(ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id, ControlGraphEdge.relation).where(
-                ControlGraphEdge.contract_id == contract.id,
-                ControlGraphEdge.relation.in_(CONTROL_EDGE_RELATIONS),
-            )
+    closure_edges = pg_session.execute(
+        select(ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id, ControlGraphEdge.relation).where(
+            ControlGraphEdge.contract_id == contract.id,
+            ControlGraphEdge.relation.in_(CONTROL_EDGE_RELATIONS),
         )
-        .all()
-    )
+    ).all()
     assert (f"address:{ROOT}", f"address:{ROLE_PRINCIPAL}", "role_principal") in {
         (row.from_node_id, row.to_node_id, row.relation) for row in closure_edges
     }

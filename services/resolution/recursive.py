@@ -81,6 +81,7 @@ def _coerce_resolved_type(value: object) -> str:
         return "unknown"
     return text
 
+
 _MATERIALIZE_METRIC_LOCK = threading.Lock()
 
 
