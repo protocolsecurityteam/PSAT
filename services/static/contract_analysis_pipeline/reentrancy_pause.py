@@ -60,6 +60,7 @@ except Exception:  # pragma: no cover
     SLITHER_AVAILABLE = False
 
 from .predicate_types import LeafPredicate, PredicateTree
+from .shared import _all_modifiers, _all_state_variables
 
 GuardKind = Literal["reentrancy", "pause"]
 
@@ -252,7 +253,17 @@ class PauseAnalyzer:
         return pause_vars
 
     def _lookup_state_var(self, name: str) -> Any | None:
-        for sv in getattr(self.contract, "state_variables", []) or []:
+        """Inheritance-aware: ``contract.state_variables`` is the *accessible*
+        view and excludes a ``private`` variable declared in an ancestor, but
+        such a variable is still part of the derived contract's storage and
+        can be its pause latch (EigenLayer's abstract ``Pausable`` declares
+        ``uint256 private _paused``; every strategy inherits it). The writer
+        index is built from ``contract.functions`` — inherited writers
+        included — so the lookup must see the same declaration set or an
+        inherited latch is vetoed at admission. ``_all_state_variables``
+        orders ``[contract, *inheritance]``, so a shadowing local declaration
+        still wins."""
+        for sv in _all_state_variables(self.contract):
             if sv.name == name:
                 return sv
         return None
@@ -300,7 +311,10 @@ class PauseAnalyzer:
             return True
         if self._has_constant_write(var_name, writers):
             return True
-        for modifier in getattr(self.contract, "modifiers", []) or []:
+        # Inheritance-aware for the same reason as ``_lookup_state_var``:
+        # the gating modifier is typically declared in the same ancestor as
+        # the latch (mirrors ``_detect_pausability``'s ``_all_modifiers``).
+        for modifier in _all_modifiers(self.contract):
             if self._reads_with_revert(modifier, var_name):
                 return True
         if self._flag_read_with_revert(var_name, writers):

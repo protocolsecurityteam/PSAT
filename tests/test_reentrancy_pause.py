@@ -887,3 +887,76 @@ def test_uint_latch_inline_mask_no_modifier_detected(tmp_path):
     contract = next(c for c in sl.contracts if c.name == "IM")
     trees = _build_trees(contract)
     assert PauseAnalyzer(contract, trees).run() == {"_paused"}
+
+
+_PRIVATE_BASE_LATCH = """
+pragma solidity ^0.8.19;
+abstract contract BasePausable {
+    address public pauser;
+    uint256 private _paused;
+    function paused(uint8 index) public view returns (bool) {
+        uint256 mask = 1 << uint256(index);
+        return ((_paused & mask) == mask);
+    }
+    modifier onlyWhenNotPaused(uint8 index) {
+        require(!paused(index), "paused");
+        _;
+    }
+    function pause(uint256 newStatus) external {
+        require(msg.sender == pauser, "not pauser");
+        _paused = newStatus;
+    }
+}
+
+contract DerivedStrategy is BasePausable {
+    uint256 public totalShares;
+    function deposit(uint256 shares) external onlyWhenNotPaused(0) {
+        require(totalShares + shares >= shares, "overflow");
+        totalShares += shares;
+    }
+    function withdraw(uint256 shares) external onlyWhenNotPaused(1) {
+        require(totalShares >= shares, "insufficient");
+        totalShares -= shares;
+    }
+}
+"""
+
+
+def test_private_latch_declared_in_abstract_base_detected(tmp_path):
+    """R4 for the EigenStrategy shape (PR-161 contract 635): the genuine
+    ``uint256 _paused`` latch is declared ``private`` in an abstract base
+    (EigenLayer's ``Pausable``) and only inherited by the analyzed
+    contract. ``contract.state_variables`` is the accessible view and
+    excludes private ancestor declarations, while the writer index
+    (``contract.functions``, inherited included) sees the writers — so a
+    same-contract-only lookup vetoes the latch at admission and the
+    detector publishes a proven-absence ``is_pausable=False`` on a
+    contract that is pausable on chain. The lookup must cover the full
+    ``[contract, *inheritance]`` declaration set. The same-contract
+    variant of this shape is ``test_uint_latch_read_through_helper_in_-
+    modifier_detected`` above; this one is the inherited variant that
+    test could not catch."""
+    sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")
+    trees = _build_trees(contract)
+    detected = PauseAnalyzer(contract, trees).run()
+    assert "_paused" in detected
+    assert "totalShares" not in detected
+
+
+def test_private_latch_declared_in_abstract_base_publishes_true(tmp_path):
+    """End-to-end on the published surface for the inherited-latch shape:
+    ``is_pausable=True`` earned with the latch var — not the fabricated
+    proven-absence ``False`` the accessible-only lookup produced."""
+    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+        build_predicate_artifacts_with_pause_info,
+    )
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")
+    trees_artifact, pause_info = build_predicate_artifacts_with_pause_info(contract)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, None, trees_artifact)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["_paused"]
+    assert "pause(uint256)" in pausability["pause_functions"] or "pause(uint256)" in pausability["unpause_functions"]
