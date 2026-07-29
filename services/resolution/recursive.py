@@ -59,6 +59,29 @@ class UnresolvedProxyError(RuntimeError):
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
+
+def _coerce_resolved_type(value: object) -> str:
+    """A ``resolved_type`` that was never determined must surface as the
+    vocabulary's not-determined token (``"unknown"``), never as a fabricated
+    concrete one.
+
+    ``str(payload.get("resolved_type", "unknown"))`` only defaults on an
+    ABSENT key; a key PRESENT with value ``None`` reaches ``str(None)`` and
+    mints the literal ``"None"`` — a token in no vocabulary
+    (``schemas.control_tracking.ResolvedControllerType``) that is truthy and
+    ``!= "unknown"``, so every downstream three-way branch reads it as a
+    concrete, determined type. The literal string ``"None"`` is likewise
+    coerced: it can arrive from a previously stored graph (the policy-stage
+    refresh pre-seeds from the persisted artifact) and means the same absence.
+    """
+    if value is None:
+        return "unknown"
+    text = str(value)
+    if not text or text == "None":
+        return "unknown"
+    return text
+
+
 _MATERIALIZE_METRIC_LOCK = threading.Lock()
 
 
@@ -137,7 +160,10 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
         return None
     if not isinstance(result, dict):
         return None
-    name = str(result.get("ContractName", "")).strip()
+    # ``or ""`` not a ``.get`` default: a key PRESENT with ``None`` would reach
+    # ``str(None)`` and fabricate the name "None" (same shape as the
+    # ``resolved_type`` bug ``_coerce_resolved_type`` guards).
+    name = str(result.get("ContractName") or "").strip()
     return name or None
 
 
@@ -168,7 +194,9 @@ def _build_effective_permissions(
         # its role principals from the graph (consumed below in
         # ``_role_principals_from_effective_permissions``). Was debug-only — surface
         # it as a degraded breadcrumb so the gap is visible in stage_errors.
-        address = str((analysis.get("subject") or {}).get("address", "")) or "<unknown>"
+        # ``or ""`` before ``str``: a subject with ``address: None`` must fall
+        # through to "<unknown>", not read as the truthy string "None".
+        address = str((analysis.get("subject") or {}).get("address") or "") or "<unknown>"
         record_degraded(
             phase="recursive_effective_permissions",
             exc=exc,
@@ -204,7 +232,7 @@ def _build_static_artifacts(
     persistent row. The tempdir is cleaned up at function exit.
     """
     result = fetch(effective_address, chain_id=chain_id)
-    contract_name = str(result.get("ContractName", "Contract"))
+    contract_name = str(result.get("ContractName") or "Contract")
     project_name = _workspace_name(contract_name, effective_address, workspace_prefix)
 
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
@@ -500,11 +528,19 @@ def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysis
         if int(node.get("depth") or 0) > max_depth:
             return "beyond_depth_horizon"
         return None
-    if resolved_type and resolved_type != "unknown":
+    if resolved_type and resolved_type not in {"unknown", "None"}:
         # ``not_analyzable``, not ``not_a_contract``: the test is membership of
         # ANALYZABLE_TYPES, and the largest population outside it is Gnosis
         # Safes (230 of the local corpus's 1,236), which ARE contracts. The old
         # token stated something literally false about every one of them.
+        #
+        # ``"None"`` is excluded alongside ``"unknown"``: it is ``str(None)``,
+        # a not-determined type that leaked through an unguarded
+        # stringification (producers now coerce it via ``_coerce_resolved_type``,
+        # but a stored graph from before that fix can still carry the token
+        # into this recomputation via the policy refresh's pre-seed).
+        # ``not_analyzable`` is a positive claim — "analysis was never
+        # applicable" — and an undetermined type proves no such thing.
         return "not_analyzable"
     return None
 
@@ -651,7 +687,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
     for function in effective_permissions.get("functions", []):
         if not isinstance(function, dict):
             continue
-        function_signature = str(function.get("function", ""))
+        function_signature = str(function.get("function") or "")
         # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
         # ``None`` on a role-gated function whose role identity is not
         # determined, and a dict default only fires on an
@@ -680,7 +716,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                     address,
                     {
                         "address": address,
-                        "resolved_type": str(principal.get("resolved_type", "unknown")),
+                        "resolved_type": _coerce_resolved_type(principal.get("resolved_type")),
                         "details": details,
                         "roles": set(),
                         "functions": set(),
@@ -690,7 +726,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                 if function_signature:
                     payload["functions"].add(function_signature)
                 if payload.get("resolved_type") in {None, "", "unknown"} and principal.get("resolved_type"):
-                    payload["resolved_type"] = str(principal.get("resolved_type"))
+                    payload["resolved_type"] = _coerce_resolved_type(principal.get("resolved_type"))
                 merged_details = dict(payload["details"])
                 merged_details.update(details)
                 payload["details"] = merged_details
@@ -711,7 +747,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                     address,
                     {
                         "address": address,
-                        "resolved_type": str(principal.get("resolved_type", "unknown")),
+                        "resolved_type": _coerce_resolved_type(principal.get("resolved_type")),
                         "details": details,
                         "roles": set(),
                         "functions": set(),
@@ -720,7 +756,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                 if function_signature:
                     payload["functions"].add(function_signature)
                 if payload.get("resolved_type") in {None, "", "unknown"} and principal.get("resolved_type"):
-                    payload["resolved_type"] = str(principal.get("resolved_type"))
+                    payload["resolved_type"] = _coerce_resolved_type(principal.get("resolved_type"))
                 merged_details = dict(payload["details"])
                 merged_details.update(details)
                 merged_details.setdefault("controller_label", controller_label)
@@ -1060,7 +1096,13 @@ def resolve_control_graph(
                 continue
             node_id = node.get("id")
             if isinstance(node_id, str):
-                nodes[node_id] = cast(ResolvedGraphNode, dict(node))
+                seeded = dict(node)
+                # A stored graph written before the ``str(None)`` guard can
+                # carry the fabricated ``"None"`` type; coerce it back to the
+                # not-determined token at the boundary so it can neither win a
+                # ``_resolved_type_rank`` merge nor read as a concrete type.
+                seeded["resolved_type"] = _coerce_resolved_type(seeded.get("resolved_type"))
+                nodes[node_id] = cast(ResolvedGraphNode, seeded)
         for edge in initial_graph.get("edges", []):
             if not isinstance(edge, dict):
                 continue
@@ -1206,7 +1248,7 @@ def resolve_control_graph(
             snapshot = artifacts["snapshot"]
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
-            contract_name = str(subject.get("name", address))
+            contract_name = str(subject.get("name") or address)
             # The classifier's answer, not a hardcoded "contract". A timelock
             # that is itself analysed used to lose its type AND its ``delay``
             # here: EtherFiTimelock's own node read ``resolved_type=contract``
@@ -1257,9 +1299,9 @@ def resolve_control_graph(
                 controller_address = str(controller_value.get("value", "")).lower()
                 if not controller_address.startswith("0x") or len(controller_address) != 42:
                     continue
-                resolved_type = str(controller_value.get("resolved_type", "unknown"))
+                resolved_type = _coerce_resolved_type(controller_value.get("resolved_type"))
                 details = dict(controller_value.get("details", {}))
-                controller_label = str(controller_value.get("source", controller_id))
+                controller_label = str(controller_value.get("source") or controller_id)
                 controller_node_type = "contract" if resolved_type in ANALYZABLE_TYPES else "principal"
                 controller_node_id = _ensure_node(
                     nodes,
@@ -1332,7 +1374,7 @@ def resolve_control_graph(
                 principal_address = str(principal_value["address"]).lower()
                 if principal_address == address:
                     continue
-                resolved_type = str(principal_value.get("resolved_type", "unknown"))
+                resolved_type = _coerce_resolved_type(principal_value.get("resolved_type"))
                 details = dict(principal_value["details"])
                 if resolved_type == "unknown":
                     resolved_type, classified_details = _cached_classify(principal_address)

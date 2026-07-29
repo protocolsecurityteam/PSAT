@@ -776,10 +776,13 @@ class ControlGraphNode(Base):
     # once. ``analysis_state`` is what a consumer must read.
     analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 'analyzed' | 'not_analyzable' | 'attempt_failed' | 'beyond_depth_horizon'
-    # | NULL (not determined). No row has ever held a non-NULL value: the column
-    # is newer than the last analysis run. ``beyond_depth_horizon`` is a fact about OUR
+    # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
     # walk, not about the address, and is the one the bool could never express:
     # without ``graph_max_depth`` below it was not even derivable from the row.
+    # Two writers: the resolution walk's stamp, and
+    # ``services.governance.control_graph_types.reconcile_control_graph_types``,
+    # which fills NULL (only NULL) with the walk's own derivation after a type
+    # fold determines analyzability the walk could not.
     # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
     analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # The ``max_depth`` of the walk that produced this row. NULL = not

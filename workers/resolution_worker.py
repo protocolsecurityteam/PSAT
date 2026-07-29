@@ -16,8 +16,6 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     ContractBalance,
-    ControlGraphEdge,
-    ControlGraphNode,
     ControllerValue,
     Job,
     JobStage,
@@ -30,6 +28,7 @@ from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
 )
+from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
@@ -270,51 +269,17 @@ class ResolutionWorker(BaseWorker):
                 job.name or "Contract",
             )
 
-            # Write to control_graph_nodes and control_graph_edges tables
+            # Write to control_graph_nodes and control_graph_edges tables.
+            # Shared with the policy stage's graph-refresh rewrite: the same
+            # replace keeps the table plane equal to whichever graph artifact
+            # was stored last, instead of freezing it at the pre-refresh walk.
             if contract_row:
-                session.query(ControlGraphNode).filter(
-                    ControlGraphNode.contract_id == contract_row.id,
-                    deployment_scope(ControlGraphNode.deployment_address, deployment_address),
-                ).delete(synchronize_session=False)
-                session.query(ControlGraphEdge).filter(
-                    ControlGraphEdge.contract_id == contract_row.id,
-                    deployment_scope(ControlGraphEdge.deployment_address, deployment_address),
-                ).delete(synchronize_session=False)
-                graph_max_depth = resolved_graph.get("max_depth")
-                for node in resolved_graph.get("nodes", []):
-                    session.add(
-                        ControlGraphNode(
-                            contract_id=contract_row.id,
-                            deployment_address=deployment_address,
-                            address=(node.get("address") or "").lower(),
-                            node_type=node.get("node_type"),
-                            resolved_type=node.get("resolved_type"),
-                            label=node.get("label"),
-                            contract_name=node.get("contract_name"),
-                            depth=node.get("depth"),
-                            analyzed=node.get("analyzed", False),
-                            # Absent in the graph => NULL, not a guessed value.
-                            analysis_state=node.get("analysis_state"),
-                            # The walk's horizon, which the row otherwise loses:
-                            # without it ``depth`` cannot distinguish "cut off"
-                            # from "not attempted for some other reason".
-                            graph_max_depth=graph_max_depth,
-                            details=node.get("details"),
-                        )
-                    )
-                for edge in resolved_graph.get("edges", []):
-                    session.add(
-                        ControlGraphEdge(
-                            contract_id=contract_row.id,
-                            deployment_address=deployment_address,
-                            from_node_id=edge.get("from_id", ""),
-                            to_node_id=edge.get("to_id", ""),
-                            relation=edge.get("relation"),
-                            label=edge.get("label"),
-                            source_controller_id=edge.get("source_controller_id"),
-                            notes=edge.get("notes"),
-                        )
-                    )
+                replace_control_graph_rows(
+                    session,
+                    contract_id=contract_row.id,
+                    deployment_address=deployment_address,
+                    resolved_graph=resolved_graph,
+                )
                 session.commit()
 
             # Queue analysis jobs for contracts discovered during resolution
