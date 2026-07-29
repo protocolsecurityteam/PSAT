@@ -2,7 +2,7 @@
 
 Drives the real ``poll_for_state_changes`` / ``run_poll_loop`` /
 ``run_scan_loop`` production paths against the real test DB (shared
-``db_session`` fixture), stubbing only the wire — ``rpc_batch_request_with_status`` and,
+``db_session`` fixture), stubbing only the wire — ``rpc_batch_request_classified`` and,
 for the deadlock cases, the narrowest DB statement that Postgres would abort.
 Never replaces the repo classes.
 
@@ -81,10 +81,10 @@ def _seed(
 
 def _rpc_mock(returns: Mapping[str, str | None]):
     def _mock(url, calls):
-        out: list[tuple[str | None, bool]] = []
+        out: list[tuple[str | None, str]] = []
         for method, params in calls:
             to = params[0]["to"] if method == "eth_call" else params[0]
-            out.append((returns.get(to.lower()), False))
+            out.append((returns.get(to.lower()), "ok"))
         return out
 
     return _mock
@@ -164,7 +164,7 @@ def test_deadlock_at_stamp_isolates_chunk_and_reports_partial(db_session, monkey
     # Chunk order is a, b, c (last_polled_at asc). Deadlock the 2nd stamp (b).
     wrapper = _deadlock_on_nth(db_session, predicate=_is_stamp_update, raise_on=2, error_factory=_deadlock_error)
     with (
-        patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_rpc_mock(returns)),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc_mock(returns)),
         patch.object(db_session, "execute", side_effect=wrapper),
         patch("services.monitoring.record_heartbeat", side_effect=lambda p, *, status, detail: captured.append(detail)),
     ):
@@ -230,7 +230,7 @@ def test_deadlock_during_suppression_autoflush_rolls_back_in_memory_state(db_ses
     returns = {ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191))}
     wrapper = _deadlock_on_nth(db_session, predicate=_is_suppression_select, raise_on=1, error_factory=_deadlock_error)
     with (
-        patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_rpc_mock(returns)),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc_mock(returns)),
         patch.object(db_session, "execute", side_effect=wrapper),
     ):
         events = poll_for_state_changes(db_session, "http://rpc")  # must not raise
@@ -274,7 +274,7 @@ def test_non_deadlock_operational_error_kills_the_pass(db_session, monkeypatch):
     returns = {ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191))}
     wrapper = _deadlock_on_nth(db_session, predicate=_is_stamp_update, raise_on=2, error_factory=_conn_lost_error)
     with (
-        patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_rpc_mock(returns)),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc_mock(returns)),
         patch.object(db_session, "execute", side_effect=wrapper),
         pytest.raises(OperationalError),
     ):
@@ -323,13 +323,13 @@ def test_deadlock_in_reanalysis_autoflush_is_isolated_not_fatal(db_session, monk
 
     def _rpc(url, calls):
         arm["on"] = True  # arm as the chunk's DB phase begins
-        return [(_word(ADDR(190)), False) for _ in calls]
+        return [(_word(ADDR(190)), "ok") for _ in calls]
 
     captured: list[dict] = []
     event.listen(engine, "before_cursor_execute", _abort_update)
     try:
         with (
-            patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_rpc),
+            patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc),
             patch(
                 "services.monitoring.record_heartbeat",
                 side_effect=lambda p, *, status, detail: captured.append(detail),
@@ -392,7 +392,7 @@ def test_notifies_committed_chunks_once_never_the_rolled_back_chunk(db_session, 
     returns = {ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191)), ADDR(3): _word(ADDR(192))}
     wrapper = _deadlock_on_nth(db_session, predicate=_is_stamp_update, raise_on=2, error_factory=_deadlock_error)
     with (
-        patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=_rpc_mock(returns)),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc_mock(returns)),
         patch.object(db_session, "execute", side_effect=wrapper),
         patch("services.monitoring.notifier.notify_protocol_events", side_effect=_record_notify),
     ):
@@ -416,7 +416,7 @@ def test_cleansed_owner_absent_state_emits_no_phantom(db_session, monkeypatch):
     _seed(db_session, 1, plan=[_entry("owner", "0xaa01")], last_known_state={})  # owner absent
 
     with patch(
-        "services.monitoring.unified_watcher.rpc_batch_request_with_status",
+        "services.monitoring.unified_watcher.rpc_batch_request_classified",
         side_effect=_rpc_mock({ADDR(1): _word(ADDR(200))}),
     ):
         events = poll_for_state_changes(db_session, "http://rpc")

@@ -5,12 +5,17 @@ Revises: d3f1a86c204b
 Create Date: 2026-07-29
 
 ``last_poll_status`` records, per polling-plan ``field``, how that entry's
-most recent dispatched poll call ended: ``"ok"`` (the RPC call returned a
-result) or ``"error"`` (the call carried a per-call JSON-RPC error, e.g. a
-revert). A field absent from the map was not polled. This keeps the three
-states apart on the served surface — before it, a reverting entry was
-indistinguishable from one that had never been polled, because
-``last_known_state`` only ever holds successfully decoded values.
+most recent ANSWERED poll call ended: ``"ok"`` (the call returned a result
+that decoded into ``last_known_state``), ``"error"`` (the node answered
+this call with a per-call JSON-RPC error, e.g. a revert), or ``"no_value"``
+(the call answered without error but returned nothing decodable — empty
+``0x`` / zero word). A field absent from the map was not polled. The map is
+written only from batches the node actually answered — a wholesale
+transport failure publishes nothing and leaves the row unstamped — so it
+never reports liveness the poller did not observe. This keeps the states
+apart on the served surface: before it, a dead entry was indistinguishable
+from one that had never been polled, because ``last_known_state`` only ever
+holds successfully decoded values.
 
 Additive; NULL means no poll pass has run against the row since the column
 landed.

@@ -322,7 +322,7 @@ class TestRevertedEthCallPolling:
     def test_poll_skips_error_rpc_results(self, db_session: SASession):
         """An errored poll call produces no value and no event — and the
         contract's ``last_poll_status`` records the error while a
-        successful-but-undecodable call records ``ok``.
+        successful-but-undecodable call records ``no_value``, not ``ok``.
         """
         from services.monitoring.polling_plan import build_polling_plan
         from services.monitoring.unified_watcher import poll_for_state_changes
@@ -364,21 +364,22 @@ class TestRevertedEthCallPolling:
         db_session.commit()
 
         def mock_batch(url, calls):
-            # Slot 0 errored (revert); slot 1 succeeded but returned junk
+            # Slot 0 errored (revert); slot 1 answered but returned junk
             # short data the decoder can't use.
-            results: list[tuple[str | None, bool]] = [(None, True)] * len(calls)
+            results: list[tuple[str | None, str]] = [(None, "error")] * len(calls)
             if len(calls) > 1:
-                results[1] = ("0x08c379a0", False)
+                results[1] = ("0x08c379a0", "ok")
             return results
 
-        with patch("services.monitoring.unified_watcher.rpc_batch_request_with_status", side_effect=mock_batch):
+        with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock_batch):
             events = poll_for_state_changes(db_session, "http://fake-rpc")
 
         assert len(events) == 0
         db_session.expire_all()
         reloaded = db_session.get(MonitoredContract, mc.id)
-        # Plan is field-sorted: implementation (errored), owner (ok).
-        assert reloaded.last_poll_status == {"implementation": "error", "owner": "ok"}
+        # Plan is field-sorted: implementation (errored), owner (answered
+        # but undecodable — published as valueless, never as healthy).
+        assert reloaded.last_poll_status == {"implementation": "error", "owner": "no_value"}
         # The error never contaminated the value plane.
         assert reloaded.last_known_state == {"implementation": ADDR(99)}
 

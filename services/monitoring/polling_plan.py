@@ -220,7 +220,8 @@ def selector_for(target_name: str) -> str:
     real function for every entry built from a current-schema plan;
     plans persisted before the ``unknown`` strategy existed may still
     name a private var as a getter target, and the poll loop surfaces
-    those as per-entry ``error`` status rather than silence.
+    those as per-entry ``error`` (revert) or ``no_value`` (empty return
+    from a permissive fallback) status rather than silence.
     """
     return "0x" + keccak(text=f"{target_name}()").hex()[:8]
 

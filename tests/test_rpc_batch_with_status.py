@@ -24,6 +24,11 @@ What we cover:
 8. Result correctly preserves ``None`` returned by a successful call
    (e.g. ``eth_call`` to a missing function returning ``"0x"`` is
    passed through verbatim — caller decides what "0x" means).
+9. The three-state core ``rpc_batch_request_classified`` keeps an
+   answered per-call error (``"error"``) apart from a batch the node
+   never answered (``"transport"``) — the ``_with_status`` wrapper
+   collapses both to ``had_error=True`` (pinned by 2/3 above), so any
+   caller that must publish an earned negative uses the classified form.
 """
 
 from __future__ import annotations
@@ -168,3 +173,71 @@ def test_successful_null_result_preserved_with_error_false():
     with patch.object(session, "post", return_value=response):
         results = rpc.rpc_batch_request_with_status("https://example.invalid", [("eth_call", [{}, "latest"])])
     assert results == [("0x", False)]
+
+
+# ---------------------------------------------------------------------------
+# rpc_batch_request_classified — the three-state core
+# ---------------------------------------------------------------------------
+
+
+def test_classified_per_call_error_is_error_not_transport():
+    """A revert is an ANSWERED call: the node observed it and said no.
+    It must never read as the transport shape (unobserved), and the ok
+    neighbour keeps its result."""
+    _reset_thread_session()
+    response = _make_response(
+        200,
+        [
+            {"jsonrpc": "2.0", "id": 0, "error": {"code": -32000, "message": "execution reverted"}},
+            {"jsonrpc": "2.0", "id": 1, "result": "0xok"},
+        ],
+    )
+    session = rpc._get_session()
+    with patch.object(session, "post", return_value=response):
+        results = rpc.rpc_batch_request_classified(
+            "https://example.invalid",
+            [("eth_call", [{}, "latest"]), ("eth_call", [{}, "latest"])],
+        )
+    assert results == [(None, "error"), ("0xok", "ok")]
+
+
+def test_classified_transport_failure_is_transport_not_error():
+    """A batch the node never answered observed nothing: every slot is
+    ``"transport"`` — never the earned-looking per-call ``"error"``."""
+    _reset_thread_session()
+    session = rpc._get_session()
+    with patch.object(session, "post", side_effect=ConnectionError("DNS")):
+        results = rpc.rpc_batch_request_classified(
+            "https://example.invalid",
+            [("eth_call", [{}, "latest"]), ("eth_call", [{}, "latest"])],
+        )
+    assert results == [(None, "transport"), (None, "transport")]
+
+
+def test_classified_skipped_id_stays_transport():
+    """A slot the response never named was not observed — it stays
+    ``"transport"``, not ``"ok"`` and not ``"error"``."""
+    _reset_thread_session()
+    response = _make_response(
+        200,
+        [{"jsonrpc": "2.0", "id": 1, "result": "0xok"}],  # id 0 missing
+    )
+    session = rpc._get_session()
+    with patch.object(session, "post", return_value=response):
+        results = rpc.rpc_batch_request_classified(
+            "https://example.invalid",
+            [("eth_call", [{}, "latest"]), ("eth_call", [{}, "latest"])],
+        )
+    assert results == [(None, "transport"), ("0xok", "ok")]
+
+
+def test_classified_empty_return_is_ok_with_verbatim_result():
+    """``"0x"`` from a permissive fallback is an answered, error-free call:
+    ``("0x", "ok")`` verbatim — the CALLER decides what an empty return
+    means (the poll loop publishes it as ``no_value``)."""
+    _reset_thread_session()
+    response = _make_response(200, [{"jsonrpc": "2.0", "id": 0, "result": "0x"}])
+    session = rpc._get_session()
+    with patch.object(session, "post", return_value=response):
+        results = rpc.rpc_batch_request_classified("https://example.invalid", [("eth_call", [{}, "latest"])])
+    assert results == [("0x", "ok")]

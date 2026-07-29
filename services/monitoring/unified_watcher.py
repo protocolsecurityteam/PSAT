@@ -60,7 +60,7 @@ from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.chains import UnknownChainError, chain_by_name
 from utils.rpc import (
     MAX_BATCH_SIZE,
-    rpc_batch_request_with_status,
+    rpc_batch_request_classified,
     rpc_request,
 )
 
@@ -1412,7 +1412,7 @@ def _apply_poll_result(
     entry: dict,
     raw: str | None,
     new_events: list[MonitoredEvent],
-) -> None:
+) -> bool:
     """Decode one poll result and, when the value changed, persist the new
     ``last_known_state``, emit a ``state_changed_poll`` event, and run the
     downstream sync (proxy write-through, relational, reanalysis, per-entry
@@ -1421,22 +1421,26 @@ def _apply_poll_result(
     The computation is identical to the pre-rotation inline driver; only the
     framing moved from a single flat loop to per-chunk dispatch.
 
-    Only successful RPC results reach here — the poll loop routes errored
-    calls to the contract's ``last_poll_status`` map instead — so a None
-    decode below means exactly "the call returned nothing decodable"
-    (empty/zero word), never a swallowed revert.
+    Only answered, error-free RPC results reach here — the poll loop routes
+    errored calls to the contract's ``last_poll_status`` map instead — so a
+    None decode below means exactly "the call returned nothing decodable"
+    (empty ``0x`` / zero word), never a swallowed revert.
+
+    Returns True iff a value decoded (whatever it did downstream); False is
+    the caller's signal to publish the entry as ``no_value`` rather than
+    ``ok``.
     """
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
-        return
+        return False
     new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
     if new_value is None:
-        return
+        return False
 
     state = dict(mc.last_known_state or {})
     old_value = state.get(field_name)
     if new_value == old_value:
-        return
+        return True
 
     # Always record the new value in last_known_state, even on the
     # first observation — subsequent polls then have a baseline.
@@ -1452,7 +1456,7 @@ def _apply_poll_result(
             mc.address,
             new_value,
         )
-        return
+        return True
 
     # Suppress when the event scanner already recorded the same
     # mutation. Per-entry suppress lists come from the enrollment-
@@ -1479,7 +1483,7 @@ def _apply_poll_result(
                 mc.address,
                 field_name,
             )
-            return
+            return True
 
     event = MonitoredEvent(
         id=uuid.uuid4(),
@@ -1557,6 +1561,7 @@ def _apply_poll_result(
             exc,
             extra={"exc_type": type(exc).__name__},
         )
+    return True
 
 
 def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
@@ -1576,19 +1581,31 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     synced, stamped (``last_polled_at`` = server ``now()``), committed, and its
     events notified, all on its own.
 
-    Per-entry outcomes are published: each contract's ``last_poll_status``
-    is overwritten with ``{field: "ok" | "error"}`` for every entry
-    dispatched this pass (``error`` = the call carried a per-call JSON-RPC
-    error, e.g. a revert on a getter that doesn't exist on the address; a
-    field absent from the map was not polled). ``last_known_state`` keeps
-    holding only successfully decoded values, so the status map is what
-    keeps a reverting entry distinguishable from a never-polled one. A
-    wholesale batch-transport failure flags every slot in the chunk the
-    same way (``rpc_batch_request_with_status`` never raises); the chunk
-    still stamps — deliberately not retry-first, because always-reverting
-    entries exist in persisted pre-``unknown``-strategy plans and an
-    unstamped-on-error rule would pin their contracts to the front of the
-    rotation forever. Any errored entry marks the pass ``partial``.
+    Per-entry outcomes are published: an answered chunk overwrites each of
+    its contracts' ``last_poll_status`` with
+    ``{field: "ok" | "error" | "no_value"}`` for every entry dispatched
+    this pass — ``ok`` = the call answered and its value decoded (only
+    those values reach ``last_known_state``); ``error`` = the node
+    answered THIS call with a per-call JSON-RPC error (e.g. a revert on a
+    getter the address doesn't expose); ``no_value`` = the call answered
+    without error but returned nothing the entry can decode (empty ``0x``
+    from a codeless address or permissive fallback, zero word / zero
+    address, undecodable type). A field absent from the map was not
+    polled. The status map is what keeps a dead entry distinguishable
+    from a never-polled one.
+
+    Statuses are written only from batches the node actually answered. A
+    wholesale transport failure (``rpc_batch_request_classified`` reports
+    those slots as ``transport`` instead of raising) observed nothing, so
+    it publishes nothing: the chunk neither overwrites statuses nor
+    stamps, its contracts sort first next pass (retry-first — an outage
+    self-heals and must not masquerade as an earned per-entry negative).
+    Per-call ``error`` entries DO stamp and rotate normally:
+    always-reverting entries exist in persisted pre-``unknown``-strategy
+    plans, and an unstamped-on-revert rule would pin their contracts to
+    the front of the rotation forever — their outcome is published, not
+    retried. Any errored, valueless, or transport-failed entry marks the
+    pass ``partial``.
 
     A chunk whose write side deadlocks against the scanner's cohort UPDATE
     is rolled back and left unstamped so its contracts sort first next pass
@@ -1705,7 +1722,9 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 
     new_events: list[MonitoredEvent] = []
     chunks_failed = 0
+    chunks_transport_failed = 0
     entry_errors = 0
+    entries_no_value = 0
 
     for chunk_chain, chunk in chunks:
         chunk_ids = [mc.id for mc, _ in chunk]
@@ -1718,15 +1737,28 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                 dispatch.append((mc, len(batch_calls), entry))
                 batch_calls.append(call)
 
-        # ``_with_status`` keeps per-call errors visible: a reverting
-        # getter yields ``(None, True)``, not a silent ``None``. A
-        # wholesale transport failure flags every slot the same way (the
-        # helper never raises), so the chunk still stamps and publishes
-        # per-entry ``error`` status — deliberately NOT retry-first:
-        # always-reverting entries exist in persisted plans, and leaving
-        # their contracts unstamped would pin them to the front of the
-        # rotation forever.
-        results = rpc_batch_request_with_status(chunk_rpc_url, batch_calls) if batch_calls else []
+        # ``_classified`` keeps the two failure shapes apart: a reverting
+        # getter is an answered call (``"error"``, an earned per-entry
+        # negative), while a batch the node never answered leaves its
+        # slots ``"transport"`` (outcome unobserved; the helper never
+        # raises).
+        results = rpc_batch_request_classified(chunk_rpc_url, batch_calls) if batch_calls else []
+
+        if any(status == "transport" for _raw, status in results):
+            # Nothing was observed for at least one slot, so nothing is
+            # published for the whole chunk (a >MAX_BATCH_SIZE plan can
+            # split across posts; partially-answered chunks are treated
+            # the same, conservatively): statuses stay as they were,
+            # ``last_polled_at`` is NOT stamped, so these contracts sort
+            # first next pass — retry-first for outages, which self-heal,
+            # unlike per-call reverts which stamp and rotate below.
+            chunks_transport_failed += 1
+            logger.warning(
+                "Poll chunk transport-failed; nothing published, retrying next pass: %s",
+                [mc.address for mc, _ in chunk],
+                extra={"chain": chunk_chain, "calls": len(batch_calls)},
+            )
+            continue
 
         # Decode + apply + stamp + commit as one unit under deadlock isolation.
         # The scanner advances cursors with a bulk UPDATE over the same
@@ -1736,17 +1768,22 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         # discards exactly the detections that rolled back with it.
         chunk_events: list[MonitoredEvent] = []
         chunk_entry_errors = 0
+        chunk_entries_no_value = 0
         try:
             statuses: dict[uuid.UUID, dict[str, str]] = {mc.id: {} for mc, _ in chunk}
             for mc, idx, entry in dispatch:
-                raw, had_error = results[idx]
+                raw, status = results[idx]
                 field_name = entry.get("field")
-                if isinstance(field_name, str) and field_name:
-                    statuses[mc.id][field_name] = "error" if had_error else "ok"
-                if had_error:
+                if status == "error":
                     chunk_entry_errors += 1
+                    if isinstance(field_name, str) and field_name:
+                        statuses[mc.id][field_name] = "error"
                     continue
-                _apply_poll_result(session, mc, entry, raw, chunk_events)
+                decoded = _apply_poll_result(session, mc, entry, raw, chunk_events)
+                if not decoded:
+                    chunk_entries_no_value += 1
+                if isinstance(field_name, str) and field_name:
+                    statuses[mc.id][field_name] = "ok" if decoded else "no_value"
             # Overwrite wholesale: the chunk dispatches every recognizable
             # entry of each contract's plan, so this pass's outcomes ARE
             # the full per-field truth; a field absent from the map was
@@ -1782,6 +1819,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         # here, so its events are never notified (and its entry errors were
         # discarded with it — chunks_failed already marks the pass partial).
         entry_errors += chunk_entry_errors
+        entries_no_value += chunk_entries_no_value
         _notify_committed_events(session, chunk_events)
         new_events.extend(chunk_events)
 
@@ -1801,15 +1839,18 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         contracts_scanned=len(contracts),
         blocks_scanned=0,
         events_found=len(new_events),
-        # A pass with any failed poll call is partial: some published
-        # entry produced no value this tick, whether the whole chunk
-        # rolled back or a single call errored.
-        partial=chunks_failed > 0 or entry_errors > 0,
+        # A pass with any failed or valueless poll call is partial: some
+        # dispatched entry produced no value this tick, whether the chunk
+        # rolled back (deadlock), was never answered (transport), a call
+        # errored, or an answered call decoded to nothing.
+        partial=chunks_failed > 0 or chunks_transport_failed > 0 or entry_errors > 0 or entries_no_value > 0,
         extra_detail={
             "contracts_selected": len(contracts),
             "chunks": len(chunks),
             "chunks_failed": chunks_failed,
+            "chunks_transport_failed": chunks_transport_failed,
             "entry_errors": entry_errors,
+            "entries_no_value": entries_no_value,
             "oldest_last_polled_age_s": oldest_age_s,
         },
     )
