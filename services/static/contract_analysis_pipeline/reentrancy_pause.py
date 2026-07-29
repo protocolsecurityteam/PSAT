@@ -48,6 +48,7 @@ try:
     from slither.slithir.operations import (  # type: ignore[import]
         Assignment,
         Binary,
+        BinaryType,
         InternalCall,
         LibraryCall,
         SolidityCall,
@@ -59,6 +60,7 @@ except Exception:  # pragma: no cover
     SLITHER_AVAILABLE = False
 
 from .predicate_types import LeafPredicate, PredicateTree
+from .shared import _all_modifiers, _all_state_variables
 
 GuardKind = Literal["reentrancy", "pause"]
 
@@ -243,13 +245,25 @@ class PauseAnalyzer:
             sv = self._lookup_state_var(var_name)
             if sv is None or not self._is_pause_typed(sv):
                 continue
+            if not self._is_latch_shaped(sv, var_name, writers):
+                continue
             if any(self._writer_is_auth_gated(w) for w in writers):
                 if self._read_with_revert_in_others(var_name, writers):
                     pause_vars.add(var_name)
         return pause_vars
 
     def _lookup_state_var(self, name: str) -> Any | None:
-        for sv in getattr(self.contract, "state_variables", []) or []:
+        """Inheritance-aware: ``contract.state_variables`` is the *accessible*
+        view and excludes a ``private`` variable declared in an ancestor, but
+        such a variable is still part of the derived contract's storage and
+        can be its pause latch (EigenLayer's abstract ``Pausable`` declares
+        ``uint256 private _paused``; every strategy inherits it). The writer
+        index is built from ``contract.functions`` — inherited writers
+        included — so the lookup must see the same declaration set or an
+        inherited latch is vetoed at admission. ``_all_state_variables``
+        orders ``[contract, *inheritance]``, so a shadowing local declaration
+        still wins."""
+        for sv in _all_state_variables(self.contract):
             if sv.name == name:
                 return sv
         return None
@@ -258,6 +272,119 @@ class PauseAnalyzer:
         # bool or uint8 typically; we accept both.
         type_name = str(getattr(sv, "type", ""))
         return type_name in ("bool", "uint8", "uint256")
+
+    def _is_latch_shaped(self, sv: Any, var_name: str, writers: list[Any]) -> bool:
+        """A pause latch is a FLAG, not a quantity. The written-by-auth +
+        read-with-revert fingerprint alone also matches a governed NUMERIC
+        parameter — OZ TimelockController's ``uint256 _minDelay`` is written
+        by the auth-gated ``updateDelay`` and read inside ``schedule``'s
+        insufficient-delay revert, and classifying it as a latch published
+        ``is_pausable=true`` on contracts with no pause mechanism at all.
+
+        * ``bool`` — a flag by type; qualifies as-is (covers both
+          constant-toggle ``pause()/unpause()`` pairs and parameter-driven
+          ``setPaused(bool)`` setters).
+        * ``uint8``/``uint256`` — qualifies only on flag evidence:
+          - some writer assigns a CONSTANT to the var (``paused = 1``); a
+            duration/delay setter assigns a parameter or derived value; or
+          - a modifier reads the var inside a require/revert (the
+            EigenLayer shape: ``uint256 _paused`` written from a parameter
+            but gating via ``whenNotPaused``-style modifiers); or
+          - a non-writer reverts on the var compared for EQUALITY against
+            a CONSTANT (``require(pausedStatus == 0)`` inline in a function
+            body — parameter-written, no modifier). A latch is checked
+            against a distinguished value; a governed quantity's revert
+            read is RELATIONAL against a parameter (``_minDelay`` under
+            ``require(delay >= getMinDelay())``), which never matches the
+            ``==``/``!=``-vs-constant fingerprint. Tested on the
+            predicate-LEAF plane (``_flag_read_with_revert``), where
+            ``build_predicate_tree`` has already polarity-folded the gate
+            and resolved indirection — so ``if (flag != 0) revert
+            Paused()``, ``require(pausedStatus() == 0)`` (getter hop) and
+            ``require(_paused & 1 == 0)`` (mask arithmetic) all surface as
+            an ``eq``/``ne`` leaf pairing the state var with a constant.
+            A same-node IR scan remains only as the fallback for functions
+            whose tree degraded.
+        """
+        type_name = str(getattr(sv, "type", ""))
+        if type_name == "bool":
+            return True
+        if self._has_constant_write(var_name, writers):
+            return True
+        # Inheritance-aware for the same reason as ``_lookup_state_var``:
+        # the gating modifier is typically declared in the same ancestor as
+        # the latch (mirrors ``_detect_pausability``'s ``_all_modifiers``).
+        for modifier in _all_modifiers(self.contract):
+            if self._reads_with_revert(modifier, var_name):
+                return True
+        if self._flag_read_with_revert(var_name, writers):
+            return True
+        return False
+
+    def _flag_read_with_revert(self, var_name: str, writers: list[Any]) -> bool:
+        """Some non-writer reads the var under a revert compared for
+        EQUALITY against a CONSTANT — checked on the same predicate-leaf
+        plane ``_read_with_revert_in_others`` traverses (leaves only exist
+        on RevertGate paths by construction, and the builder normalizes
+        custom-error if/revert gates, getter hops, and mask arithmetic
+        into an ``eq``/``ne`` leaf with a state-variable operand and a
+        constant operand). A governed quantity's revert read publishes a
+        RELATIONAL leaf (``comparison``/``gte`` against a parameter) and
+        never matches. Falls back to the stricter same-node IR scan for
+        functions whose tree degraded to None/unsupported."""
+        writer_ids = {id(w) for w in writers}
+        for fn in self.contract.functions:
+            if fn.is_constructor or id(fn) in writer_ids:
+                continue
+            full_name = getattr(fn, "full_name", None)
+            if not isinstance(full_name, str):
+                continue
+            tree = self.predicate_trees.get(full_name)
+            if tree is not None and _tree_has_constant_equality_on_var(tree, var_name):
+                return True
+        return self._has_constant_equality_revert_read(var_name, writers)
+
+    def _has_constant_equality_revert_read(self, var_name: str, writers: list[Any]) -> bool:
+        """IR-plane fallback for ``_flag_read_with_revert`` when no
+        predicate tree carries the read: a non-writer function has a
+        require/revert-carrying node whose Binary compares the var itself
+        ``==``/``!=`` a Constant. Direct operands only — a compare reached
+        through arithmetic or a helper call is covered by the leaf-plane
+        test (or, for modifier shapes, the modifier arm)."""
+        writer_ids = {id(w) for w in writers}
+        for fn in self.contract.functions:
+            if fn.is_constructor or id(fn) in writer_ids:
+                continue
+            for n in getattr(fn, "nodes", []) or []:
+                irs = list(getattr(n, "irs_ssa", None) or getattr(n, "irs", []) or [])
+                if not any(_ir_is_require_or_revert(ir) for ir in irs):
+                    continue
+                for ir in irs:
+                    if not isinstance(ir, Binary):
+                        continue
+                    if getattr(ir, "type", None) not in (BinaryType.EQUAL, BinaryType.NOT_EQUAL):
+                        continue
+                    for var_op, other_op in (
+                        (ir.variable_left, ir.variable_right),
+                        (ir.variable_right, ir.variable_left),
+                    ):
+                        if _base_state_var_name(var_op) != var_name:
+                            continue
+                        if type(other_op).__name__ == "Constant":
+                            return True
+        return False
+
+    def _has_constant_write(self, var_name: str, writers: list[Any]) -> bool:
+        for fn in writers:
+            for node in getattr(fn, "nodes", []) or []:
+                for ir in getattr(node, "irs", []) or []:
+                    if type(ir).__name__ != "Assignment":
+                        continue
+                    if _base_state_var_name(getattr(ir, "lvalue", None)) != var_name:
+                        continue
+                    if type(getattr(ir, "rvalue", None)).__name__ == "Constant":
+                        return True
+        return False
 
     def _writer_is_auth_gated(self, fn: Any) -> bool:
         tree = self.predicate_trees.get(fn.full_name)
@@ -302,7 +429,15 @@ class PauseAnalyzer:
     def _reads_with_revert(self, container: Any, var_name: str) -> bool:
         """Returns True if container has a require/revert that
         reads ``var_name``. Checks Binary, Unary, and direct require
-        of the state-var value."""
+        of the state-var value — and, on a require-carrying node, reads
+        reached through a helper call: EigenLayer's Pausable gates as
+        ``modifier onlyWhenNotPaused(uint8 index) { require(!paused(index)); }``
+        with the ``_paused`` read inside ``paused(index)``, so without the
+        helper hop the real latch is invisible and the detector's only
+        admission for such contracts was a fabricated quantity latch. The
+        latch-shape check (``_is_latch_shaped``) is what keeps this hop
+        safe: a duration read through a getter under a bounds require
+        (TimelockController's ``getMinDelay()``) still fails the flag test."""
         for n in getattr(container, "nodes", []) or []:
             irs = list(getattr(n, "irs_ssa", None) or getattr(n, "irs", []) or [])
             if not any(_ir_is_require_or_revert(ir) for ir in irs):
@@ -325,12 +460,35 @@ class PauseAnalyzer:
                     for a in args:
                         if _base_state_var_name(a) == var_name:
                             return True
+                if isinstance(ir, (InternalCall, LibraryCall)):
+                    callee = getattr(ir, "function", None)
+                    if callee is not None and _function_reads_state_var(callee, var_name):
+                        return True
         return False
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _function_reads_state_var(fn: Any, var_name: str, _seen: set[int] | None = None) -> bool:
+    """Does ``fn`` (transitively through internal/library callees) read the
+    named state variable? Bounded recursion with a visited set."""
+    seen = _seen if _seen is not None else set()
+    if id(fn) in seen:
+        return False
+    seen.add(id(fn))
+    for sv in getattr(fn, "state_variables_read", []) or []:
+        if getattr(sv, "name", None) == var_name:
+            return True
+    for node in getattr(fn, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            if isinstance(ir, (InternalCall, LibraryCall)):
+                callee = getattr(ir, "function", None)
+                if callee is not None and _function_reads_state_var(callee, var_name, seen):
+                    return True
+    return False
 
 
 def _base_state_var_name(value: Any) -> str | None:
@@ -376,6 +534,27 @@ def _tree_has_state_var_operand(tree: PredicateTree, var_name: str) -> bool:
         return False
     for child in tree.get("children") or []:
         if _tree_has_state_var_operand(child, var_name):
+            return True
+    return False
+
+
+def _tree_has_constant_equality_on_var(tree: PredicateTree, var_name: str) -> bool:
+    """True iff some leaf pairs a read of state-variable ``var_name`` with a
+    CONSTANT under an ``eq``/``ne`` operator — the latch fingerprint on the
+    leaf plane. The builder emits leaves only from RevertGate paths, so a
+    match is a revert-gated equality-vs-constant read by construction."""
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if leaf is None:
+            return False
+        if leaf.get("operator") not in ("eq", "ne"):
+            return False
+        operands = leaf.get("operands") or []
+        reads_var = any(op.get("state_variable_name") == var_name for op in operands)
+        has_constant = any(op.get("source") == "constant" for op in operands)
+        return reads_var and has_constant
+    for child in tree.get("children") or []:
+        if _tree_has_constant_equality_on_var(child, var_name):
             return True
     return False
 

@@ -461,7 +461,17 @@ logger = logging.getLogger(__name__)
 # and the settle leaves every effects artifact byte-identical (the measured effects
 # diffs attribute to the ``abi_selector`` addition on callee records and the cid-561
 # identity-hash sink-order noise documented at v10).
-EFFECT_CACHE_SCHEMA_VERSION = 34
+# v35: the static classifier's ``external_bool`` authority discriminator
+# (ANALYSIS_SCHEMA_VERSION v5) moves a witness input to this cache's claims:
+# ``claims/matchers/_authcommon`` reads ``authority_role`` and the
+# ``authority_contract`` descriptor off external_bool leaves, and v34 rows
+# were computed from trees in which value-movement calls
+# (``permit``/``transferFrom``/``burnShares``/``vault.enter`` with a
+# msg.sender funds-subject argument) still carried
+# ``delegated_authority`` — auth-oracle facts minted from calls that gate
+# nothing. Every movement retreats from that fabricated proof state
+# (delegated_authority → business); no input moves toward a stronger claim.
+EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
 # NULL keeps the identity UniqueConstraint portable (no NULLS-NOT-DISTINCT dep) —

@@ -114,7 +114,28 @@ logger = logging.getLogger(__name__)
 # (db/effect_cache.py), where the probe-input consumers live. Noted per the
 # same-unreleased-version precedent rather than minting a version no row was
 # ever written under.
-ANALYSIS_SCHEMA_VERSION = 4
+# v5: an ``external_bool`` leaf carries ``authority_role='delegated_authority'``
+# (and its ``external_set``/``authority_contract`` descriptor) only when the
+# callee is GATE-SHAPED (view/pure/nonview_library, or the void-call
+# ``bytes32[]`` merkle-witness carve-out) — a v4 tree still stamps delegated
+# authority on value-movement calls (``permit(msg.sender,…)``,
+# ``transferFrom(msg.sender,…)``, ``burnShares(msg.sender,…)``,
+# ``vault.enter(msg.sender,…)``), and a materialized v4 row would keep minting
+# the fabricated ``caller_gate`` controllers those leaves produced (PR-161:
+# 21 controller rows, incl. wstETH published as a controller of
+# WithdrawalQueueERC721). Result-checked const-compare external_bool leaves
+# now also carry ``callee_state_mutability``/``callee_signature``/``gate_kind``.
+# Same v5 window: pause-var classification requires a LATCH shape (bool flag;
+# constant-toggle uint; a uint read by a revert-carrying modifier — directly
+# or through a helper call; or a uint a non-writer's revert read compares for
+# EQUALITY against a CONSTANT, tested on the predicate-leaf plane so
+# polarity-folded if/revert custom-error gates, getter hops, and mask
+# arithmetic all count, with a same-node IR fallback for degraded trees), so
+# a governed duration like OZ TimelockController's ``_minDelay`` — whose
+# revert read is RELATIONAL against a parameter — is no longer classified as
+# a pause var, and its comparison leaves lose the ``authority_role='pause'``
+# stamp v4 trees carried.
+ANALYSIS_SCHEMA_VERSION = 5
 
 
 def _builder_staleness_s() -> float:

@@ -1903,12 +1903,17 @@ class StaticWorker(BaseWorker):
             return None
 
         # ``predicate_trees`` and ``effects`` are the semantic artifacts
-        # consumed by policy resolution.
-        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2) + "\n")
+        # consumed by policy resolution. ``default=str`` is defence in depth:
+        # a stray non-JSON analyzer object (a Slither ``Constant`` reached
+        # ``derived_from.callee`` before provenance stringified it) must
+        # degrade to its string form rather than kill the whole static job.
+        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
-            (project_dir / "predicate_trees.json").write_text(json.dumps(semantic_predicate_trees, indent=2) + "\n")
+            (project_dir / "predicate_trees.json").write_text(
+                json.dumps(semantic_predicate_trees, indent=2, default=str) + "\n"
+            )
         if semantic_effects is not None:
-            (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2) + "\n")
+            (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
         store_artifact(session, job.id, "contract_analysis", data=analysis_data)
         if semantic_predicate_trees is not None:

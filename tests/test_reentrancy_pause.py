@@ -599,3 +599,364 @@ def test_detect_pausability_is_not_determined_without_the_trees_plane(tmp_path):
 
     assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, degraded_trees)["is_pausable"] is None
     assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, None)["is_pausable"] is None
+
+
+# ---------------------------------------------------------------------------
+# Latch shape — a pause var is a FLAG, not a governed quantity
+# ---------------------------------------------------------------------------
+
+_TIMELOCK_MIN_DELAY = """
+pragma solidity ^0.8.19;
+contract TL {
+    uint256 private _minDelay;
+    mapping(bytes32 => uint256) private _timestamps;
+    event MinDelayChange(uint256 oldDuration, uint256 newDuration);
+    constructor(uint256 minDelay) { _minDelay = minDelay; }
+    function getMinDelay() public view returns (uint256) { return _minDelay; }
+    function updateDelay(uint256 newDelay) external {
+        require(msg.sender == address(this), "unauthorized");
+        emit MinDelayChange(_minDelay, newDelay);
+        _minDelay = newDelay;
+    }
+    function schedule(bytes32 id, uint256 delay) external {
+        require(_timestamps[id] == 0, "exists");
+        require(delay >= getMinDelay(), "insufficient delay");
+        _timestamps[id] = block.timestamp + delay;
+    }
+}
+"""
+
+
+def test_timelock_min_delay_is_not_a_pause_latch(tmp_path):
+    """OZ TimelockController's ``uint256 _minDelay`` matches the
+    written-by-auth + read-with-revert fingerprint (``updateDelay`` is
+    self-gated; ``schedule`` reverts on insufficient delay) but is a governed
+    DURATION, not a latch. Classifying it as one published
+    ``is_pausable=true`` on two mainnet TimelockControllers with no pause
+    mechanism at all (PR-161 contracts 471/554, chain-refuted:
+    ``paused()`` reverts, ``getMinDelay()`` returns a duration)."""
+    sl = _compile(tmp_path, _TIMELOCK_MIN_DELAY)
+    contract = next(c for c in sl.contracts if c.name == "TL")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == set()
+
+    pause_info = apply_reentrancy_pause_pass(contract, trees)
+    assert pause_info["pause_state_vars"] == []
+    assert pause_info["pause_toggle_functions"] == []
+    # The comparison leaves reading _minDelay must not be promoted to the
+    # pause authority role either.
+    for tree in trees.values():
+        for leaf in _all_leaves(tree):
+            assert leaf.get("authority_role") != "pause"
+
+
+def test_timelock_min_delay_detect_pausability_false_end_to_end(tmp_path):
+    """With all three planes demonstrably run, the timelock publishes the
+    affirmative ``is_pausable=False`` — not ``true`` (the refuted claim) and
+    not ``None`` (the planes did run)."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _TIMELOCK_MIN_DELAY)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is False
+    assert pausability["pause_variables"] == []
+    assert pausability["pause_functions"] == []
+    assert pausability["unpause_functions"] == []
+
+
+def test_uint_latch_with_gating_modifier_still_detected(tmp_path):
+    """R4 positive control for the latch-shape narrowing: the EigenLayer
+    shape — ``uint256 _paused`` written from a PARAMETER (no constant
+    toggle) but read by a gating modifier — is a real latch and must keep
+    detecting after ``_minDelay`` is rejected."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract EP {
+            address public pauser;
+            uint256 private _paused;
+            modifier onlyWhenNotPaused(uint8 index) {
+                require(_paused & (1 << uint256(index)) == 0, "paused");
+                _;
+            }
+            function pause(uint256 newPausedStatus) external {
+                require(msg.sender == pauser, "not pauser");
+                _paused = newPausedStatus;
+            }
+            function deposit() external onlyWhenNotPaused(0) {}
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "EP")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"_paused"}
+
+
+def test_uint_constant_toggle_latch_still_detected(tmp_path):
+    """R4 positive control: a uint flag toggled by CONSTANT writes
+    (``stopped = 1`` / ``stopped = 0``) with the revert read in a function
+    body (no modifier) is a latch."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract UT {
+            address public admin;
+            uint256 private stopped;
+            function stop() external { require(msg.sender == admin); stopped = 1; }
+            function start() external { require(msg.sender == admin); stopped = 0; }
+            function act() external { require(stopped == 0, "stopped"); }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "UT")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"stopped"}
+
+
+def test_uint_latch_read_through_helper_in_modifier_detected(tmp_path):
+    """EigenLayer Pausable shape: the modifier's require reads the latch
+    THROUGH a helper (``require(!paused(index))`` with the ``_paused`` read
+    inside ``paused(index)``). Before the helper hop the real latch was
+    invisible, and EigenStrategy's ``is_pausable=true`` rode entirely on a
+    fabricated ``totalShares`` quantity latch (PR-161 contract 635)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract EPI {
+            address public pauser;
+            uint256 private _paused;
+            uint256 public totalShares;
+            function paused(uint8 index) public view returns (bool) {
+                uint256 mask = 1 << uint256(index);
+                return ((_paused & mask) == mask);
+            }
+            modifier onlyWhenNotPaused(uint8 index) {
+                require(!paused(index), "paused");
+                _;
+            }
+            function pause(uint256 newStatus) external {
+                require(msg.sender == pauser, "not pauser");
+                _paused = newStatus;
+            }
+            function pauseAll() external {
+                require(msg.sender == pauser, "not pauser");
+                _paused = type(uint256).max;
+            }
+            function deposit(uint256 shares) external onlyWhenNotPaused(0) {
+                require(totalShares + shares >= shares, "overflow");
+                totalShares += shares;
+            }
+            function withdraw(uint256 shares) external onlyWhenNotPaused(1) {
+                require(totalShares >= shares, "insufficient");
+                totalShares -= shares;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "EPI")
+    trees = _build_trees(contract)
+    detected = PauseAnalyzer(contract, trees).run()
+    # The real latch is admitted; the quantity var is not (it is written
+    # from computed values and gates nothing through a modifier).
+    assert "_paused" in detected
+    assert "totalShares" not in detected
+
+
+_UINT_INLINE_LATCH = """
+pragma solidity ^0.8.19;
+contract UInline {
+    address public owner;
+    uint256 private pausedStatus;
+    function setPaused(uint256 p) external { require(msg.sender == owner, "no"); pausedStatus = p; }
+    function act(uint256 v) external { require(pausedStatus == 0, "paused"); }
+    function act2(uint256 v) external { require(pausedStatus == 0, "paused"); }
+}
+"""
+
+
+def test_uint_latch_parameter_written_inline_require_detected(tmp_path):
+    """R4 positive control for the third flag-evidence arm: a uint latch
+    that is PARAMETER-written (no constant toggle) and gated by an INLINE
+    ``require(pausedStatus == 0)`` in ordinary function bodies (no
+    modifier) satisfies neither of the first two arms — dropping it
+    published the affirmative ``is_pausable=False`` on a genuinely
+    pausable contract. The equality-vs-CONSTANT revert read is the flag
+    evidence: ``_minDelay``'s revert read is relational against a
+    parameter and stays out (the two tests above)."""
+    sl = _compile(tmp_path, _UINT_INLINE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "UInline")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"pausedStatus"}
+
+
+def test_uint_latch_parameter_written_inline_require_publishes_true(tmp_path):
+    """End-to-end on the published surface: all three planes run and the
+    inline uint latch publishes the affirmative ``is_pausable=True`` —
+    not ``False`` (a proven-absence claim the detector cannot make here)
+    and not ``None``."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_INLINE_LATCH)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["pausedStatus"]
+    assert "setPaused(uint256)" in pausability["pause_functions"]
+
+
+_UINT_CUSTOM_ERROR_LATCH = """
+pragma solidity ^0.8.19;
+contract CE {
+    error Paused();
+    address public admin;
+    uint8 private pausedFlag;
+    function setPaused(uint8 s) external { require(msg.sender == admin, "no"); pausedFlag = s; }
+    function act() external { if (pausedFlag != 0) revert Paused(); }
+}
+"""
+
+
+def test_uint_latch_custom_error_if_revert_detected(tmp_path):
+    """R4 positive control: the mainstream post-0.8.4 gate shape
+    ``if (pausedFlag != 0) revert Paused();`` — the revert lives in a
+    SEPARATE node from the comparison, so a same-node IR scan never sees
+    both together. The predicate builder polarity-folds the if/revert
+    gate into an ``eq``-vs-constant leaf, which is where the flag test
+    must look."""
+    sl = _compile(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "CE")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"pausedFlag"}
+
+
+def test_uint_latch_custom_error_if_revert_publishes_true(tmp_path):
+    """End-to-end on the published surface for the custom-error shape:
+    ``is_pausable=True`` with the latch var — not the fabricated
+    proven-absence ``False``."""
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, with_claims, trees)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["pausedFlag"]
+    assert "setPaused(uint8)" in pausability["pause_functions"]
+
+
+def test_uint_latch_read_through_getter_inline_detected(tmp_path):
+    """R4 positive control: the revert read reaches the latch through a
+    GETTER (``require(pausedStatus() == 0)`` with ``_paused`` read inside
+    the getter, no modifier anywhere). The leaf plane resolves the hop to
+    the underlying state var; the same-node IR scan sees only a TMP."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract G {
+            address public admin;
+            uint256 private _paused;
+            function pausedStatus() public view returns (uint256) { return _paused; }
+            function setPaused(uint256 s) external { require(msg.sender == admin, "no"); _paused = s; }
+            function act() external { require(pausedStatus() == 0, "paused"); }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "G")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"_paused"}
+
+
+def test_uint_latch_inline_mask_no_modifier_detected(tmp_path):
+    """R4 positive control: bit-mask latch read inline in a function body
+    (``require(_paused & 1 == 0)``, no modifier). The equality's direct
+    operand is the mask TMP, not the var — the leaf plane folds the
+    arithmetic and pairs the var with the constant."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract IM {
+            address public pauser;
+            uint256 private _paused;
+            function pause(uint256 s) external { require(msg.sender == pauser, "no"); _paused = s; }
+            function deposit() external { require(_paused & 1 == 0, "paused"); }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "IM")
+    trees = _build_trees(contract)
+    assert PauseAnalyzer(contract, trees).run() == {"_paused"}
+
+
+_PRIVATE_BASE_LATCH = """
+pragma solidity ^0.8.19;
+abstract contract BasePausable {
+    address public pauser;
+    uint256 private _paused;
+    function paused(uint8 index) public view returns (bool) {
+        uint256 mask = 1 << uint256(index);
+        return ((_paused & mask) == mask);
+    }
+    modifier onlyWhenNotPaused(uint8 index) {
+        require(!paused(index), "paused");
+        _;
+    }
+    function pause(uint256 newStatus) external {
+        require(msg.sender == pauser, "not pauser");
+        _paused = newStatus;
+    }
+}
+
+contract DerivedStrategy is BasePausable {
+    uint256 public totalShares;
+    function deposit(uint256 shares) external onlyWhenNotPaused(0) {
+        require(totalShares + shares >= shares, "overflow");
+        totalShares += shares;
+    }
+    function withdraw(uint256 shares) external onlyWhenNotPaused(1) {
+        require(totalShares >= shares, "insufficient");
+        totalShares -= shares;
+    }
+}
+"""
+
+
+def test_private_latch_declared_in_abstract_base_detected(tmp_path):
+    """R4 for the EigenStrategy shape (PR-161 contract 635): the genuine
+    ``uint256 _paused`` latch is declared ``private`` in an abstract base
+    (EigenLayer's ``Pausable``) and only inherited by the analyzed
+    contract. ``contract.state_variables`` is the accessible view and
+    excludes private ancestor declarations, while the writer index
+    (``contract.functions``, inherited included) sees the writers — so a
+    same-contract-only lookup vetoes the latch at admission and the
+    detector publishes a proven-absence ``is_pausable=False`` on a
+    contract that is pausable on chain. The lookup must cover the full
+    ``[contract, *inheritance]`` declaration set. The same-contract
+    variant of this shape is ``test_uint_latch_read_through_helper_in_-
+    modifier_detected`` above; this one is the inherited variant that
+    test could not catch."""
+    sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")
+    trees = _build_trees(contract)
+    detected = PauseAnalyzer(contract, trees).run()
+    assert "_paused" in detected
+    assert "totalShares" not in detected
+
+
+def test_private_latch_declared_in_abstract_base_publishes_true(tmp_path):
+    """End-to-end on the published surface for the inherited-latch shape:
+    ``is_pausable=True`` earned with the latch var — not the fabricated
+    proven-absence ``False`` the accessible-only lookup produced."""
+    from services.static.contract_analysis_pipeline.predicate_artifacts import (
+        build_predicate_artifacts_with_pause_info,
+    )
+    from services.static.contract_analysis_pipeline.summaries import _detect_pausability
+
+    sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
+    contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")
+    trees_artifact, pause_info = build_predicate_artifacts_with_pause_info(contract)
+    pausability = _detect_pausability(contract, tmp_path, pause_info, None, trees_artifact)
+    assert pausability["is_pausable"] is True
+    assert pausability["pause_variables"] == ["_paused"]
+    assert "pause(uint256)" in pausability["pause_functions"] or "pause(uint256)" in pausability["unpause_functions"]
