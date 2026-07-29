@@ -377,6 +377,7 @@ class TestRevertedEthCallPolling:
         assert len(events) == 0
         db_session.expire_all()
         reloaded = db_session.get(MonitoredContract, mc.id)
+        assert reloaded is not None
         # Plan is field-sorted: implementation (errored), owner (answered
         # but undecodable — published as valueless, never as healthy).
         assert reloaded.last_poll_status == {"implementation": "error", "owner": "no_value"}

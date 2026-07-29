@@ -869,9 +869,15 @@ def _state_var_read_spec(
     * private/internal var with NO getter — the var is not readable by
       any function call, so no getter target exists to claim:
       ``strategy=unknown`` (``target`` keeps the var name purely as an
-      identifier). Consumers that mint selectors from getter_call
-      targets (``polling_plan._is_poll_decodable``) skip these; the
-      type fields stay populated so type-shape guards (struct skip,
+      identifier). The monitoring plane's selector-minting consumer
+      (``polling_plan._is_poll_decodable``) skips these. The RESOLUTION
+      plane's ``_getter_target`` does NOT skip: it falls back to
+      ``source`` (the same var name) and still probes the nonexistent
+      getter — the revert path there records the honest third state
+      (``value=None, observed_via="eth_call_error"`` + record_degraded),
+      so no false value publishes, but the probe is wasted; tightening
+      that consumer is a recorded follow-up, not this function's claim.
+      The type fields stay populated so type-shape guards (struct skip,
       primitive-scalar snapshot skip) keep their inputs.
     """
     sv = state_vars_by_name.get(name)

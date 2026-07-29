@@ -311,9 +311,9 @@ def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_
     read_spec = by_id["state_variable:_admin"]["read_spec"]
     assert isinstance(read_spec, dict)
     assert read_spec["strategy"] == "unknown"
-    assert read_spec["state_variable_name"] == "_admin"
+    assert read_spec.get("state_variable_name") == "_admin"
     # Type info survives so type-shape guards downstream keep their inputs.
-    assert read_spec["type_kind"] == "address"
+    assert read_spec.get("type_kind") == "address"
 
     plan = build_polling_plan(
         contract_type="regular",
@@ -352,6 +352,7 @@ def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
     targets = _build(tmp_path, source)
     by_id = {t["controller_id"]: t for t in targets}
     read_spec = by_id["state_variable:_owner"]["read_spec"]
+    assert isinstance(read_spec, dict)
     assert read_spec["strategy"] == "getter_call"
     assert read_spec["target"] == "owner"
 
@@ -388,6 +389,7 @@ def test_public_underscore_var_keeps_its_auto_getter(tmp_path):
     by_id = {t["controller_id"]: t for t in targets}
     assert "state_variable:_roleRegistry" in by_id, list(by_id.keys())
     read_spec = by_id["state_variable:_roleRegistry"]["read_spec"]
+    assert isinstance(read_spec, dict)
     assert read_spec["strategy"] == "getter_call"
     assert read_spec["target"] == "_roleRegistry"
 
