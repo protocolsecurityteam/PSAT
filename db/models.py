@@ -1555,7 +1555,14 @@ class MappingEnumerationCache(Base):
     produces a fresh row instead of silently returning a stale enumeration.
     Truncated and errored results are cached too — re-running them within
     the TTL would just hit the same bound — and the caller sees the
-    ``status`` field to decide whether to act on partial data.
+    ``status`` field to decide whether to act on partial data. That
+    promise is only kept while every status the enumerator can emit fits
+    ``status``: an oversized one turns the upsert into a no-op that
+    leaves whatever row was already there, so a stale ``complete`` would
+    keep being served in place of the honest truncated verdict. The
+    column is sized well past the longest current member and
+    ``tests/test_mapping_enumeration_status_vocabulary.py`` round-trips
+    the whole vocabulary to keep it that way.
     """
 
     __tablename__ = "mapping_enumeration_cache"
@@ -1564,7 +1571,7 @@ class MappingEnumerationCache(Base):
     address: Mapped[str] = mapped_column(String(42), primary_key=True)
     specs_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     principals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
     pages_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_block_scanned: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

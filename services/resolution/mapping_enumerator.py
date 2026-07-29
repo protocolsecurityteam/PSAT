@@ -591,7 +591,15 @@ def enumerate_mapping_allowlist_sync(
     first so other processes see it, then to L1. ``incomplete_*`` and
     ``error`` results are cached at both tiers — re-running them inside
     the TTL would just hit the same bound; the caller sees the
-    ``status`` field and decides whether to act on partial data.
+    ``status`` field and decides whether to act on partial data. A
+    status that L2 cannot store would break that: the rejected write
+    leaves the prior row standing, so an in-TTL ``complete`` would be
+    served in place of the truncated verdict that superseded it. Adding
+    a status therefore has a schema obligation —
+    ``tests/test_mapping_enumeration_status_vocabulary.py`` scrapes this
+    module for the vocabulary and round-trips every member through the
+    real column, so an oversized one is a red suite, not a silent
+    republish.
     """
     specs_as_dicts = [dict(s) for s in writer_specs]
     cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
