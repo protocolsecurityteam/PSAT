@@ -2011,6 +2011,98 @@ class TestControlGraphTypeReconciliation:
         assert (self._node_details(pg_session, eth_c.id, principal) or {}).get("owners") == owners
         assert not (self._node_details(pg_session, base_c.id, principal) or {}).get("owners")
 
+    @staticmethod
+    def _node_analysis_state(session, contract_id, addr):
+        from db.models import ControlGraphNode
+
+        return (
+            session.execute(
+                select(ControlGraphNode.analysis_state).where(
+                    ControlGraphNode.contract_id == contract_id,
+                    ControlGraphNode.address == addr,
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+    def test_safe_upgrade_stamps_coherent_analysis_state(self, pg_session):
+        """Typing a node ``safe`` must also answer the analyzability question
+        the walk left NULL: ('safe', NULL) claims "typed as a Safe,
+        analyzability not determined" — refuted by the same row. The stamp is
+        exactly what the walk derives for a safe: ``not_analyzable``."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b5" * 20)
+        gov_safe = "0x" + "f5" * 20
+        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
+        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
+        assert self._node_analysis_state(pg_session, c.id, gov_safe) == "not_analyzable"
+
+    def test_pretyped_safe_with_null_state_is_healed_and_converges(self, pg_session):
+        """The observed incoherence: rows a prior reconcile already typed
+        ``safe`` while leaving ``analysis_state`` NULL. The next run heals the
+        pair (counts as a change) and then converges."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b6" * 20)
+        gov_safe = "0x" + "f6" * 20
+        self._add_cgn(pg_session, c.id, gov_safe, "safe")
+        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
+        pg_session.commit()
+
+        assert self._node_analysis_state(pg_session, c.id, gov_safe) is None
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        pg_session.flush()
+        assert self._node_analysis_state(pg_session, c.id, gov_safe) == "not_analyzable"
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
+
+    def test_analyzable_upgrade_leaves_analysis_state_null(self, pg_session):
+        """Negative control: a ``timelock`` upgrade types an ANALYZABLE address,
+        for which the walk's derivation is None ("analyzable, unanalysed, not
+        determined") — the column must stay NULL, not gain an invented value."""
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b7" * 20)
+        addr = "0x" + "f8" * 20
+        self._add_cgn(pg_session, c.id, addr, "unknown")
+        _grant_primary_authority(pg_session, c.id, addr, function_name="schedule", resolved_type="timelock")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, addr) == "timelock"
+        assert self._node_analysis_state(pg_session, c.id, addr) is None
+
+    def test_determined_analysis_state_never_overwritten(self, pg_session):
+        """A state the walk DID determine (here ``attempt_failed``) survives the
+        type fold — the heal only fills NULL."""
+        from db.models import ControlGraphNode
+        from services.governance.control_graph_types import reconcile_control_graph_types
+
+        c = self._proto_contract(pg_session, "0x" + "b8" * 20)
+        gov_safe = "0x" + "f9" * 20
+        pg_session.add(
+            ControlGraphNode(
+                contract_id=c.id,
+                address=gov_safe,
+                node_type="unknown",
+                resolved_type="unknown",
+                analysis_state="attempt_failed",
+                details={"materialize_error": "boom"},
+            )
+        )
+        pg_session.flush()
+        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
+        pg_session.commit()
+
+        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
+        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
+        assert self._node_analysis_state(pg_session, c.id, gov_safe) == "attempt_failed"
+
 
 class TestTrackingPlanNotDetermined:
     """Not-determined vs. found-nothing at the enrollment boundary.
