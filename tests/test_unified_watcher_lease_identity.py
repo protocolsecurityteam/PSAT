@@ -1,7 +1,8 @@
 """Stage-4 lease gating + event-identity tests for the unified watcher (W2a).
 
 Real test DB, real decode/sync/reanalysis/notify pipeline; only the RPC wire
-(``rpc_request`` for head + getLogs, ``rpc_batch_request`` for poll) and the
+(``rpc_request`` for head + getLogs, ``rpc_batch_request_with_status`` for
+poll) and the
 Discord HTTP call (``notifier._send_discord``) are stubbed. Covers design §2.4
 (two-layer singleton), HR2 (duplicate-pass produces zero extra rows / jobs /
 posts), the batch-timelock identity, the partial-index poll exclusion, the
@@ -320,15 +321,15 @@ def test_two_poll_detections_same_field_both_insert_with_null_log_index(db_sessi
 
     def _wire(value):
         def stub(url, calls):
-            return [value for _ in calls]
+            return [(value, False) for _ in calls]
 
         return stub
 
     import services.monitoring.unified_watcher as uw
 
-    monkeypatch.setattr(uw, "rpc_batch_request", _wire("0x" + "0" * 24 + ADDR(0x2)[2:]))
+    monkeypatch.setattr(uw, "rpc_batch_request_with_status", _wire("0x" + "0" * 24 + ADDR(0x2)[2:]))
     poll_for_state_changes(db_session, "http://stub")
-    monkeypatch.setattr(uw, "rpc_batch_request", _wire("0x" + "0" * 24 + ADDR(0x3)[2:]))
+    monkeypatch.setattr(uw, "rpc_batch_request_with_status", _wire("0x" + "0" * 24 + ADDR(0x3)[2:]))
     poll_for_state_changes(db_session, "http://stub")
 
     assert _count_events(db_session, mc.id, "state_changed_poll") == 2
@@ -443,12 +444,12 @@ def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
 
     def stub(url, calls):
         called["n"] += 1
-        return [None for _ in calls]
+        return [(None, False) for _ in calls]
 
     import services.monitoring.unified_watcher as uw
 
     notes = _capture_cycle_notes(monkeypatch)
-    monkeypatch.setattr(uw, "rpc_batch_request", stub)
+    monkeypatch.setattr(uw, "rpc_batch_request_with_status", stub)
     result = poll_for_state_changes(db_session, "http://stub")
 
     assert result == []
@@ -476,7 +477,7 @@ def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatc
     import services.monitoring.unified_watcher as uw
 
     new_val = "0x" + "0" * 24 + ADDR(0x2)[2:]
-    monkeypatch.setattr(uw, "rpc_batch_request", lambda url, calls: [new_val for _ in calls])
+    monkeypatch.setattr(uw, "rpc_batch_request_with_status", lambda url, calls: [(new_val, False) for _ in calls])
     poll_for_state_changes(db_session, "http://stub")
     assert _count_events(db_session, mc.id, "state_changed_poll") == 1
 
@@ -557,7 +558,9 @@ def test_poll_owner_change_marks_governance_rotation(db_session, monkeypatch):
     import services.monitoring.unified_watcher as uw
 
     new_owner = ADDR(0x2)
-    monkeypatch.setattr(uw, "rpc_batch_request", lambda url, calls: ["0x" + "0" * 24 + new_owner[2:] for _ in calls])
+    monkeypatch.setattr(
+        uw, "rpc_batch_request_with_status", lambda url, calls: [("0x" + "0" * 24 + new_owner[2:], False) for _ in calls]
+    )
     poll_for_state_changes(db_session, "http://stub")
 
     assert _queue_reason(db_session, proto.id) == "governance_rotation"

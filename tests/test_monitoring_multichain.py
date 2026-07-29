@@ -11,7 +11,7 @@ what actually reaches the wire — the thing M1.1 makes true:
   - ``enroll_protocol_contracts`` keys a base proxy's WatchedProxy on ``chain="base"``
     and seeds its block from the base RPC
 
-Only the wire is stubbed (``rpc_batch_request`` / ``rpc_request`` / the Etherscan
+Only the wire is stubbed (``rpc_batch_request_with_status`` / ``rpc_request`` / the Etherscan
 balance helpers) — never the production classes — matching the hermetic offline
 suite.
 """
