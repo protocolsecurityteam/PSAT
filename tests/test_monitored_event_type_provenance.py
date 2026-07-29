@@ -245,18 +245,62 @@ def test_absent_and_call_target_agree_but_caller_gate_differs():
 
 
 def test_provenance_never_overrides_a_canonical_classification():
-    """Steps 1 and 2 of the resolver are untouched: a tagged emitter and a
-    legacy controller_id still win over the terminal fallback, with or
-    without the gate proof."""
+    """Steps 1 and 2 of the resolver still win over the terminal fallback
+    when the event's own signature corroborates the canonical family,
+    with or without the gate proof."""
+    assert (
+        _resolve_event_type(
+            "state_variable:whatever",
+            {"writes": ["owner"]},
+            authority_provenance=None,
+            signature="OwnershipTransferred(address,address)",
+        )
+        == "ownership_transferred"
+    )
+    assert (
+        _resolve_event_type(
+            "state_variable:owner",
+            authority_provenance="caller_gate",
+            signature="OwnerUpdated(address,address)",
+        )
+        == "ownership_transferred"
+    )
+
+
+def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
+    """A canonical family type needs the event's OWN signature to
+    corroborate it. Without that, writes donation and the legacy
+    controller_id map fall to the terminal stem — which still honours
+    the provenance three-state."""
+    # Donated writes, uncorroborated name -> neutral.
+    assert (
+        _resolve_event_type(
+            "state_variable:whatever",
+            {"writes": ["owner"]},
+            authority_provenance=None,
+            signature="Initialized(uint8)",
+        )
+        == "state_changed:state_variable:whatever"
+    )
+    # Legacy controller_id map, uncorroborated name -> the stem earned by
+    # provenance (proven gate -> controller_changed, not the canonical type).
+    assert (
+        _resolve_event_type(
+            "state_variable:owner",
+            authority_provenance="caller_gate",
+            signature="Initialized(uint8)",
+        )
+        == "controller_changed:state_variable:owner"
+    )
+    # Not-determined signature (absent) cannot corroborate anything.
     assert (
         _resolve_event_type(
             "state_variable:whatever",
             {"writes": ["owner"]},
             authority_provenance=None,
         )
-        == "ownership_transferred"
+        == "state_changed:state_variable:whatever"
     )
-    assert _resolve_event_type("state_variable:owner", authority_provenance="caller_gate") == "ownership_transferred"
 
 
 def test_unclassified_spec_decodes_to_the_neutral_type():
