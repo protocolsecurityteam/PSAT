@@ -2292,3 +2292,301 @@ def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session
     # narrowing cannot have removed the strongest evidence path.
     proven = _cov(match_confidence="low", equivalence_status="proven", proof_kind="bytecode_match")
     assert _current_status(db_session, proxy, [unbounded, proven]) == "audited"
+
+
+def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
+    """``upgrade_count`` renders as literal "N upgrades" text, so its unit is
+    exercises of upgrade authority. A within-tx swap-and-restore emits two
+    ``Upgraded`` logs in ONE transaction — it must count once. A poll-detected
+    row (NULL ``tx_hash``) is its own observed upgrade and must still count.
+    """
+    p = _add_protocol(db_session, f"upgcount-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgc")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    swap_tx = "0x" + "a" * 64
+    genuine_tx = "0x" + "b" * 64
+    events = [
+        # Genuine upgrade, its own tx.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=100,
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            tx_hash=genuine_tx,
+            source="backfill",
+        ),
+        # Swap-and-restore: two Upgraded logs, one transaction.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i2"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        # Poll-detected: no tx known, still one observed upgrade.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i3"),
+            block_number=None,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            tx_hash=None,
+            source="poll",
+        ),
+    ]
+    db_session.add_all(events)
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 3, (
+        "4 Upgraded rows across 2 transactions + 1 poll detection must "
+        f"publish 3 upgrades, got {entry['upgrade_count']}"
+    )
+
+
+def test_last_upgrade_pair_comes_from_one_event(db_session):
+    """``last_upgrade_block`` / ``last_upgrade_timestamp`` describe THE last
+    upgrade, so both halves must come from the same row. With a poll-detected
+    row (NULL block by design) newer than a block-carrying one, two
+    independent MAX aggregates would pair the OLD row's block with the poll
+    row's timestamp — a composite describing no event that happened.
+    """
+    p = _add_protocol(db_session, f"upglast-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgl")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j1"),
+                block_number=500,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "c" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j2"),
+                block_number=None,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+                tx_hash=None,
+                source="poll",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
+    assert entry["last_upgrade_block"] is None, (
+        "the newest upgrade is poll-detected (block not determined); pairing "
+        "the older event's block 500 with the poll timestamp fabricates a "
+        f"composite event, got block {entry['last_upgrade_block']}"
+    )
+
+
+def test_last_upgrade_pair_block_carrying_control(db_session):
+    """Positive control for the pair-coherence fix: when the newest event
+    carries a block, both halves publish from it unchanged."""
+    p = _add_protocol(db_session, f"upgctl-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgx")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k1"),
+                block_number=700,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "d" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k2"),
+                block_number=900,
+                timestamp=datetime(2024, 9, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "e" * 64,
+                source="backfill",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 2
+    assert entry["last_upgrade_block"] == 900
+    assert entry["last_upgrade_timestamp"] == "2024-09-01T00:00:00+00:00"
+
+
+def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type=None):
+    ef = EffectiveFunction(
+        contract_id=contract.id,
+        function_name=fname,
+        selector=selector,
+        abi_signature=f"{fname}()",
+        effect_labels=labels,
+        effect_targets=[],
+        action_summary=fname,
+        authority_public=False,
+        authority_roles=[],
+    )
+    session.add(ef)
+    session.commit()
+    session.refresh(ef)
+    session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=fp_addr,
+            resolved_type=fp_type,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+    session.commit()
+    return ef
+
+
+def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
+    """``fund_flows[].capabilities`` states what the edge's SOURCE can do to
+    the target — never the target's own capability union. Two sources with
+    disjoint witnessed rights on one target must publish disjoint edge
+    capabilities, and neither may carry the target-shell ``upgradeable`` flag.
+    """
+    p = _add_protocol(db_session, f"edgecaps-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tgt")
+    a_addr = _addr("srca")
+    b_addr = _addr("srcb")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
+    a_job = _add_job(db_session, address=a_addr, protocol_id=p.id, name="Pauser")
+    b_job = _add_job(db_session, address=b_addr, protocol_id=p.id, name="Upgrader")
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
+    _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Pauser")
+    _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Upgrader")
+
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], a_addr.lower())
+    _add_ef_with_fp(db_session, t, "upgradeTo", "0x3659cfe6", ["implementation_update"], b_addr.lower())
+
+    payload = build_company_overview(db_session, p.name)
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    # The target's OWN union carries both function caps plus the proxy-shell
+    # flag — the pre-fix value every inbound edge copied.
+    assert set(target_entry["capabilities"]) == {"pause", "upgrade", "upgradeable"}
+
+    flows = {(f["from"], f["to"]): f for f in payload["fund_flows"]}
+    a_flow = flows.get((a_addr.lower(), t_addr.lower()))
+    b_flow = flows.get((b_addr.lower(), t_addr.lower()))
+    assert a_flow is not None and b_flow is not None, (
+        f"expected principal flows from both FP sources, got {list(flows)}"
+    )
+    assert a_flow["capabilities"] == ["pause"], (
+        f"edge capabilities must be the source's witnessed rights on the target, got {a_flow['capabilities']}"
+    )
+    assert b_flow["capabilities"] == ["upgrade"], (
+        f"edge capabilities must be the source's witnessed rights on the target, got {b_flow['capabilities']}"
+    )
+    for f in (a_flow, b_flow):
+        assert "upgradeable" not in f["capabilities"], (
+            "the proxy-shell flag is a property of the target node, not of any inbound relationship"
+        )
+
+
+def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_session):
+    """A source whose only witnessed right maps to no capability chip
+    publishes ``[]`` on its edge — not the target's union. The edge itself
+    (its ``type``) still states the relationship; the empty list just makes
+    no positive capability claim.
+    """
+    p = _add_protocol(db_session, f"edgeempty-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tg2")
+    a_addr = _addr("plain")
+    b_addr = _addr("pausr")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault")
+    a_job = _add_job(db_session, address=a_addr, protocol_id=p.id, name="Plain")
+    b_job = _add_job(db_session, address=b_addr, protocol_id=p.id, name="Pauser")
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, contract_name="Vault")
+    _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Plain")
+    _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Pauser")
+
+    # A's right: a function with no capability-mapped effect label.
+    _add_ef_with_fp(db_session, t, "poke", "0xdeadbe01", [], a_addr.lower())
+    # B's right gives the TARGET a non-empty union A must not inherit.
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower())
+
+    payload = build_company_overview(db_session, p.name)
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    assert "pause" in target_entry["capabilities"]
+
+    flows = {(f["from"], f["to"]): f for f in payload["fund_flows"]}
+    a_flow = flows.get((a_addr.lower(), t_addr.lower()))
+    assert a_flow is not None
+    assert a_flow["capabilities"] == [], (
+        "a source with zero witnessed capability on the target must publish "
+        f"an empty edge list, got {a_flow['capabilities']}"
+    )
+
+
+def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
+    """For a principal-source edge, the edge chip and the principal's own
+    ``controls_detail`` row for the same target must state the same
+    capabilities — they are two renderings of one witnessed relationship.
+    """
+    p = _add_protocol(db_session, f"edgecd-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tg3")
+    safe_addr = _addr("safe")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
+
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], safe_addr.lower(), fp_type="safe")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=t.id,
+            address=safe_addr.lower(),
+            resolved_type="safe",
+            depth=1,
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principal = next(pr for pr in payload["principals"] if pr["address"] == safe_addr.lower())
+    cd_by_addr = {row["address"]: row["capabilities"] for row in principal["controls_detail"]}
+    flow = next(f for f in payload["fund_flows"] if f["from"] == safe_addr.lower() and f["to"] == t_addr.lower())
+    assert flow["capabilities"] == cd_by_addr.get(t_addr.lower()), (
+        "edge capabilities and controls_detail disagree about the same "
+        f"(source, target) pair: {flow['capabilities']} vs {cd_by_addr}"
+    )
+    assert flow["capabilities"] == ["pause"]
+    # The target's union additionally carries the proxy-shell flag; the
+    # edge must not.
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    assert "upgradeable" in target_entry["capabilities"]
+    assert "upgradeable" not in flow["capabilities"]
