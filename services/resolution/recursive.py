@@ -994,8 +994,12 @@ def _replay_mapping_principals(
             # A contract enumerated as a member of its OWN mapping (e.g. a
             # timelock granting itself a Solady `_roles` role) is real on-chain
             # state, but as a control edge it is degenerate: X->X asserts
-            # nothing, pollutes the value closure, and renders as a bogus
-            # "Indirect Control Path" card. Skip the self edge.
+            # nothing, yet the raw graph plane serves it verbatim through the
+            # analysis-detail API, and the _ensure_node call below would merge
+            # principal fields (controller_label/mapping_name/...) onto the
+            # contract's own node and clobber its label with the mapping name.
+            # Skip the self edge. (The value closure and the Surface
+            # indirect-path index each drop self loops on their own.)
             logger.debug(
                 "mapping_enumerator: skipping self-membership edge",
                 extra={"address": address, "mapping_name": principal["mapping_name"]},
