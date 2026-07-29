@@ -1799,6 +1799,25 @@ def build_governance_view(
         p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
 
+    # Per-edge ``capabilities``: what THE SOURCE can do to THE TARGET, from
+    # the same FunctionPrincipal-derived machinery that feeds
+    # ``controls_detail`` — so an edge chip and the principal's own detail
+    # panel can never disagree about the same (source, target) pair.
+    # ``detail_acc`` (principal sources; includes the one-hop governance
+    # passthrough) is consulted first, then ``caller_detail`` (contract
+    # sources with direct FP rights). A source with no witnessed rights on
+    # the target publishes ``[]`` — same convention as the contract-level
+    # list: a capability chip is a positive claim, and its absence is not
+    # published as proof of inability (the edge itself still states the
+    # ownership/controller relationship via ``type``).
+    for flow in fund_flows:
+        src_lc = (flow.get("from") or "").lower()
+        target_entity = _entity_key(flow.get("to_chain"), flow.get("to"))
+        detail = detail_acc.get(src_lc, {}).get(target_entity)
+        if detail is None:
+            detail = caller_detail.get(target_entity, {}).get(src_lc)
+        flow["capabilities"] = sorted(detail["capabilities"]) if detail else []
+
     # Per-contract "other callers": principal-callers holding FP authority that
     # are neither the contract's primary owner nor a co-controller of it — the
     # permissionless / lower-privilege long tail (e.g. AuctionManager's
@@ -1884,7 +1903,6 @@ def _build_flows_and_principals(
     principal_lookup: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
-    contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
     # Control relations are intra-chain, so every flow carries a single chain
     # (from_chain == to_chain). Dedup is per-chain so a same-address twin on
     # another chain keeps its own edge instead of colliding on the bare pair.
@@ -1897,14 +1915,17 @@ def _build_flows_and_principals(
         if key in flow_seen:
             return
         flow_seen.add(key)
-        target = contract_by_addr.get(to_addr, {})
         fund_flows.append(
             {
                 "from": from_addr,
                 "to": to_addr,
                 "type": flow_type,
                 "lane": lane,
-                "capabilities": target.get("capabilities", []),
+                # Filled by build_governance_view once caller_detail exists:
+                # the SOURCE's witnessed rights on the target, never the
+                # target's own capability union — an edge is a claim about the
+                # relationship, and the frontend renders it as a per-edge chip.
+                "capabilities": [],
                 "from_chain": chain_tok,
                 "to_chain": chain_tok,
             }
