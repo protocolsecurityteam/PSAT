@@ -52,15 +52,15 @@ def _current_head_block(chain: str | None) -> int:
 
 
 #: Stamped into every caller-supplied ``monitoring_config``. The auto-enrollment
-#: path (``services/monitoring/enrollment._build_monitoring_config``) encodes the
-#: tracking plan three ways: ``tracked_topics`` present = the analysis produced a
-#: plan; ``tracking_plan_not_determined`` present = the plan was not readable and
-#: the reason token says why; NEITHER key = the plan WAS read and it named
-#: nothing, "a finding [that] may be relied on" per that function's docstring.
-#: A config authored by an API caller has none of that provenance, and storing it
-#: verbatim landed it in the third bucket — proven-absent by a route that never
-#: looked. This token is the fourth honest answer and keeps the other three
-#: earned.
+#: path (``services/monitoring/enrollment._build_monitoring_config``) always
+#: emits a positive tracking-plan token: ``tracked_topics`` present = the plan
+#: was read (a non-empty list is the witnessed plan, ``[]`` the witnessed
+#: read-and-named-nothing finding); ``tracking_plan_not_determined`` present =
+#: the plan was not read and the reason token says why. A config authored by an
+#: API caller has none of that provenance, and storing it verbatim with neither
+#: key would read as a builder output that never existed. This token is the
+#: honest answer for the caller-authored case and keeps the builder's states
+#: earned; NEITHER key survives only on rows that predate the discriminant.
 CALLER_SUPPLIED_TRACKING_PLAN = "config_supplied_by_caller"
 
 

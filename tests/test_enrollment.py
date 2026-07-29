@@ -286,13 +286,15 @@ class TestBuildMonitoringConfig:
         config = _build_monitoring_config(None, [], "regular", tracked)
         assert config.get("watch_authority") is True
 
-    def test_empty_tracked_topics_omitted(self):
-        """No tracked_topics arg → no field on monitoring_config (avoids
-        polluting existing rows with empty lists during a reconcile)."""
+    def test_empty_tracked_topics_witnessed_as_empty_list(self):
+        """No tracked_topics and no not-determined token → the builder emits
+        the positive witnessed-empty ``tracked_topics: []`` (the plan was
+        read and named nothing); key absence is never a builder output."""
         from services.monitoring.enrollment import _build_monitoring_config
 
         config = _build_monitoring_config(None, [], "regular")
-        assert "tracked_topics" not in config
+        assert config["tracked_topics"] == []
+        assert "tracking_plan_not_determined" not in config
         assert "watch_authority" not in config
 
 
@@ -2303,9 +2305,11 @@ class TestTrackingPlanNotDetermined:
         Mirrors ``0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f`` (PriceProvider,
         ethereum): ready, current schema version, ``tracking_plan`` actually
         hydrates to a dict, and the analyzer derived no governance events. This
-        is the one shape where an empty ``tracked_topics`` is a finding, and it
-        must carry no flag — a fix that stamped every empty config would erase
-        the distinction it exists to make.
+        is the one shape where an empty ``tracked_topics`` is a finding: it is
+        witnessed as the PRESENT empty list, with no not-determined flag — a
+        fix that stamped every empty config would erase the distinction it
+        exists to make, and one that omitted the key would make the finding
+        indistinguishable from rows the builder never produced.
 
         The plan is read through the real ``hydrate_tracking_plan``; nothing is
         stubbed.
@@ -2322,7 +2326,7 @@ class TestTrackingPlanNotDetermined:
         assert not_determined is None
 
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert "tracked_topics" not in config
+        assert config["tracked_topics"] == []
         assert "tracking_plan_not_determined" not in config
 
     def test_a_read_plan_with_events_stays_clean_and_publishes_them(self, pg_session, materialization_factory):
