@@ -489,6 +489,15 @@ logger = logging.getLogger(__name__)
 # row holds this shape and a HIT publishes no reach keys at all — the version is
 # already minted for this unreleased window and this change rides it, stated here so a
 # reader of a v34-era residue knows which key set it was written under.
+# v35 (same version, fourth reason): ``pause_effective`` joins
+# ``DEPLOYMENT_PLANE_KEYS`` — it records whether the resolved pauser could enact
+# the pause on ONE deployment's forked state (authority, cooldown, precondition),
+# and it sat on cache rows only because the v29 split missed it. Rows minted
+# earlier in this same unreleased window may still carry it; the hit paths
+# launder served details through ``code_plane_details`` so such a row cannot
+# republish it, which is why the constant does not move: no persisted v35 row
+# exists outside this branch's own local runs, and the laundering makes the
+# residual carriers unreadable rather than wrong.
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
@@ -825,6 +834,12 @@ DEPLOYMENT_PLANE_KEYS = (
     "input_seeded",
     "contract_balance_seeded",
     "backing",
+    # Whether the resolved pauser could enact the pause ON THIS FORKED STATE
+    # (``anvil.pause_recipe``): missing authority, an active per-pauser cooldown
+    # and an unmet precondition are all facts about one deployment's state, so a
+    # twin must not inherit them. Not a kernel-signature key, so stripping it
+    # never changes the self-audit comparison.
+    "pause_effective",
 )
 
 
@@ -833,6 +848,17 @@ def code_plane_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
     if not details:
         return details
     return {k: v for k, v in details.items() if k not in DEPLOYMENT_PLANE_KEYS}
+
+
+def deployment_plane_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """The complement of :func:`code_plane_details`: only the per-deployment
+    observation keys. What a cache-hit resolution that RE-SIMULATED this
+    deployment (the self-audit) lifts from its fresh probe onto the served
+    payload, so the verdict row it rewrites keeps this deployment's own
+    qualifiers instead of the cache's structurally-stripped copy."""
+    if not details:
+        return {}
+    return {k: v for k, v in details.items() if k in DEPLOYMENT_PLANE_KEYS}
 
 
 def kernel_signature(verdict: str, details: dict[str, Any] | None) -> tuple[Any, ...]:
@@ -904,6 +930,7 @@ def record_effect_verdict(
     current_check_passed: bool | None = None,
     observed_residue: dict[str, Any] | None = None,
     witness: dict[str, Any] | None = None,
+    witness_from_cache: bool = False,
     transcript_ptr: str | None = None,
 ) -> None:
     """Upsert the per contract-function state-plane residue for one deployment.
@@ -915,6 +942,17 @@ def record_effect_verdict(
     ``(chain_id, contract_address, selector, effect_class)``; the empty-string
     ``selector`` sentinel keeps the identity constraint portable for
     fallback/receive functions.
+
+    ``witness_from_cache`` declares the SHAPE of the ``witness`` payload: it was
+    served from the code-plane cache, so :data:`DEPLOYMENT_PLANE_KEYS` are
+    structurally absent from it — their absence says nothing about this
+    deployment. Under the flag the upsert preserves the stored row's own
+    deployment-plane keys (while the code and the verdict are unchanged) instead
+    of letting the stripped copy erase them: absence of ``input_seeded`` on a
+    proven row contractually means "no seeding was needed", so the erasure
+    published a claim stronger than the producing observation. A fresh-probe
+    write (the default) stays an unconditional overwrite — there, an absent key
+    IS the current measurement.
     """
     # A candidate's function row can be replaced (delete+recreate, new id) by a
     # concurrent policy pass between selection and this write. The verdict must
@@ -1006,6 +1044,36 @@ def record_effect_verdict(
             flipped = _bookkeeping(_object(stored)).op("||")(_object(incoming))
             return func.nullif(case((residue_still_stands, merged), else_=flipped), empty)
 
+        def merge_witness(incoming, stored):
+            """Cache-served rewrites only (``witness_from_cache``): keep the stored
+            row's deployment-plane keys under the same lifecycle as residue — same
+            code AND same verdict — with incoming keys winning where present. The
+            producing write put this deployment's own qualifiers here (the cache
+            copy is stripped by design), and a self-hit's rewrite must not erase
+            them: their ABSENCE is a contractual statement ("no seeding was
+            needed", "no blast radius observed") that the hit never earned. A
+            changed verdict or changed code drops them with the witness they
+            qualified, exactly as the unconditional branch below always has."""
+            empty = text("'{}'::jsonb")
+
+            def _object(col):
+                return func.coalesce(func.nullif(col, text("'null'::jsonb")), empty)
+
+            picked = func.jsonb_build_object()
+            for key in DEPLOYMENT_PLANE_KEYS:
+                value = _object(stored).op("->")(key)
+                picked = picked.op("||")(case((value.is_not(None), func.jsonb_build_object(key, value)), else_=empty))
+            merged = func.nullif(picked.op("||")(_object(incoming)), empty)
+            incoming_present = func.nullif(_object(incoming), empty).is_not(None)
+            return case(
+                (and_(residue_still_stands, incoming_present), merged),
+                # A hit served from a NULL-details cache row asserts the same
+                # verdict of the same code and nothing else — the stored evidence
+                # still describes it, so it stands (keep_residue semantics).
+                (residue_still_stands, stored),
+                else_=incoming,
+            )
+
         return stmt.on_conflict_do_update(
             constraint="uq_effect_verdicts_identity",
             set_={
@@ -1024,8 +1092,15 @@ def record_effect_verdict(
                 "observed_residue": merge_residue(stmt.excluded.observed_residue, existing.observed_residue),
                 # Evidence FOR the verdict above, so it moves with it: preserving a
                 # "proven" witness next to a downgraded ``unknown`` verdict would
-                # publish a contradiction. Deliberately not residue-preserved.
-                "witness": stmt.excluded.witness,
+                # publish a contradiction. Not residue-preserved as a whole — but a
+                # cache-served rewrite of the SAME verdict of the SAME code keeps
+                # the stored deployment-plane keys the stripped payload cannot
+                # carry (``merge_witness``).
+                "witness": (
+                    merge_witness(stmt.excluded.witness, existing.witness)
+                    if witness_from_cache
+                    else stmt.excluded.witness
+                ),
                 "transcript_ptr": stmt.excluded.transcript_ptr,
                 "updated_at": text("NOW()"),
             },

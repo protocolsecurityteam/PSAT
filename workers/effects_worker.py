@@ -46,6 +46,8 @@ from sqlalchemy.orm import Session
 from db.effect_cache import (
     AUDIT_FAILED,
     bump_hit,
+    code_plane_details,
+    deployment_plane_details,
     find_cached_verdict,
     find_cached_verdicts_batch,
     find_verdict_residue_batch,
@@ -311,6 +313,29 @@ def _residue_only(concrete: dict[str, Any] | None, effect_class: str) -> dict[st
         return None
     value = concrete.get(key)
     return {key: value} if value is not None else None
+
+
+def _details_with_fresh_deployment_plane(
+    cached_details: dict[str, Any] | None, fresh: ObservedEffect
+) -> dict[str, Any] | None:
+    """The details an AUDITED hit persists as this deployment's witness: the
+    cache's code-plane facts with the fresh re-simulation's own deployment-plane
+    keys re-attached.
+
+    The cache stripped those keys at the write (they are one deployment's fork
+    observations), so serving ``cached.details`` verbatim rewrote the producing
+    verdict's witness WITHOUT its seeding qualifiers / blast-radius set — and
+    their absence is itself a contract ("no seeding was needed"), so the rewrite
+    published a stronger claim than the observation (the realized case: a proven
+    ``supply_burn`` whose own transcript records ``input_seeded: true`` and the
+    unseeded probe reverting). The audit just re-ran the full recipe against
+    THIS deployment, so its payload's deployment-plane keys are the current
+    measurement — including their honest absence when nothing was seeded.
+    ``code_plane_details`` on the cached side launders any same-version row
+    minted before a key joined ``DEPLOYMENT_PLANE_KEYS``."""
+    merged = dict(code_plane_details(cached_details) or {})
+    merged.update(deployment_plane_details(fresh.witness_payload))
+    return merged or None
 
 
 def _residue_probe_enabled() -> bool:
@@ -965,7 +990,9 @@ class EffectsWorker(BaseWorker):
         self, session: Session, job: Job, items: list[_Item], seams: _Seams, counters: _Counters
     ) -> None:
         for it in items:
-            verdict, tier, transcript_ptr, details, concrete, discrepancy = self._resolve_item(session, it, counters)
+            verdict, tier, transcript_ptr, details, concrete, discrepancy, witness_from_cache = self._resolve_item(
+                session, it, counters
+            )
             cand = it.candidate
             record_effect_verdict(
                 session,
@@ -1000,6 +1027,10 @@ class EffectsWorker(BaseWorker):
                 # ABSENCE as "not recorded" — rows written before it existed, and
                 # cache hits served from such a row, simply lack the key.
                 witness=details or None,
+                # The payload above was served from the code-plane cache without a
+                # re-simulation: its missing deployment-plane keys are structural,
+                # not measured, so the upsert keeps the stored row's own.
+                witness_from_cache=witness_from_cache,
                 transcript_ptr=transcript_ptr,
             )
             counters.verdicts_written += 1
@@ -1038,16 +1069,26 @@ class EffectsWorker(BaseWorker):
 
     def _resolve_item(
         self, session: Session, it: _Item, counters: _Counters
-    ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None]:
+    ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None, bool]:
         """Turn one worklist item into its persisted verdict, applying the cache /
-        self-audit rules."""
+        self-audit rules.
+
+        The trailing bool is ``witness_from_cache``: the details being persisted
+        were served from the code-plane cache WITHOUT a fresh re-simulation, so
+        ``DEPLOYMENT_PLANE_KEYS`` are structurally absent from them and the
+        verdict upsert must not read that absence as a measurement (it would
+        erase the producing write's own seeding qualifiers / blast-radius set —
+        whose absence is a contractual claim — on every self-hit). The audited
+        hit paths return ``False`` because they re-attach the fresh probe's own
+        deployment-plane keys below: there, an absent key IS this run's
+        measurement."""
         if it.cached is None:
             # MISS — the probe result is the verdict; write it to the code-plane cache.
             eff = it.probed
             if eff is None:
                 # Probe failed (degraded already recorded) → fail-closed unknown,
                 # NOT cached (a flake must not poison the shared cache).
-                return VERDICT_UNKNOWN, TIER_CALL, None, None, None, None
+                return VERDICT_UNKNOWN, TIER_CALL, None, None, None, None, False
             counters.cache_misses += 1
             if _is_cacheable(eff):
                 self._cache_miss_write(session, it, eff, audit_status=None)
@@ -1058,6 +1099,7 @@ class EffectsWorker(BaseWorker):
                 eff.witness_payload or None,
                 eff.concrete,
                 eff.discrepancy,
+                False,
             )
 
         cached = it.cached
@@ -1100,9 +1142,10 @@ class EffectsWorker(BaseWorker):
                         cached.verdict,
                         cached.tier,
                         cached.transcript_ptr,
-                        cached.details,
+                        _details_with_fresh_deployment_plane(cached.details, fresh),
                         _residue_only(fresh.concrete, it.effect_class),
                         None,
+                        False,
                     )
                 record_degraded(
                     phase="effect_cache_audit_floor",
@@ -1124,6 +1167,7 @@ class EffectsWorker(BaseWorker):
                     fresh.witness_payload or None,
                     fresh.concrete,
                     fresh.discrepancy,
+                    False,
                 )
             agree = kernel_verdicts_agree(cached.verdict, cached.details, fresh.verdict, fresh.details)
             mark_audited(session, cached, passed=agree, peer_hash=it.surface_hash or it.behavior_hash)
@@ -1133,14 +1177,18 @@ class EffectsWorker(BaseWorker):
             self._count_hit(it, counters)
             # The audit already re-simulated THIS deployment, so its state-plane
             # residue is in hand at no extra cost — the verdict still comes from
-            # the cache (the audit only confirmed they agree).
+            # the cache (the audit only confirmed they agree), while the
+            # deployment-plane qualifiers come from the fresh probe: they are
+            # THIS deployment's own observation, which the cache structurally
+            # cannot carry.
             return (
                 cached.verdict,
                 cached.tier,
                 cached.transcript_ptr,
-                cached.details,
+                _details_with_fresh_deployment_plane(cached.details, fresh),
                 _residue_only(fresh.concrete, it.effect_class),
                 None,
+                False,
             )
 
         if cached.audit_status == AUDIT_FAILED:
@@ -1159,7 +1207,21 @@ class EffectsWorker(BaseWorker):
             concrete = _residue_only(it.probed.concrete, it.effect_class)
             if concrete is not None:
                 counters.residue_observations += 1
-        return cached.verdict, cached.tier, cached.transcript_ptr, cached.details, concrete, None
+        # ``code_plane_details`` is a no-op on a row written at the current
+        # version; it launders any earlier same-version row that still carries a
+        # newly-classified deployment-plane key (``pause_effective``), so a hit
+        # can never republish one deployment's fork state as another's.
+        # ``witness_from_cache=True``: no re-simulation happened here, so the
+        # verdict upsert must keep the stored row's own deployment-plane keys.
+        return (
+            cached.verdict,
+            cached.tier,
+            cached.transcript_ptr,
+            code_plane_details(cached.details),
+            concrete,
+            None,
+            True,
+        )
 
     def _cache_miss_write(self, session: Session, it: _Item, eff: ObservedEffect, *, audit_status: str | None) -> None:
         upsert_cached_verdict(
@@ -1178,7 +1240,7 @@ class EffectsWorker(BaseWorker):
 
     def _withhold_collision(
         self, session: Session, cached: EffectBehaviorCache, it: _Item, counters: _Counters, *, reason: str
-    ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None]:
+    ) -> tuple[str, str, str | None, dict[str, Any] | None, dict[str, Any] | None, Discrepancy | None, bool]:
         """A caught hash collision / poisoned key: withhold the cached verdict and
         file a discrepancy. The cached verdict is NEVER propagated to this
         deployment."""
@@ -1187,7 +1249,7 @@ class EffectsWorker(BaseWorker):
             effect_class=it.effect_class,
             detail={"behavior_hash": it.behavior_hash, "cached_verdict": cached.verdict},
         )
-        return VERDICT_UNKNOWN, TIER_CALL, None, None, None, disc
+        return VERDICT_UNKNOWN, TIER_CALL, None, None, None, disc, False
 
     def _count_hit(self, it: _Item, counters: _Counters) -> None:
         if it.scope == SCOPE_KERNEL:
