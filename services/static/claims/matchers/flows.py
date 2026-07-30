@@ -80,6 +80,17 @@ def _flow_entry(ctx: ClaimContext, function: str, f: dict[str, Any]) -> dict[str
     # (folded kind ``param``), so no consumer reads a guessed value elsewhere.
     if isinstance(f.get("target_kind"), dict) and f["target_kind"].get("kind") == "param":
         entry["target_constraint"] = _facts.param_constraint(ctx, function, f.get("target_param_index"))
+    # The identity of the op(s) carrying a routed move, so a consumer holding
+    # only the persisted witness reads what ``_facts.effect_sink_identities``
+    # reads in process. ``callee`` is an INTRA-UNIT AST name, never a resolved
+    # on-chain target: an interface-typed parameter makes the declared signature
+    # hash to a different selector, which is why the name travels beside it.
+    # Guarded, so a missing record and ``[]`` alike leave the key ABSENT and the
+    # existing fail-closed reading holds — a routed flow with no recorded op
+    # makes nothing transparent, its router leaf blocks, and the mandatory gate
+    # falls to ``not_determined``. No consumer can read ``[]`` as "no router".
+    if f.get("router_ops"):
+        entry["router_ops"] = f["router_ops"]
     return entry
 
 

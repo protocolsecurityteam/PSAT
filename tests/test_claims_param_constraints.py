@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from services.static.claims.context import ClaimContext
-from services.static.claims.matchers import _facts
+from services.static.claims.matchers import _facts, flows
 
 
 def _ctx(
@@ -367,6 +367,94 @@ def test_a_routed_flow_without_recorded_router_ops_makes_nothing_transparent():
         ],
     )
     assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+
+
+# ---------------------------------------------------------------------------
+# The recorded op reaches the PUBLISHED witness, not only the in-process read
+# ---------------------------------------------------------------------------
+
+
+def _routed_flow(**extra: Any) -> dict[str, Any]:
+    return {
+        "kind": "callee_erc20_selector",
+        "selector": "0xa9059cbb",
+        "direction": "value_router",
+        "origin": "body",
+        "from_is_self": True,
+        **extra,
+    }
+
+
+def test_the_recorded_router_op_is_projected_into_the_published_witness():
+    """The transparency join above runs on the producer dict in process; a
+    consumer holding only the persisted claim saw none of it. The projection
+    carries the op identity through verbatim — ``selector`` is the keccak4 of
+    the callee's canonical signature and ``callee`` its bare AST name, an
+    intra-unit call identity and never a resolved on-chain target."""
+    ctx = _ctx(
+        _leaf(**_ROUTER_LEAF),
+        sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
+        flows=[_routed_flow(router_ops=[{"selector": "0x18457e61", "callee": "exit"}])],
+    )
+    evidence = flows.value_router(ctx, "f(address,uint256)")
+    assert evidence is not None
+    assert evidence.witness == {
+        "kind": "value_flow",
+        "direction": "value_router",
+        "flows": [
+            {
+                "kind": "callee_erc20_selector",
+                "selector": "0xa9059cbb",
+                "from_is_self": True,
+                "router_ops": [{"selector": "0x18457e61", "callee": "exit"}],
+            }
+        ],
+        "sink_ids": [],
+    }
+
+
+def test_every_recorded_op_is_projected_in_the_producers_order():
+    """A crossing that carries the move through two calls records both. The
+    projection is a passthrough, so the consumer sees the same ops in the same
+    order the producer sorted them into — dropping or reordering one would
+    silently narrow the transparency set."""
+    ops = [{"selector": "0x39d6ba32", "callee": "enter"}, {"selector": "0x9729bb1e", "callee": "safeTransferFrom"}]
+    ctx = _ctx(_leaf(**_ROUTER_LEAF), flows=[_routed_flow(router_ops=list(ops))])
+    evidence = flows.value_router(ctx, "f(address,uint256)")
+    assert evidence is not None
+    assert evidence.witness["flows"][0]["router_ops"] == ops
+
+
+@pytest.mark.parametrize("recorded", [None, []], ids=["absent", "empty"])
+def test_an_unrecorded_router_op_leaves_the_key_absent_and_the_gate_undetermined(recorded):
+    """Both failure shapes — the field never written, and a written empty list —
+    publish the SAME thing: no key. ``[]`` must never reach a consumer, because
+    an empty set of ops reads as "this routed flow has no router" and would
+    license the transparency the absence is supposed to deny. The paired gate
+    assertion pins that denial: the router's own leaf blocks and the parameter
+    stays ``not_determined``."""
+    flow = _routed_flow() if recorded is None else _routed_flow(router_ops=recorded)
+    ctx = _ctx(
+        _leaf(**_ROUTER_LEAF),
+        sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
+        flows=[flow],
+    )
+    evidence = flows.value_router(ctx, "f(address,uint256)")
+    assert evidence is not None
+    assert evidence.witness["flows"] == [
+        {"kind": "callee_erc20_selector", "selector": "0xa9059cbb", "from_is_self": True}
+    ]
+    assert _facts.param_constraint(ctx, "f(address,uint256)", 0) == {"state": "not_determined"}
+
+
+def test_an_unrouted_flow_never_carries_a_router_op():
+    """The projection is reachable from every flow entry, so the non-routed
+    control matters: a plain out-flow the producer never gave ops to publishes
+    no key either."""
+    ctx = _ctx(_leaf(**_ROUTER_LEAF), sinks=[{**VALUE_SINK, "id": "s1"}], flows=[VALUE_FLOW])
+    evidence = flows.flow_out(ctx, "f(address,uint256)")
+    assert evidence is not None
+    assert "router_ops" not in evidence.witness["flows"][0]
 
 
 # ---------------------------------------------------------------------------
