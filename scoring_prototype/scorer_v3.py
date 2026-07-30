@@ -161,6 +161,7 @@ DELIBERATELY NOT BUILT, with cause:
    (registry_address, role) -- a Solmate role integer is meaningful only per
    registry -- and that is a second aggregation pass this prototype does not make.
 """
+
 import json
 import math
 import os
@@ -178,10 +179,20 @@ DB = os.environ["DATABASE_URL"]
 
 # B0b/R16: withdraw the inv.2 charge against claim_id, add the openness gate.
 PRODUCT_CLAIMS = {
-    "flow.in", "erc20.approve", "erc20.transfer", "erc20.transfer_from",
-    "gov.delegate", "pause.unset", "supply.mint", "supply.burn",
-    "ownership.accept", "ownership.renounce", "timelock.execute",
-    "timelock.schedule", "timelock.cancel", "rate_limit.consume",
+    "flow.in",
+    "erc20.approve",
+    "erc20.transfer",
+    "erc20.transfer_from",
+    "gov.delegate",
+    "pause.unset",
+    "supply.mint",
+    "supply.burn",
+    "ownership.accept",
+    "ownership.renounce",
+    "timelock.execute",
+    "timelock.schedule",
+    "timelock.cancel",
+    "rate_limit.consume",
 }
 # B0b/S5: supply.mint/supply.burn are in PRODUCT_CLAIMS and an EOA-gated
 # mintShares on a $3.5B token would be dropped silently. Harmless on this corpus
@@ -190,9 +201,14 @@ PRODUCT_CLAIMS = {
 NOT_SCORED = {"value_router", "contract_deployment", "callee_pointer.rotate"}
 
 TRANSITIVE_CAPS = {
-    "upgrade.implementation", "exec.arbitrary", "delegatecall.execute",
-    "authority.replace", "ownership.transfer", "roles.grant",
-    "roles.configure", "authorized_caller.rotate",
+    "upgrade.implementation",
+    "exec.arbitrary",
+    "delegatecall.execute",
+    "authority.replace",
+    "ownership.transfer",
+    "roles.grant",
+    "roles.configure",
+    "authorized_caller.rotate",
 }
 REVERSIBLE_CAPS = {"pause.set"}
 
@@ -204,7 +220,7 @@ BASE_SEV = {
     "roles.configure": 0.55,
     "authorized_caller.rotate": 0.55,
     "ownership.transfer": 0.55,
-    "pause.set": 0.0,              # V7: set from proven components only
+    "pause.set": 0.0,  # V7: set from proven components only
     "transfer_policy.configure": 0.25,
     "timelock.set_delay": 0.3,
     "lz_oapp.set_peer": 0.3,
@@ -216,9 +232,9 @@ BASE_SEV = {
 
 # V7 freeze ladder. No duration term: duration_bound_source is not_determined on
 # 4/4 and licenses nothing either way (T-INDEF).
-FREEZE_KEYSET_RECOVERABLE = 0.05   # a disjoint quorum can lift it -- proven
-FREEZE_SUSTAINABLE = 0.20          # this key set can hold its own freeze
-FREEZE_AUTO_EXPIRY = 0.02          # requires auto_expiry is True (T-BOUND)
+FREEZE_KEYSET_RECOVERABLE = 0.05  # a disjoint quorum can lift it -- proven
+FREEZE_SUSTAINABLE = 0.20  # this key set can hold its own freeze
+FREEZE_AUTO_EXPIRY = 0.02  # requires auto_expiry is True (T-BOUND)
 
 # V3: the writer's own fixed-target set. `constant` and `storage_no_setter` are
 # 0/0 on this corpus, so the rule is validated on one third of its input domain.
@@ -226,9 +242,16 @@ FIXED_TARGET_KINDS = {"immutable", "constant", "storage_no_setter"}
 ADMIN_TARGET_KIND = "storage_setter"
 # Worst-first, for `several` expansion (rule 1).
 TARGET_KIND_RANK = {
-    "indeterminate": 0, "param": 1, "msg_sender": 2, "caller_controlled": 2,
-    "token_owner": 3, "self": 4, "storage_setter": 5,
-    "storage_no_setter": 6, "constant": 7, "immutable": 7,
+    "indeterminate": 0,
+    "param": 1,
+    "msg_sender": 2,
+    "caller_controlled": 2,
+    "token_owner": 3,
+    "self": 4,
+    "storage_setter": 5,
+    "storage_no_setter": 6,
+    "constant": 7,
+    "immutable": 7,
 }
 # V2: exactly three kinds (effects.py:122); native side pinned at calldata.py:1033.
 NATIVE_FLOW_KINDS = {"native_transfer_send", "low_level_value_call"}
@@ -256,8 +279,7 @@ def band(usd):
 
 
 def band_label(usd):
-    for lo, lab in [(1e9, ">$1B"), (1e8, "$100M-$1B"), (1e7, "$10M-$100M"),
-                    (1e6, "$1M-$10M"), (1e5, "$100k-$1M")]:
+    for lo, lab in [(1e9, ">$1B"), (1e8, "$100M-$1B"), (1e7, "$10M-$100M"), (1e6, "$1M-$10M"), (1e5, "$100k-$1M")]:
         if usd >= lo:
             return lab
     return "<$100k"
@@ -280,32 +302,40 @@ def _norm_sig(s):
 
 # ---------------------------------------------------------------- load
 
+
 def load():
     conn = psycopg2.connect(DB)
     conn.set_session(readonly=True)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    cur.execute("""
+    cur.execute(
+        """
         select id, lower(address) addr, chain, contract_name, is_proxy,
                proxy_type, lower(admin) admin, lower(implementation) impl,
                lower(beacon) beacon
         from contracts where protocol_id=%s order by id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     contracts = {r["id"]: r for r in cur.fetchall()}
 
     # V1/V2: per-asset, keyed for MAX-per-(holder,asset) reduction. `usd_value`
     # NULL is not_determined, never 0 (T-PRICE: 432 rows carry price_usd=0 with
     # usd_value NULL, and nothing distinguishes spam from a failed lookup).
-    cur.execute("""
+    cur.execute(
+        """
         select cb.contract_id cid, lower(c.address) caddr,
                coalesce(lower(cb.token_address),'native') asset,
                cb.token_symbol, cb.usd_value, cb.fetched_at
         from contract_balances cb join contracts c on c.id=cb.contract_id
         where c.protocol_id=%s order by cb.contract_id, asset, cb.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     bal_rows = cur.fetchall()
 
-    cur.execute("""
+    cur.execute(
+        """
         select ef.id fid, ef.contract_id cid, ef.function_name fn,
                ef.abi_signature sig, ef.authority_openness openness,
                ef.authority_public pub, ef.claims, ef.state_changing,
@@ -313,29 +343,37 @@ def load():
                ef.capability_expr
         from effective_functions ef join contracts c on c.id=ef.contract_id
         where c.protocol_id=%s order by ef.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     funcs = cur.fetchall()
 
-    cur.execute("""
+    cur.execute(
+        """
         select fp.function_id fid, lower(fp.address) addr, fp.resolved_type rtype,
                fp.details
         from function_principals fp
         join effective_functions ef on ef.id=fp.function_id
         join contracts c on c.id=ef.contract_id
         where c.protocol_id=%s order by fp.function_id, fp.address, fp.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     princ = defaultdict(list)
     for r in cur.fetchall():
         princ[r["fid"]].append(r)
 
-    cur.execute("""
+    cur.execute(
+        """
         select lower(replace(e.from_node_id,'address:','')) frm,
                lower(replace(e.to_node_id,'address:','')) too, e.relation
         from control_graph_edges e join contracts c on c.id=e.contract_id
         where c.protocol_id=%s
           and e.relation in ('controller_value','role_principal','mapping_member')
         order by 1,2,3
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     # T-EXTCALL / R17: external_call_target and contract_dependencies are
     # excluded. safe_owner is excluded as a control edge: one owner does not
     # satisfy k-of-n, so treating it as a full edge would over-attribute.
@@ -349,16 +387,20 @@ def load():
 
     # V9 / R-REGISTRY: never queried by proto-0.2. `authority_provenance` is a
     # genuine three-state -- the key is omitted, not None, when unanswered.
-    cur.execute("""
+    cur.execute(
+        """
         select cv.contract_id cid, lower(c.address) caddr, cv.source,
                cv.value, cv.resolved_type rtype, cv.block_number blk,
                cv.authority_provenance prov, cv.observed_via via
         from controller_values cv join contracts c on c.id=cv.contract_id
         where c.protocol_id=%s order by cv.contract_id, cv.source, cv.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     cvals = cur.fetchall()
 
-    cur.execute("""
+    cur.execute(
+        """
         select acc.contract_id cid, lower(c.address) caddr, acc.proof_kind,
                acc.equivalence_status eq, acc.matched_commit_sha sha,
                acc.bytecode_keccak_at_match bkam, acc.equivalence_reason reason
@@ -366,26 +408,30 @@ def load():
         join contracts c on c.id=acc.contract_id
         where acc.protocol_id=%s
         order by acc.contract_id, acc.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     audits = cur.fetchall()
 
     # V10: the deterministic negative generator. bytecode_cache has no block, so
     # the honest claim is "matched the bytecode cached during this run".
-    cur.execute("select lower(address) addr, code_keccak from bytecode_cache "
-                "where chain_id=1 order by address")
+    cur.execute("select lower(address) addr, code_keccak from bytecode_cache where chain_id=1 order by address")
     bc = {r["addr"]: r["code_keccak"] for r in cur.fetchall()}
 
     # V3/G3: concrete_destination is NOT projected into claims; join on
     # effect_verdict_id. Gated -- on the unknown/none branch it is one
     # destination from one probe, and it is withheld on caller_arbitrary.
-    cur.execute("""
+    cur.execute(
+        """
         select ev.id, ev.verdict, ev.tier, ev.effect_class, ev.function_id fid,
                lower(ev.concrete_destination) cdest, ev.witness
         from effect_verdicts ev
         join effective_functions ef on ef.id=ev.function_id
         join contracts c on c.id=ef.contract_id
         where c.protocol_id=%s order by ev.id
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     verdicts = {r["id"]: r for r in cur.fetchall()}
 
     conn.close()
@@ -393,6 +439,7 @@ def load():
 
 
 # ---------------------------------------------------------------- V1/V2 value
+
 
 def build_value(contracts, bal_rows):
     """MAX per (runtime address, asset). A proxy and its implementation each carry
@@ -408,8 +455,7 @@ def build_value(contracts, bal_rows):
         if prev is not None and prev != c["addr"]:
             # two proxies sharing one implementation: last-wins would be
             # deterministic but arbitrary. Pin to the lowest address and record it.
-            shared_impl.append({"implementation": c["impl"],
-                                "proxies": sorted([prev, c["addr"]])})
+            shared_impl.append({"implementation": c["impl"], "proxies": sorted([prev, c["addr"]])})
             impl_to_proxy[c["impl"]] = min(prev, c["addr"])
         else:
             impl_to_proxy[c["impl"]] = c["addr"]
@@ -417,7 +463,7 @@ def build_value(contracts, bal_rows):
     def runtime(addr):
         return impl_to_proxy.get(addr, addr)
 
-    per_asset = defaultdict(dict)   # runtime addr -> asset -> usd (max)
+    per_asset = defaultdict(dict)  # runtime addr -> asset -> usd (max)
     native_seen = defaultdict(bool)
     fetched = []
     for r in bal_rows:
@@ -426,15 +472,14 @@ def build_value(contracts, bal_rows):
         if r["asset"] == "native":
             native_seen[rt] = True
         if usd is None:
-            continue            # not_determined, never 0 (T-PRICE)
+            continue  # not_determined, never 0 (T-PRICE)
         prev = per_asset[rt].get(r["asset"])
         if prev is None or usd > prev:
             per_asset[rt][r["asset"]] = usd
         if r["fetched_at"]:
             fetched.append(r["fetched_at"])
 
-    val_by_addr = {a: round(sum(sorted(d.values())), 6)
-                   for a, d in sorted(per_asset.items())}
+    val_by_addr = {a: round(sum(sorted(d.values())), 6) for a, d in sorted(per_asset.items())}
     native_by_addr = {}
     for a in sorted(per_asset):
         native_by_addr[a] = per_asset[a].get("native") if native_seen[a] else None
@@ -443,23 +488,24 @@ def build_value(contracts, bal_rows):
     prov = {
         "entity_key": "effective_functions.deployment_address -> contracts.address",
         "reduction": "MAX per (runtime address, asset)",
-        "fetched_at_span_seconds": (
-            round((max(fetched) - min(fetched)).total_seconds(), 3) if fetched else None),
+        "fetched_at_span_seconds": (round((max(fetched) - min(fetched)).total_seconds(), 3) if fetched else None),
         "replayability": (
             "contract_balances is DELETEd and re-inserted every monitoring cycle "
             "(tvl.py) with no block, no version and no history, so any figure "
             "sourced from it is NOT byte-identically replayable. Measured drift: "
             "an ETHFI price moved 0.836% between a verdict and the table 23 "
-            "minutes later. Frozen claims[] values ARE replayable."),
+            "minutes later. Frozen claims[] values ARE replayable."
+        ),
         "shared_implementations": shared_impl,
         "absent_native_row": (
-            "not_determined, never $0 -- tvl.py gates the native insert on "
-            "eth_wei > 0 and swallows a failed fetch as 0"),
+            "not_determined, never $0 -- tvl.py gates the native insert on eth_wei > 0 and swallows a failed fetch as 0"
+        ),
     }
     return val_by_addr, native_by_addr, runtime, prov
 
 
 # ---------------------------------------------------------------- V3 lattice
+
 
 def _target_kinds(flow):
     tk = flow.get("target_kind") or {}
@@ -478,7 +524,7 @@ def _target_kinds(flow):
                 out.append(str(k) if k else None)
             elif m:
                 out.append(str(m))
-        return out or [None]        # unreadable member fails CLOSED
+        return out or [None]  # unreadable member fails CLOSED
     return [kind]
 
 
@@ -513,7 +559,7 @@ def static_destination_shape(claim_list):
 
     worst = None
     for fl in considered:
-        for k in _target_kinds(fl):          # rule 1: worst member of `several`
+        for k in _target_kinds(fl):  # rule 1: worst member of `several`
             r = TARGET_KIND_RANK.get(k, 0)
             if worst is None or r < worst[0]:
                 worst = (r, k)
@@ -541,7 +587,7 @@ def amount_bounds(claim_list):
     for cl in claim_list:
         if cl.get("claim_id") != "flow.out":
             continue
-        for fl in ((cl.get("witness") or {}).get("flows") or []):
+        for fl in (cl.get("witness") or {}).get("flows") or []:
             ak = (fl.get("amount_kind") or {}).get("kind")
             if ak == "several":
                 kinds.update(str(m) for m in (fl.get("amount_kinds") or []) if m)
@@ -557,7 +603,7 @@ def flow_asset_class(claim_list):
     for cl in claim_list:
         if cl.get("claim_id") not in ("flow.out",):
             continue
-        for fl in ((cl.get("witness") or {}).get("flows") or []):
+        for fl in (cl.get("witness") or {}).get("flows") or []:
             if fl.get("from_is_self") is not True:
                 # An ABSENT key is not "this contract is the source". Defaulting it
                 # True would be a positive fact from a missing key, on the gate that
@@ -581,6 +627,7 @@ def flow_asset_class(claim_list):
 
 # ---------------------------------------------------------------- V5/V6/V12
 
+
 def _owners(details):
     o = (details or {}).get("owners") or []
     return frozenset(str(x).lower() for x in o if x)
@@ -595,7 +642,7 @@ def _threshold(details):
 
 def _trace_bases(details):
     out = set()
-    for step in ((details or {}).get("trace") or []):
+    for step in (details or {}).get("trace") or []:
         if isinstance(step, dict):
             b = step.get("basis")
             if isinstance(b, str):
@@ -644,15 +691,13 @@ def quorum_weakness(k, n, cap, reversible_proven=None):
     return 0.2
 
 
-def principal_weakness(p, cap, timelock_proposers, warn, ctx, contract_princ,
-                       reversible_proven=None):
+def principal_weakness(p, cap, timelock_proposers, warn, ctx, contract_princ, reversible_proven=None):
     """Returns (weakness, label, kind, notes). None weakness -> warning path."""
     rt = p["rtype"]
     d = p.get("details") or {}
     notes = []
     bases = _trace_bases(d)
-    steps = {str(st.get("step")) for st in ((d or {}).get("trace") or [])
-             if isinstance(st, dict)}
+    steps = {str(st.get("step")) for st in ((d or {}).get("trace") or []) if isinstance(st, dict)}
     conv = bases & WEAK_RESOLVER_BASES
     if conv:
         # CORRECTED. The first cut multiplied weakness by 1.25 here. Three things
@@ -668,15 +713,22 @@ def principal_weakness(p, cap, timelock_proposers, warn, ctx, contract_princ,
         notes.append("resolver_basis_convention:" + ",".join(sorted(conv)))
         if "live_getter_resolution" not in steps:
             notes.append("resolver_convention_uncorroborated")
-            warn.append({
-                "kind": "principal_binding_convention_uncorroborated", **ctx,
-                "principal": p["addr"], "capability": cap,
-                "note": ("the principal address is a real eth_call result but the "
-                         "BINDING rests on a 3-name accessor convention with no "
-                         "corroborating live_getter_resolution step in the trace"),
-                "missing_witness": ("a differential storage-slot comparison between "
-                                    "the public getter and the slot the gate reads"),
-            })
+            warn.append(
+                {
+                    "kind": "principal_binding_convention_uncorroborated",
+                    **ctx,
+                    "principal": p["addr"],
+                    "capability": cap,
+                    "note": (
+                        "the principal address is a real eth_call result but the "
+                        "BINDING rests on a 3-name accessor convention with no "
+                        "corroborating live_getter_resolution step in the trace"
+                    ),
+                    "missing_witness": (
+                        "a differential storage-slot comparison between the public getter and the slot the gate reads"
+                    ),
+                }
+            )
 
     if rt == "eoa":
         return 0.9, "EOA", "eoa", notes
@@ -699,23 +751,31 @@ def principal_weakness(p, cap, timelock_proposers, warn, ctx, contract_princ,
             # exactly this: its type and delay rest on a duck-type with no
             # structural corroboration in the DB at all.
             notes.append("timelock_proposer_not_determined:no_delay_credit")
-            warn.append({
-                "kind": "timelock_proposer_unresolved", **ctx,
-                "principal": p["addr"], "capability": cap,
-                "delay_seconds": dl,
-                "note": ("proven delay with an unresolved proposer set; the delay "
-                         "is not credited because a timelock whose proposer set "
-                         "and role admin are undetermined is not proven protection"),
-                "missing_witness": ("effective_functions on the timelock-as-contract "
-                                    "(schedule/execute principals) + a persisted "
-                                    "TIMELOCK_ADMIN_ROLE/DEFAULT_ADMIN_ROLE fold"),
-            })
+            warn.append(
+                {
+                    "kind": "timelock_proposer_unresolved",
+                    **ctx,
+                    "principal": p["addr"],
+                    "capability": cap,
+                    "delay_seconds": dl,
+                    "note": (
+                        "proven delay with an unresolved proposer set; the delay "
+                        "is not credited because a timelock whose proposer set "
+                        "and role admin are undetermined is not proven protection"
+                    ),
+                    "missing_witness": (
+                        "effective_functions on the timelock-as-contract "
+                        "(schedule/execute principals) + a persisted "
+                        "TIMELOCK_ADMIN_ROLE/DEFAULT_ADMIN_ROLE fold"
+                    ),
+                }
+            )
             notes.append("proven_delay_NOT_credited:protection_not_determined")
-            return 0.55, f"timelock {int(_f(dl) or 0)//86400}d(proposer?)", "timelock", notes
+            return 0.55, f"timelock {int(_f(dl) or 0) // 86400}d(proposer?)", "timelock", notes
         pk, pn = prop["k"], prop["n"]
         w = round(quorum_weakness(pk, pn, cap) * disc, 4)
         notes.append(f"delay_discount={disc};proposer={pk}/{pn}")
-        return w, f"timelock {int(_f(dl))//86400}d via {pk}/{pn}", "timelock", notes
+        return w, f"timelock {int(_f(dl)) // 86400}d via {pk}/{pn}", "timelock", notes
     if rt == "contract":
         # B0b: 26 of 78 contract principals resolve one hop. The first cut computed
         # the hop and then returned None in BOTH branches, so it changed only a
@@ -736,8 +796,7 @@ def principal_weakness(p, cap, timelock_proposers, warn, ctx, contract_princ,
             # one-hop flow.out rows above every real finding.
             # The hop is real information and it belongs in the CONFIDENCE channel:
             # it says the path is walkable, not that it is weak.
-            notes.append(f"one_hop_target_resolvable:{hop['how']}"
-                         + (f":{hop['label']}" if hop.get("label") else ""))
+            notes.append(f"one_hop_target_resolvable:{hop['how']}" + (f":{hop['label']}" if hop.get("label") else ""))
         return None, "contract", "contract", notes
     return None, rt or "unresolved", "unknown", notes
 
@@ -791,9 +850,9 @@ def keyset_independent(pauser_addr, pauser_details, unset_princs):
 
 # ---------------------------------------------------------------- main
 
+
 def main():
-    (contracts, bal_rows, funcs, princ, controls, cvals, audits, bc,
-     verdicts) = load()
+    (contracts, bal_rows, funcs, princ, controls, cvals, audits, bc, verdicts) = load()
     val_by_addr, native_by_addr, runtime, val_prov = build_value(contracts, bal_rows)
     total_value = round(sum(sorted(val_by_addr.values())), 2)
 
@@ -807,11 +866,9 @@ def main():
     for r in cvals:
         if r["source"] == "authority" and r["rtype"] == "zero" and r["prov"] == "caller_gate":
             zero_authority.add(r["caddr"])
-        if r["source"] == "owner" and r["rtype"] == "zero" and r["prov"] == "caller_gate" \
-                and r["via"] == "eth_call":
+        if r["source"] == "owner" and r["rtype"] == "zero" and r["prov"] == "caller_gate" and r["via"] == "eth_call":
             zero_owner[r["caddr"]] = r["blk"]
-        if r["source"] == "owner" and r["rtype"] in ("safe", "timelock") \
-                and r["prov"] == "caller_gate":
+        if r["source"] == "owner" and r["rtype"] in ("safe", "timelock") and r["prov"] == "caller_gate":
             v = str(r["value"] or "").lower()
             if v.startswith("0x") and len(v) == 42:
                 reg_owner[r["caddr"]] = (v, r["rtype"], r["blk"])
@@ -828,8 +885,7 @@ def main():
     safe_info = {}
     for a in sorted(safe_details):
         d = safe_details[a]
-        safe_info[a] = {"owners": _owners(d), "k": _threshold(d),
-                        "n": len(_owners(d))}
+        safe_info[a] = {"owners": _owners(d), "k": _threshold(d), "n": len(_owners(d))}
 
     # union Safes that can ACT as each other: |S| >= max(k_A,k_B) (inv.13)
     parent = {a: a for a in sorted(safe_info)}
@@ -854,23 +910,27 @@ def main():
             blk_a = A["n"] - ka + 1
             blk_b = B["n"] - kb + 1
             can_block = len(shared) >= max(blk_a, blk_b)
-            overlaps.append({
-                "a": a, "b": b, "a_k_of_n": f"{ka}/{A['n']}",
-                "b_k_of_n": f"{kb}/{B['n']}", "shared_owners": len(shared),
-                "shared_can_act_as_both": can_act,
-                "shared_can_block_both": can_block,
-                "min_coalition_to_act_as_both": max(ka, kb) if can_act else None,
-                "min_coalition_to_block_both": max(blk_a, blk_b) if can_block else None,
-                # The operative number when one owner set is a SUBSET of the other:
-                # act as the smaller with min(k) keys and block the larger with
-                # n-k+1, and the same keys do both. This is the figure the freeze
-                # warning carries, and it is smaller than either column above.
-                "shared_is_subset": (A["owners"] <= B["owners"]
-                                     or B["owners"] <= A["owners"]),
-                "min_coalition_to_freeze_and_hold": (
-                    max(min(ka, kb), min(blk_a, blk_b))
-                    if (can_act and can_block) else None),
-            })
+            overlaps.append(
+                {
+                    "a": a,
+                    "b": b,
+                    "a_k_of_n": f"{ka}/{A['n']}",
+                    "b_k_of_n": f"{kb}/{B['n']}",
+                    "shared_owners": len(shared),
+                    "shared_can_act_as_both": can_act,
+                    "shared_can_block_both": can_block,
+                    "min_coalition_to_act_as_both": max(ka, kb) if can_act else None,
+                    "min_coalition_to_block_both": max(blk_a, blk_b) if can_block else None,
+                    # The operative number when one owner set is a SUBSET of the other:
+                    # act as the smaller with min(k) keys and block the larger with
+                    # n-k+1, and the same keys do both. This is the figure the freeze
+                    # warning carries, and it is smaller than either column above.
+                    "shared_is_subset": (A["owners"] <= B["owners"] or B["owners"] <= A["owners"]),
+                    "min_coalition_to_freeze_and_hold": (
+                        max(min(ka, kb), min(blk_a, blk_b)) if (can_act and can_block) else None
+                    ),
+                }
+            )
             if can_act:
                 ra, rb = find(a), find(b)
                 if ra != rb:
@@ -905,8 +965,7 @@ def main():
                 for p in ps:
                     if p["rtype"] == "safe":
                         k, o = _threshold(p["details"]), _owners(p["details"])
-                        cand = {"k": k, "n": len(o), "addr": p["addr"],
-                                "ratio": ((k / len(o)) if (k and o) else 1.0)}
+                        cand = {"k": k, "n": len(o), "addr": p["addr"], "ratio": ((k / len(o)) if (k and o) else 1.0)}
                         # inv.5 is WEAKEST path: take the weakest proposer, not the
                         # strongest. Latent here (each analysed timelock has exactly
                         # one Safe proposer) but it fails in the flattering direction.
@@ -953,8 +1012,7 @@ def main():
                     worst = (cand, lab)
         return worst
 
-    for a in sorted({p["addr"] for fid in sorted(princ) for p in princ[fid]
-                     if p["rtype"] == "contract"}):
+    for a in sorted({p["addr"] for fid in sorted(princ) for p in princ[fid] if p["rtype"] == "contract"}):
         cid = addr_to_cid.get(a)
         tgt, how = None, None
         if cid is not None and fn_by_cid.get(cid):
@@ -962,8 +1020,7 @@ def main():
         else:
             impl = (contracts.get(cid) or {}).get("impl") if cid is not None else None
             if impl and impl in analyzed:
-                tgt = next((c for c in sorted(contracts)
-                            if addr_of_cid[c] == impl and fn_by_cid.get(c)), None)
+                tgt = next((c for c in sorted(contracts) if addr_of_cid[c] == impl and fn_by_cid.get(c)), None)
                 how = "via_implementation"
         if tgt is None:
             continue
@@ -971,15 +1028,14 @@ def main():
         contract_princ[a] = {
             "how": how,
             "weakness": (round(min(1.0, w[0] * 1.1), 4) if w else None),
-            "label": (f"{w[1]} (one hop through {contracts[tgt]['contract_name']})"
-                      if w else None),
+            "label": (f"{w[1]} (one hop through {contracts[tgt]['contract_name']})" if w else None),
         }
 
     # ---- pause pre-pass (V6/V7) ----
     unset_by_c = defaultdict(list)
     pause_set_by_c = defaultdict(list)
     for f in funcs:
-        for cl in (f["claims"] or []):
+        for cl in f["claims"] or []:
             cid = cl.get("claim_id")
             if cid == "pause.unset":
                 for p in princ.get(f["fid"], []):
@@ -999,8 +1055,8 @@ def main():
     # signatures of pause.*-claiming functions per contract (structural)
     pause_claim_sigs = defaultdict(set)
     for f in funcs:
-        for cl in (f["claims"] or []):
-            if str(cl.get("claim_id","")).startswith("pause."):
+        for cl in f["claims"] or []:
+            if str(cl.get("claim_id", "")).startswith("pause."):
                 pause_claim_sigs[f["cid"]].add(_norm_sig(f["sig"] or f["fn"]))
 
     freeze_scope = {}
@@ -1022,31 +1078,43 @@ def main():
         den_kept = [d for d in den if _norm_sig(d) not in pause_sigs]
         unmatched = sorted({d for d in den_kept if _norm_sig(d) not in known})
         if unmatched:
-            warnings.append({
-                "kind": "scored_denominator_unmatched_signatures",
-                "contract": contracts[cid]["contract_name"] if cid else None,
-                "note": ("scored_denominator entries are Solidity source-level type "
-                         "names that match no abi_signature; surfaced rather than "
-                         "silently dropped, which would shrink the denominator"),
-                "entries": unmatched,
-                "missing_witness": "canonical ABI encoding of the static guard set",
-            })
+            warnings.append(
+                {
+                    "kind": "scored_denominator_unmatched_signatures",
+                    "contract": contracts[cid]["contract_name"] if cid else None,
+                    "note": (
+                        "scored_denominator entries are Solidity source-level type "
+                        "names that match no abi_signature; surfaced rather than "
+                        "silently dropped, which would shrink the denominator"
+                    ),
+                    "entries": unmatched,
+                    "missing_witness": "canonical ABI encoding of the static guard set",
+                }
+            )
         freeze_scope[fid] = {
             "denominator_entries": sorted(den_kept),
             "blast_entries": sorted(blast),
-            "coverage_fraction": (round(len(blast) / len(den_kept), 4)
-                                  if den_kept else None),
+            "coverage_fraction": (round(len(blast) / len(den_kept), 4) if den_kept else None),
             "pre_pause_succeeding": sorted(str(x) for x in (w.get("pre_pause_succeeding") or [])),
             "unmatched": unmatched,
         }
 
     # ---------------------------------------------------------------- scoring
-    ledger = defaultdict(lambda: {
-        "instances": [], "max_weakness": 0.0, "weakest_label": None,
-        "seed_addrs": set(), "witness_tiers": set(), "sev_reasons": set(),
-        "capability": None, "principal": None, "principal_kind": None,
-        "notes": set(), "citations": [],
-    })
+    ledger = defaultdict(
+        lambda: {
+            "instances": [],
+            "max_weakness": 0.0,
+            "weakest_label": None,
+            "seed_addrs": set(),
+            "witness_tiers": set(),
+            "sev_reasons": set(),
+            "capability": None,
+            "principal": None,
+            "principal_kind": None,
+            "notes": set(),
+            "citations": [],
+        }
+    )
     freeze_facts = []
     earned_negatives = []
 
@@ -1058,34 +1126,43 @@ def main():
         openness = f["openness"]
         claims = f["claims"] or []
         fprinc = princ.get(f["fid"], [])
-        ctx = {"contract": c["contract_name"], "address": rt_addr,
-               "code_address": caddr, "function": f["fn"]}
+        ctx = {"contract": c["contract_name"], "address": rt_addr, "code_address": caddr, "function": f["fn"]}
 
         # ---- V9 earned negatives: resolved_empty, as findings not dismissals ----
         cexpr = f["capability_expr"] or {}
-        if isinstance(cexpr, dict) and cexpr.get("kind") == "finite_set" \
-                and cexpr.get("members") == [] \
-                and cexpr.get("membership_quality") == "exact" \
-                and cexpr.get("confidence") == "enumerable" \
-                and not fprinc:
+        if (
+            isinstance(cexpr, dict)
+            and cexpr.get("kind") == "finite_set"
+            and cexpr.get("members") == []
+            and cexpr.get("membership_quality") == "exact"
+            and cexpr.get("confidence") == "enumerable"
+            and not fprinc
+        ):
             tr = cexpr.get("trace") or []
-            basis0 = (tr[0].get("basis") if tr and isinstance(tr[0], dict) else None)
-            step0 = (tr[0].get("step") if tr and isinstance(tr[0], dict) else None)
+            basis0 = tr[0].get("basis") if tr and isinstance(tr[0], dict) else None
+            step0 = tr[0].get("step") if tr and isinstance(tr[0], dict) else None
             if basis0 == "accessor_name" or step0 in (None, "", "unrecorded"):
                 # _pending_ceiling_capability mints an exact empty from an
                 # accessor's `pending` NAME PREFIX and says so in its docstring.
-                warnings.append({
-                    "kind": ("empty_caller_set_name_derived" if basis0 == "accessor_name"
-                             else "empty_caller_set_no_provenance"),
-                    **ctx,
-                    "note": ("exact+enumerable empty with no recorded step, basis, "
-                             "block or reason -- indistinguishable from a defaulted "
-                             "empty (predicate_evaluator.py:783 returns this shape on "
-                             "`if not result_addr`, which is also true of a burn "
-                             "address); or produced from an accessor name prefix, "
-                             "which inv.2 bans outright"),
-                    "missing_witness": "a recorded resolution step with a block",
-                })
+                warnings.append(
+                    {
+                        "kind": (
+                            "empty_caller_set_name_derived"
+                            if basis0 == "accessor_name"
+                            else "empty_caller_set_no_provenance"
+                        ),
+                        **ctx,
+                        "note": (
+                            "exact+enumerable empty with no recorded step, basis, "
+                            "block or reason -- indistinguishable from a defaulted "
+                            "empty (predicate_evaluator.py:783 returns this shape on "
+                            "`if not result_addr`, which is also true of a burn "
+                            "address); or produced from an accessor name prefix, "
+                            "which inv.2 bans outright"
+                        ),
+                        "missing_witness": "a recorded resolution step with a block",
+                    }
+                )
             else:
                 reenabler = None
                 for a, (own, _t, _b) in sorted(registry_owners.items()):
@@ -1097,25 +1174,27 @@ def main():
                         auth_owner = registry_owners.get(str(r["value"] or "").lower())
                 if auth_owner:
                     reenabler = auth_owner[0]
-                earned_negatives.append({
-                    **ctx,
-                    "fact": "no resolved caller can reach this function",
-                    "basis": step0 or "unrecorded",
-                    "claims_on_function": sorted(
-                        {cl.get("claim_id") for cl in claims if cl.get("claim_id")}),
-                    "value_at_runtime_address_usd": round(cval, 2),
-                    "state": "currently_unreachable",
-                    "re_enablable_by": reenabler,
-                    "counterfactual": (
-                        f"one setRoleCapability + one setUserRole from {reenabler} "
-                        "restores reachability" if reenabler else
-                        "one ownership/authority write restores reachability"),
-                    "as_of_block": "NOT PERSISTED -- last_indexed_block and "
-                                   "empty_reason are dropped by the finite_set "
-                                   "combinators (capabilities.py:507-550)",
-                    "axiom": "msg.sender != 0x0 (the owner disjunct is {0x0}, a "
-                             "singleton, not the empty set; the pipeline drops it)",
-                })
+                earned_negatives.append(
+                    {
+                        **ctx,
+                        "fact": "no resolved caller can reach this function",
+                        "basis": step0 or "unrecorded",
+                        "claims_on_function": sorted({cl.get("claim_id") for cl in claims if cl.get("claim_id")}),
+                        "value_at_runtime_address_usd": round(cval, 2),
+                        "state": "currently_unreachable",
+                        "re_enablable_by": reenabler,
+                        "counterfactual": (
+                            f"one setRoleCapability + one setUserRole from {reenabler} restores reachability"
+                            if reenabler
+                            else "one ownership/authority write restores reachability"
+                        ),
+                        "as_of_block": "NOT PERSISTED -- last_indexed_block and "
+                        "empty_reason are dropped by the finite_set "
+                        "combinators (capabilities.py:507-550)",
+                        "axiom": "msg.sender != 0x0 (the owner disjunct is {0x0}, a "
+                        "singleton, not the empty set; the pipeline drops it)",
+                    }
+                )
             continue
 
         for claim in claims:
@@ -1126,15 +1205,22 @@ def main():
                     # surfaced with its weakness, never dropped. `value_router` has a
                     # standing inv.2 argument (the entry is neither source nor sink);
                     # these two do not.
-                    warnings.append({
-                        "kind": "claim_type_not_scored", **ctx, "capability": cid,
-                        "note": ("no severity model exists for this claim type, so it "
-                                 "is excluded from the grade. Exclusion is not a "
-                                 "judgement that the capability is benign"),
-                        "missing_witness": ("a severity semantics for " + cid +
-                                            " (and, for callee_pointer.rotate, the "
-                                            "principal of the pointer's setter)"),
-                    })
+                    warnings.append(
+                        {
+                            "kind": "claim_type_not_scored",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                "no severity model exists for this claim type, so it "
+                                "is excluded from the grade. Exclusion is not a "
+                                "judgement that the capability is benign"
+                            ),
+                            "missing_witness": (
+                                "a severity semantics for " + cid + " (and, for callee_pointer.rotate, the "
+                                "principal of the pointer's setter)"
+                            ),
+                        }
+                    )
                 continue
             # V11: product only if provenly permissionless.
             if cid in PRODUCT_CLAIMS:
@@ -1143,14 +1229,19 @@ def main():
                     # design (pause.unset SHOULD be gated). The B0b finding is
                     # narrower: not_determined is not product.
                     continue
-                warnings.append({
-                    "kind": "product_claim_reachability_unproven", **ctx,
-                    "capability": cid,
-                    "note": (f"{cid} treated as product on claim_id alone by "
-                             "proto-0.2, but authority_openness is "
-                             f"{openness!r}; not_determined is not product"),
-                    "missing_witness": "authority_openness = open",
-                })
+                warnings.append(
+                    {
+                        "kind": "product_claim_reachability_unproven",
+                        **ctx,
+                        "capability": cid,
+                        "note": (
+                            f"{cid} treated as product on claim_id alone by "
+                            "proto-0.2, but authority_openness is "
+                            f"{openness!r}; not_determined is not product"
+                        ),
+                        "missing_witness": "authority_openness = open",
+                    }
+                )
                 continue
             if cid not in BASE_SEV:
                 continue
@@ -1164,7 +1255,7 @@ def main():
             inst_val = cval
             val_basis = "runtime_address_balance_sheet"
             notes = set()
-            value_entities = None      # 16a: set when the witness names a holder
+            value_entities = None  # 16a: set when the witness names a holder
 
             # ---------- V1/V2/V4 magnitude ----------
             if cid == "flow.out":
@@ -1185,8 +1276,7 @@ def main():
                 if rd and rv is not None:
                     inst_val = rv
                     val_basis = "observed_reach_value_usd(fork-proven)"
-                    citations.append({"field": "observed_reach_value_usd",
-                                      "value": rv, "holders": sorted(holders)})
+                    citations.append({"field": "observed_reach_value_usd", "value": rv, "holders": sorted(holders)})
                     if holders and not any(h in (rt_addr, caddr) for h in holders):
                         # 16a: the value belongs to the HOLDER entity, not the
                         # analyzed row. Detecting this and still keying on the
@@ -1203,31 +1293,41 @@ def main():
                     fl_usd = _f(obs.get("observed_reach_floor_usd"))
                     inst_val = fl_usd
                     val_basis = "observed_reach_floor_usd(>= floor)"
-                    citations.append({"field": "observed_reach_floor_usd",
-                                      "value": fl_usd, "direction": "lower_bound"})
+                    citations.append({"field": "observed_reach_floor_usd", "value": fl_usd, "direction": "lower_bound"})
                 elif priced is not None:
                     # 16a/inv.9: a proven partial FLOOR. Raises, never caps.
                     inst_val = priced
-                    val_basis = f"observed_reach_priced_usd(>= floor)"
-                    citations.append({
-                        "field": "observed_reach_priced_usd",
-                        "value": priced, "direction": "lower_bound",
-                        "priced_holders": sorted(
-                            str(h).lower() for h in
-                            (obs.get("observed_reach_priced_holders") or [])),
-                        "unpriced_triples": [
-                            {"pair": pr, "reason": rs}
-                            for pr, rs in zip(
-                                obs.get("observed_reach_unvalued_pairs") or [],
-                                obs.get("observed_reach_unvalued_reasons") or [])],
-                    })
-                    warnings.append({
-                        "kind": "reach_partially_priced", **ctx, "capability": cid,
-                        "note": (f"reach is a proven floor of >= ${priced:,.2f}; the "
-                                 "unpriced remainder is a confidence gap, not a "
-                                 "small reach"),
-                        "missing_witness": "observed_reach_unvalued_pairs pricing",
-                    })
+                    val_basis = "observed_reach_priced_usd(>= floor)"
+                    citations.append(
+                        {
+                            "field": "observed_reach_priced_usd",
+                            "value": priced,
+                            "direction": "lower_bound",
+                            "priced_holders": sorted(
+                                str(h).lower() for h in (obs.get("observed_reach_priced_holders") or [])
+                            ),
+                            "unpriced_triples": [
+                                {"pair": pr, "reason": rs}
+                                for pr, rs in zip(
+                                    obs.get("observed_reach_unvalued_pairs") or [],
+                                    obs.get("observed_reach_unvalued_reasons") or [],
+                                )
+                            ],
+                        }
+                    )
+                    warnings.append(
+                        {
+                            "kind": "reach_partially_priced",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                f"reach is a proven floor of >= ${priced:,.2f}; the "
+                                "unpriced remainder is a confidence gap, not a "
+                                "small reach"
+                            ),
+                            "missing_witness": "observed_reach_unvalued_pairs pricing",
+                        }
+                    )
                 elif str(obs.get("contract_balance_seeded")).lower() == "true":
                     # FIXES latent inv.2 #2. The verdict means "would move value
                     # if the contract were funded" -- a code capability, not a
@@ -1235,13 +1335,19 @@ def main():
                     # funded", and presence must not read as $0 either.
                     inst_val = None
                     val_basis = "contract_balance_seeded(not_determined)"
-                    warnings.append({
-                        "kind": "reach_seeded_balance_only", **ctx, "capability": cid,
-                        "note": ("the contract's own balance was OVERRIDDEN before "
-                                 "the payout, so the verdict proves a code "
-                                 "capability, not an outflow of present treasury"),
-                        "missing_witness": "an unseeded reach observation",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "reach_seeded_balance_only",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                "the contract's own balance was OVERRIDDEN before "
+                                "the payout, so the verdict proves a code "
+                                "capability, not an outflow of present treasury"
+                            ),
+                            "missing_witness": "an unseeded reach observation",
+                        }
+                    )
 
                 # ---------- V3 static lattice ----------
                 st_shape, st_reason = static_destination_shape(claims)
@@ -1250,40 +1356,51 @@ def main():
                 if "capped_by_balance" in amt_kinds:
                     notes.add("amount_capped_by_own_balance(proven upper bound)")
                 if amt_kinds:
-                    citations.append({"field": "flows[].amount_kind",
-                                      "value": sorted(amt_kinds)})
+                    citations.append({"field": "flows[].amount_kind", "value": sorted(amt_kinds)})
                 eff_shape = shape if proved_by in ("simulation", "static") else None
                 if eff_shape is None and st_shape:
                     eff_shape = st_shape
                     sev_reason = f"static_lattice:{st_reason}"
-                    warnings.append({
-                        "kind": "destination_shape_static_only", **ctx,
-                        "capability": cid, "shape": st_shape,
-                        "note": ("shape recomputed from the static lattice; no fork "
-                                 "sentinel exists on this row, so the plane that "
-                                 "could refute a false fixed-destination is absent "
-                                 "by construction"),
-                        "missing_witness": "a fork verdict (effect_verdicts sentinel)",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "destination_shape_static_only",
+                            **ctx,
+                            "capability": cid,
+                            "shape": st_shape,
+                            "note": (
+                                "shape recomputed from the static lattice; no fork "
+                                "sentinel exists on this row, so the plane that "
+                                "could refute a false fixed-destination is absent "
+                                "by construction"
+                            ),
+                            "missing_witness": "a fork verdict (effect_verdicts sentinel)",
+                        }
+                    )
 
                 if eff_shape == "caller_arbitrary" and tier != "behavioral_observed":
                     # §E: a tier may WITHHOLD an escalation that needs a behavioural
                     # existence proof. caller_arbitrary is an existential and only a
                     # fork sentinel can prove it. Population 0 here (all 36 such
                     # claims are behavioral_observed); shipped as a live guard.
-                    warnings.append({
-                        "kind": "caller_arbitrary_without_behavioural_proof", **ctx,
-                        "capability": cid, "tier": tier,
-                        "note": ("caller_arbitrary is an existential and this claim "
-                                 "carries no fork observation, so the escalation is "
-                                 "withheld"),
-                        "missing_witness": "a behavioral_observed verdict",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "caller_arbitrary_without_behavioural_proof",
+                            **ctx,
+                            "capability": cid,
+                            "tier": tier,
+                            "note": (
+                                "caller_arbitrary is an existential and this claim "
+                                "carries no fork observation, so the escalation is "
+                                "withheld"
+                            ),
+                            "missing_witness": "a behavioral_observed verdict",
+                        }
+                    )
                     continue
                 if eff_shape == "caller_arbitrary":
                     sev = 0.9
                     tc = None
-                    for fl in (wit.get("flows") or []):
+                    for fl in wit.get("flows") or []:
                         tc = (fl.get("target_constraint") or {}).get("state") or tc
                     if tc == "unconstrained_proven":
                         sev_reason = "caller_arbitrary+unconstrained_proven"
@@ -1292,8 +1409,7 @@ def main():
                         notes.add(f"target_constraint={tc or 'absent'}")
                 elif eff_shape == "immutable_fixed":
                     sev = 0.10
-                    sev_reason = (sev_reason if sev_reason.startswith("static")
-                                  else "immutable_fixed_proven")
+                    sev_reason = sev_reason if sev_reason.startswith("static") else "immutable_fixed_proven"
                     # V3: `immutable` lives in implementation code, so a fixed
                     # destination is conditional on upgrade authority. Compose it.
                     notes.add("fixed_destination_conditional_on_upgrade_authority")
@@ -1302,63 +1418,82 @@ def main():
                     if "token_identity" in amt_kinds:
                         inst_val = None
                         val_basis = "token_identity(non-fungible; pricing forbidden)"
-                        warnings.append({
-                            "kind": "amount_is_token_identity", **ctx,
-                            "capability": cid,
-                            "note": ("amount_kind proves exactly one NON-FUNGIBLE "
-                                     "token moves, which forbids pricing this row "
-                                     "off a fungible balance sheet"),
-                            "missing_witness": "a per-NFT valuation",
-                        })
+                        warnings.append(
+                            {
+                                "kind": "amount_is_token_identity",
+                                **ctx,
+                                "capability": cid,
+                                "note": (
+                                    "amount_kind proves exactly one NON-FUNGIBLE "
+                                    "token moves, which forbids pricing this row "
+                                    "off a fungible balance sheet"
+                                ),
+                                "missing_witness": "a per-NFT valuation",
+                            }
+                        )
                     elif asset_class == "native_only":
                         nat = native_by_addr.get(rt_addr)
                         if nat is None:
                             inst_val = None
                             val_basis = "native_only_flow+absent_native_row(not_determined)"
-                            warnings.append({
-                                "kind": "native_magnitude_not_determined", **ctx,
-                                "capability": cid,
-                                "note": ("flow is provably native-only but no native "
-                                         "balance row exists; absence conflates "
-                                         "proven-zero with a failed fetch, so the "
-                                         "magnitude is not_determined, not $0"),
-                                "missing_witness": "a native balance read at a pinned block",
-                                # §E inv.9 clause: a floored weight must still
-                                # publish the magnitude that IS proven. The entity
-                                # holds this much; what it can move natively is
-                                # what is undetermined.
-                                "magnitude_named_not_scored_usd": round(cval, 2),
-                                "recorded_non_native_holdings_usd": round(cval, 2),
-                            })
+                            warnings.append(
+                                {
+                                    "kind": "native_magnitude_not_determined",
+                                    **ctx,
+                                    "capability": cid,
+                                    "note": (
+                                        "flow is provably native-only but no native "
+                                        "balance row exists; absence conflates "
+                                        "proven-zero with a failed fetch, so the "
+                                        "magnitude is not_determined, not $0"
+                                    ),
+                                    "missing_witness": "a native balance read at a pinned block",
+                                    # §E inv.9 clause: a floored weight must still
+                                    # publish the magnitude that IS proven. The entity
+                                    # holds this much; what it can move natively is
+                                    # what is undetermined.
+                                    "magnitude_named_not_scored_usd": round(cval, 2),
+                                    "recorded_non_native_holdings_usd": round(cval, 2),
+                                }
+                            )
                         else:
                             inst_val = nat
                             val_basis = "native_only_flow x native_balance"
-                            citations.append({"field": "contract_balances(native)",
-                                              "value": nat})
+                            citations.append({"field": "contract_balances(native)", "value": nat})
                     elif asset_class in ("erc20_only", "mixed"):
-                        warnings.append({
-                            "kind": "erc20_asset_identity_unwitnessed", **ctx,
-                            "capability": cid,
-                            "note": ("ERC-20 flow: sink_ids carry a variable name "
-                                     "only, and name-based asset resolution is "
-                                     "banned by inv.2, so which token moves is "
-                                     "not_determined"),
-                            "missing_witness": "asset identity on the static flow entry",
-                        })
+                        warnings.append(
+                            {
+                                "kind": "erc20_asset_identity_unwitnessed",
+                                **ctx,
+                                "capability": cid,
+                                "note": (
+                                    "ERC-20 flow: sink_ids carry a variable name "
+                                    "only, and name-based asset resolution is "
+                                    "banned by inv.2, so which token moves is "
+                                    "not_determined"
+                                ),
+                                "missing_witness": "asset identity on the static flow entry",
+                            }
+                        )
                 elif eff_shape == "storage_determined":
                     # NOT a severity constant. The flow entry carries no
                     # variable / writer_signatures / slot, so the setter's
                     # principal is unresolvable from B2's own fields.
-                    warnings.append({
-                        "kind": "destination_storage_determined_deferred", **ctx,
-                        "capability": cid,
-                        "note": ("destination is redirectable by whoever holds the "
-                                 "setter -- an admin fact strictly between fixed "
-                                 "and caller-chosen -- but the flow entry names no "
-                                 "setter, so its principal cannot be resolved and "
-                                 "no severity may be assigned"),
-                        "missing_witness": "the setter's signature on the flow entry",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "destination_storage_determined_deferred",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                "destination is redirectable by whoever holds the "
+                                "setter -- an admin fact strictly between fixed "
+                                "and caller-chosen -- but the flow entry names no "
+                                "setter, so its principal cannot be resolved and "
+                                "no severity may be assigned"
+                            ),
+                            "missing_witness": "the setter's signature on the flow entry",
+                        }
+                    )
                     continue
                 else:
                     ev = verdicts.get(wit.get("effect_verdict_id"))
@@ -1368,35 +1503,48 @@ def main():
                         # an existential ("this sink was used on the witnessed
                         # path"), so it cannot prove immutable_fixed.
                         rv2 = _f(obs.get("observed_reach_value_usd")) if rd else None
-                        confidence_notes.append({
-                            **ctx, "capability": cid,
-                            "fact": "identifiable non-caller-supplied sink observed",
-                            "concrete_destination": cdest,
-                            "proven_reach_usd": rv2,
-                            "note": ("a proven reach with an identifiable sink but no "
-                                     "static lattice: existential, so it cannot prove "
-                                     "a fixed destination and does not enter the grade"),
-                            "missing_witness": "a static flow extraction (universal)",
-                        })
-                    warnings.append({
-                        "kind": "flow_out_destination_unproven", **ctx,
-                        "capability": cid,
-                        "note": (f"destination_shape={shape!r} shape_proved_by="
-                                 f"{proved_by!r} static_replay={st_reason}; neither "
-                                 "arbitrariness nor fixedness is proven"),
-                        "missing_witness": "destination_shape (fork verdict or static lattice)",
-                    })
+                        confidence_notes.append(
+                            {
+                                **ctx,
+                                "capability": cid,
+                                "fact": "identifiable non-caller-supplied sink observed",
+                                "concrete_destination": cdest,
+                                "proven_reach_usd": rv2,
+                                "note": (
+                                    "a proven reach with an identifiable sink but no "
+                                    "static lattice: existential, so it cannot prove "
+                                    "a fixed destination and does not enter the grade"
+                                ),
+                                "missing_witness": "a static flow extraction (universal)",
+                            }
+                        )
+                    warnings.append(
+                        {
+                            "kind": "flow_out_destination_unproven",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                f"destination_shape={shape!r} shape_proved_by="
+                                f"{proved_by!r} static_replay={st_reason}; neither "
+                                "arbitrariness nor fixedness is proven"
+                            ),
+                            "missing_witness": "destination_shape (fork verdict or static lattice)",
+                        }
+                    )
                     continue
 
             elif cid in ("exec.arbitrary", "delegatecall.execute"):
                 dc = wit.get("destination_constraint") or {}
                 dest = wit.get("destination") or {}
                 if dest.get("target_kind") == "storage_setter":
-                    warnings.append({
-                        "kind": "proxy_fallback_delegatecall", **ctx,
-                        "note": "open fallback delegatecalls to a stored admin impl",
-                        "missing_witness": "who controls setAdminImpl",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "proxy_fallback_delegatecall",
+                            **ctx,
+                            "note": "open fallback delegatecalls to a stored admin impl",
+                            "missing_witness": "who controls setAdminImpl",
+                        }
+                    )
                     continue
                 if dc.get("state") == "constrained":
                     g = dc.get("guard")
@@ -1423,38 +1571,48 @@ def main():
                 # `authority == 0x0` plus a resolved owner.
                 mutators = solmate_mutators.get(f["cid"], set())
                 if own and not mutators:
-                    warnings.append({
-                        "kind": "registry_escalation_mutators_unverified", **ctx,
-                        "capability": cid, "principal": own[0],
-                        "note": ("authority is zero and an owner resolves, but no "
-                                 "setUserRole/setRoleCapability/setPublicCapability "
-                                 "function is present, so the self-grant escalation "
-                                 "is not established for this contract"),
-                        "missing_witness": "the Solmate role-mutator selectors",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "registry_escalation_mutators_unverified",
+                            **ctx,
+                            "capability": cid,
+                            "principal": own[0],
+                            "note": (
+                                "authority is zero and an owner resolves, but no "
+                                "setUserRole/setRoleCapability/setPublicCapability "
+                                "function is present, so the self-grant escalation "
+                                "is not established for this contract"
+                            ),
+                            "missing_witness": "the Solmate role-mutator selectors",
+                        }
+                    )
                     own = None
                 if own:
                     sev, sev_reason = 1.0, "registry_owner_self_grant_escalation"
-                    notes.add("owner may setPublicCapability/setRoleCapability on "
-                              "any target trusting this registry")
+                    notes.add("owner may setPublicCapability/setRoleCapability on any target trusting this registry")
 
             elif cid == "timelock.set_delay":
                 sg = timelock_self_gated.get(rt_addr) or timelock_self_gated.get(caddr)
                 if sg:
                     # B4b Decision 2 needs a SIGN FLIP: proto-0.2 books this as a
                     # deduction. Self-gated updateDelay is protective.
-                    confidence_notes.append({
-                        **ctx, "capability": cid,
-                        "fact": "delay-change path is self-gated",
-                        "self_gated_functions": sg,
-                        "note": ("updateDelay/grantRole are gated by the timelock "
-                                 "itself, so the delay cannot be shortened without "
-                                 "first paying it. PROVEN by a complete RoleGranted/"
-                                 "RoleRevoked fold, but NOT replayable from persisted "
-                                 "inputs -- role_definitions omits "
-                                 "TIMELOCK_ADMIN_ROLE/DEFAULT_ADMIN_ROLE"),
-                        "missing_witness": "a persisted role-admin fold",
-                    })
+                    confidence_notes.append(
+                        {
+                            **ctx,
+                            "capability": cid,
+                            "fact": "delay-change path is self-gated",
+                            "self_gated_functions": sg,
+                            "note": (
+                                "updateDelay/grantRole are gated by the timelock "
+                                "itself, so the delay cannot be shortened without "
+                                "first paying it. PROVEN by a complete RoleGranted/"
+                                "RoleRevoked fold, but NOT replayable from persisted "
+                                "inputs -- role_definitions omits "
+                                "TIMELOCK_ADMIN_ROLE/DEFAULT_ADMIN_ROLE"
+                            ),
+                            "missing_witness": "a persisted role-admin fold",
+                        }
+                    )
                     continue
 
             if wit.get("callee") and inst_val is not None:
@@ -1467,8 +1625,7 @@ def main():
                     inst_val = cv2
                     val_basis = "witness.callee(where the value actually is)"
                     value_entities = [cal]
-                    citations.append({"field": "witness.callee", "value": cal,
-                                      "value_usd": cv2})
+                    citations.append({"field": "witness.callee", "value": cal, "value_usd": cv2})
 
             if cid == "transfer_policy.configure":
                 cfg = wit.get("configures")
@@ -1478,8 +1635,7 @@ def main():
                     if tv is not None:
                         inst_val = tv
                         val_basis = "witness.configures(affected contract)"
-                        citations.append({"field": "witness.configures",
-                                          "value": cfg, "value_usd": tv})
+                        citations.append({"field": "witness.configures", "value": cfg, "value_usd": tv})
 
             elif cid == "pause.set":
                 pe = str(obs.get("pause_effective")).lower() == "true"
@@ -1489,14 +1645,19 @@ def main():
                 if not unset:
                     # proto-0.2 published "irreversibility_proven" from the
                     # ABSENCE of a pause.unset claim. Removed.
-                    warnings.append({
-                        "kind": "freeze_recovery_path_not_determined", **ctx,
-                        "capability": cid,
-                        "note": ("no pause.unset claim on this contract; absence of a "
-                                 "recovery claim is NOT proof that no recovery exists"),
-                        "missing_witness": "a pause.unset claim or an ABI-level proof "
-                                           "that no unpause entry point exists",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "freeze_recovery_path_not_determined",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                "no pause.unset claim on this contract; absence of a "
+                                "recovery claim is NOT proof that no recovery exists"
+                            ),
+                            "missing_witness": "a pause.unset claim or an ABI-level proof "
+                            "that no unpause entry point exists",
+                        }
+                    )
                 if dbs is not None and ae is True:
                     d = _f(dbs)
                     if d is not None and d <= 30 * 86400:
@@ -1507,14 +1668,19 @@ def main():
                     sev = FREEZE_KEYSET_RECOVERABLE
                     sev_reason = "freeze_floor_pending_keyset_test"
                 if not pe:
-                    warnings.append({
-                        "kind": "freeze_effectiveness_not_determined", **ctx,
-                        "capability": cid,
-                        "note": ("no fork proof that the latch takes effect; the "
-                                 "94%-undetermined corpus rate is NOT a reason to "
-                                 "soften this row (inv.5 bans dilution by average)"),
-                        "missing_witness": "pause_effective (fork verdict)",
-                    })
+                    warnings.append(
+                        {
+                            "kind": "freeze_effectiveness_not_determined",
+                            **ctx,
+                            "capability": cid,
+                            "note": (
+                                "no fork proof that the latch takes effect; the "
+                                "94%-undetermined corpus rate is NOT a reason to "
+                                "soften this row (inv.5 bans dilution by average)"
+                            ),
+                            "missing_witness": "pause_effective (fork verdict)",
+                        }
+                    )
                 scope = freeze_scope.get(f["fid"])
                 # CORRECTED. The first cut floored BOTH axes and so buried the
                 # round's largest finding. Two different quantities were conflated:
@@ -1532,121 +1698,163 @@ def main():
                 # satisfies inv.6, not inv.9.
                 inst_val = cval
                 val_basis = "value held at the frozen runtime entity (measured)"
-                citations.append({"field": "contract_balances(entity total)",
-                                  "value": round(cval, 2),
-                                  "coverage_fraction_non_multiplying":
-                                      (scope or {}).get("coverage_fraction"),
-                                  "blast_radius": (scope or {}).get("blast_entries")})
-                warnings.append({
-                    "kind": "freeze_immobilised_fraction_not_determined", **ctx,
-                    "capability": cid,
-                    "note": ("the value held at the frozen entity is measured and "
-                             "scored; what fraction of it is immobilised, and for how "
-                             "long, has no witness -- scored_denominator answers a "
-                             "static/fork agreement question, not an economic one"),
-                    "missing_witness": "a value-denominated blast radius",
-                    "coverage_fraction": (scope or {}).get("coverage_fraction"),
-                    "magnitude_scored_usd": round(cval, 2),
-                    "blast_radius": (scope or {}).get("blast_entries"),
-                })
-                freeze_facts.append({
-                    **ctx, "pause_effective": pe, "tier": tier,
-                    "scope": scope,
-                    "recovery_principals": sorted(a for a, _d, _t in unset)[:6],
-                })
+                citations.append(
+                    {
+                        "field": "contract_balances(entity total)",
+                        "value": round(cval, 2),
+                        "coverage_fraction_non_multiplying": (scope or {}).get("coverage_fraction"),
+                        "blast_radius": (scope or {}).get("blast_entries"),
+                    }
+                )
+                warnings.append(
+                    {
+                        "kind": "freeze_immobilised_fraction_not_determined",
+                        **ctx,
+                        "capability": cid,
+                        "note": (
+                            "the value held at the frozen entity is measured and "
+                            "scored; what fraction of it is immobilised, and for how "
+                            "long, has no witness -- scored_denominator answers a "
+                            "static/fork agreement question, not an economic one"
+                        ),
+                        "missing_witness": "a value-denominated blast radius",
+                        "coverage_fraction": (scope or {}).get("coverage_fraction"),
+                        "magnitude_scored_usd": round(cval, 2),
+                        "blast_radius": (scope or {}).get("blast_entries"),
+                    }
+                )
+                freeze_facts.append(
+                    {
+                        **ctx,
+                        "pause_effective": pe,
+                        "tier": tier,
+                        "scope": scope,
+                        "recovery_principals": sorted(a for a, _d, _t in unset)[:6],
+                    }
+                )
 
             # ---------- reachability ----------
             if openness == "open":
-                if cid in ("upgrade.implementation", "exec.arbitrary",
-                           "delegatecall.execute", "authority.replace",
-                           "roles.grant", "roles.configure", "ownership.transfer",
-                           "flow.out"):
+                if cid in (
+                    "upgrade.implementation",
+                    "exec.arbitrary",
+                    "delegatecall.execute",
+                    "authority.replace",
+                    "roles.grant",
+                    "roles.configure",
+                    "ownership.transfer",
+                    "flow.out",
+                ):
                     row = ledger[("ANYONE", cid)]
-                    row.update(capability=cid, principal="ANYONE (permissionless)",
-                               principal_kind="anyone", max_weakness=1.0,
-                               weakest_label="ANYONE")
+                    row.update(
+                        capability=cid,
+                        principal="ANYONE (permissionless)",
+                        principal_kind="anyone",
+                        max_weakness=1.0,
+                        weakest_label="ANYONE",
+                    )
                     row["seed_addrs"].add(rt_addr)
                     row["witness_tiers"].add(tier)
                     row["sev_reasons"].add(sev_reason)
                     row["notes"].update(notes)
                     row["citations"].extend(citations)
-                    row["instances"].append({**ctx, "usd": inst_val, "sev": sev,
-                                             "value_basis": val_basis,
-                                             "value_entities": value_entities})
+                    row["instances"].append(
+                        {**ctx, "usd": inst_val, "sev": sev, "value_basis": val_basis, "value_entities": value_entities}
+                    )
                 continue
 
             if openness == "not_determined":
-                warnings.append({
-                    "kind": "unresolved_reachability", **ctx, "capability": cid,
-                    "note": "authority_openness not_determined on a privileged capability",
-                    "missing_witness": "principal resolution",
-                })
+                warnings.append(
+                    {
+                        "kind": "unresolved_reachability",
+                        **ctx,
+                        "capability": cid,
+                        "note": "authority_openness not_determined on a privileged capability",
+                        "missing_witness": "principal resolution",
+                    }
+                )
                 continue
 
             scored_any = False
             for p in sorted(fprinc, key=lambda x: (x["addr"], str(x["rtype"]))):
-                w, lab, kind, pnotes = principal_weakness(
-                    p, cid, timelock_proposers, warnings, ctx, contract_princ)
+                w, lab, kind, pnotes = principal_weakness(p, cid, timelock_proposers, warnings, ctx, contract_princ)
                 if w is None:
-                    warnings.append({
-                        "kind": ("contract_gated_unknown_path" if kind.startswith("contract")
-                                 else "unresolved_principal"),
-                        **ctx, "capability": cid, "principal": p["addr"],
-                        "note": (f"{cid} gated by a {lab} principal whose own authority "
-                                 "is not reduced to a key"),
-                        "missing_witness": ("controlling principal of the gating contract"
-                                            if not pnotes else
-                                            "; ".join(sorted(pnotes))),
-                    })
+                    warnings.append(
+                        {
+                            "kind": (
+                                "contract_gated_unknown_path" if kind.startswith("contract") else "unresolved_principal"
+                            ),
+                            **ctx,
+                            "capability": cid,
+                            "principal": p["addr"],
+                            "note": (f"{cid} gated by a {lab} principal whose own authority is not reduced to a key"),
+                            "missing_witness": (
+                                "controlling principal of the gating contract"
+                                if not pnotes
+                                else "; ".join(sorted(pnotes))
+                            ),
+                        }
+                    )
                     continue
                 scored_any = True
                 p_sev, p_reason = sev, sev_reason
                 if cid == "pause.set":
                     unset = unset_by_c.get(f["cid"], [])
-                    indep, min_coal, note = keyset_independent(
-                        p["addr"], p.get("details"), unset)
+                    indep, min_coal, note = keyset_independent(p["addr"], p.get("details"), unset)
                     if indep is True:
                         p_sev, p_reason = FREEZE_KEYSET_RECOVERABLE, note
                     elif indep is None:
                         # not_determined: neither recoverable nor sustainable is
                         # proven, so the severity floors and the gap is a warning.
                         p_sev, p_reason = FREEZE_KEYSET_RECOVERABLE, note
-                        warnings.append({
-                            "kind": "freeze_recovery_independence_not_determined",
-                            **ctx, "capability": cid, "principal": p["addr"],
-                            "note": ("no unpause principal reduces to a key set, so "
-                                     "independence is undetermined in both directions; "
-                                     "severity floored rather than assumed either way"),
-                            "missing_witness": "an unpause principal resolvable to a quorum",
-                            "magnitude_named_not_scored_usd": round(cval, 2),
-                        })
+                        warnings.append(
+                            {
+                                "kind": "freeze_recovery_independence_not_determined",
+                                **ctx,
+                                "capability": cid,
+                                "principal": p["addr"],
+                                "note": (
+                                    "no unpause principal reduces to a key set, so "
+                                    "independence is undetermined in both directions; "
+                                    "severity floored rather than assumed either way"
+                                ),
+                                "missing_witness": "an unpause principal resolvable to a quorum",
+                                "magnitude_named_not_scored_usd": round(cval, 2),
+                            }
+                        )
                     else:
                         p_sev, p_reason = FREEZE_SUSTAINABLE, note
                         # inv.5: the reversible-capability exemption from the k==1
                         # cliff is a design credit, and the design property has just
                         # been refuted for this key. Recompute without it.
                         w2, lab2, _k2, _n2 = principal_weakness(
-                            p, cid, timelock_proposers, [], ctx, contract_princ,
-                            reversible_proven=False)
+                            p, cid, timelock_proposers, [], ctx, contract_princ, reversible_proven=False
+                        )
                         if w2 is not None and w2 > w:
                             w, lab = w2, lab2
-                        warnings.append({
-                            "kind": "freeze_keyset_not_independent", **ctx,
-                            "capability": cid, "principal": p["addr"],
-                            "min_coalition_to_sustain": min_coal,
-                            # The DISCRIMINATOR the first cut never computed: what it
-                            # costs to START the freeze. min_coalition_to_sustain is
-                            # a property of the unpauser and was constant across the
-                            # population, so it discriminated nothing on its own.
-                            "min_coalition_to_initiate": (
-                                _threshold(p.get("details"))
-                                or (1 if p["rtype"] == "eoa" else None)),
-                            "note": ("this key set can freeze AND deny the recovery "
-                                     "quorum; independence must be evaluated over "
-                                     "owner key sets, not principal addresses"),
-                            "missing_witness": "an unpause quorum disjoint in KEYS",
-                            "magnitude_named_not_scored_usd": round(cval, 2),
-                        })
+                        warnings.append(
+                            {
+                                "kind": "freeze_keyset_not_independent",
+                                **ctx,
+                                "capability": cid,
+                                "principal": p["addr"],
+                                "min_coalition_to_sustain": min_coal,
+                                # The DISCRIMINATOR the first cut never computed: what it
+                                # costs to START the freeze. min_coalition_to_sustain is
+                                # a property of the unpauser and was constant across the
+                                # population, so it discriminated nothing on its own.
+                                "min_coalition_to_initiate": (
+                                    _threshold(p.get("details")) or (1 if p["rtype"] == "eoa" else None)
+                                ),
+                                "note": (
+                                    "this key set can freeze AND deny the recovery "
+                                    "quorum; independence must be evaluated over "
+                                    "owner key sets, not principal addresses"
+                                ),
+                                "missing_witness": "an unpause quorum disjoint in KEYS",
+                                "magnitude_named_not_scored_usd": round(cval, 2),
+                            }
+                        )
                 # B4b Decision 1 / D4: a timelock and its SOLE proposer-executor are
                 # one power through one delay -- proven a superset relation by the
                 # role fold, so collapsing cannot under-count. The first cut claimed
@@ -1663,7 +1871,7 @@ def main():
                 unit = safe_unit.get(unit, unit)
                 row = ledger[(unit, cid)]
                 row["capability"] = cid
-                row["principal"] = f'{lab} {p["addr"]}'
+                row["principal"] = f"{lab} {p['addr']}"
                 row["principal_kind"] = kind
                 if w > row["max_weakness"]:
                     row["max_weakness"] = w
@@ -1673,17 +1881,19 @@ def main():
                 row["sev_reasons"].add(p_reason)
                 row["notes"].update(notes | set(pnotes))
                 row["citations"].extend(citations)
-                row["instances"].append({**ctx, "usd": inst_val, "sev": p_sev,
-                                         "value_basis": val_basis,
-                                         "value_entities": value_entities})
+                row["instances"].append(
+                    {**ctx, "usd": inst_val, "sev": p_sev, "value_basis": val_basis, "value_entities": value_entities}
+                )
             if not scored_any and not fprinc:
-                warnings.append({
-                    "kind": "restricted_privileged_no_principal", **ctx,
-                    "capability": cid,
-                    "note": "restricted privileged fn with no resolved principal and "
-                            "no earned-empty witness",
-                    "missing_witness": "principal resolution",
-                })
+                warnings.append(
+                    {
+                        "kind": "restricted_privileged_no_principal",
+                        **ctx,
+                        "capability": cid,
+                        "note": "restricted privileged fn with no resolved principal and no earned-empty witness",
+                        "missing_witness": "principal resolution",
+                    }
+                )
 
     # ---------------------------------------------------------------- aggregate
     rows = []
@@ -1717,19 +1927,21 @@ def main():
             undetermined = []
             for i in sorted(row["instances"], key=lambda x: (x["address"], x["function"])):
                 if i["usd"] is None:
-                    undetermined.append({
-                        "contract": i["contract"], "function": i["function"],
-                        "entity": i["address"],
-                        "why": i["value_basis"],
-                        # §E: name the magnitude that IS proven. The entity holds
-                        # this much; what the capability can move is undetermined.
-                        "entity_holdings_usd": round(
-                            val_by_addr.get(i["address"], 0.0), 2),
-                    })
+                    undetermined.append(
+                        {
+                            "contract": i["contract"],
+                            "function": i["function"],
+                            "entity": i["address"],
+                            "why": i["value_basis"],
+                            # §E: name the magnitude that IS proven. The entity holds
+                            # this much; what the capability can move is undetermined.
+                            "entity_holdings_usd": round(val_by_addr.get(i["address"], 0.0), 2),
+                        }
+                    )
                     continue
                 # 16a: when the reach witness names holders, the value belongs to
                 # those entities, not to the analyzed row.
-                for ent in (i.get("value_entities") or [i["address"]]):
+                for ent in i.get("value_entities") or [i["address"]]:
                     per_e[ent] = max(per_e[ent], i["usd"])
             reach = set(per_e)
             if per_e and not undetermined:
@@ -1740,13 +1952,13 @@ def main():
                 # direction-honest (16d), and the undetermined instances are named
                 # on the row so a reader cannot mistake the floor for the total.
                 vas = round(sum(sorted(per_e.values())), 6)
-                vas_basis = (f">= proven floor over {len(per_e)} entity(ies); "
-                             f"{len(undetermined)} instance(s) not_determined")
+                vas_basis = (
+                    f">= proven floor over {len(per_e)} entity(ies); {len(undetermined)} instance(s) not_determined"
+                )
             else:
                 vas = None
                 vas_basis = "not_determined"
-        undetermined_rows = sorted(
-            undetermined, key=lambda x: (str(x["contract"]), str(x["function"])))
+        undetermined_rows = sorted(undetermined, key=lambda x: (str(x["contract"]), str(x["function"])))
         sev = max(i["sev"] for i in row["instances"])
         w = row["max_weakness"]
         b = band(vas)
@@ -1755,48 +1967,56 @@ def main():
             # direction the whole register leans against. contract_balances misses
             # EigenLayer-restaked ETH behind EtherFiNodes, so a real arbitrary-exec
             # surface floors to the lowest band. Say so on the row, not silently.
-            warnings.append({
-                "kind": "value_at_stake_at_band_floor",
-                "contract": row["instances"][0]["contract"],
-                "address": row["instances"][0]["address"],
-                "function": row["instances"][0]["function"],
-                "capability": cid, "principal": row["principal"],
-                "note": ("weight is at the band floor because the value this "
-                         "capability is proven to reach is undetermined or below the "
-                         "floor. Note this does NOT mean the entity holds nothing: "
-                         "restaked and other position value is absent from "
-                         "contract_balances, so this is the one direction in which "
-                         "the model under-scores"),
-                "missing_witness": "position/restaking value for the reached entities",
-                "recorded_entity_holdings_usd": round(
-                    val_by_addr.get(row["instances"][0]["address"], 0.0), 2),
-            })
-        rows.append({
-            "principal_unit": paddr,
-            "principal": row["principal"],
-            "principal_kind": row["principal_kind"],
-            "capability": cid,
-            "value_at_stake_usd": (round(vas, 2) if vas is not None else None),
-            "value_at_stake_basis": vas_basis,
-            "value_at_stake_is_floor": bool(vas is not None and undetermined_rows),
-            "value_band": (
-                ((">= " + band_label(vas)) if undetermined_rows else band_label(vas))
-                if vas is not None else "not_determined"),
-            "undetermined_instances": undetermined_rows,
-            "severity_proven": round(sev, 4),
-            "severity_basis": sorted(row["sev_reasons"]),
-            "weakness": round(w, 4),
-            "weakest_gate": row["weakest_label"],
-            "raw_points": round(SEV_SCALE * sev * w * b, 4),
-            "n_functions": len(row["instances"]),
-            "n_contracts": len(row["seed_addrs"]),
-            "reach_addrs": sorted(reach),
-            "example_functions": sorted({i["function"] for i in row["instances"]})[:6],
-            "witness_tiers": sorted(t for t in row["witness_tiers"] if t),
-            "witness_notes": sorted(row["notes"]),
-            "citations": row["citations"][:8],
-            "counterfactual": counterfactual(cid, row["principal_kind"]),
-        })
+            warnings.append(
+                {
+                    "kind": "value_at_stake_at_band_floor",
+                    "contract": row["instances"][0]["contract"],
+                    "address": row["instances"][0]["address"],
+                    "function": row["instances"][0]["function"],
+                    "capability": cid,
+                    "principal": row["principal"],
+                    "note": (
+                        "weight is at the band floor because the value this "
+                        "capability is proven to reach is undetermined or below the "
+                        "floor. Note this does NOT mean the entity holds nothing: "
+                        "restaked and other position value is absent from "
+                        "contract_balances, so this is the one direction in which "
+                        "the model under-scores"
+                    ),
+                    "missing_witness": "position/restaking value for the reached entities",
+                    "recorded_entity_holdings_usd": round(val_by_addr.get(row["instances"][0]["address"], 0.0), 2),
+                }
+            )
+        rows.append(
+            {
+                "principal_unit": paddr,
+                "principal": row["principal"],
+                "principal_kind": row["principal_kind"],
+                "capability": cid,
+                "value_at_stake_usd": (round(vas, 2) if vas is not None else None),
+                "value_at_stake_basis": vas_basis,
+                "value_at_stake_is_floor": bool(vas is not None and undetermined_rows),
+                "value_band": (
+                    ((">= " + band_label(vas)) if undetermined_rows else band_label(vas))
+                    if vas is not None
+                    else "not_determined"
+                ),
+                "undetermined_instances": undetermined_rows,
+                "severity_proven": round(sev, 4),
+                "severity_basis": sorted(row["sev_reasons"]),
+                "weakness": round(w, 4),
+                "weakest_gate": row["weakest_label"],
+                "raw_points": round(SEV_SCALE * sev * w * b, 4),
+                "n_functions": len(row["instances"]),
+                "n_contracts": len(row["seed_addrs"]),
+                "reach_addrs": sorted(reach),
+                "example_functions": sorted({i["function"] for i in row["instances"]})[:6],
+                "witness_tiers": sorted(t for t in row["witness_tiers"] if t),
+                "witness_notes": sorted(row["notes"]),
+                "citations": row["citations"][:8],
+                "counterfactual": counterfactual(cid, row["principal_kind"]),
+            }
+        )
 
     # per-principal-unit subsumption (inv.13)
     by_p = defaultdict(list)
@@ -1807,17 +2027,20 @@ def main():
         rs = sorted(by_p[paddr], key=lambda x: (-x["raw_points"], x["capability"]))
         top = dict(rs[0])
         top["subsumed_capabilities"] = [
-            {"capability": x["capability"], "raw_points": x["raw_points"],
-             "n_contracts": x["n_contracts"]} for x in rs[1:]]
+            {"capability": x["capability"], "raw_points": x["raw_points"], "n_contracts": x["n_contracts"]}
+            for x in rs[1:]
+        ]
         top["subsumed_raw_points"] = round(sum(x["raw_points"] for x in rs[1:]), 4)
         if rs[1:]:
             # inv.10 wants the change that REMOVES the deduction. For a subsuming
             # row that is all of the key's capabilities, not just the top one.
             top["counterfactual"] = (
-                top["counterfactual"] + "; note this row subsumes "
+                top["counterfactual"]
+                + "; note this row subsumes "
                 + ", ".join(x["capability"] for x in rs[1:])
                 + f" ({top['subsumed_raw_points']} raw) -- fixing the top capability "
-                  "alone does not release them")
+                "alone does not release them"
+            )
         findings.append(top)
         subsumed.extend(rs[1:])
 
@@ -1828,7 +2051,7 @@ def main():
     # it is derived from the PUBLISHED (rounded) per-row contributions, not from an
     # unrounded accumulator that leaves a residual.
     for i, fr in enumerate(findings):
-        fr["net_points_lambda"] = round(fr["raw_points"] * (LAMBDA ** i), 4)
+        fr["net_points_lambda"] = round(fr["raw_points"] * (LAMBDA**i), 4)
     cum = round(sum(fr["net_points_lambda"] for fr in findings), 4)
     grade_lambda = round(100.0 - min(cum, 100.0), 4)
 
@@ -1840,8 +2063,7 @@ def main():
         mine = 0.0
         for a in sorted(fr["reach_addrs"]):
             v = val_by_addr.get(a, 0.0)
-            if fr["capability"] not in TRANSITIVE_CAPS and \
-                    fr["value_at_stake_usd"] is not None:
+            if fr["capability"] not in TRANSITIVE_CAPS and fr["value_at_stake_usd"] is not None:
                 # 16a, on the register's own worked example. The first cut charged
                 # the whole balance sheet of each reached address: sweepETH booked
                 # $212,584 of exposure against a fork-proven reach of $90.97 --
@@ -1857,8 +2079,7 @@ def main():
         # accumulate the PUBLISHED value so the decomposition closes exactly,
         # rather than an unrounded parallel total (which left -0.009).
         exposure += fr["exposure_usd"]
-    grade_exposure = (round(100.0 * (1.0 - exposure / total_value), 3)
-                      if total_value else 0.0)
+    grade_exposure = round(100.0 * (1.0 - exposure / total_value), 3) if total_value else 0.0
 
     conf = confidence(funcs, princ, contracts, val_by_addr, runtime, controls)
 
@@ -1868,92 +2089,119 @@ def main():
     conn2 = psycopg2.connect(DB)
     conn2.set_session(readonly=True)
     c2 = conn2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    c2.execute("""
+    c2.execute(
+        """
         select count(*) n, count(distinct lower(replace(e.to_node_id,'address:',''))) t
         from control_graph_edges e join contracts c on c.id=e.contract_id
         where c.protocol_id=%s and e.relation='controller_value_unattributed'
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     ua = c2.fetchone()
-    c2.execute("""
+    c2.execute(
+        """
         select coalesce(n.analysis_state,'null') st, count(*) n
         from control_graph_nodes n join contracts c on c.id=n.contract_id
         where c.protocol_id=%s group by 1 order by 1
-    """, (PROTOCOL_ID,))
+    """,
+        (PROTOCOL_ID,),
+    )
     astates = {r["st"]: r["n"] for r in c2.fetchall()}
     conn2.close()
-    confidence_notes.append({
-        "contract": None, "function": None,
-        "fact": "unattributed controller edges excluded from the value closure",
-        "rows": ua["n"], "distinct_targets": ua["t"],
-        "value_contributed_usd": 0.0,
-        "note": ("these point at real principals -- Safes and timelocks -- whose "
-                 "authority RELATION was never established. Excluding them costs $0 "
-                 "and the third-state semantics forbid including them, but the "
-                 "exclusion is a confidence item, not a zero"),
-        "missing_witness": "an established authority relation for these edges",
-    })
-    confidence_notes.append({
-        "contract": None, "function": None,
-        "fact": "control-graph traversal completeness",
-        "analysis_state": astates,
-        "note": ("only attempt_failed + beyond_depth_horizon can move to analysed on "
-                 "a rerun with more budget; not_analyzable is terminal by construction "
-                 "and must not be counted as improvable. This is the field inv.6's "
-                 "monotone property is argued from"),
-        "missing_witness": "budget for the depth-horizon and failed-attempt nodes",
-    })
+    confidence_notes.append(
+        {
+            "contract": None,
+            "function": None,
+            "fact": "unattributed controller edges excluded from the value closure",
+            "rows": ua["n"],
+            "distinct_targets": ua["t"],
+            "value_contributed_usd": 0.0,
+            "note": (
+                "these point at real principals -- Safes and timelocks -- whose "
+                "authority RELATION was never established. Excluding them costs $0 "
+                "and the third-state semantics forbid including them, but the "
+                "exclusion is a confidence item, not a zero"
+            ),
+            "missing_witness": "an established authority relation for these edges",
+        }
+    )
+    confidence_notes.append(
+        {
+            "contract": None,
+            "function": None,
+            "fact": "control-graph traversal completeness",
+            "analysis_state": astates,
+            "note": (
+                "only attempt_failed + beyond_depth_horizon can move to analysed on "
+                "a rerun with more budget; not_analyzable is terminal by construction "
+                "and must not be counted as improvable. This is the field inv.6's "
+                "monotone property is argued from"
+            ),
+            "missing_witness": "budget for the depth-horizon and failed-attempt nodes",
+        }
+    )
 
     # B9 REQUIRED: equivalence_reason separates three epistemic states the scorer
     # would otherwise collapse. Note the taxonomy lives in equivalence_STATUS --
     # equivalence_reason itself is free text with ~59 distinct values (B0b/R7), so
     # branch on status and cite the reason.
-    _EQ_CLASS = {"candidate_path_missing": "our_side_data_gap",
-                 "commit_not_found_in_repo": "our_side_data_gap",
-                 "hash_mismatch": "deployed_source_provably_differs",
-                 "etherscan_fetch_failed": "infrastructure"}
+    _EQ_CLASS = {
+        "candidate_path_missing": "our_side_data_gap",
+        "commit_not_found_in_repo": "our_side_data_gap",
+        "hash_mismatch": "deployed_source_provably_differs",
+        "etherscan_fetch_failed": "infrastructure",
+    }
     eqc = defaultdict(int)
     for a in sorted(audits, key=lambda x: (x["cid"], str(x["eq"]))):
         k = _EQ_CLASS.get(str(a["eq"]))
         if k:
             eqc[k] += 1
-    confidence_notes.append({
-        "contract": None, "function": None,
-        "fact": "audit non-coverage, classified",
-        "counts": dict(sorted(eqc.items())),
-        "note": ("inv.1's audit corollary: these read UNKNOWN, not 0. Only "
-                 "`deployed_source_provably_differs` is adverse; the our-side gaps "
-                 "name a repo path or commit whose resolution would clear them, "
-                 "which is inv.6's promote-or-clear requirement"),
-        "missing_witness": "the named repo path / commit for each our-side gap",
-    })
+    confidence_notes.append(
+        {
+            "contract": None,
+            "function": None,
+            "fact": "audit non-coverage, classified",
+            "counts": dict(sorted(eqc.items())),
+            "note": (
+                "inv.1's audit corollary: these read UNKNOWN, not 0. Only "
+                "`deployed_source_provably_differs` is adverse; the our-side gaps "
+                "name a repo path or commit whose resolution would clear them, "
+                "which is inv.6's promote-or-clear requirement"
+            ),
+            "missing_witness": "the named repo path / commit for each our-side gap",
+        }
+    )
 
-    credits = build_credits(findings, audits, bc, freeze_facts, unset_by_c,
-                           princ, funcs, safe_info, overlaps, timelock_self_gated)
+    credits = build_credits(
+        findings, audits, bc, freeze_facts, unset_by_c, princ, funcs, safe_info, overlaps, timelock_self_gated
+    )
 
     wsummary = defaultdict(lambda: {"count": 0, "examples": []})
-    for wr in sorted(warnings, key=lambda x: (x["kind"], str(x.get("contract")),
-                                              str(x.get("function")))):
+    for wr in sorted(warnings, key=lambda x: (x["kind"], str(x.get("contract")), str(x.get("function")))):
         g = wsummary[wr["kind"]]
         g["count"] += 1
         if len(g["examples"]) < 4:
-            g["examples"].append(f'{wr.get("contract","?")}.{wr.get("function","?")}')
+            g["examples"].append(f"{wr.get('contract', '?')}.{wr.get('function', '?')}")
 
     top = findings[0] if findings else None
     headline = None
     if top:
-        vb = (f'{top["value_band"]}' if top["value_at_stake_usd"] is not None
-              else "value not_determined")
-        headline = (f'{top["weakest_gate"]} can {top["capability"]} on {vb} '
-                    f'({", ".join(top["example_functions"][:3])}) '
-                    f'— raw -{top["raw_points"]}')
+        vb = f"{top['value_band']}" if top["value_at_stake_usd"] is not None else "value not_determined"
+        headline = (
+            f"{top['weakest_gate']} can {top['capability']} on {vb} "
+            f"({', '.join(top['example_functions'][:3])}) "
+            f"— raw -{top['raw_points']}"
+        )
 
     # inv.9: the decomposition must include subsumed rows.
     sum_net = round(sum(f["net_points_lambda"] for f in findings), 4)
     out = {
-        "protocol": "etherfi", "protocol_id": PROTOCOL_ID,
+        "protocol": "etherfi",
+        "protocol_id": PROTOCOL_ID,
         "model_version": MODEL_VERSION,
         "headline": headline,
-        "grade_lambda": grade_lambda, "grade_lambda_letter": letter(grade_lambda),
+        "grade_lambda": grade_lambda,
+        "grade_lambda_letter": letter(grade_lambda),
         "grade_exposure": grade_exposure,
         "grade_exposure_letter": letter(grade_exposure),
         "confidence_pct": conf["pct"],
@@ -1961,50 +2209,55 @@ def main():
         "total_tracked_value_usd": total_value,
         "total_exposure_usd": round(exposure, 2),
         "model_parameters": {
-            "lambda": LAMBDA, "severity_scale": SEV_SCALE,
+            "lambda": LAMBDA,
+            "severity_scale": SEV_SCALE,
             "delay_discount": {
                 "form": "1 - log10(1+days)/log10(31), clamped [0.25, 1.0]",
                 "864000s_10d": delay_discount(864000),
                 "432000s_5d": delay_discount(432000),
                 "172800s_2d": delay_discount(172800),
-                "note": ("the witness supplies the ORDERING of delays; this mapping "
-                         "is a model choice and belongs to model_version (16c). It "
-                         "is published here because a numeric consequence of adopting "
-                         "a monotone weakness function may not be quoted before the "
-                         "function is defined."),
+                "note": (
+                    "the witness supplies the ORDERING of delays; this mapping "
+                    "is a model choice and belongs to model_version (16c). It "
+                    "is published here because a numeric consequence of adopting "
+                    "a monotone weakness function may not be quoted before the "
+                    "function is defined."
+                ),
             },
             "freeze_ladder": {
                 "keyset_recoverable": FREEZE_KEYSET_RECOVERABLE,
                 "sustainable": FREEZE_SUSTAINABLE,
                 "auto_expiry": FREEZE_AUTO_EXPIRY,
-                "note": ("no duration term: duration_bound_source is not_determined "
-                         "on 4/4 and neither no_time_reference nor guard_constant "
-                         "appears, so duration contributes zero to severity"),
+                "note": (
+                    "no duration term: duration_bound_source is not_determined "
+                    "on 4/4 and neither no_time_reference nor guard_constant "
+                    "appears, so duration contributes zero to severity"
+                ),
             },
         },
         "decomposition_check": {
             "row_reproduction": row_reproduction(findings, subsumed),
             "lambda": {
-                "grade": grade_lambda, "sum_net": sum_net,
+                "grade": grade_lambda,
+                "sum_net": sum_net,
                 "residual": round(100.0 - grade_lambda - sum_net, 6),
-                "subsumed_raw_points_total": round(
-                    sum(r["raw_points"] for r in subsumed), 4),
-                "note": ("the residual is an algebraic identity and cannot detect an "
-                         "error in raw_points; the subsumed total is published so the "
-                         "quantity F7 removes from the ledger is visible, which "
-                         "proto-0.2 omitted (57.809 raw points left its accounting)"),
+                "subsumed_raw_points_total": round(sum(r["raw_points"] for r in subsumed), 4),
+                "note": (
+                    "the residual is an algebraic identity and cannot detect an "
+                    "error in raw_points; the subsumed total is published so the "
+                    "quantity F7 removes from the ledger is visible, which "
+                    "proto-0.2 omitted (57.809 raw points left its accounting)"
+                ),
             },
             "exposure": {
                 "grade": grade_exposure,
                 "sum_exposure_usd": round(sum(f["exposure_usd"] for f in findings), 2),
-                "residual_usd": round(
-                    exposure - sum(f["exposure_usd"] for f in findings), 4),
+                "residual_usd": round(exposure - sum(f["exposure_usd"] for f in findings), 4),
             },
         },
         "value_provenance": val_prov,
         "replayability": {
-            "deterministic_inputs": ("frozen effective_functions.claims, "
-                                     "function_principals.details, effect_verdicts"),
+            "deterministic_inputs": ("frozen effective_functions.claims, function_principals.details, effect_verdicts"),
             "non_replayable_inputs": [
                 "contract_balances (destructively rewritten each monitoring cycle; "
                 "no block_number column; fetched_at spans "
@@ -2012,24 +2265,30 @@ def main():
                 "effect_verdicts fork observations (51 distinct blocks in one run)",
                 "bytecode_cache (cached_at only, no block)",
             ],
-            "ordering": ("every query carries ORDER BY and every sort a total-order "
-                         "tiebreak, so ties cannot permute the ledger (proto-0.2 had "
-                         "real ties at 0.81, 0.405, 0.247 and 0.157)"),
+            "ordering": (
+                "every query carries ORDER BY and every sort a total-order "
+                "tiebreak, so ties cannot permute the ledger (proto-0.2 had "
+                "real ties at 0.81, 0.405, 0.247 and 0.157)"
+            ),
         },
         "safe_keyset_overlaps": overlaps,
         "credits": credits,
-        "earned_negatives": sorted(
-            earned_negatives, key=lambda x: (str(x["contract"]), str(x["function"]))),
-        "confidence_channel": sorted(
-            confidence_notes, key=lambda x: (str(x.get("contract")), str(x.get("function")))),
+        "earned_negatives": sorted(earned_negatives, key=lambda x: (str(x["contract"]), str(x["function"]))),
+        "confidence_channel": sorted(confidence_notes, key=lambda x: (str(x.get("contract")), str(x.get("function")))),
         "warnings_summary": dict(sorted(wsummary.items())),
         "findings": findings,
         "subsumed_rows": subsumed,
-        "freeze_facts": sorted(
-            freeze_facts, key=lambda x: (str(x["contract"]), str(x["function"]))),
-        "warnings": sorted(warnings, key=lambda x: (
-            x["kind"], str(x.get("contract")), str(x.get("function")),
-            str(x.get("capability")), str(x.get("principal")))),
+        "freeze_facts": sorted(freeze_facts, key=lambda x: (str(x["contract"]), str(x["function"]))),
+        "warnings": sorted(
+            warnings,
+            key=lambda x: (
+                x["kind"],
+                str(x.get("contract")),
+                str(x.get("function")),
+                str(x.get("capability")),
+                str(x.get("principal")),
+            ),
+        ),
     }
     out["differential_vs_proto_0_2"] = differential(findings, subsumed, out, safe_unit)
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "score_v3.json")
@@ -2042,55 +2301,70 @@ def main():
     print(f"confidence         {conf['pct']}%")
     print(f"tracked value      ${total_value:,.0f}")
     print(f"exposure           ${exposure:,.0f}")
-    print(f"findings {len(findings)}  subsumed {len(subsumed)}  "
-          f"warnings {len(warnings)}  earned_negatives {len(earned_negatives)}  "
-          f"confidence_notes {len(confidence_notes)}")
-    print(f"\n{'raw':>8} {'net_l':>8} {'exposure$':>15}  {'capability':22s} "
-          f"{'gate':22s} {'band':16s} {'sev':>6} {'w':>6}  basis")
+    print(
+        f"findings {len(findings)}  subsumed {len(subsumed)}  "
+        f"warnings {len(warnings)}  earned_negatives {len(earned_negatives)}  "
+        f"confidence_notes {len(confidence_notes)}"
+    )
+    print(
+        f"\n{'raw':>8} {'net_l':>8} {'exposure$':>15}  {'capability':22s} "
+        f"{'gate':22s} {'band':16s} {'sev':>6} {'w':>6}  basis"
+    )
     for fr in findings[:16]:
-        print(f'{fr["raw_points"]:8.3f} {fr["net_points_lambda"]:8.3f} '
-              f'{fr["exposure_usd"]:15,.0f}  {fr["capability"][:22]:22s} '
-              f'{str(fr["weakest_gate"])[:22]:22s} {fr["value_band"][:16]:16s} '
-              f'{fr["severity_proven"]:6.3f} {fr["weakness"]:6.3f}  '
-              f'{",".join(fr["severity_basis"])[:44]}')
+        print(
+            f"{fr['raw_points']:8.3f} {fr['net_points_lambda']:8.3f} "
+            f"{fr['exposure_usd']:15,.0f}  {fr['capability'][:22]:22s} "
+            f"{str(fr['weakest_gate'])[:22]:22s} {fr['value_band'][:16]:16s} "
+            f"{fr['severity_proven']:6.3f} {fr['weakness']:6.3f}  "
+            f"{','.join(fr['severity_basis'])[:44]}"
+        )
     return out
 
 
-def build_credits(findings, audits, bc, freeze_facts, unset_by_c, princ, funcs,
-                  safe_info, overlaps, timelock_self_gated):
+def build_credits(
+    findings, audits, bc, freeze_facts, unset_by_c, princ, funcs, safe_info, overlaps, timelock_self_gated
+):
     credits = []
     for fr in findings:
-        if (fr["capability"] in TRANSITIVE_CAPS
-                and fr["principal_kind"] in ("timelock", "safe")
-                and (fr["value_at_stake_usd"] or 0) >= 100_000_000
-                and fr["weakness"] <= 0.2):
+        if (
+            fr["capability"] in TRANSITIVE_CAPS
+            and fr["principal_kind"] in ("timelock", "safe")
+            and (fr["value_at_stake_usd"] or 0) >= 100_000_000
+            and fr["weakness"] <= 0.2
+        ):
             eoa_raw = SEV_SCALE * fr["severity_proven"] * 0.9 * band(fr["value_at_stake_usd"])
-            credits.append({
-                "protective_fact": f'{fr["weakest_gate"]} gates {fr["capability"]}',
-                "principal": fr["principal"],
-                "value_protected_band": fr["value_band"],
-                "n_functions": fr["n_functions"],
-                "counterfactual_if_eoa_gated":
-                    f'~-{round(eoa_raw,1)} raw (vs -{fr["raw_points"]} now)',
-            })
+            credits.append(
+                {
+                    "protective_fact": f"{fr['weakest_gate']} gates {fr['capability']}",
+                    "principal": fr["principal"],
+                    "value_protected_band": fr["value_band"],
+                    "n_functions": fr["n_functions"],
+                    "counterfactual_if_eoa_gated": f"~-{round(eoa_raw, 1)} raw (vs -{fr['raw_points']} now)",
+                }
+            )
 
     # V6: the dual-use brake credit, now on KEY-SET independence. proto-0.2
     # published it for 36 capabilities off a `None` sentinel while its own
     # per-principal pass emitted 23 contradicting warnings.
     ok = [x for x in freeze_facts if x.get("pause_effective")]
     if ok:
-        credits.append({
-            "protective_fact": ("emergency brake: pause capability with a fork-proven "
-                                "latch (inv.4 dual-use, credit side)"),
-            "n_pause_capabilities_fork_proven": len(ok),
-            "n_contracts": len({x["address"] for x in ok}),
-            "basis": "pause_effective = true",
-            "withheld": ("no credit is claimed for recovery independence: it is a "
-                         "property of owner KEY SETS, and on the 4/7 <-> 1/5 pair the "
-                         "1/5's five owners are a strict subset of the 4/7's, so four "
-                         "of them can freeze and deny the recovery quorum"),
-            "counterfactual_if_removed": "these rows disappear; no grade credit is taken",
-        })
+        credits.append(
+            {
+                "protective_fact": (
+                    "emergency brake: pause capability with a fork-proven latch (inv.4 dual-use, credit side)"
+                ),
+                "n_pause_capabilities_fork_proven": len(ok),
+                "n_contracts": len({x["address"] for x in ok}),
+                "basis": "pause_effective = true",
+                "withheld": (
+                    "no credit is claimed for recovery independence: it is a "
+                    "property of owner KEY SETS, and on the 4/7 <-> 1/5 pair the "
+                    "1/5's five owners are a strict subset of the 4/7's, so four "
+                    "of them can freeze and deny the recovery quorum"
+                ),
+                "counterfactual_if_removed": "these rows disappear; no grade credit is taken",
+            }
+        )
 
     # V10: the deterministic core only. Join the audit anchor to the cached
     # bytecode; a mismatch is a real negative, an absent cache row is unknown.
@@ -2106,34 +2380,48 @@ def build_credits(findings, audits, bc, freeze_facts, unset_by_c, princ, funcs,
             still_matching += 1
         else:
             replaced += 1
-    credits.append({
-        "anchor_join": {"still_matching": still_matching, "replaced": replaced,
-                        "no_cached_bytecode_unknown": no_cache},
-        "protective_fact": ("audit equivalence proven: deployed source is "
-                            "deterministically equivalent to a commit sha printed "
-                            "verbatim in the audit document"),
-        "rows": len(proven),
-        "basis": ["equivalence_status='proven'", "matched_commit_sha",
-                  "bytecode_keccak_at_match"],
-        "excluded": ("proof_kind is BANNED from the grade in every value: `clean` and "
-                     "`pre_fix_unpatched` are opposite branches of one `if` over the "
-                     "same LLM commit-role labels (coverage.py:1137-1200), and the sha "
-                     "comparison is a fuzzy 7-character prefix match"),
-        "as_of": ("bytecode_cache carries cached_at only, no block, so the honest "
-                  "claim is 'matches the bytecode cached during this run', not "
-                  "'deployed right now'; it remains a deterministic negative "
-                  "generator going forward"),
-    })
+    credits.append(
+        {
+            "anchor_join": {
+                "still_matching": still_matching,
+                "replaced": replaced,
+                "no_cached_bytecode_unknown": no_cache,
+            },
+            "protective_fact": (
+                "audit equivalence proven: deployed source is "
+                "deterministically equivalent to a commit sha printed "
+                "verbatim in the audit document"
+            ),
+            "rows": len(proven),
+            "basis": ["equivalence_status='proven'", "matched_commit_sha", "bytecode_keccak_at_match"],
+            "excluded": (
+                "proof_kind is BANNED from the grade in every value: `clean` and "
+                "`pre_fix_unpatched` are opposite branches of one `if` over the "
+                "same LLM commit-role labels (coverage.py:1137-1200), and the sha "
+                "comparison is a fuzzy 7-character prefix match"
+            ),
+            "as_of": (
+                "bytecode_cache carries cached_at only, no block, so the honest "
+                "claim is 'matches the bytecode cached during this run', not "
+                "'deployed right now'; it remains a deterministic negative "
+                "generator going forward"
+            ),
+        }
+    )
     if timelock_self_gated:
-        credits.append({
-            "protective_fact": "timelock role admin is the timelock itself (anti-decoy)",
-            "timelocks": sorted(timelock_self_gated),
-            "grade_credit_taken": 0.0,
-            "why_no_credit": ("PROVEN by a complete RoleGranted/RoleRevoked fold, but "
-                              "role_definitions omits TIMELOCK_ADMIN_ROLE/"
-                              "DEFAULT_ADMIN_ROLE, so it is not replayable from "
-                              "persisted inputs (inv.11). Confidence channel only."),
-        })
+        credits.append(
+            {
+                "protective_fact": "timelock role admin is the timelock itself (anti-decoy)",
+                "timelocks": sorted(timelock_self_gated),
+                "grade_credit_taken": 0.0,
+                "why_no_credit": (
+                    "PROVEN by a complete RoleGranted/RoleRevoked fold, but "
+                    "role_definitions omits TIMELOCK_ADMIN_ROLE/"
+                    "DEFAULT_ADMIN_ROLE, so it is not replayable from "
+                    "persisted inputs (inv.11). Confidence channel only."
+                ),
+            }
+        )
     return credits
 
 
@@ -2143,26 +2431,32 @@ def row_reproduction(findings, subsumed):
     residual below is zero by construction and cannot detect an error in
     raw_points; THIS can."""
     bad = []
-    for r in sorted(findings + subsumed,
-                    key=lambda x: (x["principal_unit"], x["capability"])):
-        expect = round(SEV_SCALE * r["severity_proven"] * r["weakness"]
-                       * band(r["value_at_stake_usd"]), 4)
+    for r in sorted(findings + subsumed, key=lambda x: (x["principal_unit"], x["capability"])):
+        expect = round(SEV_SCALE * r["severity_proven"] * r["weakness"] * band(r["value_at_stake_usd"]), 4)
         # Compare at the PUBLISHED precision: raw_points is round(.., 4), so a
         # tolerance-based compare against the unrounded product reports every row
         # whose 5th decimal is non-zero. That is a defect in the check, not the
         # scorer -- worth recording because the first cut did exactly that and
         # reported 11 false mismatches.
         if expect != r["raw_points"]:
-            bad.append({"principal_unit": r["principal_unit"],
-                        "capability": r["capability"],
-                        "published": r["raw_points"], "recomputed": expect})
+            bad.append(
+                {
+                    "principal_unit": r["principal_unit"],
+                    "capability": r["capability"],
+                    "published": r["raw_points"],
+                    "recomputed": expect,
+                }
+            )
     return {
         "rows_checked": len(findings) + len(subsumed),
-        "mismatches": len(bad), "detail": bad,
+        "mismatches": len(bad),
+        "detail": bad,
         "formula": "60 * severity_proven * weakness * band(value_at_stake_usd)",
-        "note": ("each row recomputed from its own published fields; this is the "
-                 "redundancy check inv.9 asks for, as opposed to the algebraic "
-                 "residual below, which is zero by construction"),
+        "note": (
+            "each row recomputed from its own published fields; this is the "
+            "redundancy check inv.9 asks for, as opposed to the algebraic "
+            "residual below, which is zero by construction"
+        ),
     }
 
 
@@ -2182,8 +2476,7 @@ def differential(findings, subsumed, out, safe_unit):
             d[(str(r.get(key) or "").lower(), r["capability"])] = r
         return d
 
-    v2_all = index(v2.get("findings", []) + v2.get("subsumed_rows", []),
-                   "principal_address")
+    v2_all = index(v2.get("findings", []) + v2.get("subsumed_rows", []), "principal_address")
     v3_all = index(findings + subsumed, "principal_unit")
     # a v3 unit absorbs several v2 principal addresses; map every member -> unit
     unit_members = {}
@@ -2197,59 +2490,75 @@ def differential(findings, subsumed, out, safe_unit):
             causes = []
             if abs((r3["raw_points"] or 0) - (r2["raw_points"] or 0)) > 1e-9:
                 if abs(r3["weakness"] - r2["weakness"]) > 1e-9:
-                    causes.append(f'weakness {r2["weakness"]} -> {r3["weakness"]} '
-                                  f'({"; ".join(r3["severity_basis"])})')
+                    causes.append(f"weakness {r2['weakness']} -> {r3['weakness']} ({'; '.join(r3['severity_basis'])})")
                 if abs(r3["severity_proven"] - r2["severity_proven"]) > 1e-9:
-                    causes.append(f'severity {r2["severity_proven"]} -> '
-                                  f'{r3["severity_proven"]} '
-                                  f'({"; ".join(r3["severity_basis"])})')
+                    causes.append(
+                        f"severity {r2['severity_proven']} -> "
+                        f"{r3['severity_proven']} "
+                        f"({'; '.join(r3['severity_basis'])})"
+                    )
                 if r3["value_band"] != r2["value_band"]:
-                    causes.append(f'value_band {r2["value_band"]} -> '
-                                  f'{r3["value_band"]} ({r3["value_at_stake_basis"]})')
+                    causes.append(f"value_band {r2['value_band']} -> {r3['value_band']} ({r3['value_at_stake_basis']})")
             if causes:
-                changed.append({
-                    "principal": r3["principal"], "capability": r3["capability"],
-                    "raw_v2": r2["raw_points"], "raw_v3": r3["raw_points"],
-                    "caused_by": causes,
-                    "witness_notes": r3["witness_notes"],
-                })
+                changed.append(
+                    {
+                        "principal": r3["principal"],
+                        "capability": r3["capability"],
+                        "raw_v2": r2["raw_points"],
+                        "raw_v3": r3["raw_points"],
+                        "caused_by": causes,
+                        "witness_notes": r3["witness_notes"],
+                    }
+                )
         else:
-            appeared.append({
-                "principal": r3["principal"], "capability": r3["capability"],
-                "raw_v3": r3["raw_points"],
-                "caused_by": (f'field(s): {"; ".join(r3["severity_basis"])}'
-                              f' | value: {r3["value_at_stake_basis"]}'),
-                "witness_notes": r3["witness_notes"],
-            })
+            appeared.append(
+                {
+                    "principal": r3["principal"],
+                    "capability": r3["capability"],
+                    "raw_v3": r3["raw_points"],
+                    "caused_by": (f"field(s): {'; '.join(r3['severity_basis'])} | value: {r3['value_at_stake_basis']}"),
+                    "witness_notes": r3["witness_notes"],
+                }
+            )
     for k, r2 in sorted(v2_all.items()):
         if k in v3_all:
             continue
         addr, cap = k
         unit = next((u for u, m in sorted(unit_members.items()) if addr in m), None)
-        vanished.append({
-            "principal": r2["principal"], "capability": cap,
-            "raw_v2": r2["raw_points"],
-            "disposition": ("merged into Safe key-set unit " + unit
-                            if unit else "no longer scored"),
-            "caused_by": (
-                "key-set aggregation (inv.13): overlapping Safes that can act as "
-                "each other are one unit" if unit else
-                "capability now routed to a warning, an earned negative, or the "
-                "confidence channel -- see warnings_summary"),
-        })
+        vanished.append(
+            {
+                "principal": r2["principal"],
+                "capability": cap,
+                "raw_v2": r2["raw_points"],
+                "disposition": ("merged into Safe key-set unit " + unit if unit else "no longer scored"),
+                "caused_by": (
+                    "key-set aggregation (inv.13): overlapping Safes that can act as each other are one unit"
+                    if unit
+                    else "capability now routed to a warning, an earned negative, or the "
+                    "confidence channel -- see warnings_summary"
+                ),
+            }
+        )
     return {
-        "grade_lambda": {"v2": v2.get("grade_lambda"), "v3": out["grade_lambda"],
-                         "delta": round(out["grade_lambda"] - (v2.get("grade_lambda") or 0), 3)},
-        "grade_exposure": {"v2": v2.get("grade_exposure"), "v3": out["grade_exposure"],
-                           "delta": round(out["grade_exposure"] - (v2.get("grade_exposure") or 0), 3)},
+        "grade_lambda": {
+            "v2": v2.get("grade_lambda"),
+            "v3": out["grade_lambda"],
+            "delta": round(out["grade_lambda"] - (v2.get("grade_lambda") or 0), 3),
+        },
+        "grade_exposure": {
+            "v2": v2.get("grade_exposure"),
+            "v3": out["grade_exposure"],
+            "delta": round(out["grade_exposure"] - (v2.get("grade_exposure") or 0), 3),
+        },
         "confidence_pct": {"v2": v2.get("confidence_pct"), "v3": out["confidence_pct"]},
         "total_tracked_value_usd": {
             "v2": v2.get("total_tracked_value_usd"),
             "v3": out["total_tracked_value_usd"],
-            "delta": round(out["total_tracked_value_usd"]
-                           - (v2.get("total_tracked_value_usd") or 0), 2),
-            "cause": ("MAX per (runtime address, asset) removes the proxy/impl "
-                      "duplicate rows that SUM-per-contracts-row double-counted"),
+            "delta": round(out["total_tracked_value_usd"] - (v2.get("total_tracked_value_usd") or 0), 2),
+            "cause": (
+                "MAX per (runtime address, asset) removes the proxy/impl "
+                "duplicate rows that SUM-per-contracts-row double-counted"
+            ),
         },
         "counts": {
             "findings": {"v2": len(v2.get("findings", [])), "v3": len(findings)},
@@ -2268,10 +2577,8 @@ def counterfactual(cid, kind):
     return {
         "anyone": "gate this capability behind a multisig/timelock",
         "eoa": "move behind a strong multisig (>=k/n 0.67) or a timelock",
-        "safe": "raise the threshold ratio, diversify signers across units, "
-                "and/or add a timelock in front",
-        "timelock": "already timelock-gated; residual is the proposer quorum and "
-                    "the delay length",
+        "safe": "raise the threshold ratio, diversify signers across units, and/or add a timelock in front",
+        "timelock": "already timelock-gated; residual is the proposer quorum and the delay length",
         "contract": "resolve the controlling principal of the gating contract",
     }.get(kind, "n/a")
 
@@ -2301,8 +2608,7 @@ def confidence(funcs, princ, contracts, val_by_addr, runtime, controls):
     """
     perimeter = {}
     for cid in sorted(contracts):
-        perimeter[contracts[cid]["addr"]] = band(
-            val_by_addr.get(contracts[cid]["addr"], 0.0))
+        perimeter[contracts[cid]["addr"]] = band(val_by_addr.get(contracts[cid]["addr"], 0.0))
     for a in sorted(controls):
         perimeter.setdefault(a, band(val_by_addr.get(a, 0.0)))
         for src in sorted(controls[a]):
@@ -2318,12 +2624,13 @@ def confidence(funcs, princ, contracts, val_by_addr, runtime, controls):
             continue
         addr = f["deploy"] or runtime(contracts[f["cid"]]["addr"])
         cexpr = f["capability_expr"] or {}
-        earned_empty = (isinstance(cexpr, dict)
-                        and cexpr.get("membership_quality") == "exact"
-                        and cexpr.get("confidence") == "enumerable"
-                        and cexpr.get("members") == [])
-        keyed = any(p["rtype"] in ("eoa", "safe", "timelock")
-                    for p in princ.get(f["fid"], []))
+        earned_empty = (
+            isinstance(cexpr, dict)
+            and cexpr.get("membership_quality") == "exact"
+            and cexpr.get("confidence") == "enumerable"
+            and cexpr.get("members") == []
+        )
+        keyed = any(p["rtype"] in ("eoa", "safe", "timelock") for p in princ.get(f["fid"], []))
         reach_ok = f["openness"] == "open" or keyed or earned_empty
         by_addr_reach[addr][1] += 1
         by_addr_cap[addr][1] += 1
@@ -2347,14 +2654,17 @@ def confidence(funcs, princ, contracts, val_by_addr, runtime, controls):
         "pct": min(reach_pct, cap_pct),
         "reachability_answered_pct": reach_pct,
         "capability_answered_pct": cap_pct,
-        "headline_rule": ("report the MINIMUM; 'assessed over X%' reads as "
-                          "capability assessed, not reachability answered"),
+        "headline_rule": (
+            "report the MINIMUM; 'assessed over X%' reads as capability assessed, not reachability answered"
+        ),
         "perimeter_entities": len(perimeter),
         "perimeter_value_weighted_denominator": den,
         "analysed_entities_with_privileged_surface": len(by_addr_reach),
-        "monotonicity": ("the denominator is inv.8's perimeter and is fixed "
-                         "independent of what has been analysed, so resolution work "
-                         "can only move value from unanswered to answered"),
+        "monotonicity": (
+            "the denominator is inv.8's perimeter and is fixed "
+            "independent of what has been analysed, so resolution work "
+            "can only move value from unanswered to answered"
+        ),
     }
 
 
