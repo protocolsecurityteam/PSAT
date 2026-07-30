@@ -1029,12 +1029,13 @@ def _leaf_is_keyed_set_membership(leaf: Mapping[str, Any] | None) -> bool:
     pointer.
 
     Deliberately WIDER than the static plane's admission rule
-    (``summaries._operand_is_role_key``, which additionally requires the exact
-    ``hasRole(bytes32,address)`` selector and the argument POSITIONS on the
-    external arm). Only the direction matters, and it is safe in this direction:
-    here the predicate WITHHOLDS a slot-locator reroute, so over-matching costs a
-    resolution that would have been published, never a wrong address. The static
-    plane MINTS a fact, so it must be strict."""
+    (``summaries._operand_is_role_key``, which admits the in-contract
+    ``mapping_membership`` shape only — a cross-contract ``external_set``
+    descriptor names the callee from the CALLER's declared interface, which is
+    not a proven property of the deployed callee). Only the direction matters,
+    and it is safe in this direction: here the predicate WITHHOLDS a slot-locator
+    reroute, so over-matching costs a resolution that would have been published,
+    never a wrong address. The static plane MINTS a fact, so it must be strict."""
     if not isinstance(leaf, Mapping):
         return False
     if leaf.get("kind") not in ("membership", "external_bool"):

@@ -1491,43 +1491,46 @@ Three decisions this enables:
 |---|---|--:|---|---|---|
 | `role_name` | `role_definitions.role_name`; artifact `semantic_control.role_definitions[].role` | 19 rows total, 11 protocol-1 | **CONFIDENCE** (a declared role name, not a holder set) | present = the constant is **proven** to be a key of a set the contract tests membership in / **row absent** = not determined | a leaf the lowering could not classify, a `bytes32` constant whose set descriptor is missing, or a state var not in scope ⇒ **no row**. Absence is never "this contract has no roles" |
 
-**Admission rule (structural, no identifier is read).** A `bytes32 constant`
-operand mints a role name only when it is witnessed as a **KEY** of the set the
-leaf tests, on one of two arms, and in both its `member_path` must be empty (a
-dereferenced constant is a struct base, which is what a storage pointer is):
-
-1. **Mapping arm** — leaf `kind == "membership"` with a `set_descriptor` of kind
-   `mapping_membership`: the in-contract AccessControl read
-   `_roles[ROLE][account]`.
-2. **External arm** — leaf `kind == "external_bool"` with an `external_set`
-   descriptor whose `callee_selector` is **exactly**
-   `keccak("hasRole(bytes32,address)")[:4] = 0x91d14854`, **and** whose
-   `key_sources` put the constant in the **role** argument (index 0) and a
-   caller-tainted operand (`msg_sender` / `tx_origin` / `root_caller` /
-   `signature_recovery`) in the **account** argument (index 1).
-
-**The external arm's selector-and-position gate is load-bearing, not decoration.**
-`predicates.py::_build_external_bool_leaf` fills `key_sources` from *every* call
-argument, so admitting on "the descriptor is `external_set`" makes "is an argument
-of a gate-shaped view call" stand in for key-ness — a defaulted witness. Three
-shapes compiled through the production static path each minted a non-role
-constant under that wider rule: an ERC-7201 pointer passed to
-`lens.readBool(address,bytes32)` (**the D6 defect class re-entering**), a merkle
-root in `tree.isInTree(bytes32,address)` — which has `hasRole`'s exact argument
-*order* — and a CREATE2 salt in `factory.isAuthorized(address,bytes32)`. The ABI
-named by the selector is what makes argument 0 a role identifier.
+**Admission rule (structural, one arm, no identifier is read).** A
+`bytes32 constant` operand mints a role name only when it is witnessed as the
+**KEY of a persisted mapping the leaf tests membership in**: leaf
+`kind == "membership"` **AND** `set_descriptor.kind == "mapping_membership"`
+**AND** the operand's `member_path` is empty. That is the in-contract
+AccessControl read `_roles[ROLE][account]`, where the lowering saw both the
+mapping and the constant indexing it. A non-empty `member_path` means the
+constant is a struct BASE being dereferenced, which is what a storage-layout
+pointer is.
 
 Measured on the persisted predicate trees of contracts 454 / 599 / 623: 8 real
-roles all match the mapping arm, and the 2 ERC-7201 pointers
+roles all match, and the 2 ERC-7201 pointers
 (`AccessControlDefaultAdminRulesStorageLocation` with `member_path ["_pendingDefaultAdmin"]`,
-`OwnableStorageLocation` with `["_owner"]`) match neither — they are `equality`
+`OwnableStorageLocation` with `["_owner"]`) match none — they are `equality`
 leaves with no set descriptor at all.
 
-`predicate_evaluator._canonical_authority_selector_for_slot` carries the same
-refusal so a role key can never be re-read as an `owner()`/`governor()` slot
-locator. It is deliberately **wider** there (leaf kind + descriptor kind only, no
-selector/position check): that predicate WITHHOLDS a reroute, so over-matching
-costs a resolution, never publishes a wrong address.
+**Residual, stated with cause: cross-contract role checks — including a genuine
+`registry.hasRole(bytes32,address)` registry — mint no `role_definitions` row.**
+An `external_set` descriptor records the callee's signature and selector from
+`ir.function.full_name` (`predicates.py:2338`), which is the interface the
+**CALLING** contract declared, not a proven property of the deployed callee. A
+slot lens, a merkle-tree contract, or a `hasRole` whose body is
+`return salts[salt]` and drops its `account` argument entirely all lower to a
+byte-identical descriptor when declared under that name, and each was measured
+minting an ERC-7201 pointer / merkle root / CREATE2 salt as a role. Argument
+position adds no independent witness: `_build_external_bool_leaf` fills
+`key_sources` from *every* call argument, so "is an argument of a gate-shaped
+view call" stands in for key-ness — a defaulted witness. **Those roles are
+`not_determined`, never "no roles".** The excision costs nothing measured: across
+all six role-bearing contracts in the persisted corpus every surviving row is
+mapping-arm and the `external_set` descriptor count over the 19 rows is **0**, so
+the arm's only exhibit was a synthetic test contract — under B14 a rule with
+population 0 may not be kept.
+
+`predicate_evaluator._canonical_authority_selector_for_slot` carries a related
+refusal so a role key is never re-read as an `owner()`/`governor()` slot locator.
+It is deliberately **wider** there (leaf kind + descriptor kind, admitting
+`external_set` too): that predicate WITHHOLDS a reroute, so over-matching costs a
+resolution, never publishes a wrong address, whereas this rule MINTS a fact and
+must be strict.
 
 **Banned as the fix:** the name-suffix guard `_is_storage_layout_constant`
 (inv.2 — it classifies on `endswith("_slot")` / `"storagelocation"` and is wrong

@@ -64,81 +64,39 @@ def _function_has_sensitive_sink(effect_info: dict | None) -> bool:
     return False
 
 
-# OZ AccessControl ``hasRole(bytes32 role, address account)``. Recomputed from the
-# signature rather than pasted, and matched EXACTLY: it is the one cross-contract
-# callee whose ABI fixes which argument is the role and which is the subject.
-# Mirrors the marker selector in
-# ``services/resolution/role_store_standards.OZ_ACCESS_CONTROL_ENUMERABLE`` — not
-# imported, because the static plane is upstream of resolution.
-_HAS_ROLE_SIGNATURE = "hasRole(bytes32,address)"
-_HAS_ROLE_SELECTOR = "0x" + keccak(text=_HAS_ROLE_SIGNATURE)[:4].hex()
-_HAS_ROLE_ROLE_ARG_INDEX = 0
-_HAS_ROLE_ACCOUNT_ARG_INDEX = 1
-_CALLER_TAINTED_SOURCES = frozenset({"msg_sender", "tx_origin", "root_caller", "signature_recovery"})
-
-
-def _has_role_key_position(descriptor: Mapping[str, Any], operand: Mapping[str, Any]) -> bool:
-    """True iff *operand* sits in ``hasRole``'s **role** argument and a
-    caller-tainted operand sits in its **account** argument.
-
-    ``_build_external_bool_leaf`` fills ``key_sources`` from *every* call argument,
-    so "is an argument of a gate-shaped view call" is not evidence of key-ness — a
-    slot constant handed to ``lens.readBool(who, SLOT)``, a merkle root in
-    ``tree.isInTree(ROOT, who)`` and a CREATE2 salt in
-    ``factory.isAuthorized(who, SALT)`` all land there and none is a role. The
-    selector is what fixes the ABI, and the ABI is what makes argument 0 a role
-    identifier rather than "some bytes32 the callee happens to take"."""
-    if descriptor.get("callee_selector") != _HAS_ROLE_SELECTOR:
-        return False
-    keys = descriptor.get("key_sources")
-    if not isinstance(keys, list) or len(keys) <= _HAS_ROLE_ACCOUNT_ARG_INDEX:
-        return False
-    role_arg = keys[_HAS_ROLE_ROLE_ARG_INDEX]
-    account_arg = keys[_HAS_ROLE_ACCOUNT_ARG_INDEX]
-    if not isinstance(role_arg, Mapping) or not isinstance(account_arg, Mapping):
-        return False
-    if role_arg.get("source") != "state_variable" or role_arg.get("member_path"):
-        return False
-    if role_arg.get("state_variable_name") != operand.get("state_variable_name"):
-        return False
-    return account_arg.get("source") in _CALLER_TAINTED_SOURCES
-
-
 def _operand_is_role_key(leaf: Mapping[str, Any] | None, operand: Mapping[str, Any]) -> bool:
-    """True iff *operand* is witnessed as a KEY of the set the leaf tests — the
-    only shape in which a ``bytes32`` constant is a role.
+    """True iff *operand* is witnessed as a KEY of a persisted mapping the leaf
+    tests membership in — the only shape in which a ``bytes32`` constant is
+    proven to be a role.
 
-    Two arms, both structural, neither reading an identifier:
+    ``kind="membership"`` + a ``mapping_membership`` descriptor + an empty
+    ``member_path``: the in-contract AccessControl read ``_roles[ROLE][account]``,
+    where the lowering saw the mapping and the constant indexing it. A non-empty
+    ``member_path`` means the constant is a struct BASE being dereferenced, which
+    is what an ERC-7201 / EIP-1967 storage pointer (``OwnableStorageLocation``,
+    ``AccessControlDefaultAdminRulesStorageLocation``) is. Both are
+    ``bytes32 constant``, so the compiler type alone cannot tell a pointer from a
+    role; the lowering shape can, without reading the identifier.
 
-    * **mapping** — ``kind="membership"`` with a ``mapping_membership``
-      descriptor: the in-contract AccessControl read ``_roles[ROLE][account]``.
-    * **external** — ``kind="external_bool"`` with an ``external_set`` descriptor
-      whose callee is exactly ``hasRole(bytes32,address)`` and whose argument
-      POSITIONS witness the roles of the two operands (see
-      ``_has_role_key_position``).
-
-    Both arms additionally require an empty ``member_path``: a dereferenced
-    constant is a struct base — which is what an ERC-7201 / EIP-1967 storage
-    pointer (``OwnableStorageLocation``,
-    ``AccessControlDefaultAdminRulesStorageLocation``) is. Those lower to
-    equality/comparison leaves with no set descriptor at all, so neither arm
-    admits them; both are ``bytes32 constant``, so the compiler type alone cannot
-    tell a pointer from a role.
+    **Cross-contract role checks are deliberately NOT admitted, including a
+    genuine ``registry.hasRole(ROLE, msg.sender)``.** An ``external_set``
+    descriptor records the callee signature from ``ir.function.full_name``
+    (``predicates.py:2338``) — the CALLER's declared interface, not the deployed
+    callee's ABI — so "the callee is ``hasRole(bytes32,address)``" is an
+    unverified claim the caller makes about someone else's code. A slot lens or a
+    merkle-tree contract declared under that name lowers identically, and
+    ``_build_external_bool_leaf`` fills ``key_sources`` from every call argument,
+    so argument position adds no independent witness. Those roles are
+    ``not_determined`` — never "no roles"; see ``SCORING_INVARIANTS.md`` B4c.
     """
     if not isinstance(leaf, Mapping):
         return False
     if operand.get("member_path"):
         return False
-    descriptor = leaf.get("set_descriptor")
-    if not isinstance(descriptor, Mapping):
+    if leaf.get("kind") != "membership":
         return False
-    leaf_kind = leaf.get("kind")
-    descriptor_kind = descriptor.get("kind")
-    if leaf_kind == "membership" and descriptor_kind == "mapping_membership":
-        return True
-    if leaf_kind == "external_bool" and descriptor_kind == "external_set":
-        return _has_role_key_position(descriptor, operand)
-    return False
+    descriptor = leaf.get("set_descriptor")
+    return isinstance(descriptor, Mapping) and descriptor.get("kind") == "mapping_membership"
 
 
 def _role_names_from_tree(tree: dict | None, state_vars_by_name: Mapping[str, Any] | None = None) -> set[str]:
