@@ -24,14 +24,28 @@ from sqlalchemy.orm import Session
 from db.models import (
     Contract,
     ContractBalance,
+    ContractBalanceFetch,
+    ContractBalanceLatest,
     Protocol,
     SessionLocal,
     TvlSnapshot,
 )
 from db.queue import record_heartbeat
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
+from services.monitoring.balance_reads import (
+    contracts_missing_current_rows,
+    native_status_for,
+    pinned_native_balances,
+    prune_balance_fetches,
+)
 from services.monitoring.chain_rpc import chain_id_for
+from utils.balance_status import (
+    ASSET_SET_STATUS_FETCH_FAILED,
+    BALANCE_WRITER_TVL,
+    NATIVE_STATUS_FETCH_FAILED,
+)
 from utils.chains import chain_by_id
+from utils.etherscan import TokenBalancePage
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -149,11 +163,22 @@ def refresh_contract_balances(
     no longer aborts the whole protocol's snapshot.
     """
     from services.aggregations.company_overview import _entity_key
-    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price, get_token_balances
+    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price, get_token_balances_page
 
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
         return {}, False
+
+    # One pinned native read per chain, BEFORE the per-contract loop. This is
+    # what makes a zero publishable: ``getEthBalance`` answered 0 AT a named
+    # height. Etherscan's ``account/balance`` is ``tag=latest`` and its response
+    # carries no height, so a zero from it can only ever be not_determined.
+    # Failure here is not fatal — it drops the cycle back to the unpinned path,
+    # which is strictly weaker and never wrong.
+    pinned_by_chain: dict[int, tuple[int | None, dict[str, int]]] = {}
+    for chain_id in sorted({chain_id_for(c.chain) for c in contracts}):
+        addresses = [c.address for c in contracts if chain_id_for(c.chain) == chain_id and c.address]
+        pinned_by_chain[chain_id] = pinned_native_balances(addresses, chain_id=chain_id)
 
     # Fetch the mainnet ETH/USD quote once for every ETH-native contract. ETH/USD
     # is an L1-scoped quote reused for the ETH-native L2s too (their ETH balance
@@ -220,23 +245,64 @@ def refresh_contract_balances(
         contract_total = 0.0
         tokens: list[dict] = []
 
-        try:
-            eth_wei = get_eth_balance(address, chain_id=chain_id)
-        except Exception as exc:
-            logger.warning("ETH balance failed for %s: %s", address, exc)
-            eth_wei = 0
+        # This writer reads the contract's OWN address and never a proxy address
+        # (unlike the resolution worker, which reads ``request['proxy_address']``);
+        # ``_get_protocol_addresses`` has already excluded impls fronted by a
+        # proxy. Captured verbatim so the row records which address the quantity
+        # actually belongs to instead of leaving it to be re-derived.
+        observed_address = address
+        pinned_block, pinned_wei = pinned_by_chain.get(chain_id, (None, {}))
+
+        eth_wei: int | None
+        if pinned_block is not None and address.lower() in pinned_wei:
+            eth_wei = pinned_wei[address.lower()]
+            native_block: int | None = pinned_block
+            native_failed = False
+        else:
+            native_block = None
+            try:
+                eth_wei = get_eth_balance(address, chain_id=chain_id)
+                native_failed = False
+            except Exception as exc:
+                # The swallow this replaces set ``eth_wei = 0`` and left no
+                # persisted trace of any kind, so a failed read and a real zero
+                # were the same absent row. The quantity stays unknown and the
+                # fetch row records why.
+                logger.warning("ETH balance failed for %s: %s", address, exc)
+                eth_wei = None
+                native_failed = True
 
         try:
-            token_list = get_token_balances(address, chain_id=chain_id)
+            page = get_token_balances_page(address, chain_id=chain_id)
         except Exception as exc:
+            # The second swallow: ``token_list = []`` followed by a destructive
+            # DELETE published "holds no tokens" from a failed fetch. Note the
+            # common Etherscan failure never reaches here at all — it is caught
+            # one layer down and returns an empty page carrying ``fetch_failed``.
             logger.warning("Token balance failed for %s: %s", address, exc)
-            token_list = []
+            page = TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
+        token_list = page.rows
 
-        # Clear old balances for this contract
-        session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).delete()
+        native_status = native_status_for(wei=eth_wei, pinned=native_block is not None, failed=native_failed)
+        fetch = ContractBalanceFetch(
+            contract_id=contract.id,
+            chain_id=chain_id,
+            observed_address=observed_address,
+            block_number=native_block,
+            native_status=native_status,
+            asset_set_status=page.status,
+            asset_page_length=page.page_length,
+            writer=BALANCE_WRITER_TVL,
+        )
+        session.add(fetch)
+        session.flush()
+
+        # No DELETE. The writers are insert-only and ``contract_balances_latest``
+        # decides what is current, per row class, so a failed fetch can no longer
+        # wipe a holdings set it knows nothing about.
 
         # Native coin (ETH / POL / BNB / ... — symbol is the chain's native_asset)
-        if eth_wei > 0:
+        if eth_wei is not None and eth_wei > 0:
             eth_usd = (eth_wei / 1e18) * native_price if native_price else None
             session.add(
                 ContractBalance(
@@ -248,13 +314,20 @@ def refresh_contract_balances(
                     raw_balance=str(eth_wei),
                     price_usd=native_price,
                     usd_value=round(eth_usd, 2) if eth_usd else None,
+                    observed_address=observed_address,
+                    block_number=native_block,
+                    fetch_id=fetch.id,
                 )
             )
             if eth_usd:
                 contract_total += eth_usd
                 tokens.append({"symbol": native_symbol, "usd_value": round(eth_usd, 2)})
 
-        # ERC-20 tokens
+        # ERC-20 tokens. ``block_number`` stays NULL here even when the native
+        # read above was pinned: these quantities come from Etherscan's unpinned
+        # page, and inheriting the fetch's native height would assert a height
+        # they were never read at. DB-enforced by
+        # ``ck_contract_balances_token_block_null``.
         for tok in token_list:
             session.add(
                 ContractBalance(
@@ -266,6 +339,9 @@ def refresh_contract_balances(
                     raw_balance=str(tok["balance"]),
                     price_usd=tok.get("price_usd"),
                     usd_value=tok.get("usd_value"),
+                    observed_address=observed_address,
+                    block_number=None,
+                    fetch_id=fetch.id,
                 )
             )
             usd = tok.get("usd_value")
@@ -287,6 +363,22 @@ def refresh_contract_balances(
             "total_usd": round(contract_total, 2),
             "tokens": tokens,
         }
+        # A failed read is a degraded cycle, and this loop has no
+        # ``record_degraded`` available (it runs outside ``BaseWorker``, where
+        # that call is a no-op). The persisted fetch row is the durable trace;
+        # this flag is what carries it into the per-cycle heartbeat, and the log
+        # below is unconditional so a failure is visible even without the DB.
+        if native_status == NATIVE_STATUS_FETCH_FAILED or page.status == ASSET_SET_STATUS_FETCH_FAILED:
+            partial = True
+            logger.info(
+                "balance fetch degraded for %s on chain %s: native=%s assets=%s",
+                observed_address,
+                chain_id,
+                native_status,
+                page.status,
+            )
+
+        prune_balance_fetches(session, contract.id, observed_address)
 
     session.commit()
     return breakdown, partial
@@ -297,23 +389,39 @@ def refresh_contract_balances(
 # ---------------------------------------------------------------------------
 
 
-def _read_existing_balances(session: Session, protocol_id: int) -> dict[str, dict]:
-    """Build a contract breakdown from existing ``contract_balances`` rows.
+def _read_existing_balances(session: Session, protocol_id: int) -> tuple[dict[str, dict], bool]:
+    """Build a contract breakdown from the CURRENT ``contract_balances`` rows.
 
-    Used by the pipeline snapshot to avoid re-fetching from Etherscan —
-    the resolution stage already wrote these rows minutes earlier.
+    Used by the pipeline snapshot to avoid re-fetching from Etherscan — the
+    resolution stage already wrote these rows minutes earlier.
+
+    Reads ``contract_balances_latest``, not the base table: the writers are
+    insert-only now, so the base table carries every past cycle and summing it
+    would add the same holding once per hour.
+
+    Returns ``(breakdown, partial)``. A contract whose current holdings the view
+    cannot publish — no non-failed fetch for some row class — is OMITTED from
+    the breakdown rather than emitted with ``total_usd: 0.0``, and flips
+    ``partial``. Emitting the zero would push a failed read into
+    ``TvlSnapshot.total_usd`` as a lower money figure while the cycle reported
+    itself complete: an absence turned into a number.
     """
     from services.aggregations.company_overview import _entity_key
 
     contracts = _get_protocol_addresses(session, protocol_id)
     if not contracts:
-        return {}
+        return {}, False
     contract_ids = [c.id for c in contracts]
-    rows_by_cid: dict[int, list[ContractBalance]] = {}
-    for b in session.execute(select(ContractBalance).where(ContractBalance.contract_id.in_(contract_ids))).scalars():
+    missing = contracts_missing_current_rows(session, contract_ids)
+    rows_by_cid: dict[int, list[ContractBalanceLatest]] = {}
+    for b in session.execute(
+        select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id.in_(contract_ids))
+    ).scalars():
         rows_by_cid.setdefault(b.contract_id, []).append(b)
     breakdown: dict[str, dict] = {}
     for contract in contracts:
+        if contract.id in missing:
+            continue
         contract_total = 0.0
         tokens: list[dict] = []
         for b in rows_by_cid.get(contract.id, []):
@@ -328,7 +436,7 @@ def _read_existing_balances(session: Session, protocol_id: int) -> dict[str, dic
             "total_usd": round(contract_total, 2),
             "tokens": tokens,
         }
-    return breakdown
+    return breakdown, bool(missing)
 
 
 def take_tvl_snapshot(
@@ -348,8 +456,12 @@ def take_tvl_snapshot(
     Returns ``(snapshot, partial)``. ``snapshot`` is ``None`` (and no work is
     done) when a snapshot for this protocol already exists within the last
     ``MIN_SNAPSHOT_INTERVAL`` seconds. ``partial`` is True when the snapshot
-    completed but some contract was skipped because its chain's native coin
-    could not be priced (see :func:`refresh_contract_balances`).
+    completed but some contract's value is missing from it — because its chain's
+    native coin could not be priced, because a balance read failed
+    (see :func:`refresh_contract_balances`), or, on the read-existing branch,
+    because a contract has no non-failed fetch for some row class
+    (see :func:`_read_existing_balances`). It is never hardcoded: a headline
+    money figure that silently omits a contract must say so.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -385,8 +497,7 @@ def take_tvl_snapshot(
     if refresh_balances:
         contract_breakdown, partial = refresh_contract_balances(session, protocol_id)
     else:
-        contract_breakdown = _read_existing_balances(session, protocol_id)
-        partial = False
+        contract_breakdown, partial = _read_existing_balances(session, protocol_id)
     on_chain_total = sum(entry.get("total_usd", 0) for entry in contract_breakdown.values())
 
     # Determine source and headline number

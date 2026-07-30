@@ -1694,7 +1694,7 @@ hold no native-ETH row at all.** `scorer_v2.py:138-145` reads one
 |---|--:|---|---|
 | `contract_balances.token_address` (NULL = native ETH) | 702 + 19 | **REQUIRED** | the asset key. Cross with **`claims[].witness.flows[].kind`** — `low_level_value_call` (native) vs `callee_erc20_selector` (ERC-20). A native send provably cannot move an ERC-20 balance. No inference: a join. |
 | `token_symbol` / `decimals` / `raw_balance` / `price_usd` | 721 each | **REQUIRED** | unit reconstruction. |
-| `fetched_at` | 721/721, spanning **1h40m** (20:00:51 → 21:41:16) | **GATE** | a cross-contract sum is **not a single-block quantity**; there is no `block_number` column. Directly relevant to inv.11/inv.12 byte-identical replay. |
+| `fetched_at` | 721/721, spanning **1h40m** (20:00:51 → 21:41:16) | **GATE** | a cross-contract sum is **not a single-block quantity**. `fetched_at` is a WRITE timestamp, not an observation height, and must never be read as one. Directly relevant to inv.11/inv.12 byte-identical replay. **↳ AMENDED (2026-07-30, B1/Unit 4): a `block_number` column now exists, NULL on all 1,617 pre-existing rows, permanently — see B8.1a.** |
 | `contracts.is_proxy` / `implementation` / `admin` / `beacon` | admin **1 of 24** eip1967 proxies; beacon 1; implementation 25 (loaded, never used) | **REQUIRED**, with the caveat in B11/T-ADMIN | entity collapse to the runtime address. |
 
 **Method validation:** `CumulativeMerkleDrop.sweepETH` — fork witness $90.97;
@@ -1715,6 +1715,184 @@ today **only for the native-vs-ERC-20 split**, not for "which ERC-20".
 $3.50B eETH holding is the same economic value as the eETH its users deposited.
 The exposure composition **divides by** this total, so a double-counted
 denominator systematically flatters the grade.
+
+### B8.1a. Balance provenance — observation height, observed address, fetch plane (B1/B2, Unit 4)
+
+Two planes, and the separation is the whole substance of the fix.
+``contract_balances`` still means what it always meant — **a row is a witnessed
+positive quantity** — because `services/effects/selection.py::_asset_holdings_by_deployment`
+consumes a row's mere EXISTENCE as *"this deployment holds this asset"*, and that
+set feeds the 43 published `flow.out` reach rows. Delivering the three-state as
+rows in that table would have published holdings that do not exist: a fix that
+closes one gap by widening another. The discriminator therefore lives in
+`contract_balance_fetches`, **whose rows are NOT holdings**.
+
+Measured before the change: 1,617 rows, of which **0** are NULL, empty, numeric
+zero or non-numeric `raw_balance` — both writers gate their native insert on
+`> 0` and `utils/etherscan.py` drops every zero-balance ERC-20 entry. Row
+existence was therefore only *accidentally* sound as a holdings witness; the
+positive-quantity requirement added to `_asset_holdings_by_deployment` in the
+same commit makes it structural, and is a measured no-op on this corpus
+(byte-identical reader differential, below).
+
+**`contract_balances` — provenance columns.** Population `0 / 1617` on every one
+of them, and that is not a defect: no backfill is possible, because the height
+and the observed address were never recorded.
+
+| field | pop. | status | three-state | failure/absence path |
+|---|--:|---|---|---|
+| `observed_address` | 0/1617 | **REQUIRED** | non-NULL = the address the read was ISSUED against, captured verbatim from the write-point local (`tvl.py` uses `contracts.address`; `resolution_worker.py` uses `request['proxy_address'] or address`). NULL = not_determined. | a failed read writes no holdings row at all, so the column is never a guess. |
+| `block_number` | 0/1617 | **GATE** | non-NULL = **this quantity** was read at this height via `Multicall3.getEthBalance` at an explicitly pinned block. NULL = not_determined, permanently. | pinned read raises, `aggregate3` reports `success=False`, **or returns fewer than 32 bytes** → fall back to the unpinned Etherscan path → NULL. A stamped `eth_blockNumber` beside an unpinned answer is BANNED: it asserts the node answered at that head. |
+| `price_block_number` | 0/1617, **structurally always NULL** | **CONFIDENCE** + **BANNED substitution** | NULL = the price height is not_determined. No price source in this system carries one, and the same asset diverges up to **20.97%** within one recorded instant. | n/a. DB-enforced by `ck_contract_balances_price_block_null`. A consumer that substitutes `block_number` for it is **non-conformant**: `usd_value`/`price_usd` are never as-of-block facts. |
+| `fetch_id` | 0/1617 | **GATE** | the fetch that observed this row. NULL = legacy row, provenance not_determined. | n/a. |
+
+An **ERC-20 row can never carry a `block_number`** (`ck_contract_balances_token_block_null`).
+Q1 keeps token quantities on the unpinned Etherscan page, so a fetch that pinned
+its native read must not lend that height to its token rows.
+
+**`contract_balance_fetches` — the fetch plane. Rows are not holdings.**
+
+| field | status | three-state | failure/absence path |
+|---|---|---|---|
+| `native_status` | **GATE** | `proven_zero` — pinned `getEthBalance` returned `0x0` **at** `block_number`; `proven_nonzero`; `fetch_failed`; `not_determined`. | **every** failure lands on `fetch_failed`; an **unpinned zero lands on `not_determined`**, never `proven_zero` — an Etherscan `tag=latest` answer carries no height, so it proves zero at no height. `proven_zero` requires a non-NULL block, DB-enforced (`ck_cbf_proven_zero_requires_block`). |
+| `native_status` **paired with** `block_number` | **REQUIRED as a pair** | the status alone is not the fact. `proven_nonzero` + NULL block = *"nonzero at an unrecorded height"*, never an as-of-block quantity. | every consumer routes through `services/monitoring/balance_reads.py::native_balance_fact(status, block)`. Reading the status alone is **BANNED**. |
+| `asset_set_status` | **GATE** | `returned_assets`; `returned_empty` — a proven-empty **PAGE**, never *"holds no tokens"*; `at_page_cap`; `fetch_failed`. | `utils/etherscan.py` catches the common `RuntimeError` and returns an empty list, so *"the fetch failed"* and *"holds nothing"* were one shape. They are now two values. **There is no `complete`.** |
+| `asset_page_length` | **GATE** | the RAW endpoint entry count, before the `raw_balance > 0` filter. NULL = not_determined. | the filter destroys the page-size signal one line above where it used to be read, so a stored-row count can only ever be a LOWER bound. This is the real witness for the at-cap case. |
+| `writer` | **CONFIDENCE** | `tvl` \| `resolution_worker`, a literal at the call site. | which loop issued a read was previously recoverable only by a `fetched_at`-multiplicity heuristic. |
+
+`_completeness_from_fetch(asset_set_status, asset_page_length)` is the single
+**total** mapping into `HOLDINGS_COMPLETENESS_STATES`, and it **provably cannot
+return a whole/complete state** — no such member exists. `returned_assets` maps to
+`not_determined`, not to complete: a page below the cap is consistent with a whole
+list AND with the endpoint's own paging. Where several fetches contribute to one
+holder, **the weakest value wins** (`at_page_cap` beats `not_determined`), so a
+clean sibling cannot launder a capped one.
+
+**`contract_balances_latest` — the read surface.** The destructive per-contract
+DELETE is gone; both writers are insert-only. **Every reader is migrated to the
+view in the same commit** (`selection.py` ×3, `company_overview.py`, `tvl.py::_read_existing_balances`,
+the three `scoring_prototype/` scorers), because a NULL-block row is not
+unique-constrained and a naive reader would sum across heights. No unique
+constraint is added: NULLs are distinct in a Postgres unique index, so one would
+constrain nothing on the Etherscan path and read as a guarantee it does not
+provide.
+
+The view resolves, **per row class independently**, the latest fetch that did NOT
+fail for that class, and takes its row set **wholesale**. Four properties, each of
+which is an absence-as-witness defect if dropped:
+
+1. **Wholesale, not per-asset** — a fetch's rows ARE the set it observed, so an
+   asset the holder has sold correctly disappears.
+2. **Per row class** — a transient token failure must not withdraw the native
+   holding.
+3. **Failed fetches never win** — otherwise a failure republishes *"holds nothing"*.
+4. **Legacy rows (`fetch_id IS NULL`) remain visible until a NON-FAILED fetch
+   exists** for that contract and class — a first fetch that fails must not delete
+   1,617 rows of history from the view.
+
+**The writer-side invariant the view depends on:** *a non-failed class status is a
+promise that that class's row set was written.* Possibly EMPTY, where empty is
+what was observed (`proven_zero`, `returned_empty`, or a page whose every entry
+was zero-balance) — but never merely skipped. The view keys on the status, so a
+fetch row carrying `proven_nonzero` or `returned_assets` with none of that
+class's rows persisted wins the class and **withdraws every prior holding of it**.
+The resolution worker used to do exactly that: its halves fail independently, and
+an early return on `native_failed or tokens_failed` stamped the SUCCEEDING half's
+status while persisting none of its rows. It now persists each half that
+succeeded, with no early return. This is **not** fixable in the view — an
+EXISTS-guard on the rows would resurrect sold assets (an empty observed set is a
+real observation) and would defeat `proven_zero` outright.
+
+**View currency is per `contract_id` and IGNORES `observed_address`.** A contract
+fetched at two different addresses publishes whichever writer wrote LAST, not the
+union. This is deliberate: it preserves the pre-migration last-writer-wins DELETE
+semantics, and per-address currency would publish both addresses' rows at once,
+double-counting the 5 proxy/impl pairs inside `build_authority_graph`'s
+per-contract sum. The consequence is visible rather than hidden — each row carries
+its own `observed_address`.
+
+Retention (`PSAT_BALANCE_HISTORY_DEPTH`, default 10, **rejects < 1**) bounds
+insert-only growth by fetch, never by row, and **excludes the latest non-failed
+fetch per row class from pruning**. Without that exclusion, `depth` consecutive
+failures would CASCADE away exactly the rows the view is publishing.
+
+**Why the absences matter downstream.** `selection.py` keeps INNER-join semantics:
+a contract with no current row produces **no** `deployment_balance` key. That is
+load-bearing — `recipes.py::_add_reach` publishes
+`graph.deployment_balance.get(acting, _ZERO_USD)` as `observed_reach_floor_usd`,
+so a `0` entry manufactured by a failed fetch would become a published **$0.00**
+floor on a function that may move millions.
+
+**The INNER join defends only the NO-ROW case, and that limit must be stated.**
+`coalesce(sum(usd_value), 0)` still yields a `$0.00` `balance` /
+`deployment_balance` entry for a contract whose current rows exist but are ALL
+unpriced — **22 of the 60 balance keys on this corpus**, `contracts.id 563`
+among them. Such a key is indistinguishable, at the consumer, from a contract
+proven to hold nothing, and `observed_reach_floor_usd` will publish it as a
+floor. Not repaired here: the fix is to carry the priced/unpriced three-state
+through the aggregate rather than to collapse it in SQL, which changes
+`build_authority_graph`'s published shape and belongs with the consumer work. For the same reason
+`tvl.py::_read_existing_balances` now **omits** a contract with no non-failed
+fetch rather than emitting `total_usd: 0.0`, and derives `partial=True` instead of
+hardcoding `False`: that zero would otherwise enter `TvlSnapshot.total_usd` as a
+measurement.
+
+**Entity misattribution (M7/16a) — an OPEN defect, not a withdrawal.** Re-verified
+independently at block **25643300**: `contracts.id 544` (AuctionManager
+`0x3311c72a…0162b`) holds **0 wei**, while its stored native row —
+`19059300000000000000` wei / **$35,904.67** — is exactly the balance of
+`jobs.request->>'proxy_address'` `0x00c452af…c4cb9`.
+
+**That figure is still published today.** This unit does not withdraw it, and an
+earlier draft of this section claiming otherwise was false:
+`graph.balance['0x3311c72a…'] = 35904.67` on the branch, because row `id 2336` is
+a legacy row (`fetch_id IS NULL`) and the view's legacy arm serves it. The row is
+neither deleted nor re-keyed — no protocol-1 proxy names 544 as its
+implementation, and guessing the key is precisely the inference §7 forbids.
+
+**Retirement mechanism, stated rather than assumed.** The new plane supersedes it
+on the first production NON-FAILED fetch for contract 544: the legacy arm stops
+serving a class as soon as a non-failed fetch exists for it, and the TVL loop
+reads 544 at `contracts.address` (never `request['proxy_address']`), where the
+pinned read returns 0 wei — `proven_zero`, writing no native row. The $35,904.67
+disappears from the published sheet at that point, and the fetch plane records
+*why*. Until then the misattribution stands and must be read as one.
+
+`contracts.id 563` (StakingManager) is the second such row and carries **no native
+row at all**; its three ERC-20 rows are spam-token airdrops with `usd_value` NULL,
+so there is **$0.00** of USD to withdraw there. *Population 2 — B14 bars
+calibrating anything on it; each row was decided on its own on-chain evidence.*
+
+**Deferrals carried by this unit, stated with cause.**
+
+* **ERC-20 quantities remain UNPINNED (Q1).** Only the native read moves to the
+  pinned `Multicall3` path, so `contract_balances.block_number` is populated on
+  native rows only and every ERC-20 row keeps `block_number NULL =
+  not_determined`. Cause: re-sourcing token quantities changes 571 published
+  money figures per cycle (**15.8%** of stored ERC-20 quantities do not reproduce
+  at 25643300), needs its own per-sub-call three-state, and forces `usd_value` to
+  be recomputed as pinned-quantity × unpinned-price. Honesty is preserved either
+  way — the height is `not_determined`, not guessed — so this is a capability
+  deferral, not an epistemic one. The schema is a superset; adding it later needs
+  no migration.
+* **`tvl.py:348` / `:429` truthiness (Q4).** Both the reader and the refresh loop
+  accumulate with `if usd:`, so a genuine PRICED `usd_value == 0` is dropped from
+  `contract_total` exactly as an unpriced NULL is — the same null/zero conflation
+  `company_overview.py` documents and avoids. Pre-existing, and NOT repaired here:
+  it is a defect in the USD accumulation, orthogonal to provenance, and fixing it
+  inside this change would move published `total_usd` figures for reasons
+  unrelated to the balance three-state. Recorded so the next reader of that
+  function does not mistake it for intended behaviour.
+
+**What the reader differential proves, and what it does not.** All three migrated
+`selection.py` readers produce **byte-identical** output before and after
+(60 `balance` keys, 55 `deployment_balance` keys, 701 `AssetHolding` entries across
+55 holders, 34 token holders; md5 `0e28f1ff…`), measured on a writable clone of the
+replica. That establishes **the legacy corpus is unchanged** — it is NOT evidence
+the new plane is correct, because every new column is NULL on all 1,617 rows and
+`completeness` still falls back to the stored-row rule while `asset_page_length` is
+NULL. The new plane is exercised only by the synthetic mixed-fetch arms in
+`tests/test_native_balance_three_state.py`.
 
 ### B9. Audit and change management
 

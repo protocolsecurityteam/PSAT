@@ -34,6 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
+from utils.balance_status import NATIVE_STATUS_PROVEN_ZERO
 from utils.chains import UnknownChainError, chain_by_name
 
 logger = logging.getLogger(__name__)
@@ -1266,6 +1267,72 @@ class ProtocolSubscription(Base):
     __table_args__ = (Index("ix_protocol_subscriptions_protocol_id", "protocol_id"),)
 
 
+def include_object(obj, name, type_, reflected, compare_to) -> bool:
+    """Alembic autogenerate filter: keep mapped VIEWs out.
+
+    ``ContractBalanceLatest`` maps the ``contract_balances_latest`` view so ORM
+    readers can swap entity without hand-written SQL. Alembic cannot tell a
+    mapped view from a mapped table, so without this it would report the view as
+    a missing TABLE and a later autogenerate would emit a ``CREATE TABLE`` that
+    shadows it. Keyed on the ``info={"is_view": True}`` marker the model carries,
+    not on a name list, so a future view is covered by declaring the marker.
+
+    Lives here rather than in ``alembic/env.py`` because that module runs
+    migrations at import time and cannot be imported by the drift test that
+    proves this filter works.
+    """
+    if type_ == "table" and (obj.info or {}).get("is_view"):
+        return False
+    return True
+
+
+class ContractBalanceFetch(Base):
+    """One balance-read attempt against one address. **NOT a holdings witness.**
+
+    This is the fetch-provenance plane. A row here records that a read was
+    ATTEMPTED and how it went; it never asserts that anything is held. That
+    separation is the whole point: the three-state discriminator cannot live on
+    ``contract_balances`` because ``services.effects.selection`` consumes a
+    ``contract_balances`` row's mere EXISTENCE as "this deployment holds this
+    asset", so a ``fetch_failed`` or ``proven_zero`` row written there would
+    publish holdings that do not exist.
+
+    ``native_status`` must be read as the PAIR ``(native_status, block_number)``
+    and never alone — ``proven_nonzero`` with a NULL block is "nonzero at an
+    unrecorded height", not an as-of-block fact. Route consumers through
+    :func:`services.monitoring.balance_reads.native_balance_fact`.
+    """
+
+    __tablename__ = "contract_balance_fetches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The address the read was actually ISSUED against, captured verbatim from
+    # the write-point local. Not necessarily ``contracts.address``: the
+    # resolution worker reads ``request['proxy_address'] or address``.
+    observed_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # The height the NATIVE quantity was read at. NULL = not_determined. Never
+    # projected onto ERC-20 rows (Q1 keeps those unpinned).
+    block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    native_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset_set_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The RAW endpoint entry count, BEFORE the ``raw_balance > 0`` filter drops
+    # entries. NULL = not_determined. This is the only thing that can witness
+    # the at-cap case; a stored-row count cannot (the filter destroys it).
+    asset_page_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    writer: Mapped[str] = mapped_column(String(32), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_cbf_contract_fetched", "contract_id", "fetched_at", "id"),
+        CheckConstraint(
+            f"native_status <> '{NATIVE_STATUS_PROVEN_ZERO}' OR block_number IS NOT NULL",
+            name="ck_cbf_proven_zero_requires_block",
+        ),
+    )
+
+
 class ContractBalance(Base):
     __tablename__ = "contract_balances"
 
@@ -1279,10 +1346,89 @@ class ContractBalance(Base):
     usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
     price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # The address this quantity was read at, verbatim from the write-point
+    # local. NULL = not_determined (every row written before this column
+    # existed; the address was never recorded and cannot be recovered).
+    observed_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # The height THIS quantity was read at. Populated only on the pinned
+    # Multicall3 native path; NULL = not_determined, permanently, for every
+    # Etherscan-sourced row. An ERC-20 row can never carry one (CHECK below):
+    # its quantity comes from an unpinned ``tag=latest`` answer, and letting it
+    # inherit the fetch's native height would mint a height it never had.
+    block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Structurally always NULL, and that is the field's job. No price source in
+    # this system carries a height (Etherscan's stats endpoint and
+    # ``TokenPriceUSD`` are both heightless), and the same asset diverges up to
+    # 20.97% within one recorded instant. A consumer MUST NOT substitute
+    # ``block_number``: ``usd_value``/``price_usd`` are never as-of-block facts.
+    # DB-enforced by ``ck_contract_balances_price_block_null``.
+    price_block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The fetch that observed this row. NULL = legacy row, provenance
+    # not_determined. The ``contract_balances_latest`` view keys off it.
+    fetch_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("contract_balance_fetches.id", ondelete="CASCADE"), nullable=True
+    )
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="balances")
 
-    __table_args__ = (Index("ix_contract_balances_contract_id", "contract_id"),)
+    __table_args__ = (
+        Index("ix_contract_balances_contract_id", "contract_id"),
+        Index("ix_contract_balances_fetch_id", "fetch_id"),
+        CheckConstraint(
+            "token_address IS NULL OR block_number IS NULL",
+            name="ck_contract_balances_token_block_null",
+        ),
+        CheckConstraint(
+            "price_block_number IS NULL",
+            name="ck_contract_balances_price_block_null",
+        ),
+    )
+
+
+class ContractBalanceLatest(Base):
+    """READ-ONLY mapping of the ``contract_balances_latest`` VIEW.
+
+    The view is what every consumer must read now that the writers are
+    insert-only. It is a pure projection of ``contract_balances`` — same columns,
+    a subset of the rows, never a join that can multiply or manufacture one — and
+    it answers one question per (contract, row class): which fetch's row set is
+    current?
+
+    * Per ROW CLASS (native vs ERC-20), independently: the latest fetch that did
+      NOT fail for that class wins WHOLESALE. A fetch's rows ARE the set it
+      observed, so an asset the holder has since sold correctly disappears, and
+      a transient token-fetch failure does not withdraw the native holding (or
+      vice versa).
+    * A failed fetch never wins. Letting one win would republish "holds nothing"
+      out of a failure — the exact fail-open this unit exists to close.
+    * Legacy rows (``fetch_id IS NULL``) remain visible until a NON-FAILED fetch
+      exists for that contract and class. A first fetch that fails must not
+      delete history from the view.
+
+    Not autogenerate-visible: :func:`include_object` (in this module, wired into
+    ``alembic/env.py``) filters it out on the ``info={"is_view": True}`` marker
+    below — not by name — because Alembic cannot tell a mapped view from a mapped
+    table and would otherwise emit a ``CREATE TABLE`` shadowing it.
+    ``tests/test_alembic_chain.py`` asserts the filtered diff is empty.
+    """
+
+    __tablename__ = "contract_balances_latest"
+    __table_args__ = {"info": {"is_view": True}}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(Integer)
+    token_address: Mapped[str | None] = mapped_column(String(42))
+    token_name: Mapped[str | None] = mapped_column(String(255))
+    token_symbol: Mapped[str | None] = mapped_column(String(50))
+    decimals: Mapped[int] = mapped_column(Integer)
+    raw_balance: Mapped[str] = mapped_column(String)
+    usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_address: Mapped[str | None] = mapped_column(String(42))
+    block_number: Mapped[int | None] = mapped_column(BigInteger)
+    price_block_number: Mapped[int | None] = mapped_column(BigInteger)
+    fetch_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class DAppInteraction(Base):

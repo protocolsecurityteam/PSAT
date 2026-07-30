@@ -29,6 +29,7 @@ from db.models import (
     Protocol,
     WatchedProxy,
 )
+from tests.support.balance_stubs import page
 
 ERPC_BASE = "https://erpc.test"
 BASE_URL = f"{ERPC_BASE}/main/evm/8453"  # base = chain id 8453
@@ -172,10 +173,10 @@ def test_tvl_refresh_passes_contract_chain_id(db_session, monkeypatch):
 
     def _tokens(address, chain_id=1):
         seen_chain_ids.append(chain_id)
-        return []
+        return page([])
 
     monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", _tokens)
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
     monkeypatch.setattr("utils.etherscan.get_eth_price", lambda *a, **kw: None)
 
     refresh_contract_balances(db_session, proto.id)

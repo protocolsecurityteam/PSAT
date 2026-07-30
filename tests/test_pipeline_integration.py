@@ -31,6 +31,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.support.balance_stubs import page
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
@@ -45,7 +47,7 @@ def _stub_etherscan_balances(monkeypatch):
     rewriting / handoff, not balances)."""
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
 
 
 # ---------------------------------------------------------------------------
