@@ -119,7 +119,7 @@ Real population (the register's own B6 table was measured from the **banned** co
 
 | kind | status | notes |
 |---|---|---|
-| `one_shot` + `latch_state` | REQ, **selector-level** | `consumed` is a pinned live `eth_getStorageAt` at the runtime proxy, fail-closed to `indeterminate`. But `expected_version` / `standard` / `size_bytes` are **dropped at persistence**, so a consumer cannot tell a `value >= expected` verdict from a `value > 0` one. Do not generalise to contract level — only `_disableInitializers()` proves that, and it fired 0 times |
+| `one_shot` + `latch_state` | REQ, **selector-level** | `consumed` is a pinned live `eth_getStorageAt` at the runtime proxy, fail-closed to `indeterminate`. The strength fields are no longer dropped — see `latch_witness` in §6b (0/39 today; they land on the next resolution pass, and every currently stored row must be read as the weakest branch). Do not generalise to contract level — only `_disableInitializers()` proves that, and it fired 0 times |
 | `time` | REQ | structure, **not a duration bound**. Licenses no numeric credit |
 | `pause` | CONF | 13 entries carry **both polarities**, and polarity lives only in free-text `description`. Not creditable without text parsing (inv.2-banned) |
 | `self_service` | REQ | caller may act only on their own position — not privileged (inv.3) |
@@ -127,6 +127,49 @@ Real population (the register's own B6 table was measured from the **banned** co
 | `denylist` | **CONF, not a guard** | all 28 read `"at least 0 excluded; not exhaustive"` — a lower bound with zero known members. Crediting it credits an empty set |
 | `business` | CONF | free-text `require`; 102 of 2089 are opaque `REF_nnn` placeholders |
 | name channels | CONF w/ residual | `one_shot`'s `_initializing` and `permit_sig`'s 5 canonical signatures are closed, standard-anchored exact matches — admissible with the residual stated |
+
+## 6b. One-shot latch witness — `conditions[].latch_witness` (A1 / Unit 1)
+
+Mirrors `SCORING_INVARIANTS.md` **B15** (normative). JSON path:
+`effective_functions.conditions[] where kind='one_shot' → .latch_witness`, served
+verbatim by `analysis_detail.py:434-436`. **Population 0/39 today** — the keys
+appear on the next resolution pass only. `latch_state`/`latch_value` are
+unchanged on every row (6/6 recoverable protocol rows reproduce byte-exactly
+through the production path at pinned block 25643300).
+
+**An absent `latch_witness` is the third state**, not a defect and not a
+negative: no latch was read (RPC failure, unreadable slot, no decisive latch, or
+a pre-change row). Read such a row as the **weakest branch** that could have
+produced its `latch_state`. Every failure / revert / absence path in the producer
+lands here or on `latch_basis: "not_determined"`.
+
+| field | pop. | status | three-state, and where failure lands | consume as |
+|---|--:|---|---|---|
+| `latch_basis` | 1/1 with the witness | GATE | `sentinel` / `version_ge` / `value_gt_zero` / `guard` / **`not_determined`**. An unfoldable guard — any classification failure — lands on `not_determined`, never on a branch label | gate + cite. **No ordering over the four bases** may be published as measured |
+| `probe_block` | only when a height was pinned | GATE | absent = the read used `latest`, so it has no reproducible height and must not be credited (inv.11/12) | gate + cite |
+| `probe_address` | with the witness | REQ | the **runtime** address the read hit, never `contracts.address` | cite |
+| `raw_word`, `read_kind`, `getter_selector` | with the witness; selector only on `read_kind='getter'` | CONF / trace | the returned word, verbatim, plus which read returned it — so a getter answer is never attributed to `slot` | cite (replay input) |
+| `standard` | with the witness | GATE | the latch family; with `latch_basis` this is what stops `latch_value` reading as an OZ version everywhere | gate |
+| `slot` | with the witness | REQ | keccak-anchored or layout-derived | cite |
+| `byte_offset`, `size_bytes` | often neither on `guard` rows | GATE | **absent = no byte range**, so `latch_value` is the whole word. The sentinel test is keyed on `size_bytes`, so a range-less descriptor can never be `sentinel` — 255 is one only for a 1-byte latch | gate + three-state |
+| `value_type` | absent on `unstructured_slot_latch` | CONF | **does not** on its own fix the `latch_value` mis-typing: it is absent exactly where it is worst (Lido's Aragon block number) | cite + three-state |
+| `role` | `version` on standard arms only | CONF | the static pass's **claim**, not an independently verified fact | cite |
+| `variable` | with the witness | CONF | referent varies by `standard`: state variable, **getter** name, or **modifier** name (Lido's is `"onlyInit"` — a modifier) | cite only; gating on it is inv.2 |
+| `guard.operator`, `guard.constant` | on `guard`-basis rows | REQ when `latch_basis='guard'` | `constant` absent for `falsy`/`truthy`, which take none — never a defaulted 0 | gate + cite. The only thing separating FiatTokenV2_2's `initializeV2`/`_V2_1`/`_V2_2`, all `consumed` at `latch_value=3` behind `eq 0`/`eq 1`/`eq 2` |
+| `expected_version` + `expected_version_basis` | both or neither | CONF w/ residual | bases `oz_reinitializer_argument_literal` (AST literal) and `oz_initializer_modifier_standard_constant` (the standard's 1, never read from source). Both match the closed `INITIALIZER_MODIFIERS` **name** set — the residual. A descriptor with no basis (every pre-change row) publishes **neither** key | cite. Never inferred from `latch_value` (banned) |
+
+**Permanence.** `latch_target='db_linked_proxy'` on 39/39, so `consumed` is a
+mutable now-fact: present it as "consumed at `probe_block` on `probe_address`;
+re-openable by the upgrade authority of that proxy". **Who can re-open is
+`not_determined`** and is not published. `site/src/protocolScore.js:239`
+(`isInertOneShot → 0.95`) currently credits it as permanent — an inv.10 violation,
+not fixed by Unit 1, recorded as the scorer's obligation.
+
+**Small-pop (B14), none may calibrate:** `guard` 6 rows / **0 at protocol_id=1** ·
+no-descriptor 6 rows (protocol-1 ef 479, 480, 1456, 2745 — publish no witness
+until re-analysis) · `sentinel` 0 · `value_gt_zero` 0 · Aragon-block-number type 1
+(ef 2120) · bool type 1 (ef 786). With two bases at zero rows, **no reliability
+ordering over the four is measurable here.**
 
 ## 7. Proof-strength gates
 
@@ -195,7 +238,7 @@ Real population (the register's own B6 table was measured from the **banned** co
 
 The pipeline computes proof-strength gates and **discards them at the persistence boundary**. Until these land, three earned negatives are not replayable from stored inputs:
 
-1. **One-shot latch** — persist `standard`, `expected_version`, `byte_offset`, `size_bytes` and the probe block onto the condition (or a `latch_basis ∈ {sentinel, version_ge, value_gt_zero, guard}` discriminator).
+1. ~~**One-shot latch**~~ — **LANDED (Unit 1 / A1).** `conditions[].latch_witness` now carries `standard`, `slot`, `byte_offset`, `size_bytes`, `value_type`, `role`, `variable`, `guard{operator,constant}`, `expected_version`+`expected_version_basis`, `probe_address`, `probe_block`, `raw_word`/`read_kind`, and the `latch_basis ∈ {sentinel, version_ge, value_gt_zero, guard, not_determined}` discriminator. See §6b / B15. Keys are absent, never null, where the producer had nothing; the 6 no-descriptor rows publish no witness at all until re-analysis.
 2. **Exact empty caller sets** — stop `_intersect_finite`/`_union_finite`/`_intersect_finite_blacklist` dropping `last_indexed_block` and `empty_reason`.
 3. **Accessor-convention principals** — publish the `basis` alongside the strength fields, not only inside `trace`.
 4. `contract_balances` — add `block_number`, and stop the destructive delete+reinsert.
