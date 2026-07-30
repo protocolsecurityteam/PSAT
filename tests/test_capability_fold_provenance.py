@@ -134,8 +134,8 @@ def test_min_of_present_is_not_implemented():
 # ---------------------------------------------------------------------------
 
 
-def _blacklist(members: list[str], *, block: int | None) -> CapabilityExpr:
-    cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable")
+def _blacklist(members: list[str], *, block: int | None, quality: str = "exact") -> CapabilityExpr:
+    cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable", blacklist_quality=quality)  # type: ignore[arg-type]
     cap.last_indexed_block = block
     return cap
 
@@ -315,8 +315,77 @@ def test_a_refused_as_of_poisons_every_later_composition():
     assert second["last_indexed_block"] == B1
     assert second["exact_as_of"] == "not_determined"
 
-    negated = capability_to_dict(negate(first))
-    assert negated["exact_as_of"] == "not_determined"
+    assert capability_to_dict(negate(first))["exact_as_of"] == "not_determined"
+
+
+def test_empty_result_at_heterogeneous_heights_still_refuses():
+    """The empty-result case of the same rule, stated on its own because it is
+    the one the deleted arm (i) got wrong: an inherited-empty intersection at
+    UNEQUAL heights must publish ``"not_determined"``, never the MIN.
+
+    "Empty at MIN" does not follow from "empty in the published composition":
+    both fold families publish state-AT-h with revocations applied, so a member
+    revoked from the later operand in (b1, b2] is absent from the published set
+    while the true set at b1 still held it."""
+    out = capability_to_dict(intersect(_fold([], block=B1, reason="owner_read_zero"), _fold([ADDR_A], block=B2)))
+    assert out["members"] == []
+    assert out["last_indexed_block"] == B1
+    assert out["exact_as_of"] == "not_determined"
+    assert out["exact_as_of"] != B1
+
+
+# ---------------------------------------------------------------------------
+# Laundering through the early returns
+#
+# Three working attacks, reproduced verbatim. Each rests on the same shape: an
+# operation that had every reason to refuse an as-of returned early — unlicensed
+# (created emptiness) or non-exact (a lower_bound cofinite) — leaving a
+# heterogeneous MIN in ``last_indexed_block`` with NO refusal recorded. That is
+# byte-indistinguishable from a leaf, so the NEXT combinator saw one height,
+# read "all heights equal", and minted the as-of. The refusal is now recorded
+# before both early returns.
+# ---------------------------------------------------------------------------
+
+
+def test_created_empty_subtraction_does_not_launder_a_heterogeneous_as_of():
+    """Attack (i). ``{A}@b1 − {A}@b2`` is a created emptiness, so it publishes no
+    as-of — but it must publish the REFUSAL, or re-composing it with a fold@b1
+    yields ``exact_as_of: b1``, which is false: at b1 the true set was {A}."""
+    created_empty = intersect(_fold([ADDR_A], block=B1), _blacklist([ADDR_A], block=B2))
+    assert created_empty.members == []
+    assert created_empty.exact_as_of == "not_determined"
+
+    composed = capability_to_dict(intersect(created_empty, _fold([ADDR_A], block=B1)))
+    assert composed["exact_as_of"] == "not_determined"
+    assert composed["exact_as_of"] != B1
+
+
+def test_negating_a_created_empty_does_not_launder_a_heterogeneous_as_of():
+    """Attack (ii). The complement of that same created empty is "everyone" —
+    published, before the fix, as exactly known at b1."""
+    created_empty = intersect(_fold([ADDR_A], block=B1), _blacklist([ADDR_A], block=B2))
+    out = capability_to_dict(negate(created_empty))
+    assert out["kind"] == "cofinite_blacklist"
+    assert out["exact_as_of"] == "not_determined"
+    assert out["exact_as_of"] != B1
+
+
+def test_lower_bound_cofinite_does_not_launder_a_heterogeneous_as_of():
+    """Attack (iii). ``union(fold@b1, lower_bound blacklist@b2)`` returns a
+    ``lower_bound`` cofinite, which used to exit at the quality gate with no
+    refusal. Intersecting it back with a fold@b1 then published
+    ``{members: [A], exact_as_of: b1}`` — false, because the denylist that
+    produced A's survival was observed at b2."""
+    lower_bound_cofinite = union(
+        _fold([ADDR_A], block=B1),
+        _blacklist([ADDR_A, ADDR_B], block=B2, quality="lower_bound"),
+    )
+    assert lower_bound_cofinite.exact_as_of == "not_determined"
+
+    composed = capability_to_dict(intersect(_fold([ADDR_A, ADDR_B], block=B1), lower_bound_cofinite))
+    assert composed["members"] == [ADDR_A]
+    assert composed["exact_as_of"] == "not_determined"
+    assert composed["exact_as_of"] != B1
 
 
 def test_side_conditions_preserve_height_and_as_of():

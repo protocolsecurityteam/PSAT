@@ -577,28 +577,39 @@ def _carry_fold_provenance(
     ``exact_as_of`` is far more restricted: it is published only when every
     operand carried a height AND all of them are EQUAL (one instant), the result
     is ``exact``, and — for an empty result — the emptiness was INHERITED rather
-    than created by this operation (``exact_as_of_licensed``). Heterogeneous
-    heights publish the literal ``"not_determined"``: an earned refusal, not an
-    omission.
+    than created by this operation (``exact_as_of_licensed``).
+
+    **The REFUSAL is recorded first, before any other test.** Heterogeneous
+    operand heights collapse to one MIN in ``last_indexed_block``, and a result
+    carrying one height with no ``exact_as_of`` is indistinguishable from a leaf
+    — so a second combinator would read "all heights equal" and mint an as-of
+    the first operation had every reason to refuse. Returning early for an
+    unlicensed or non-exact result would leave exactly that shape: three working
+    launderings existed through those two returns (a created-empty subtraction
+    re-composed with a fold; its negation; a ``lower_bound`` cofinite union fed
+    back into an intersection). The refusal must therefore be published
+    regardless of licensing and regardless of quality — it is the weakest state,
+    so publishing it can never over-claim, while omitting it can.
     """
     cap.last_indexed_block = _propagated_height(*operands)
     cap.exact_as_of = None
+    heights = [op.last_indexed_block for op in operands]
+    # (a) an operand that already refused poisons every composition it enters;
+    # (b) heights that disagree can never license an as-of again, whatever this
+    # result's quality or licensing turns out to be.
+    if any(op.exact_as_of == "not_determined" for op in operands) or (
+        all(height is not None for height in heights) and len(set(heights)) > 1
+    ):
+        cap.exact_as_of = "not_determined"
+        return cap
     if not exact_as_of_licensed:
         return cap
     quality = cap.blacklist_quality if cap.kind == "cofinite_blacklist" else cap.membership_quality
     if quality != "exact":
         return cap
-    if any(op.exact_as_of == "not_determined" for op in operands):
-        # An operand that already refused an as-of poisons every composition it
-        # enters. Without this, a second combinator would see one operand
-        # carrying one (MIN) height, read "all heights equal", and re-mint the
-        # refused as-of out of the staleness floor.
-        cap.exact_as_of = "not_determined"
-        return cap
-    heights = [op.last_indexed_block for op in operands]
     if any(height is None for height in heights):
         return cap
-    cap.exact_as_of = heights[0] if len(set(heights)) == 1 else "not_determined"
+    cap.exact_as_of = heights[0]
     return cap
 
 

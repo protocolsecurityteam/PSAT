@@ -2139,7 +2139,7 @@ appendix already states, must be read as the weakest branch.
 | field | JSON path | population | status | three-state — and where failure lands | consumption obligation |
 |---|---|--:|---|---|---|
 | `last_indexed_block` | `.last_indexed_block` (any node) | 250/1799 today, at leaves only | **GATE** | Proven-present = **MIN** over every operand's fold height — a **STALENESS FLOOR**, not an as-of. There is no proven-absent. **Absent = `not_determined`**, and that is where *every* fail-closed arm lands: any operand without a height (an unpinned live `owner()` read is blockless by construction) makes the whole result blockless. `min`-of-present is **banned**. | **arithmetic + three-state** via `capability_currency` (`current`/`stale`/`not_determined`, `lag_blocks` never 0 by default). |
-| `exact_as_of` | `.exact_as_of` | 0 today (prospective) | **GATE** | Three states, all distinguishable: an **int** (every operand carried a height and ALL were equal — one instant), the literal **`"not_determined"`** (heights present but heterogeneous — an *earned* refusal), and **key absent** (never computed: a leaf, or an operand with no height). | **gate + cite.** The only height admissible as an "the set was exactly this at block B" claim. |
+| `exact_as_of` | `.exact_as_of` | 0 today (prospective) | **GATE** | Three states, all distinguishable. An **int** requires ALL FOUR conditions, as built: (1) every operand carries a height, (2) all those heights are EQUAL (one instant), (3) the result's own quality is `exact` (a `lower_bound` set is exact at no height; for a cofinite the quality read is `blacklist_quality`), and (4) on the subtractive paths — `finite ∩ cofinite`, which has no structural-AND diversion — the emptiness is INHERITED, never created by the operation. The literal **`"not_determined"`** = heights present but heterogeneous, OR any operand already carrying that refusal — an *earned* refusal, **recorded before conditions (3) and (4) are even tested** (see the laundering note). **Key absent** = never computed: a leaf, or an operand with no height at all. | **gate + cite.** The only height admissible as an "the set was exactly this at block B" claim. |
 | `empty_reason` | `.empty_reason` | 1 of 52 protocol-1 empties today | **GATE** | Propagated **only on INHERITED emptiness** — an operand that was already empty carries its own reason through. Emptiness *created* by an operation (`{X} − {X}` on the blacklist path) mints **no** reason; absent = `not_determined`. Two already-empty operands that disagree resolve to absent, not to whichever came first. | **gate.** Never `is not None` — see B16.3's allow-list. |
 
 **Why MIN may not be promoted to an as-of** (this is the load-bearing correction
@@ -2153,6 +2153,36 @@ unproven. On the subtractive paths (`finite − blacklist`, and both `negate`
 arms) the argument **inverts**: the published set is a *subset* of the true set
 at MIN. Hence `exact_as_of` exists only for the equal-heights case, and a
 consumer may **never** substitute `last_indexed_block` for it.
+
+**The refusal is recorded FIRST — a defect the adversarial round caught in the
+first cut of this work.** Heterogeneous operand heights collapse to a single MIN
+in `last_indexed_block`, so a result carrying one height and no `exact_as_of` is
+byte-indistinguishable from a leaf. The first implementation returned early for
+an unlicensed (created-empty) or non-`exact` result *before* testing
+heterogeneity, leaving exactly that shape — and the next combinator read "all
+heights equal" and minted the as-of the first operation had refused. Three
+working launderings existed: `intersect(intersect(fold@b1, blacklist@b1'), fold@b1)`
+→ `exact_as_of: b1` (false — at b1 the true set was non-empty); `negate` of that
+same created empty → a cofinite "everyone" dated b1; and
+`intersect(fold@b1, union(fold@b1, lower_bound blacklist@b2))` → `{[A],
+exact_as_of: b1}` (false — the denylist that let A survive was observed at b2).
+The refusal is therefore published regardless of licensing and regardless of
+quality: it is the weakest state, so publishing it can never over-claim, while
+omitting it can. All three are pinned as tests.
+
+**A premise this rests on, stated so it can be re-measured rather than assumed.**
+`min_indexed_block` (`repos/event_logs_pg.py`) gates on `backfill_complete` for
+every topic but **not** on the cursors being at the same height, and returns
+their MIN — so an adapter leaf's `last_indexed_block`
+(`enumerable_role_store.py`, `solmate_roles.py`) is *itself* already a MIN across
+topics. If those cursors diverged, a single leaf would carry the same
+heterogeneity this entry refuses at the combinators, one level below where it is
+checked. Measured on the PR-161 replica: **32 (chain_id, event_address) cursor
+groups, 25 of them multi-topic, 0 with any spread** (`min(last_indexed_block) !=
+max(...)`), all 25 `backfill_complete`, and 80 cursors carrying exactly **1
+distinct height**. So the premise holds here — but it is a property of this
+replica's indexing state, not an invariant of the code, and it must be
+re-measured before any claim that a leaf height denotes one instant.
 
 **Ten mint sites, nine propagating.** `capabilities.py` rebuilds a capability at
 ten places; nine now carry provenance through `_carry_fold_provenance`
@@ -2193,6 +2223,20 @@ from persisted data**. Only re-resolution settles it. (An earlier draft of this
 work claimed "0 rows realized" for the burn arm; that claim is withdrawn — it
 was absence-as-witness.)
 
+**`capability_currency` moves, in the honest direction.** Propagation gives a
+FOLDED ROOT a height it did not have, so rows move `not_determined` →
+`current`/`stale` — that is the intended gain (`analysis_detail.py`, the served
+`capability_currency`, needs no change to produce it). Two second-order effects,
+stated rather than discovered later: (1) because the MIN is taken across
+operands, a composition of two folds can read `stale` where either operand alone
+would have read `current`, and (2) a combinator node's MIN can become the tree's
+lowest height, so a row already reading `current` off a surviving sibling can
+move to `stale`. Both are the honest direction — a composition really is only as
+current as its least-current operand — and both are **measured-unlikely**: the
+within-one-job cursor spread is 203 blocks against a 1,000-block staleness
+threshold, and on this replica all 80 cursors sit at a single height. Unmeasured,
+because it needs a resolution replay: how many rows actually move.
+
 **The burn arm is REAL, not hypothetical.** Solady's `TopUp` / `TopUpV2` hold
 `owner() == 0x…dEaD` on mainnet, and the repo's own verbatim fixture
 (`tests/fixtures/contracts/authority/solady/`) exercises exactly that path. So
@@ -2204,13 +2248,44 @@ correct), but such a row no longer reads as `resolved_empty` and can no longer
 earn the credit. The direction is conservative: an unproven negative becomes an
 honest unknown.
 
+**Its measured corpus impact is nevertheless 0 rows.** The four `TopUp` /
+`TopUpV2` / `TopUpDest` contract rows on the replica carry **0
+`effective_functions`** between them, and **no** stored `capability_expr` has
+`0x…dEaD` as a `finite_set` member (the 20 trees mentioning the literal are
+`conditional_universal` / `signature_witness` / `external_check_only` nodes, not
+the empty-set shape). So the code path is real and fixture-exercised while the
+persisted blast radius is nil — which is why this is registered as a behaviour
+change with a stated 0-row impact rather than as a row-flipping correction.
+
 #### B16.3 The earned-negative gate (`analysis_detail` → `exact_empty_credit`)
 
 An empty caller set is the strongest earned negative the resolver publishes, and
 the shipped consumers award it on `membership_quality == "exact" && members == []`
-alone (`site/src/protocolScore.js:127-140`, `guardSummary.js:74`) — a shape a
-provenance-less empty satisfies exactly as well as a read-confirmed one. The gate
-is now **served beside the payload** rather than re-derived downstream.
+alone — a shape a provenance-less empty satisfies exactly as well as a
+read-confirmed one. The gate is now **served beside the payload** rather than
+re-derived downstream.
+
+**There are TWO consumer credit paths, and a scorer that switches only the first
+changes nothing.** `isResolvedEmptyFunction` is
+`fn?.status === "resolved_empty" || isExactEmptyCapability(fn?.capability_expr)`
+in BOTH shipped consumers (`site/src/protocolScore.js:138-140`,
+`site/src/surface/layout/guardSummary.js:82-84`). The second disjunct is the
+capability-shape derivation this entry replaces; **the first is a column**, and
+per the Q1 adjudication `status` is deliberately UNCHANGED by this unit —
+measured: **86/86** of the affected rows carry `status='resolved_empty'`. So a
+consumer that adopts `exact_empty_credit` while leaving the `status` disjunct in
+place awards exactly the same credit it did before. Both disjuncts must be
+replaced together.
+
+**The gate answers at the ROOT only; there is no recursion.** Measured
+distribution over the 86: `{not_determined: 85, not_applicable: 1}` — the single
+`not_applicable` is the one row whose root `kind` is `AND` (85 roots are
+`finite_set`). A nested exact-empty under an `AND`/`OR` is therefore NOT assessed
+by this field, which is why the consumer rule is **"award credit only on
+`earned`"** and never **"withhold credit only on `not_determined`"**:
+`not_applicable` means *this field did not look*, not *there is nothing here*.
+Recursing the gate would require deciding what an earned negative means under a
+disjunction, which this unit does not settle.
 
 | verdict | meaning |
 |---|---|
