@@ -508,6 +508,7 @@ def _finalize_upgrade_history(
     # dict — no re-read of storage. Errors here are non-fatal: the artifact
     # is already stored, so a failure leaves the data still recoverable
     # via re-running this stage.
+    stats_proxy_ids: set[int] = set()
     if contract_row is not None:
         try:
             from services.discovery.upgrade_history import (
@@ -522,6 +523,7 @@ def _finalize_upgrade_history(
                 artifact_data=uh,
             )
             session.commit()
+            stats_proxy_ids = set(stats.get("proxy_contract_ids") or ())
             logger.info(
                 "Static stage upgrade events projected for job %s (proxies %d/%d, events %d, skipped %d)",
                 job.id,
@@ -558,6 +560,47 @@ def _finalize_upgrade_history(
             )
             logger.warning(
                 "Upgrade event projection failed for job %s: %s",
+                job.id,
+                exc,
+            )
+
+    # The executor fold is a SEPARATE failure domain from the projection: it is
+    # the only part of this stage that touches the wire twice more (receipts,
+    # creation witnesses), and a wire failure must cost the receipt facts only,
+    # never the event rows that were just written.
+    if contract_row is not None and stats_proxy_ids:
+        try:
+            from services.discovery.upgrade_history import fold_upgrade_transactions
+            from utils.rpc import chain_id_for_chain_name
+
+            chain_id = chain_id_for_chain_name(contract_row.chain or "ethereum")
+            if chain_id is not None:
+                fold_stats = fold_upgrade_transactions(
+                    session,
+                    chain_id=chain_id,
+                    contract_ids=sorted(stats_proxy_ids),
+                )
+                session.commit()
+                logger.info(
+                    "Static stage upgrade executor fold for job %s (tx %d/%d, kinds %s)",
+                    job.id,
+                    fold_stats["tx_folded"],
+                    fold_stats["tx_in_scope"],
+                    fold_stats["kinds"],
+                )
+        except Exception as exc:
+            # A DB-layer failure leaves the session in a failed transaction, and
+            # every later statement in this stage would raise
+            # PendingRollbackError instead of doing its work. Roll back first so
+            # the fold's failure costs the fold only.
+            session.rollback()
+            record_degraded(
+                phase="static_upgrade_executor_fold",
+                exc=exc,
+                context={"job_id": job.id, "address": job.address or "0x0"},
+            )
+            logger.warning(
+                "Upgrade executor fold failed for job %s: %s",
                 job.id,
                 exc,
             )

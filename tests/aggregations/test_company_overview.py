@@ -1081,7 +1081,11 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     assert norm["cge"][contract_a.id], "cge missing for contract A"
     assert norm["ef_effects"][contract_a.id], "ef_effects missing for contract A"
     assert norm["fp_governance_rows"][contract_a.id], "fp_governance_rows missing for contract A"
-    assert norm["upgrade_events_count"][contract_a.id] == 2
+    # The loader now returns the action count together with the basis it rests
+    # on — two events with no receipt facts are two *unwitnessed* actions, and
+    # the count says so rather than presenting itself as complete.
+    assert norm["upgrade_events_count"][contract_a.id]["count"] == 2
+    assert norm["upgrade_events_count"][contract_a.id]["basis"]["events_without_tx_hash"] == 2
     assert norm["upgrade_events_last"][contract_a.id]["block"] == 22345
 
 

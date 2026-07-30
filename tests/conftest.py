@@ -42,6 +42,7 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
+    ContractCreationWitness,
     DaemonLease,
     EffectVerdict,
     IndexedEventCursor,
@@ -54,6 +55,7 @@ from db.models import (  # noqa: E402
     ProxySubscription,
     ProxyUpgradeEvent,
     TvlSnapshot,
+    UpgradeTransaction,
     WatchedProxy,
 )
 
@@ -686,6 +688,10 @@ def db_session():
             EffectVerdict,
             Contract,
             Protocol,
+            # Only reachable once Contract is gone: upgrade_events cascade from
+            # Contract and hold the FK into upgrade_transactions.
+            UpgradeTransaction,
+            ContractCreationWitness,
             # Scanner/poller passes commit durable daemon_leases rows (with a
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.
