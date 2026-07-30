@@ -9,9 +9,12 @@ key that elsewhere holds an OZ version. This module pins the witness that closes
 that: what is published, and — the harder half — what is NOT published when the
 producer had nothing.
 
-The three replayed shapes are the realized ones, with descriptors read verbatim
-from the persisted ``predicate_trees`` blobs and storage words re-read on chain
-at block **25643300** (pinned; never ``latest``):
+The three replayed shapes are the realized ones, with descriptors taken from the
+persisted ``predicate_trees`` artifacts and storage words re-read on chain at
+block **25643300** (pinned; never ``latest``). The Lido and FiatTokenV2_2
+descriptors are verbatim; the ERC-7201 one adds ``expected_version_basis``, the
+key this change introduces — the persisted shape, which carries the version with
+no basis, is the ``basis=None`` arm below:
 
   * Lido ``0xae7ab965…`` — ``unstructured_slot_latch``, guard ``eq 0``, no byte
     range, slot ``keccak("aragonOS.initializable.initializationBlock")``,

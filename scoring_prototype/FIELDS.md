@@ -134,8 +134,18 @@ Mirrors `SCORING_INVARIANTS.md` **B15** (normative). JSON path:
 `effective_functions.conditions[] where kind='one_shot' → .latch_witness`, served
 verbatim by `analysis_detail.py:434-436`. **Population 0/39 today** — the keys
 appear on the next resolution pass only. `latch_state`/`latch_value` are
-unchanged on every row (6/6 recoverable protocol rows reproduce byte-exactly
-through the production path at pinned block 25643300).
+unchanged on every row (6/6 rows re-run through the production path reproduce
+byte-exactly at pinned block 25643300; all 39 conditions replay from their
+job-artifact descriptor + stored `latch_value`, 39/39).
+
+**Realized bases, measured through the resolver's own load path**
+(`get_artifact(session, analysis_job.id, "predicate_trees")`, tree keyed via the
+artifact's `canonical_signatures` map): `guard` 6 · `version_ge` 32 ·
+`sentinel` 0 · `value_gt_zero` 0 · **zero-decisive-descriptor 0**, over 38
+functions. Lane-A's "6 not recoverable" was measured through
+`contract_materializations` — the wrong surface (no row for 3 of the 4
+protocol-1 addresses; `EigenStrategy`'s trees keyed by Slither `full_name`, not
+`abi_signature`) — and is withdrawn. See B15.
 
 **An absent `latch_witness` is the third state**, not a defect and not a
 negative: no latch was read (RPC failure, unreadable slot, no decisive latch, or
@@ -166,10 +176,10 @@ re-openable by the upgrade authority of that proxy". **Who can re-open is
 not fixed by Unit 1, recorded as the scorer's obligation.
 
 **Small-pop (B14), none may calibrate:** `guard` 6 rows / **0 at protocol_id=1** ·
-no-descriptor 6 rows (protocol-1 ef 479, 480, 1456, 2745 — publish no witness
-until re-analysis) · `sentinel` 0 · `value_gt_zero` 0 · Aragon-block-number type 1
-(ef 2120) · bool type 1 (ef 786). With two bases at zero rows, **no reliability
-ordering over the four is measurable here.**
+`sentinel` 0 · `value_gt_zero` 0 · Aragon-block-number type 1 (ef 2120) · bool
+type 1 (ef 786). The protocol-1 population is **22 rows, all `version_ge`**.
+With two bases at zero rows, **no reliability ordering over the four is
+measurable here.**
 
 ## 7. Proof-strength gates
 
@@ -238,7 +248,7 @@ ordering over the four is measurable here.**
 
 The pipeline computes proof-strength gates and **discards them at the persistence boundary**. Until these land, three earned negatives are not replayable from stored inputs:
 
-1. ~~**One-shot latch**~~ — **LANDED (Unit 1 / A1).** `conditions[].latch_witness` now carries `standard`, `slot`, `byte_offset`, `size_bytes`, `value_type`, `role`, `variable`, `guard{operator,constant}`, `expected_version`+`expected_version_basis`, `probe_address`, `probe_block`, `raw_word`/`read_kind`, and the `latch_basis ∈ {sentinel, version_ge, value_gt_zero, guard, not_determined}` discriminator. See §6b / B15. Keys are absent, never null, where the producer had nothing; the 6 no-descriptor rows publish no witness at all until re-analysis.
+1. ~~**One-shot latch**~~ — **LANDED (Unit 1 / A1).** `conditions[].latch_witness` now carries `standard`, `slot`, `byte_offset`, `size_bytes`, `value_type`, `role`, `variable`, `guard{operator,constant}`, `expected_version`+`expected_version_basis`, `probe_address`, `probe_block`, `raw_word`/`read_kind`, and the `latch_basis ∈ {sentinel, version_ge, value_gt_zero, guard, not_determined}` discriminator. See §6b / B15. Keys are absent, never null, where the producer had nothing. Every one of the 38 one_shot functions has a signature-exact decisive descriptor on the resolver's job-artifact path, so none is blocked for want of one; when a given row gains its witness depends on when that job is next re-resolved.
 2. **Exact empty caller sets** — stop `_intersect_finite`/`_union_finite`/`_intersect_finite_blacklist` dropping `last_indexed_block` and `empty_reason`.
 3. **Accessor-convention principals** — publish the `basis` alongside the strength fields, not only inside `trace`.
 4. `contract_balances` — add `block_number`, and stop the destructive delete+reinsert.

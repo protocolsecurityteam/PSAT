@@ -1809,8 +1809,14 @@ through the production path at block 25643300. Only strength metadata is added.
 
 **Population (as of the PR-161 replica, 2026-07-30):** 0/39 today — the keys
 appear on the **next resolution pass only**; already-stored rows keep the 5-key
-shape. Realized bases once repopulated, measured from the persisted descriptors:
-`guard` 6 · `version_ge` 26 · `sentinel` 0 · `value_gt_zero` 0 · no descriptor 6.
+shape. Realized bases once repopulated, measured by loading each contract's job
+`predicate_trees` artifact through the resolver's own path
+(`get_artifact(session, analysis_job.id, "predicate_trees")`,
+`capability_resolver.py:320`/`:333`) and keying the tree by the artifact's
+`canonical_signatures` map: **`guard` 6 · `version_ge` 32 · `sentinel` 0 ·
+`value_gt_zero` 0 · zero-decisive-descriptor 0**, over 38 functions / 39
+conditions. Feeding those descriptors back through `_classify_value` with each
+row's stored `latch_value` reproduces the stored `latch_state` on **39/39**.
 
 **Absence is the third state.** An absent `latch_witness` means no latch was
 read — an RPC failure, an unreadable slot, a tree with no decisive latch, or a
@@ -1825,7 +1831,7 @@ positive or a negative.
 | `latch_basis` | `.latch_basis` | 1/1 whenever the witness exists | **GATE** | Four-valued discriminator `sentinel` / `version_ge` / `value_gt_zero` / `guard`, plus **`not_determined`**. Proven-present = that oracle decided `latch_state`. There is no proven-absent. **A guard the evaluator cannot fold, i.e. any classification failure, lands on `not_determined`** — never on a branch label; the row's `latch_state` is then `indeterminate` too. Witness absent ⇒ weakest branch. | **gate + cite.** Gate the inertness credit on it; cite it in the finding. **No ordering over the four bases may be published or assumed** — see the small-pop bar below. |
 | `probe_block` | `.probe_block` | present only when the pass pinned a height | **GATE** | Proven-present = the read happened at exactly this height. **Absent = the read used `latest` and has no reproducible height** (the `"latest"` path publishes no block rather than an unreplayable one) — the observation is then not replayable and must not be credited (inv.11/12). | **gate + cite.** Required for any inertness credit; see the permanence rule below. |
 | `probe_address` | `.probe_address` | present whenever the witness exists | **REQ** | The address the read was issued against — the **runtime** deployment address, never `contracts.address`. No absent state while a witness exists. | **cite.** Without it `slot` + `raw_word` are not replayable. |
-| `raw_word` / `read_kind` / `getter_selector` | `.raw_word`, `.read_kind`, `.getter_selector` | with the witness; `getter_selector` only when `read_kind='getter'` | CONF / trace | `raw_word` is the word the read returned, verbatim from the probe transcript (hex, unpadded). `read_kind` names WHICH read produced it (`storage` \| `getter`), so a getter answer is never attributed to `slot`. Unreadable ⇒ no witness at all. | **cite.** Replay input: reissue `read_kind` at `probe_address`/`probe_block` and expect `raw_word`. |
+| `raw_word` / `read_kind` / `getter_selector` | `.raw_word`, `.read_kind`, `.getter_selector` | with the witness; `getter_selector` only when `read_kind='getter'` | CONF / trace | `raw_word` is the word the read returned, verbatim from the probe transcript — `hex(word)` (unpadded) on the storage arm, the getter's 66-char `0x`-prefixed return prefix on the getter arm, so compare it numerically, not as a string. `read_kind` names WHICH read produced it (`storage` \| `getter`), so a getter answer is never attributed to `slot`. Unreadable ⇒ no witness at all. | **cite.** Replay input: reissue `read_kind` at `probe_address`/`probe_block` and expect `raw_word`. |
 | `standard` | `.standard` | with the witness | **GATE** | The producer's latch family (`storage_layout`, `oz_v5_namespaced`, `namespaced_slot_constant`, `structural_scalar_latch`, `unstructured_slot_latch`). Proven from the descriptor's construction, not from a name. | **gate.** With `latch_basis` this is what stops `latch_value` being read as an OZ version on every row — see the mis-typing note. |
 | `slot` | `.slot` | with the witness | **REQ** | The descriptor's storage location. Keccak-anchored or layout-derived; absent when the descriptor had none. | **cite.** |
 | `byte_offset` / `size_bytes` | `.byte_offset`, `.size_bytes` | `guard`-family rows often have neither | **GATE** | The byte range decoded out of `raw_word`. **Absent = the producer had no range**, so `latch_value` is the whole 32-byte word. Absence is load-bearing: the `_disableInitializers` sentinel test is `_DISABLED_SENTINELS[size_bytes]`, so **255 is a sentinel only for a 1-byte latch** and a range-less descriptor can never reach the `sentinel` basis. | **gate + three-state.** Never read a bare 255 / 2^64-1 as `_disableInitializers` without `size_bytes`. |
@@ -1856,12 +1862,11 @@ fixed by Unit 1** (JS is out of its scope); recorded here as the register's
 standing obligation on whoever writes the scorer.
 
 **Small-population bar (B14) — none of these may calibrate a weight.** `guard`
-basis **6 rows, 0 at protocol_id=1**; no-recoverable-descriptor **6 rows** (protocol-1
-`effective_functions` 479, 480, 1456, 2745 — these need re-analysis and publish no
-witness at all until then; protocol NULL 2018, 2019); `sentinel` **0**;
-`value_gt_zero` **0**; Aragon-block-number-typed `latch_value` **1 row** (ef 2120,
-Lido); bool-typed `latch_value` **1 row** (ef 786, FiatTokenV2_2). Every one is
-under ~5, so each may **gate / cite / three-state** and **none may calibrate**. In
+basis **6 rows, 0 at protocol_id=1**; `sentinel` **0**; `value_gt_zero` **0**;
+Aragon-block-number-typed `latch_value` **1 row** (ef 2120, Lido); bool-typed
+`latch_value` **1 row** (ef 786, FiatTokenV2_2). The protocol-1 population is
+**22 rows, all `version_ge`**. Every flagged one is under ~5, so each may
+**gate / cite / three-state** and **none may calibrate**. In
 particular: because `sentinel` and `value_gt_zero` have zero realized rows and
 `guard` six, **no reliability ORDERING over the four bases is measurable on this
 corpus** — any ordering a scorer adopts is a named model choice carrying its own
@@ -1874,7 +1879,7 @@ version, never a measured strength.
 - B0b/S1 states the descriptor emits a `guard` key. It does **not**: the A-spine
   `_latch_location` never emits `guard`, and `role='version'` only on its two
   standard arms. `guard` comes from the separate structural-candidate detector
-  (`one_shot.py:540`, `:584`, `:611`). The aggregate key list was assembled from
+  (`one_shot.py:567`, `:611`, `:638`). The aggregate key list was assembled from
   two different producers.
 - "The sentinel branch is recoverable because `latch_value ∈ {255, 2^64-1}` is the
   post-mask value" is **false in general** — see `size_bytes` above. Realized
@@ -1882,3 +1887,25 @@ version, never a measured strength.
 - `FIELDS.md` §6's "`expected_version` / `standard` / `size_bytes` are dropped at
   persistence" is fixed forward by this entry, but only from the next resolution
   pass; it remains true of every currently stored row.
+- **Lane-A's "descriptor recovered for 32 of 38; 6 not recoverable at all"
+  (protocol-1 ef 479, 480, 1456, 2745; protocol NULL ef 2018, 2019) is
+  WITHDRAWN.** It was measured through `contract_materializations`, which is not
+  the surface the resolver reads: three of those four protocol-1 addresses have
+  no row there at all, and `EigenStrategy`'s trees are keyed by Slither
+  `full_name` (`initialize(IERC20)`, `initialize(IEigen,IERC20)`) rather than by
+  the canonical `abi_signature` the `effective_functions` row carries. Loading
+  each contract's **job** `predicate_trees` artifact instead, and keying through
+  the artifact's own `canonical_signatures` map, yields a signature-exact
+  decisive descriptor for **all 38** functions — including both `EigenStrategy`
+  overloads and `CumulativeMerkleDrop.initializeLayerZero` (`expected_version` 2
+  against its stored `latch_value` 2). Re-measured this unit: **0** functions
+  with zero decisive descriptors. The withdrawn claim was absence-as-witness
+  without proven coverage of the recording surface — the exact shape §4's
+  reject-list names — and it also answers lane-A's own could-not-verify #7
+  (`full_name` variant, not genuinely absent).
+- Consequently: **no one_shot row is blocked on re-analysis for want of a
+  descriptor.** Residual, stated honestly: whether a given row actually gains its
+  `latch_witness` depends on **when that job is next re-resolved** — a
+  scheduling fact this unit does not control and did not measure. Until a row is
+  re-resolved it keeps the 5-key shape and must be read as the weakest branch,
+  which is the same obligation as any absent witness.
