@@ -1023,17 +1023,39 @@ def _oz_v5_namespaced_authority_selector(signature: str | None) -> str | None:
     return _selector_for_signature(f"{getter}()")
 
 
-def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
+def _leaf_is_keyed_set_membership(leaf: Mapping[str, Any] | None) -> bool:
+    """True iff the leaf tests membership of a keyed set — the shape in which a
+    ``bytes32`` constant operand is a set KEY (an AccessControl role), not a
+    storage-layout pointer. Mirrors
+    ``services.static.contract_analysis_pipeline.summaries._leaf_is_keyed_set_membership``;
+    the two planes must agree on which constants are roles."""
+    if not isinstance(leaf, Mapping):
+        return False
+    if leaf.get("kind") not in ("membership", "external_bool"):
+        return False
+    descriptor = leaf.get("set_descriptor")
+    return isinstance(descriptor, Mapping) and descriptor.get("kind") in ("mapping_membership", "external_set")
+
+
+def _canonical_authority_selector_for_slot(name: str | None, leaf: Mapping[str, Any] | None = None) -> str | None:
     """Canonical public authority-getter selector for a storage-slot-constant
-    operand, or ``None`` when the name doesn't denote one (fail-closed).
+    operand, or ``None`` when the operand doesn't denote one (fail-closed).
 
     Solady ``_OWNER_SLOT`` / OZ-v5 ``OwnableStorageLocation`` /
     ``_GOVERNOR_SLOT`` name a *slot locator*, not a getter — reading
     ``<slot>()`` reverts. The contract's canonical public getter
-    (``owner()``/``governor()``/``authority()``) reads that same slot. Gated on
-    :func:`_is_storage_layout_constant` so ordinary address state vars — which
-    resolve through their own auto-getter — are never rerouted here."""
+    (``owner()``/``governor()``/``authority()``) reads that same slot.
+
+    Two gates, structure first: a leaf that tests keyed-set membership names a role
+    KEY, and resolving a role key through ``owner()``/``governor()`` would publish
+    a real address as the authorized caller of a role-gated function. That refusal
+    does not consult the identifier, so it holds for a role constant whose name
+    happens to carry a slot-locator suffix. The surviving
+    :func:`_is_storage_layout_constant` gate only narrows further, keeping ordinary
+    address state vars — which resolve through their own auto-getter — out."""
     if not isinstance(name, str) or not name:
+        return None
+    if _leaf_is_keyed_set_membership(leaf):
         return None
     from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
 
@@ -1338,7 +1360,7 @@ def _resolve_equality_principal(
                 [
                     _nullary_getter_selector(name),
                     _public_getter_selector_for_internal_accessor(f"{name}()") if name else None,
-                    _canonical_authority_selector_for_slot(name),
+                    _canonical_authority_selector_for_slot(name, leaf),
                 ],
                 bases=["auto_getter", "internal_accessor_convention", "slot_name_keyword"],
             )

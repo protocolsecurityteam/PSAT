@@ -64,6 +64,38 @@ def _function_has_sensitive_sink(effect_info: dict | None) -> bool:
     return False
 
 
+# Leaf/descriptor shapes in which a ``bytes32`` operand is a KEY of the set being
+# tested. ``mapping_membership`` is the in-contract AccessControl read
+# (``_roles[ROLE][account]``); ``external_set`` is the cross-contract
+# ``registry.hasRole(ROLE, account)`` gate. ``array_contains`` and the
+# unsupported-leaf kinds are excluded: no measured role arrives that way, and an
+# unmeasured shape is not evidence.
+_ROLE_KEY_LEAF_KINDS = frozenset({"membership", "external_bool"})
+_ROLE_KEY_SET_KINDS = frozenset({"mapping_membership", "external_set"})
+
+
+def _leaf_is_keyed_set_membership(leaf: Mapping[str, Any] | None) -> bool:
+    """True iff the leaf tests membership of a keyed set — the shape in which a
+    ``bytes32`` constant operand is a **set key**, i.e. a role.
+
+    This is the discriminator between the two ways a ``bytes32`` constant reaches
+    an authority leaf. An AccessControl role key is tested for membership and the
+    lowering records a set descriptor naming the set and its keys. An ERC-7201 /
+    EIP-1967 storage-layout pointer (``OwnableStorageLocation``,
+    ``AccessControlDefaultAdminRulesStorageLocation``) is a *struct base pointer*:
+    it lowers to an equality/comparison over a struct FIELD and carries no set
+    descriptor at all. Both are ``bytes32 constant``, so the compiler type alone
+    cannot tell them apart — the lowering shape can, and does so without reading
+    the identifier.
+    """
+    if not isinstance(leaf, Mapping):
+        return False
+    if leaf.get("kind") not in _ROLE_KEY_LEAF_KINDS:
+        return False
+    descriptor = leaf.get("set_descriptor")
+    return isinstance(descriptor, Mapping) and descriptor.get("kind") in _ROLE_KEY_SET_KINDS
+
+
 def _role_names_from_tree(tree: dict | None, state_vars_by_name: Mapping[str, Any] | None = None) -> set[str]:
     if not isinstance(tree, dict):
         return set()
@@ -76,9 +108,18 @@ def _role_names_from_tree(tree: dict | None, state_vars_by_name: Mapping[str, An
             leaf = node.get("leaf") or {}
             if not isinstance(leaf, dict):
                 return
+            # Structural admission: a role name is minted only from a keyed-set
+            # membership leaf whose operand is the KEY itself (empty ``member_path``).
+            # A non-empty member_path means the constant is being dereferenced as a
+            # struct base — a storage-layout pointer, not a role. See
+            # ``_leaf_is_keyed_set_membership``.
+            if not _leaf_is_keyed_set_membership(leaf):
+                return
             if leaf.get("authority_role") in {"caller_authority", "delegated_authority"}:
                 for operand in leaf.get("operands") or []:
                     if not isinstance(operand, dict) or operand.get("source") != "state_variable":
+                        continue
+                    if operand.get("member_path"):
                         continue
                     name = operand.get("state_variable_name")
                     if (
