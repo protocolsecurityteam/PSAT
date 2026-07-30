@@ -27,6 +27,8 @@ address — never ``contracts.address``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -66,6 +68,30 @@ _FACET_ADDRESSES_SELECTOR = "0x" + keccak(text="facetAddresses()").hex()[:8]
 # (OZ v4) and uint64 (OZ v5).
 _DISABLED_SENTINELS = {1: 0xFF, 8: 0xFFFFFFFFFFFFFFFF}
 
+# The four oracles ``_classify_value`` can decide from. Unordered by
+# construction: sentinel and value_gt_zero have zero realized rows and guard
+# six, so no reliability ranking over them is measurable here — the value is a
+# discriminator a consumer gates and cites on, never a strength score.
+LATCH_BASIS_SENTINEL = "sentinel"
+LATCH_BASIS_VERSION_GE = "version_ge"
+LATCH_BASIS_VALUE_GT_ZERO = "value_gt_zero"
+LATCH_BASIS_GUARD = "guard"
+LATCH_BASIS_NOT_DETERMINED = "not_determined"
+
+# Descriptor keys copied verbatim onto the published witness. Each is a fact the
+# static producer recorded; a key whose descriptor value is None is OMITTED, so
+# "the producer had nothing" is a missing key rather than a null a consumer can
+# mistake for a measured zero.
+_WITNESS_DESCRIPTOR_KEYS = (
+    "standard",
+    "role",
+    "variable",
+    "slot",
+    "byte_offset",
+    "size_bytes",
+    "value_type",
+)
+
 
 @dataclass(frozen=True)
 class LatchReadResult:
@@ -73,6 +99,11 @@ class LatchReadResult:
     value: int | None
     target_kind: str  # "proxy:<standard>" | "db_linked_proxy" | "diamond" | "unverified"
     transcript: dict[str, Any] = field(default_factory=dict)
+    # The replayable witness for ``state``: which latch decided, which oracle
+    # decided it, and the read (address/block/slot/raw word) it decided from.
+    # Empty when no latch was read at all — the consumer then has no witness and
+    # must treat the row as the weakest branch, never as a proven fact.
+    witness: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -156,17 +187,21 @@ def _read_latch_value(
     latch: dict[str, Any],
     block_tag: str,
     transcript: dict[str, Any],
-) -> int | None:
-    """The latch's current integer value at ``address``, or None when
+) -> tuple[int | None, dict[str, Any] | None]:
+    """``(value, read)`` — the latch's current integer value at ``address`` and
+    the transcript record of the read it came from, or ``(None, None)`` when
     unreadable. Prefers a public getter when the latch payload carries one
-    (layout-independent), falling back to the raw storage read."""
+    (layout-independent), falling back to the raw storage read; the returned
+    record is the read that actually produced the value, so a witness built from
+    it can never attribute a getter answer to the descriptor's slot."""
     selector = latch.get("getter_selector")
     if isinstance(selector, str) and selector.startswith("0x") and len(selector) == 10:
         raw = _eth_call(rpc, rpc_url, address, selector, block_tag)
-        transcript.setdefault("reads", []).append({"kind": "getter", "selector": selector, "result": raw and raw[:66]})
+        read: dict[str, Any] = {"kind": "getter", "selector": selector, "result": raw and raw[:66]}
+        transcript.setdefault("reads", []).append(read)
         if raw and len(raw) >= 66:
             try:
-                return int(raw[2:66], 16)
+                return int(raw[2:66], 16), read
             except ValueError:
                 pass
         # fall through to the slot read when the getter reverts (e.g. called
@@ -174,18 +209,17 @@ def _read_latch_value(
 
     slot = latch.get("slot")
     if not isinstance(slot, str) or not slot.startswith("0x"):
-        return None
+        return None, None
     word = _storage_at(rpc, rpc_url, address, slot, block_tag)
-    transcript.setdefault("reads", []).append(
-        {"kind": "storage", "slot": slot, "value": None if word is None else hex(word)}
-    )
+    read = {"kind": "storage", "slot": slot, "value": None if word is None else hex(word)}
+    transcript.setdefault("reads", []).append(read)
     if word is None:
-        return None
+        return None, None
     byte_offset = latch.get("byte_offset")
     size_bytes = latch.get("size_bytes")
     if isinstance(byte_offset, int) and isinstance(size_bytes, int) and size_bytes > 0:
-        return (word >> (8 * byte_offset)) & ((1 << (8 * size_bytes)) - 1)
-    return word
+        return (word >> (8 * byte_offset)) & ((1 << (8 * size_bytes)) - 1), read
+    return word, read
 
 
 def _guard_allows(operator: Any, constant: int | None, value: int) -> bool | None:
@@ -264,24 +298,108 @@ def _latch_may_decide(latch: dict[str, Any]) -> bool:
     return latch.get("standard") in ("storage_layout", "oz_v5_namespaced")
 
 
-def _classify_value(latch: dict[str, Any], value: int) -> str:
-    """``consumed`` / ``armed`` (latch would admit a caller) / ``unknown``
-    from the latch's own semantics — proxy confirmation is applied later."""
+def _classify_value(latch: dict[str, Any], value: int) -> tuple[str, str | None]:
+    """``(classification, basis)`` — ``consumed`` / ``armed`` (latch would admit
+    a caller) / ``unknown`` from the latch's own semantics, paired with the
+    oracle that decided it. Proxy confirmation is applied later. ``basis`` is
+    None exactly when nothing decided (``unknown``), which the publication layer
+    renders as ``not_determined`` rather than picking a branch."""
     standard = latch.get("standard")
     if standard in ("storage_layout", "oz_v5_namespaced"):
         size_bytes = latch.get("size_bytes")
         sentinel = _DISABLED_SENTINELS.get(size_bytes) if isinstance(size_bytes, int) else None
         if sentinel is not None and value == sentinel:
-            return "consumed"  # _disableInitializers(): locked forever
+            # _disableInitializers(): locked forever
+            return "consumed", LATCH_BASIS_SENTINEL
         expected = latch.get("expected_version")
         if isinstance(expected, int) and expected > 0:
-            return "consumed" if value >= expected else "armed"
-        return "consumed" if value > 0 else "armed"
+            return ("consumed" if value >= expected else "armed"), LATCH_BASIS_VERSION_GE
+        return ("consumed" if value > 0 else "armed"), LATCH_BASIS_VALUE_GT_ZERO
     guard = latch.get("guard") or {}
     allows = _guard_allows(guard.get("operator"), _parse_guard_constant(guard.get("constant")), value)
     if allows is None:
-        return "unknown"
-    return "armed" if allows else "consumed"
+        return "unknown", None
+    return ("armed" if allows else "consumed"), LATCH_BASIS_GUARD
+
+
+def latch_descriptor_digest(latches: list[dict[str, Any]]) -> str:
+    """Stable identity of the descriptor list a probe result was computed from.
+
+    Two rows may share one cached read only when their descriptors are
+    byte-identical. Keying on the slot alone is not enough now that the result
+    carries a witness naming which descriptor decided: FiatTokenV2_2's
+    ``initializeV2``/``initializeV2_1``/``initializeV2_2`` read the same slot
+    behind guards ``eq 0`` / ``eq 1`` / ``eq 2``, so a slot-keyed cache would
+    stamp one function's guard onto the other two.
+    """
+    canonical = json.dumps(latches, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_latch_witness(
+    latch: dict[str, Any],
+    read: dict[str, Any] | None,
+    *,
+    basis: str | None,
+    block: int | None,
+    address: str,
+) -> dict[str, Any]:
+    """The published witness for one decided latch read.
+
+    Every key is emit-when-known: a key the producer had no value for is absent,
+    never null and never defaulted. ``latch_basis`` is the one key always
+    present, and it carries ``not_determined`` when no oracle decided — the
+    state a failed classification lands on, never a branch label.
+    """
+    witness: dict[str, Any] = {
+        "latch_basis": basis or LATCH_BASIS_NOT_DETERMINED,
+        "probe_address": address,
+    }
+    if isinstance(block, int) and block > 0:
+        # Only a pinned height is published. A ``"latest"`` read has no
+        # reproducible height, so it publishes none rather than a height that
+        # cannot be replayed.
+        witness["probe_block"] = block
+
+    for key in _WITNESS_DESCRIPTOR_KEYS:
+        value = latch.get(key)
+        if value is not None:
+            witness[key] = value
+
+    # ``expected_version`` is publishable only alongside the basis that says
+    # where the integer came from (it is derived from a modifier NAME match, so
+    # bare it reads as compiler-forced). A descriptor predating basis stamping
+    # therefore publishes neither.
+    expected_version = latch.get("expected_version")
+    expected_version_basis = latch.get("expected_version_basis")
+    if isinstance(expected_version, int) and isinstance(expected_version_basis, str) and expected_version_basis:
+        witness["expected_version"] = expected_version
+        witness["expected_version_basis"] = expected_version_basis
+
+    guard = latch.get("guard")
+    if isinstance(guard, dict):
+        published_guard = {key: guard[key] for key in ("operator", "constant") if guard.get(key) is not None}
+        if published_guard:
+            witness["guard"] = published_guard
+
+    if read is not None:
+        kind = read.get("kind")
+        if isinstance(kind, str):
+            witness["read_kind"] = kind
+        raw = read.get("value") if kind == "storage" else read.get("result")
+        if isinstance(raw, str):
+            witness["raw_word"] = raw
+        selector = read.get("selector")
+        if kind == "getter" and isinstance(selector, str):
+            witness["getter_selector"] = selector
+
+    return witness
+
+
+def _copy_witness(witness: dict[str, Any]) -> dict[str, Any]:
+    """A per-condition copy — one cached ``LatchReadResult`` annotates many
+    conditions, and a shared nested ``guard`` dict would alias across rows."""
+    return {key: (dict(value) if isinstance(value, dict) else value) for key, value in witness.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -339,17 +457,19 @@ def resolve_one_shot_state(
 
     value: int | None = None
     chosen: dict[str, Any] | None = None
+    chosen_read: dict[str, Any] | None = None
     for latch in ordered:
-        value = _read_latch_value(rpc, rpc_url, address, latch, block_tag, transcript)
+        value, chosen_read = _read_latch_value(rpc, rpc_url, address, latch, block_tag, transcript)
         if value is not None:
             chosen = latch
             break
     if value is None or chosen is None:
         return LatchReadResult("indeterminate", None, target_kind, transcript)
 
-    classified = _classify_value(chosen, value)
+    classified, basis = _classify_value(chosen, value)
     transcript["latch_value"] = value
     transcript["latch_standard"] = chosen.get("standard")
+    witness = _build_latch_witness(chosen, chosen_read, basis=basis, block=block, address=address)
     if classified == "consumed":
         state = "consumed"
     elif classified == "armed" and target_kind != "unverified":
@@ -370,7 +490,7 @@ def resolve_one_shot_state(
             "target_kind": target_kind,
         },
     )
-    return LatchReadResult(state, value, target_kind, transcript)
+    return LatchReadResult(state, value, target_kind, transcript, witness)
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +545,17 @@ def annotate_capability_one_shot(
     """Land the latch read on the serialized capability dict.
 
     Standard one-shots: every ``kind=one_shot`` condition (anywhere in the
-    expression) gains ``latch_state``/``latch_value``/``latch_target``. A
-    confirmed structural candidate (consumed or live — never indeterminate)
-    additionally APPENDS a one_shot condition at the root, since the static
-    side deliberately left its badge untouched.
+    expression) gains ``latch_state``/``latch_value``/``latch_target`` and, when
+    a latch was actually read, ``latch_witness``. A confirmed structural
+    candidate (consumed or live — never indeterminate) additionally APPENDS a
+    one_shot condition at the root, since the static side deliberately left its
+    badge untouched.
+
+    ``latch_witness`` describes the ONE read that produced ``latch_state`` for
+    this row; a function carrying several one_shot conditions gets that same
+    witness on each, because one read is what decided them all. An absent
+    ``latch_witness`` means no latch was read — the state has no replayable
+    evidence behind it and must be consumed as the weakest branch.
     """
 
     def annotate(node: dict[str, Any]) -> None:
@@ -438,6 +565,8 @@ def annotate_capability_one_shot(
                 if result.value is not None:
                     condition["latch_value"] = result.value
                 condition["latch_target"] = result.target_kind
+                if result.witness:
+                    condition["latch_witness"] = _copy_witness(result.witness)
         for child in node.get("children") or []:
             if isinstance(child, dict):
                 annotate(child)
@@ -448,12 +577,14 @@ def annotate_capability_one_shot(
     annotate(cap_dict)
     if confirmed_candidate and result.state in ("consumed", "live"):
         conditions = cap_dict.setdefault("conditions", [])
-        conditions.append(
-            {
-                "kind": "one_shot",
-                "description": "structural one-shot latch (confirmed by on-chain read)",
-                "latch_state": result.state,
-                "latch_value": result.value,
-                "latch_target": result.target_kind,
-            }
-        )
+        appended: dict[str, Any] = {
+            "kind": "one_shot",
+            "description": "structural one-shot latch (confirmed by on-chain read)",
+            "latch_state": result.state,
+            "latch_target": result.target_kind,
+        }
+        if result.value is not None:
+            appended["latch_value"] = result.value
+        if result.witness:
+            appended["latch_witness"] = _copy_witness(result.witness)
+        conditions.append(appended)
