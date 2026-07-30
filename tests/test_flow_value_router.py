@@ -287,6 +287,25 @@ def test_value_router_claim_is_minted_for_routers(_unit):
     assert witness_flow["target_param_index"] == 1
 
 
+def test_the_published_router_claim_carries_the_crossed_ops_identity(_unit):
+    """On real compiler output, end to end: the op recorded at the crossing
+    reaches the PERSISTED claim witness, not only the in-process transparency
+    join. Byte-exact against the producer's own record, so a projection that
+    rewrote or truncated it would fail here."""
+    contract = _contract(_unit, "Router")
+    art = build_effects(contract)
+    claims = build_claims(contract, art, {})["functions"]
+
+    for signature in ("deposit(uint256)", "withdraw(uint256,address)"):
+        produced = _router_flows(art["functions"][signature])[0]["router_ops"]
+        claim = next(c for c in claims[signature] if c["claim_id"] == "value_router")
+        assert claim["witness"]["flows"][0]["router_ops"] == produced
+
+    # The unrouted sibling has no op to publish and publishes none.
+    direct = next(c for c in claims["directSend(uint256,address)"] if c["claim_id"] == "flow.out")
+    assert all("router_ops" not in f for f in direct["witness"]["flows"])
+
+
 # --- the routed move's own op is recorded, and only it is transparent -------
 
 

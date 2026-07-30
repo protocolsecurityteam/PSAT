@@ -1214,6 +1214,12 @@
                     "amount_param_index": 1,
                     "from_is_self": false,
                     "kind": "callee_erc20_selector",
+                    "router_ops": [
+                      {
+                        "callee": "safeTransferFrom",
+                        "selector": "0x5beae096"
+                      }
+                    ],
                     "selector": "0x5beae096",
                     "target_kind": {
                       "kind": "immutable",
@@ -1307,6 +1313,12 @@
                     "amount_param_index": 2,
                     "from_is_self": false,
                     "kind": "callee_erc20_selector",
+                    "router_ops": [
+                      {
+                        "callee": "transferFrom",
+                        "selector": "0x23b872dd"
+                      }
+                    ],
                     "selector": "0x23b872dd",
                     "target_kind": {
                       "kind": "immutable",
@@ -1909,6 +1921,12 @@
                     },
                     "from_is_self": false,
                     "kind": "callee_erc20_selector",
+                    "router_ops": [
+                      {
+                        "callee": "enter",
+                        "selector": "0x39d6ba32"
+                      }
+                    ],
                     "selector": "0x23b872dd",
                     "target_kind": {
                       "kind": "self",
@@ -1990,6 +2008,12 @@
                     "amount_param_index": 1,
                     "from_is_self": false,
                     "kind": "callee_erc20_selector",
+                    "router_ops": [
+                      {
+                        "callee": "enter",
+                        "selector": "0x39d6ba32"
+                      }
+                    ],
                     "selector": "0x23b872dd",
                     "target_kind": {
                       "kind": "self",
@@ -2071,6 +2095,12 @@
                     },
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
+                    "router_ops": [
+                      {
+                        "callee": "exit",
+                        "selector": "0x18457e61"
+                      }
+                    ],
                     "selector": "0xa9059cbb",
                     "target_constraint": {
                       "state": "unconstrained_proven"
