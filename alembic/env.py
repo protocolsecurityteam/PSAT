@@ -13,7 +13,7 @@ import os
 from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
-from db.models import Base
+from db.models import Base, include_object
 
 config = context.config
 
@@ -31,6 +31,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=DATABASE_URL,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
@@ -61,6 +62,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            include_object=include_object,
             transaction_per_migration=True,
             compare_type=True,
             compare_server_default=True,
