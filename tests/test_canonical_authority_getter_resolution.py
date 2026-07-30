@@ -219,10 +219,19 @@ def test_owner_slot_constant_resolves_via_owner_getter(monkeypatch: pytest.Monke
     assert _called(recorder, OWNER_SELECTOR)
 
 
-def test_owner_slot_burned_resolves_to_renounced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real TopUp/TopUpV2 owner is 0x…dEaD (renounced). Reading owner()
-    yields the burn sentinel, which resolves to 'exact empty' (renounced) — not
-    a phantom 0x…dEaD principal, and not the pre-fix 'unresolved' lower_bound."""
+def test_owner_slot_burned_is_empty_but_not_a_proven_nobody(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real TopUp/TopUpV2 owner is 0x…dEaD. Reading owner() yields the burn
+    sentinel: no principal is published (never a phantom 0x…dEaD controller),
+    and the set is empty — but the emptiness is a ``lower_bound``, not the
+    ``exact`` "provably nobody".
+
+    AMENDED (A2/A6): this used to publish ``exact``, which asserts that no caller
+    can pass the gate. That rests on 0x…dEaD being unspendable, which is a
+    CONVENTION, not something any read establishes — unlike ``0x0``, which can
+    never be ``msg.sender`` on mainnet and is what makes a zero read a real
+    nobody. The honest statement is "no known caller", so the row publishes
+    ``owner_read_burn_address`` with the address it read and does not earn the
+    earned-negative credit."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: BURN}, recorder)
     tree = _eq_tree({"source": "state_variable", "state_variable_name": "_OWNER_SLOT"})
@@ -231,7 +240,8 @@ def test_owner_slot_burned_resolves_to_renounced(monkeypatch: pytest.MonkeyPatch
 
     assert cap.kind == "finite_set"
     assert cap.members == []
-    assert cap.membership_quality == "exact"  # exact (renounced), not lower_bound (unresolved)
+    assert cap.membership_quality == "lower_bound"
+    assert cap.empty_reason == "owner_read_burn_address"
     assert _called(recorder, OWNER_SELECTOR)
 
 
@@ -368,15 +378,19 @@ class TestTopUpSoladyFixture:
         assert "'state_variable_name': '_OWNER_SLOT'" in json.dumps(tree).replace('"', "'")
 
         recorder: list = []
-        # The real on-chain owner() of TopUp/TopUpV2 is 0x…dEaD (renounced).
+        # The real on-chain owner() of TopUp/TopUpV2 is 0x…dEaD.
         _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: BURN}, recorder)
 
         cap = evaluate_tree(tree, _ctx_with_rpc())
 
-        # Read the real (burned) owner() → renounced, not the pre-fix lower_bound.
+        # The fix under test is still what it was: read the real owner(), never
+        # _OWNER_SLOT(), and never mint 0x…dEaD as a principal. What the burn
+        # sentinel is allowed to CONCLUDE is narrower since A2 — see
+        # ``test_owner_slot_burned_is_empty_but_not_a_proven_nobody``.
         assert cap.kind == "finite_set"
         assert cap.members == []
-        assert cap.membership_quality == "exact"
+        assert cap.membership_quality == "lower_bound"
+        assert cap.empty_reason == "owner_read_burn_address"
         assert _called(recorder, OWNER_SELECTOR), "must read owner(), not _OWNER_SLOT()"
 
     def test_process_top_up_resolves_live_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:

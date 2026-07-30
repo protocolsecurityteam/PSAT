@@ -148,15 +148,26 @@ def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPat
 
 def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """A read-confirmed zero slot (no transfer pending — PriceProvider reality)
-    is a genuine accept-side ceiling."""
+    is a genuine accept-side ceiling, and the verdict (``resolved_empty``) is
+    unchanged.
+
+    What it publishes as its REASON changed with A2: ``slot_read_zero``, which
+    reports the read that happened, rather than ``empty_by_design``, which came
+    from a default argument value and asserted a classification. The
+    accept-side-ceiling claim rests on the accessor's ``pending`` prefix — an
+    identifier — and now lives only where it discloses that basis
+    (``_pending_ceiling_capability``)."""
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
 
     assert cap.kind == "finite_set"
     assert cap.members == []
     assert cap.membership_quality == "exact"
-    assert cap.empty_reason == "empty_by_design"
+    assert cap.empty_reason == "slot_read_zero"
     assert _status(cap) == "resolved_empty"
+    # The read that produced it is on the row, so the empty is reconstructible.
+    assert cap.trace[0]["step"] == "live_slot_resolution"
+    assert cap.trace[0]["slot"] == PENDING_GOVERNOR_SLOT
 
 
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:

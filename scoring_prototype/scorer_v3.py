@@ -258,8 +258,55 @@ NATIVE_FLOW_KINDS = {"native_transfer_send", "low_level_value_call"}
 ERC20_FLOW_KINDS = {"callee_erc20_selector"}
 
 # V12: resolution-provenance tiers. `authority_getter_basis` publishes
-# exact+enumerable but its binding is a 3-name convention.
-WEAK_RESOLVER_BASES = {"internal_accessor_convention", "slot_name_keyword"}
+# exact+enumerable but its binding may be an accessor NAME.
+#
+# Two vocabulary epochs live here on purpose. Pre-A3 rows (33 on the validated
+# corpus) carry `internal_accessor_convention`, which conflated the ERC-7201
+# accessor-table match with the leading-underscore convention; A3 split it into
+# `standard_namespaced_accessor` / `deunderscore_convention` and renamed
+# `auto_getter` to `abi_auto_getter`. Dropping the legacy literals would silently
+# un-weaken every persisted row; dropping the new ones would silently un-weaken
+# every row written from now on. Both are seated.
+#
+# `standard_namespaced_accessor` is seated in the WEAK tier deliberately: it is an
+# EXACT-name match against the standard's accessor table
+# (`_oz_v5_namespaced_authority_selector`), so its label reads authoritative — but
+# an exact name match is still a name match, and nothing measured establishes it
+# as better evidence that the accessor returns the authority than the 3-name
+# convention. It is not ranked against `deunderscore_convention`; they share this
+# tier.
+WEAK_RESOLVER_BASES = {
+    "internal_accessor_convention",  # legacy, pre-A3 split
+    "standard_namespaced_accessor",
+    "deunderscore_convention",
+    "slot_name_keyword",
+}
+
+# Every basis literal the resolver can emit, mapped to its tier. `abi_auto_getter`
+# (and its legacy spelling) is the one arm the compiler forces — solc mints the
+# getter from the declaration, no name is consulted. `callee_selector` is the
+# operand's own recorded external selector. An UNKNOWN label maps to the weakest
+# tier, never to the strongest: a basis this scorer cannot recognise is one it
+# cannot vouch for.
+RESOLVER_BASIS_TIERS = {
+    "abi_auto_getter": "abi_forced",
+    "auto_getter": "abi_forced",  # legacy spelling of the same arm
+    "callee_selector": "operand_recorded",
+    "standard_namespaced_accessor": "accessor_name_matched",
+    "deunderscore_convention": "accessor_name_matched",
+    "slot_name_keyword": "accessor_name_matched",
+    "internal_accessor_convention": "accessor_name_matched",  # legacy, pre-A3 split
+}
+WEAKEST_RESOLVER_BASIS_TIER = "accessor_name_matched"
+
+
+def resolver_basis_tier(basis):
+    """Tier for a published `authority_getter_basis`, defaulting to the WEAKEST.
+
+    The default is the whole point: an unrecognised label (a future arm, a
+    vocabulary epoch this scorer predates) must not read as ABI-forced strength.
+    """
+    return RESOLVER_BASIS_TIERS.get(basis, WEAKEST_RESOLVER_BASIS_TIER)
 
 
 def band(usd):

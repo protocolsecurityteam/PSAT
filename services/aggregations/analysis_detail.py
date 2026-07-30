@@ -27,7 +27,7 @@ from db.models import (
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
 from services.aggregations.action_summary import describe_action
-from services.policy.capability_surface import capability_currency
+from services.policy.capability_surface import capability_currency, exact_empty_credit
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +431,12 @@ def _serialize_effective_functions(
         if capability_expr is not None:
             entry["capability_expr"] = capability_expr
             entry["capability_currency"] = capability_currency(capability_expr, index_head=index_head)
+            # Served beside the payload it gates, never derived downstream from
+            # ``exact + members == []``: a consumer reading that shape alone
+            # cannot tell a read-confirmed empty from a provenance-less one.
+            # ``not_determined`` here withholds the earned-negative credit; it
+            # never asserts a caller exists, and it does not change ``status``.
+            entry["exact_empty_credit"] = exact_empty_credit(capability_expr)
         conditions = getattr(ef, "conditions", None)
         if conditions is not None:
             entry["conditions"] = conditions

@@ -16,7 +16,8 @@ The fix is two-part:
   * RESOLUTION — the ``state_variable`` branch of ``_resolve_equality_principal``
     reads that slot with ``eth_getStorageAt`` against the runtime address:
     non-zero → ``finite_set([manager], exact)``; confirmed-zero → ``resolved_empty``
-    (renounced/unset — NOT ``empty_by_design``, unlike the pending-governor gate);
+    reporting the read (``slot_read_zero``), never the name-derived
+    ``empty_by_design`` classification;
     unreadable → honest ``lower_bound``.
 
 Layered like ``test_pending_governor_slot_resolution.py``: literal-operand unit
@@ -162,15 +163,17 @@ def test_nonzero_slot_resolves_to_manager(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_confirmed_zero_slot_is_resolved_empty_not_by_design(monkeypatch: pytest.MonkeyPatch) -> None:
     """A read-confirmed zero is a renounced/unset authority — ``resolved_empty``
-    with NO ``empty_reason`` (the pending-governor gate's ``empty_by_design`` is a
-    DIFFERENT, accept-side semantic and must not be borrowed here)."""
+    reporting the READ (``slot_read_zero``), never the accept-side
+    ``empty_by_design`` classification, which is a different semantic and rests
+    on the accessor's name."""
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
 
     assert cap.kind == "finite_set"
     assert cap.members == []
     assert cap.membership_quality == "exact"
-    assert cap.empty_reason is None
+    assert cap.empty_reason == "slot_read_zero"
+    assert cap.empty_reason != "empty_by_design"
     assert _status(cap) == "resolved_empty"
 
 
@@ -391,7 +394,7 @@ class TestMembershipNFTStorageSlot:
 
         assert _principals(cap) == []
         assert _status(cap) == "resolved_empty"
-        assert cap.empty_reason is None
+        assert cap.empty_reason == "slot_read_zero"
 
     def test_unreadable_slot_not_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         tree = _tree_for(_membership_nft(), "incrementLock(uint256,uint32)")

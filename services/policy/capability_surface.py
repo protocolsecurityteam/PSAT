@@ -114,6 +114,98 @@ def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, A
     }
 
 
+#: Trace steps whose PRODUCER proves it covered the recording surface it read.
+#: Presence of *a* step is not a witness — any future producer could append one —
+#: so the admissible steps are enumerated and justified:
+#: ``solmate_roles_authority`` defers unless a ``backfill_complete`` cursor exists
+#: (``adapters/solmate_roles.py`` — no cursor ⇒ ``no_index_cursor``, never an
+#: empty set); ``enumerable_role_store`` folds at the MIN over complete cursors;
+#: the two live reads are single pinned calls that ARE their own surface.
+_COVERAGE_PROVING_TRACE_STEPS = frozenset(
+    {"solmate_roles_authority", "enumerable_role_store", "live_getter_resolution", "live_slot_resolution"}
+)
+
+#: Empty-reasons that report a COMPLETED READ. Everything else is excluded with
+#: cause: ``empty_by_design`` is a classification whose surviving producer records
+#: ``basis: "accessor_name"`` (an identifier, inv.2); ``unreadable_revert`` /
+#: ``unreadable_empty`` / ``not_read`` / ``bad_input`` are failure states, which
+#: must never license a credit; ``owner_read_burn_address`` rests on the
+#: convention that ``0x…dEaD`` is unspendable, which no read establishes.
+_READ_CONFIRMED_EMPTY_REASONS = frozenset({"owner_read_zero", "slot_read_zero"})
+
+
+def exact_empty_credit(cap_dict: Any) -> dict[str, Any]:
+    """Has this capability EARNED the "nobody can call this" credit?
+
+    An empty caller set is the strongest earned negative the resolver publishes,
+    and the shipped consumers award it on ``membership_quality == "exact" and
+    members == []`` alone — a shape a provenance-less empty satisfies exactly as
+    well as a read-confirmed one (four such rows exist that nothing can explain,
+    one of them labelled from a default argument). Three things must hold
+    together, and the verdict travels with them:
+
+    * a trace step from a producer that proves coverage of what it read;
+    * an OBSERVATION BLOCK — a pinned read's ``observed_at_block``, or the
+      equal-heights ``exact_as_of``. **Never ``last_indexed_block``**: that is a
+      MIN across operands, a staleness floor, and admitting it here would
+      re-introduce through the consumer the "empty as of MIN" claim that is
+      false whenever the operands sat at different heights;
+    * an ``empty_reason`` naming a completed read.
+
+    Anything short of all three is ``not_determined`` — with ``missing`` naming
+    which, so the shortfall is legible rather than silent. Never proven-absent:
+    this function withholds a credit, it never asserts that callers exist.
+    """
+    missing: list[str] = []
+    if not isinstance(cap_dict, dict):
+        return {"verdict": "not_determined", "missing": ["capability"]}
+    if cap_dict.get("kind") != "finite_set" or cap_dict.get("members") != []:
+        return {"verdict": "not_applicable", "missing": []}
+    if cap_dict.get("membership_quality") != "exact" or cap_dict.get("confidence") != "enumerable":
+        missing.append("exact_enumerable")
+    trace = cap_dict.get("trace")
+    steps = [s.get("step") for s in trace if isinstance(s, dict)] if isinstance(trace, list) else []
+    if not any(step in _COVERAGE_PROVING_TRACE_STEPS for step in steps):
+        missing.append("coverage_proving_step")
+    block, block_source = _observation_block(cap_dict)
+    if block is None:
+        missing.append("observation_block")
+    reason = cap_dict.get("empty_reason")
+    if reason not in _READ_CONFIRMED_EMPTY_REASONS:
+        missing.append("read_confirmed_empty_reason")
+    if missing:
+        return {"verdict": "not_determined", "missing": missing}
+    return {
+        "verdict": "earned",
+        "missing": [],
+        "block": block,
+        "block_source": block_source,
+        "empty_reason": reason,
+    }
+
+
+def _observation_block(cap_dict: dict[str, Any]) -> tuple[int | None, str | None]:
+    """The height at which this set was OBSERVED empty, and where it came from.
+
+    Two admissible sources, both describing one instant: a pinned read's
+    ``observed_at_block``, and an ``exact_as_of`` int (emitted only when every
+    operand carried a height and all were equal). ``last_indexed_block`` is
+    deliberately not one — see :func:`exact_empty_credit`.
+    """
+    trace = cap_dict.get("trace")
+    if isinstance(trace, list):
+        for step in trace:
+            if not isinstance(step, dict):
+                continue
+            observed = step.get("observed_at_block")
+            if isinstance(observed, int) and not isinstance(observed, bool):
+                return observed, "trace.observed_at_block"
+    exact_as_of = cap_dict.get("exact_as_of")
+    if isinstance(exact_as_of, int) and not isinstance(exact_as_of, bool):
+        return exact_as_of, "exact_as_of"
+    return None, None
+
+
 def _last_indexed_blocks(cap_dict: Any) -> list[int]:
     """Every ``last_indexed_block`` in a capability tree. The LOWEST governs the
     whole statement: an AND/OR over folds is only as current as its least-current
@@ -590,28 +682,102 @@ def _has_valid_path(surface: CapabilitySurface) -> bool:
     return bool(surface.principal_rows or surface.public_paths)
 
 
+#: The accessor bases a principal may be published under. An unrecognised label —
+#: including the pre-split ``internal_accessor_convention`` epoch, which 33
+#: persisted rows carry — is NOT passed through: one field must not carry two
+#: vocabularies, and a consumer that cannot map a label cannot rank it.
+_SHIPPED_AUTHORITY_BASES = frozenset(
+    {
+        "abi_auto_getter",
+        "standard_namespaced_accessor",
+        "deunderscore_convention",
+        "slot_name_keyword",
+        "callee_selector",
+    }
+)
+
+#: Bases that are an accessor-NAME match. They share one strength tier and are
+#: mutually unordered; the residual each leaves open — does the accessor read the
+#: same storage the canonical getter reads — is published, unresolved, beside them.
+_NAME_MATCHED_AUTHORITY_BASES = frozenset(
+    {"standard_namespaced_accessor", "deunderscore_convention", "slot_name_keyword"}
+)
+
+#: Trace steps that do not, on their own, attribute the members of a set: the
+#: basis step itself, and the live read it names (which corroborates the same
+#: single principal). Any OTHER step means a second producer contributed members.
+_BASIS_COMPATIBLE_TRACE_STEPS = frozenset({"authority_getter_basis", "live_getter_resolution"})
+
+
+def _authority_basis(cap_dict: dict[str, Any]) -> str | None:
+    """The accessor basis every member of this set rests on, or ``None``.
+
+    Fail-closed on anything that could attribute one operand's basis to members
+    it did not resolve. ``_intersect_finite`` / ``_union_finite`` concatenate
+    their operands' traces, so a merged set can carry ONE basis step beside
+    members an event fold contributed — and these details are stamped onto EVERY
+    member row. So the basis is hoisted only for a set that is a single member,
+    named by exactly one basis step, with no other member-attributing step in the
+    trace. (0 rows on the corpus are merged today; the guard is for the first one
+    that is.)
+    """
+    trace = cap_dict.get("trace")
+    if not isinstance(trace, list):
+        return None
+    if len(cap_dict.get("members") or []) != 1:
+        return None
+    bases: list[str] = []
+    for step in trace:
+        if not isinstance(step, dict):
+            return None
+        name = step.get("step")
+        if name == "authority_getter_basis":
+            basis = step.get("basis")
+            if not isinstance(basis, str):
+                return None
+            bases.append(basis)
+        elif name not in _BASIS_COMPATIBLE_TRACE_STEPS:
+            return None
+    if len(bases) != 1 or bases[0] not in _SHIPPED_AUTHORITY_BASES:
+        return None
+    return bases[0]
+
+
 def _rows_for_finite_set(cap_dict: dict[str, Any], conditions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     members = cap_dict.get("members") or []
+    # Published BESIDE membership_quality / confidence, not only inside the trace:
+    # a consumer reading "exact + enumerable" off this row was reading the
+    # strength of a set whose principal may rest on an accessor NAME, with the
+    # only disclosure of that buried in a trace nobody reads.
+    basis = _authority_basis(cap_dict)
     for member in members:
         if not isinstance(member, str) or not member.startswith("0x") or len(member) != 42:
             continue
+        details: dict[str, Any] = {
+            "source": "semantic_predicate_capability_resolver",
+            "resolver_path": resolver_path(cap_dict),
+            "membership_quality": cap_dict.get("membership_quality"),
+            "confidence": cap_dict.get("confidence"),
+            "trace": cap_dict.get("trace") or [],
+        }
+        if basis is not None:
+            details["authority_basis"] = basis
+            if basis in _NAME_MATCHED_AUTHORITY_BASES:
+                # The open residual, stated rather than left to look settled:
+                # whether the matched accessor reads the same storage the
+                # canonical getter reads is NOT established. A slot differential
+                # would answer it; on this corpus it is unrunnable on 2 of 3
+                # runtime addresses and non-identifying on the third, so the
+                # honest value is the third state.
+                details["accessor_slot_agreement"] = "not_determined"
         rows.append(
             {
                 "address": member.lower(),
                 "resolved_type": None,
                 "origin": "semantic_capability:finite_set",
                 "principal_type": "controller",
-                "details": _details_with_conditions(
-                    {
-                        "source": "semantic_predicate_capability_resolver",
-                        "resolver_path": resolver_path(cap_dict),
-                        "membership_quality": cap_dict.get("membership_quality"),
-                        "confidence": cap_dict.get("confidence"),
-                        "trace": cap_dict.get("trace") or [],
-                    },
-                    conditions,
-                ),
+                "details": _details_with_conditions(details, conditions),
             }
         )
     return rows
