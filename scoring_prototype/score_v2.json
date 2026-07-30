@@ -1,0 +1,3975 @@
+{
+  "protocol": "etherfi",
+  "protocol_id": 1,
+  "model_version": "proto-0.2",
+  "headline": "Safe 4/6 can authority.replace on $10M-$100M (setAuthority) \u2014 raw -11.025",
+  "grade_lambda": 75.22,
+  "grade_lambda_letter": "B",
+  "grade_exposure": 64.54,
+  "grade_exposure_letter": "C",
+  "confidence_pct": 53.4,
+  "total_tracked_value_usd": 4159585667,
+  "total_exposure_usd": 1474989766,
+  "decomposition_check": {
+    "lambda": {
+      "grade": 75.22,
+      "sum_net": 24.78,
+      "residual": 0.0
+    },
+    "exposure": {
+      "grade": 64.54,
+      "sum_exposure_usd": 1474989766.44,
+      "residual_usd": 0.0048
+    }
+  },
+  "credits": [
+    {
+      "protective_fact": "timelock gates upgrade.implementation",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "value_protected_band": ">$1B",
+      "n_functions": 44,
+      "counterfactual_if_eoa_gated": "~-54.0 raw (vs -9.0 now)"
+    },
+    {
+      "protective_fact": "emergency brake: pause capability with a witnessed, independent recovery path (inv.4 dual-use, credit side)",
+      "n_pause_capabilities": 36,
+      "n_contracts": 30,
+      "counterfactual_if_removed": "deleting the brake removes these rows entirely; proto-0.1 paid +7.77 grade points for having no pause at all",
+      "mitigation_overlap": []
+    },
+    {
+      "protective_fact": "audit equivalence proven (deployed code == sha printed in audit PDF)",
+      "rows": 36,
+      "note": "modest credit only; LLM role labels excluded (inv.2)"
+    }
+  ],
+  "warnings_summary": {
+    "freeze_blast_radius_unwitnessed": {
+      "count": 32,
+      "examples": [
+        "CumulativeMerkleDrop.pause",
+        "CumulativeMerkleDrop.setUserChainSwitchingEnabled",
+        "AccountantWithRateProviders.pause",
+        "WeETH.pause"
+      ]
+    },
+    "extraction_magnitude_unwitnessed": {
+      "count": 4,
+      "examples": [
+        "BoringVault.exit",
+        "EETH.recoverETH",
+        "WeETH.recoverETH",
+        "BoringVault.exit"
+      ]
+    },
+    "contract_gated_unknown_path": {
+      "count": 60,
+      "examples": [
+        "BoringVault.exit",
+        "BoringVault.manage",
+        "BoringVault.manage",
+        "BoringVault.manage"
+      ]
+    },
+    "unresolved_reachability": {
+      "count": 4,
+      "examples": [
+        "CumulativeMerkleDrop.revokeRole",
+        "CumulativeMerkleDrop.grantRole",
+        "RoleRegistry.grantRole",
+        "RoleRegistry.revokeRole"
+      ]
+    },
+    "restricted_no_principal": {
+      "count": 11,
+      "examples": [
+        "LayerZeroTellerWithRateLimiting.allowFrom",
+        "LayerZeroTellerWithRateLimiting.denyTo",
+        "LayerZeroTellerWithRateLimiting.denyAll",
+        "LayerZeroTellerWithRateLimiting.allowAll"
+      ]
+    },
+    "flow_out_destination_unproven": {
+      "count": 48,
+      "examples": [
+        "LayerZeroTellerWithRateLimiting.depositAndBridge",
+        "LayerZeroTellerWithRateLimiting.depositAndBridgeWithPermit",
+        "LayerZeroTellerWithRateLimiting.bridge",
+        "LayerZeroTellerWithRateLimiting.refundDeposit"
+      ]
+    },
+    "freeze_recovery_not_independent": {
+      "count": 23,
+      "examples": [
+        "WeETH.pause",
+        "EtherFiRestaker.pause",
+        "EtherFiRateLimiter.pause",
+        "TellerWithMultiAssetSupport.pause"
+      ]
+    },
+    "proxy_fallback_delegatecall": {
+      "count": 2,
+      "examples": [
+        "LRTSquaredCore.fallback",
+        "LRTSquaredAdmin.depositToStrategy"
+      ]
+    },
+    "audit_pre_fix_unpatched_llm_label": {
+      "count": 1,
+      "examples": [
+        "BeHYPEStakeModule.?"
+      ]
+    }
+  },
+  "findings": [
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "authority.replace",
+      "value_at_stake_usd": 79655012.88,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.75,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 11.025,
+      "n_functions": 29,
+      "n_contracts": 29,
+      "reach_addrs": [
+        "0x02904af5c3be78481528e0f01780439f024109a6",
+        "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+        "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+        "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+        "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+        "0x352180974c71f84a934953cf49c4e538a6f9c997",
+        "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b",
+        "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+        "0x402dff43b4f24b006bbd6520a11c169f81085039",
+        "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+        "0x485bde66bb668a51f2372e34e45b1c6226798122",
+        "0x49f954c67ff235034b69b8a59fbe309a40256c8d",
+        "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0x5979f753b417c17fcd8f8c87b86154a0eb0e2c17",
+        "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+        "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+        "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+        "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+        "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+        "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+        "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+        "0x829675330fdcee01022983493e71f73fb53eab45",
+        "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+        "0x86b5780b606940eb59a062aa85a07959518c0161",
+        "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+        "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+        "0x929b44db23740e65df3a81ea4aab716af1b88474",
+        "0x92b10e02825986bac2375bdacafa3e89e3f612aa",
+        "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+        "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+        "0xaba6ba1e95e0926a6a6b917fe4e2f19ceae4ff2e",
+        "0xabbc3e6bccd53c55fee9a785f30a3a8202e6f61e",
+        "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+        "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+        "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+        "0xbe16605b22a7facef247363312121670dfe5afbe",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+        "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+        "0xc9ca4f230d30913877c9a18eef7e907ee32ebef2"
+      ],
+      "example_functions": [
+        "setAuthority"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [
+        {
+          "capability": "roles.configure",
+          "raw_points": 8.085,
+          "n_contracts": 9
+        },
+        {
+          "capability": "ownership.transfer",
+          "raw_points": 8.085,
+          "n_contracts": 29
+        },
+        {
+          "capability": "exec.arbitrary",
+          "raw_points": 5.145,
+          "n_contracts": 1
+        },
+        {
+          "capability": "lz_oapp.set_delegate",
+          "raw_points": 0.945,
+          "n_contracts": 1
+        },
+        {
+          "capability": "pause.set",
+          "raw_points": 0.63,
+          "n_contracts": 12
+        }
+      ],
+      "subsumed_raw_points": 22.89,
+      "net_points_lambda": 11.025,
+      "exposure_usd": 13040605.22
+    },
+    {
+      "principal_address": "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 1121280.66,
+      "value_band": "$1M-$10M",
+      "severity_proven": 1.0,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "raw_points": 10.5,
+      "n_functions": 3,
+      "n_contracts": 3,
+      "reach_addrs": [
+        "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+        "0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f",
+        "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5"
+      ],
+      "example_functions": [
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [
+        {
+          "capability": "authorized_caller.rotate",
+          "raw_points": 1.732,
+          "n_contracts": 1
+        },
+        {
+          "capability": "pause.set",
+          "raw_points": 0.157,
+          "n_contracts": 1
+        }
+      ],
+      "subsumed_raw_points": 1.889,
+      "net_points_lambda": 6.3,
+      "exposure_usd": 392448.23
+    },
+    {
+      "principal_address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 1.0,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "raw_points": 9.9,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [
+        {
+          "capability": "ownership.transfer",
+          "raw_points": 5.445,
+          "n_contracts": 1
+        },
+        {
+          "capability": "lz_oapp.set_delegate",
+          "raw_points": 2.97,
+          "n_contracts": 1
+        },
+        {
+          "capability": "lz_oapp.set_peer",
+          "raw_points": 2.97,
+          "n_contracts": 1
+        },
+        {
+          "capability": "pause.set",
+          "raw_points": 0.495,
+          "n_contracts": 1
+        }
+      ],
+      "subsumed_raw_points": 11.88,
+      "net_points_lambda": 3.564,
+      "exposure_usd": 259588.91
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 4058743865.71,
+      "value_band": ">$1B",
+      "severity_proven": 1.0,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 9.0,
+      "n_functions": 44,
+      "n_contracts": 22,
+      "reach_addrs": [
+        "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+        "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+        "0x3b44a093b9736af765f98f3245998f63bc757970",
+        "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0x5a765826700cf3a918eb713b3a7978e9333085df",
+        "0x5b083dde26fba0e43940b2e161fcd129903fc27d",
+        "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+        "0x66e1c53e846ef3e9f3722591868afcffb7f39800",
+        "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+        "0x77b929befe793367712c0c28ca8e857bf23a2296",
+        "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+        "0xbc870c47c6eb10009a0720e76f166f104c124ecf",
+        "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+        "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+        "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+        "0xd43d99df3d42675ce126a7cff8f7dff037620851"
+      ],
+      "example_functions": [
+        "upgradeTo",
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "subsumed_capabilities": [
+        {
+          "capability": "roles.grant",
+          "raw_points": 4.95,
+          "n_contracts": 1
+        },
+        {
+          "capability": "ownership.transfer",
+          "raw_points": 2.475,
+          "n_contracts": 4
+        },
+        {
+          "capability": "roles.revoke",
+          "raw_points": 0.54,
+          "n_contracts": 1
+        },
+        {
+          "capability": "timelock.set_delay",
+          "raw_points": 0.405,
+          "n_contracts": 1
+        },
+        {
+          "capability": "lz_oapp.set_delegate",
+          "raw_points": 0.405,
+          "n_contracts": 1
+        },
+        {
+          "capability": "lz_oapp.set_peer",
+          "raw_points": 0.405,
+          "n_contracts": 1
+        },
+        {
+          "capability": "pause.set",
+          "raw_points": 0.315,
+          "n_contracts": 1
+        }
+      ],
+      "subsumed_raw_points": 9.495,
+      "net_points_lambda": 1.944,
+      "exposure_usd": 608811579.86
+    },
+    {
+      "principal_address": "0xcdd57d11476c22d265722f68390b036f3da48c21",
+      "principal": "Safe 6/10 0xcdd57d11476c22d265722f68390b036f3da48c21",
+      "principal_kind": "safe",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 4058743865.71,
+      "value_band": ">$1B",
+      "severity_proven": 0.35,
+      "severity_basis": [
+        "destination_constrained"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 6/10",
+      "raw_points": 7.35,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x00c452affee3a17d9cecc1bcd2b8d5c7635c4cb9",
+        "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+        "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x1b7a4c3797236a1c37f8741c0be35c2c72736fff",
+        "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+        "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+        "0x308861a430be4cce5502d0a12724771fc6daf216",
+        "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+        "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa",
+        "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+        "0x3b44a093b9736af765f98f3245998f63bc757970",
+        "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+        "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+        "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+        "0x4a84ba0b5e716b37c78d0f5094757205626c7c1e",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0x556db8c611fe63e694413f718d795f976dcf5881",
+        "0x5585996e7cfe95f2d99e61168b8b35c66ff99b18",
+        "0x57aaf0004c716388b21795431cd7d5f9d3bb6a41",
+        "0x5a765826700cf3a918eb713b3a7978e9333085df",
+        "0x5b083dde26fba0e43940b2e161fcd129903fc27d",
+        "0x5d310451276d28a90cc6910449052d29a41e3abd",
+        "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+        "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9",
+        "0x66e1c53e846ef3e9f3722591868afcffb7f39800",
+        "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+        "0x6c7c54cfc2225fa985cd25f04d923b93c60a02f8",
+        "0x77b929befe793367712c0c28ca8e857bf23a2296",
+        "0x7d5706f6ef3f89b3951e23e557cdfbc3239d4e2c",
+        "0x89e45081437c959a827d2027135bc201ab33a2c8",
+        "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+        "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+        "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+        "0x9ffdf407cde9a93c47611799da23924af3ef764f",
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+        "0xb49e4420ea6e35f98060cd133842dbea9c27e479",
+        "0xbc870c47c6eb10009a0720e76f166f104c124ecf"
+      ],
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.953,
+      "exposure_usd": 497195139.78
+    },
+    {
+      "principal_address": "0xd8f3803d8412e61e04f53e1c9394e13ec8b32550",
+      "principal": "EOA 0xd8f3803d8412e61e04f53e1c9394e13ec8b32550",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 90.97,
+      "value_band": "<$100k",
+      "severity_proven": 0.9,
+      "severity_basis": [
+        "caller_arbitrary_proven+reach"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 7.29,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "sweepETH"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.567,
+      "exposure_usd": 40.94
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "authority.replace",
+      "value_at_stake_usd": 14371161.56,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.75,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 4.725,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x382d0106f308864d5462332d9d3bb54a60384b70",
+        "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+        "0x6889e57bca038c28520c0b047a75e567502ea5f6"
+      ],
+      "example_functions": [
+        "setAuthority"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "subsumed_capabilities": [
+        {
+          "capability": "roles.configure",
+          "raw_points": 3.465,
+          "n_contracts": 1
+        },
+        {
+          "capability": "ownership.transfer",
+          "raw_points": 3.465,
+          "n_contracts": 2
+        },
+        {
+          "capability": "roles.grant",
+          "raw_points": 3.465,
+          "n_contracts": 1
+        },
+        {
+          "capability": "roles.revoke",
+          "raw_points": 0.54,
+          "n_contracts": 1
+        },
+        {
+          "capability": "timelock.set_delay",
+          "raw_points": 0.405,
+          "n_contracts": 1
+        }
+      ],
+      "subsumed_raw_points": 11.34,
+      "net_points_lambda": 0.22,
+      "exposure_usd": 1616755.68
+    },
+    {
+      "principal_address": "0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal": "Safe 4/7 0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 4058743865.71,
+      "value_band": ">$1B",
+      "severity_proven": 0.2,
+      "severity_basis": [
+        "attacker_sustained_freeze_same_key",
+        "attacker_sustained_freeze_same_key+blast_scoped"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/7",
+      "raw_points": 4.2,
+      "n_functions": 20,
+      "n_contracts": 16,
+      "reach_addrs": [
+        "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+        "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+        "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0x5d310451276d28a90cc6910449052d29a41e3abd",
+        "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+        "0x77b929befe793367712c0c28ca8e857bf23a2296",
+        "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+        "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+        "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+        "0xd1901dd36cbf4a81386d0162df2707f7ddb60527"
+      ],
+      "example_functions": [
+        "pause",
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [
+        {
+          "capability": "flow.out",
+          "raw_points": 0.315,
+          "n_contracts": 1
+        }
+      ],
+      "subsumed_raw_points": 0.315,
+      "net_points_lambda": 0.118,
+      "exposure_usd": 284112070.6
+    },
+    {
+      "principal_address": "0xd55df81be2db8d2424ffe90a5e2b8ecb0c71886a",
+      "principal": "EOA 0xd55df81be2db8d2424ffe90a5e2b8ecb0c71886a",
+      "principal_kind": "eoa",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 0.07,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "severity_basis": [
+        "destination_constrained"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 2.835,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05"
+      ],
+      "example_functions": [
+        "forwardExternalCall"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.048,
+      "exposure_usd": 0.02
+    },
+    {
+      "principal_address": "0x9af1298993dc1f397973c62a5d47a284cf76844d",
+      "principal": "EOA 0x9af1298993dc1f397973c62a5d47a284cf76844d",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 206813489.98,
+      "value_band": "$100M-$1B",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent",
+        "recovery_path_witnessed_independent+blast_scoped"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 2.43,
+      "n_functions": 6,
+      "n_contracts": 6,
+      "reach_addrs": [
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+        "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5"
+      ],
+      "example_functions": [
+        "pause",
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.024,
+      "exposure_usd": 12783118.77
+    },
+    {
+      "principal_address": "0x427989bb12f4a390d11e7647d467dea02b9d2ee3",
+      "principal": "Safe 1/5 0x427989bb12f4a390d11e7647d467dea02b9d2ee3",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 1519836888.89,
+      "value_band": ">$1B",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent+blast_scoped"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 1/5",
+      "raw_points": 1.65,
+      "n_functions": 4,
+      "n_contracts": 4,
+      "reach_addrs": [
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xd1901dd36cbf4a81386d0162df2707f7ddb60527"
+      ],
+      "example_functions": [
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.01,
+      "exposure_usd": 56778414.71
+    },
+    {
+      "principal_address": "0xcd425f44758a08baab3c4908f3e3de5776e45d7a",
+      "principal": "timelock 0xcd425f44758a08baab3c4908f3e3de5776e45d7a",
+      "principal_kind": "timelock",
+      "capability": "flow.out",
+      "value_at_stake_usd": 13.37,
+      "value_band": "<$100k",
+      "severity_proven": 0.9,
+      "severity_basis": [
+        "caller_arbitrary_proven+reach",
+        "caller_arbitrary_proven+reach_unwitnessed"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 1.215,
+      "n_functions": 3,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xd1901dd36cbf4a81386d0162df2707f7ddb60527"
+      ],
+      "example_functions": [
+        "recoverERC20",
+        "recoverETH"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.004,
+      "exposure_usd": 3.61
+    },
+    {
+      "principal_address": "0xf8a86ea1ac39ec529814c377bd484387d395421e",
+      "principal": "EOA 0xf8a86ea1ac39ec529814c377bd484387d395421e",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 0.81,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.002,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x67e10b7764a99165665557b3e6cf24555bfc88c3",
+      "principal": "EOA 0x67e10b7764a99165665557b3e6cf24555bfc88c3",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 1.24,
+      "value_band": "<$100k",
+      "severity_proven": 0.1,
+      "severity_basis": [
+        "immutable_fixed_proven"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 0.81,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70"
+      ],
+      "example_functions": [
+        "sendToEtherFiRestaker"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.001,
+      "exposure_usd": 0.11
+    },
+    {
+      "principal_address": "0x13edfc1b04d003c2a142e92fad838b925672b07f",
+      "principal": "EOA 0x13edfc1b04d003c2a142e92fad838b925672b07f",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 0.405,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x18deea881548a592285d9ba63f0f67dc97e28e99",
+      "principal": "EOA 0x18deea881548a592285d9ba63f0f67dc97e28e99",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 0.405,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x4a21d84eb5b8bd5254e6a2d0ca11aa64ed1b6b66",
+      "principal": "EOA 0x4a21d84eb5b8bd5254e6a2d0ca11aa64ed1b6b66",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "raw_points": 0.405,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+      "principal": "Safe 2/5 0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 2/5",
+      "raw_points": 0.247,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x7859baa3e12b6480b15b77b069d8d0279ebc74ea",
+      "principal": "Safe 2/7 0x7859baa3e12b6480b15b77b069d8d0279ebc74ea",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 2/7",
+      "raw_points": 0.247,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x41dfc53b13932a2690c9790527c1967d8579a6ae",
+      "principal": "Safe 2/4 0x41dfc53b13932a2690c9790527c1967d8579a6ae",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "raw_points": 0.157,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    },
+    {
+      "principal_address": "0x71e2d6c34f569cc4df5802d675b208fb8ae3bcd6",
+      "principal": "Safe 2/4 0x71e2d6c34f569cc4df5802d675b208fb8ae3bcd6",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "raw_points": 0.157,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front",
+      "subsumed_capabilities": [],
+      "subsumed_raw_points": 0,
+      "net_points_lambda": 0.0,
+      "exposure_usd": 0.0
+    }
+  ],
+  "subsumed_rows": [
+    {
+      "principal_address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "raw_points": 5.445,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "beginDefaultAdminTransfer",
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "raw_points": 2.97,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_peer",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "raw_points": 2.97,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "setPeer"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 471979.84,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "raw_points": 0.495,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511"
+      ],
+      "example_functions": [
+        "pause",
+        "setUserChainSwitchingEnabled"
+      ],
+      "witness_tiers": [
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "roles.configure",
+      "value_at_stake_usd": 79655012.88,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 8.085,
+      "n_functions": 27,
+      "n_contracts": 9,
+      "reach_addrs": [
+        "0x02904af5c3be78481528e0f01780439f024109a6",
+        "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+        "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+        "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+        "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+        "0x352180974c71f84a934953cf49c4e538a6f9c997",
+        "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b",
+        "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+        "0x402dff43b4f24b006bbd6520a11c169f81085039",
+        "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+        "0x485bde66bb668a51f2372e34e45b1c6226798122",
+        "0x49f954c67ff235034b69b8a59fbe309a40256c8d",
+        "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0x5979f753b417c17fcd8f8c87b86154a0eb0e2c17",
+        "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+        "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+        "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+        "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+        "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+        "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+        "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+        "0x829675330fdcee01022983493e71f73fb53eab45",
+        "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+        "0x86b5780b606940eb59a062aa85a07959518c0161",
+        "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+        "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+        "0x929b44db23740e65df3a81ea4aab716af1b88474",
+        "0x92b10e02825986bac2375bdacafa3e89e3f612aa",
+        "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+        "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+        "0xaba6ba1e95e0926a6a6b917fe4e2f19ceae4ff2e",
+        "0xabbc3e6bccd53c55fee9a785f30a3a8202e6f61e",
+        "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+        "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+        "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+        "0xbe16605b22a7facef247363312121670dfe5afbe",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+        "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+        "0xc9ca4f230d30913877c9a18eef7e907ee32ebef2"
+      ],
+      "example_functions": [
+        "setPublicCapability",
+        "setRoleCapability",
+        "setUserRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 79655012.88,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 8.085,
+      "n_functions": 29,
+      "n_contracts": 29,
+      "reach_addrs": [
+        "0x02904af5c3be78481528e0f01780439f024109a6",
+        "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+        "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+        "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+        "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+        "0x352180974c71f84a934953cf49c4e538a6f9c997",
+        "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b",
+        "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+        "0x402dff43b4f24b006bbd6520a11c169f81085039",
+        "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+        "0x485bde66bb668a51f2372e34e45b1c6226798122",
+        "0x49f954c67ff235034b69b8a59fbe309a40256c8d",
+        "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0x5979f753b417c17fcd8f8c87b86154a0eb0e2c17",
+        "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+        "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+        "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+        "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+        "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+        "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+        "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+        "0x829675330fdcee01022983493e71f73fb53eab45",
+        "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+        "0x86b5780b606940eb59a062aa85a07959518c0161",
+        "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+        "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+        "0x929b44db23740e65df3a81ea4aab716af1b88474",
+        "0x92b10e02825986bac2375bdacafa3e89e3f612aa",
+        "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+        "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+        "0xaba6ba1e95e0926a6a6b917fe4e2f19ceae4ff2e",
+        "0xabbc3e6bccd53c55fee9a785f30a3a8202e6f61e",
+        "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+        "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+        "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+        "0xbe16605b22a7facef247363312121670dfe5afbe",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+        "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+        "0xc9ca4f230d30913877c9a18eef7e907ee32ebef2"
+      ],
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 14371161.56,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.35,
+      "severity_basis": [
+        "destination_constrained"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 5.145,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x382d0106f308864d5462332d9d3bb54a60384b70",
+        "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+        "0x6889e57bca038c28520c0b047a75e567502ea5f6",
+        "0x70a64840a353c58f63333570f53dba0948bece3d"
+      ],
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 0.945,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387"
+      ],
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.2,
+      "severity_basis": [
+        "attacker_sustained_freeze_same_key",
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "raw_points": 0.63,
+      "n_functions": 12,
+      "n_contracts": 12,
+      "reach_addrs": [
+        "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+        "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+        "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+        "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+        "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+        "0x929b44db23740e65df3a81ea4aab716af1b88474",
+        "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+        "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+        "0xbe16605b22a7facef247363312121670dfe5afbe",
+        "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+        "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+        "0xf44bd12956a0a87c2c20113ddfe1537a442526b5"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal": "Safe 4/7 0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 1.24,
+      "value_band": "<$100k",
+      "severity_proven": 0.1,
+      "severity_basis": [
+        "immutable_fixed_proven"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/7",
+      "raw_points": 0.315,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70"
+      ],
+      "example_functions": [
+        "sendToEtherFiRestaker"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "authorized_caller.rotate",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "raw_points": 1.732,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5"
+      ],
+      "example_functions": [
+        "setRebalancer"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "raw_points": 0.157,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5"
+      ],
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front"
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.configure",
+      "value_at_stake_usd": 14371161.56,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 3.465,
+      "n_functions": 3,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x382d0106f308864d5462332d9d3bb54a60384b70",
+        "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+        "0x6889e57bca038c28520c0b047a75e567502ea5f6"
+      ],
+      "example_functions": [
+        "setPublicCapability",
+        "setRoleCapability",
+        "setUserRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 14371161.56,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 3.465,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "reach_addrs": [
+        "0x382d0106f308864d5462332d9d3bb54a60384b70",
+        "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+        "0x6889e57bca038c28520c0b047a75e567502ea5f6"
+      ],
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.grant",
+      "value_at_stake_usd": 14371161.56,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 3.465,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x382d0106f308864d5462332d9d3bb54a60384b70",
+        "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+        "0x6889e57bca038c28520c0b047a75e567502ea5f6",
+        "0x70a64840a353c58f63333570f53dba0948bece3d"
+      ],
+      "example_functions": [
+        "grantRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.revoke",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.4,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.54,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x70a64840a353c58f63333570f53dba0948bece3d"
+      ],
+      "example_functions": [
+        "revokeRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "timelock.set_delay",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.405,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x70a64840a353c58f63333570f53dba0948bece3d"
+      ],
+      "example_functions": [
+        "updateDelay"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "roles.grant",
+      "value_at_stake_usd": 4058743865.71,
+      "value_band": ">$1B",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 4.95,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x00c452affee3a17d9cecc1bcd2b8d5c7635c4cb9",
+        "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+        "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+        "0x1b7a4c3797236a1c37f8741c0be35c2c72736fff",
+        "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+        "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+        "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+        "0x308861a430be4cce5502d0a12724771fc6daf216",
+        "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+        "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa",
+        "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+        "0x3b44a093b9736af765f98f3245998f63bc757970",
+        "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+        "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+        "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+        "0x4a84ba0b5e716b37c78d0f5094757205626c7c1e",
+        "0x51357a700b309637f109a897a6479a563d5afb8e",
+        "0x556db8c611fe63e694413f718d795f976dcf5881",
+        "0x5585996e7cfe95f2d99e61168b8b35c66ff99b18",
+        "0x57aaf0004c716388b21795431cd7d5f9d3bb6a41",
+        "0x5a765826700cf3a918eb713b3a7978e9333085df",
+        "0x5b083dde26fba0e43940b2e161fcd129903fc27d",
+        "0x5d310451276d28a90cc6910449052d29a41e3abd",
+        "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+        "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9",
+        "0x66e1c53e846ef3e9f3722591868afcffb7f39800",
+        "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+        "0x6c7c54cfc2225fa985cd25f04d923b93c60a02f8",
+        "0x77b929befe793367712c0c28ca8e857bf23a2296",
+        "0x7d5706f6ef3f89b3951e23e557cdfbc3239d4e2c",
+        "0x89e45081437c959a827d2027135bc201ab33a2c8",
+        "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+        "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+        "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+        "0x9ffdf407cde9a93c47611799da23924af3ef764f",
+        "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+        "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+        "0xb49e4420ea6e35f98060cd133842dbea9c27e479",
+        "0xbc870c47c6eb10009a0720e76f166f104c124ecf"
+      ],
+      "example_functions": [
+        "grantRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 1754709.51,
+      "value_band": "$1M-$10M",
+      "severity_proven": 0.55,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 2.475,
+      "n_functions": 4,
+      "n_contracts": 4,
+      "reach_addrs": [
+        "0x3b44a093b9736af765f98f3245998f63bc757970",
+        "0x5d310451276d28a90cc6910449052d29a41e3abd",
+        "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+        "0xd43d99df3d42675ce126a7cff8f7dff037620851"
+      ],
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "roles.revoke",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.4,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.54,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
+      ],
+      "example_functions": [
+        "revokeRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "timelock.set_delay",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.405,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
+      ],
+      "example_functions": [
+        "updateDelay"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.405,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5d310451276d28a90cc6910449052d29a41e3abd"
+      ],
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "lz_oapp.set_peer",
+      "value_at_stake_usd": 0.0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "severity_basis": [
+        "base"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.405,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x5d310451276d28a90cc6910449052d29a41e3abd"
+      ],
+      "example_functions": [
+        "setPeer"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    },
+    {
+      "principal_address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "pause.set",
+      "value_at_stake_usd": 77255816.11,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.05,
+      "severity_basis": [
+        "recovery_path_witnessed_independent"
+      ],
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "raw_points": 0.315,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "reach_addrs": [
+        "0x17a16747d03006c9754548ac0d0aff48783a4a45"
+      ],
+      "example_functions": [
+        "initializeOnUpgradeV2"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal"
+    }
+  ],
+  "freeze_facts": [
+    {
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9af1298993dc1f397973c62a5d47a284cf76844d",
+        "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+        "0xf8a86ea1ac39ec529814c377bd484387d395421e"
+      ]
+    },
+    {
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "setUserChainSwitchingEnabled",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9af1298993dc1f397973c62a5d47a284cf76844d",
+        "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+        "0xf8a86ea1ac39ec529814c377bd484387d395421e"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x7c5c721ff970d86cede81cbb81914dd7c2dcb234",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0xc83a99a259fc884a85adb899c418a46d92398935",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x31a4ae4dec55de29112870ef5fd8b55f7925bc97",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9af1298993dc1f397973c62a5d47a284cf76844d",
+        "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5"
+      ]
+    },
+    {
+      "contract": "EtherFiRateLimiter",
+      "address": "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0xc83a99a259fc884a85adb899c418a46d92398935",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "WeETHWithdrawAdapter",
+      "address": "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "WithdrawRequestNFT",
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "pauseUntil",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent+blast_scoped",
+      "blast_radius": [
+        "burnShares",
+        "mintShares",
+        "transfer",
+        "transferFrom"
+      ],
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "MembershipManager",
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EtherFiOracle",
+      "address": "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "initializeOnUpgradeV2",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "pauseUntil",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent+blast_scoped",
+      "blast_radius": [
+        "transferStETH",
+        "undelegate",
+        "withdrawEther"
+      ],
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "pauseUntil",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent+blast_scoped",
+      "blast_radius": [
+        "withdraw"
+      ],
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EtherFiNodesManager",
+      "address": "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "NodeOperatorManager",
+      "address": "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "pauseUntil",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent+blast_scoped",
+      "blast_radius": [
+        "transfer",
+        "transferFrom",
+        "unwrap"
+      ],
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbe16605b22a7facef247363312121670dfe5afbe",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x2aca71020de61bb532008049e1bd41e451ae8adc"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    },
+    {
+      "contract": "AccountantWithRateProviders",
+      "address": "0xf44bd12956a0a87c2c20113ddfe1537a442526b5",
+      "function": "pause",
+      "severity": 0.05,
+      "reason": "recovery_path_witnessed_independent",
+      "blast_radius": null,
+      "recovery_principals": [
+        "0x9ffeef56dfb45a44c51543f3a08d0c91948e9f56",
+        "0xcea8039076e35a825854c5c2f85659430b06ec96"
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "extraction_magnitude_unwitnessed",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "exit",
+      "capability": "flow.out",
+      "note": "destination proven caller_arbitrary but reach_determined is not true; amount that can leave is unproven, weight floored",
+      "missing_witness": "observed_reach_value_usd (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "revokeRole",
+      "capability": "roles.revoke",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "setUserChainSwitchingEnabled",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x7c5c721ff970d86cede81cbb81914dd7c2dcb234",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowFrom",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyTo",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "depositAndBridge",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "depositAndBridgeWithPermit",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "bridge",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "refundDeposit",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "bulkWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyAll",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowAll",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyFrom",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowTo",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyOperator",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowOperator",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "proxy_fallback_delegatecall",
+      "contract": "LRTSquaredCore",
+      "address": "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+      "function": "fallback",
+      "note": "open fallback delegatecalls to a stored admin impl; reachability shifts to the impl-setter",
+      "missing_witness": "who controls setAdminImpl"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LRTSquaredCore",
+      "address": "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+      "function": "withdrawCommunityDepositedPauseAmount",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x9aa79c84b79816ab920bbce20f8f74557b514734",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0xc83a99a259fc884a85adb899c418a46d92398935",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xe238e253b67f42ee3af194baf7aba5e2eadda1b8",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LRTSquaredCore",
+      "address": "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+      "function": "redeem",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape 'unknown': arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x6ee3aaccf9f2321e49063c4f8da775ddbd407268",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x31a4ae4dec55de29112870ef5fd8b55f7925bc97",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "TimelockController",
+      "address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "function": "execute",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "TimelockController",
+      "address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "function": "executeBatch",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "proxy_fallback_delegatecall",
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "depositToStrategy",
+      "note": "open fallback delegatecalls to a stored admin impl; reachability shifts to the impl-setter",
+      "missing_witness": "who controls setAdminImpl"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "rebalance",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "UpgradeableBeacon",
+      "address": "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+      "function": "transferOwnership",
+      "capability": "ownership.transfer",
+      "principal": "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+      "note": "ownership.transfer gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "unpause",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "UpgradeableBeacon",
+      "address": "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+      "function": "upgradeTo",
+      "capability": "upgrade.implementation",
+      "principal": "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+      "note": "upgrade.implementation gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "claim",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "grantRole",
+      "capability": "roles.grant",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherFiRateLimiter",
+      "address": "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiRateLimiter",
+      "address": "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xd445c65e4821dbd4ed0114ecdf6325c69fad7653",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiTimelock",
+      "address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "function": "execute",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiTimelock",
+      "address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "function": "executeBatch",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "setAuthority",
+      "capability": "authority.replace",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "transferOwnership",
+      "capability": "ownership.transfer",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "setPeer",
+      "capability": "lz_oapp.set_peer",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0xc83a99a259fc884a85adb899c418a46d92398935",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "completeQueuedETHWithdrawals",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "completeQueuedWithdrawals",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "forwardExternalCall",
+      "capability": "exec.arbitrary",
+      "principal": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "sweepFunds",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "requestWithdrawWithWeETH",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape 'unknown': arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "extraction_magnitude_unwitnessed",
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "recoverETH",
+      "capability": "flow.out",
+      "note": "destination proven caller_arbitrary but reach_determined is not true; amount that can leave is unproven, weight floored",
+      "missing_witness": "observed_reach_value_usd (fork verdict)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "WithdrawRequestNFT",
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "function": "batchClaimWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "WithdrawRequestNFT",
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "function": "claimWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "WeETHWithdrawAdapter",
+      "address": "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "WeETHWithdrawAdapter",
+      "address": "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "WithdrawRequestNFT",
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "WithdrawRequestNFT",
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "RoleRegistry",
+      "address": "0x3b44a093b9736af765f98f3245998f63bc757970",
+      "function": "grantRole",
+      "capability": "roles.grant",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "pauseUntil",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EETH",
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "function": "recoverERC721",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "batchClaimWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "cancelWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "claimWithdraw",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "stEthClaimWithdrawals",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "stEthRequestWithdrawal",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape 'unknown': arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "invalidateRequests",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "transferStETH",
+      "capability": "flow.out",
+      "principal": "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "withdrawEther",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "MembershipManager",
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "MembershipManager",
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "RoleRegistry",
+      "address": "0x3b44a093b9736af765f98f3245998f63bc757970",
+      "function": "revokeRole",
+      "capability": "roles.revoke",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "MembershipManager",
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "function": "unwrapForEEthAndBurn",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherFiOracle",
+      "address": "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiOracle",
+      "address": "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "initializeOnUpgradeV2",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "initializeOnUpgradeV2",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "depositIntoStrategy",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape 'unknown': arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "pauseUntil",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "addEthAmountLockedForWithdrawal",
+      "capability": "flow.out",
+      "principal": "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "addEthAmountLockedForWithdrawal",
+      "capability": "flow.out",
+      "principal": "0x7d5706f6ef3f89b3951e23e557cdfbc3239d4e2c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "pauseUntil",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "transferLockedEthForPriority",
+      "capability": "flow.out",
+      "principal": "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "withdraw",
+      "capability": "flow.out",
+      "principal": "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "withdraw",
+      "capability": "flow.out",
+      "principal": "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherFiNodesManager",
+      "address": "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiNodesManager",
+      "address": "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "unwrapL2Eth",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "withdrawEther",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "recoverERC20",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "recoverERC721",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "NodeOperatorManager",
+      "address": "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "NodeOperatorManager",
+      "address": "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "unwrap",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "lzReceive",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "sweep",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "cancelBid",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "cancelBidBatch",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "updateSelectedBidInformation",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "pauseUntil",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "extraction_magnitude_unwitnessed",
+      "contract": "WeETH",
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "function": "recoverETH",
+      "capability": "flow.out",
+      "note": "destination proven caller_arbitrary but reach_determined is not true; amount that can leave is unproven, weight floored",
+      "missing_witness": "observed_reach_value_usd (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x8ea0b382d054dbebeb1d0ae47ee4ac433c730353",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbe16605b22a7facef247363312121670dfe5afbe",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbe16605b22a7facef247363312121670dfe5afbe",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "extraction_magnitude_unwitnessed",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "exit",
+      "capability": "flow.out",
+      "note": "destination proven caller_arbitrary but reach_determined is not true; amount that can leave is unproven, weight floored",
+      "missing_witness": "observed_reach_value_usd (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "redeemEEth",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "redeemEEthWithPermit",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "redeemWeEth",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "redeemWeEthWithPermit",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "EtherFiRedemptionManager",
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "function": "sweepDust",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "RestakingRewardsRouter",
+      "address": "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+      "function": "receive",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "flow_out_destination_unproven",
+      "contract": "RestakingRewardsRouter",
+      "address": "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+      "function": "recoverERC20",
+      "capability": "flow.out",
+      "note": "flow.out with destination_shape None: arbitrariness unproven and fixedness unproven; not scored (inv.1)",
+      "missing_witness": "destination_shape (fork verdict or immutability proof)"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "freeze_recovery_not_independent",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "function": "pause",
+      "note": "the only resolved unpauser is the pauser itself; this key can sustain its own freeze",
+      "missing_witness": "an unpause principal disjoint from this pauser"
+    },
+    {
+      "kind": "freeze_blast_radius_unwitnessed",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xf44bd12956a0a87c2c20113ddfe1537a442526b5",
+      "function": "pause",
+      "capability": "pause.set",
+      "note": "pause capability with no observed_blast_radius; frozen scope unproven, value not scoped down",
+      "missing_witness": "observed_blast_radius (fork verdict)"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xf44bd12956a0a87c2c20113ddfe1537a442526b5",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9ffeef56dfb45a44c51543f3a08d0c91948e9f56",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "audit_pre_fix_unpatched_llm_label",
+      "contract": "BeHYPEStakeModule",
+      "note": "LLM-labeled 'fix commit exists, not deployed' - hallucinatable",
+      "missing_witness": "deterministic 'fixed in <sha>' phrase match in PDF"
+    }
+  ]
+}

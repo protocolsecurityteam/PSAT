@@ -1,0 +1,2187 @@
+{
+  "headline": "Safe 1/5 can pause.set on >$1B (pauseUntil) \u2014 raw -17.85",
+  "credits": [
+    {
+      "protective_fact": "timelock gates upgrade.implementation",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "value_protected_band": ">$1B",
+      "n_functions": 44,
+      "counterfactual_if_eoa_gated": "~-54.0 raw (vs -9.0 now)",
+      "example_functions": [
+        "upgradeTo",
+        "upgradeToAndCall"
+      ]
+    },
+    {
+      "protective_fact": "timelock gates roles.grant",
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "value_protected_band": ">$1B",
+      "n_functions": 1,
+      "counterfactual_if_eoa_gated": "~-29.7 raw (vs -4.95 now)",
+      "example_functions": [
+        "grantRole"
+      ]
+    },
+    {
+      "protective_fact": "audit equivalence proven (deployed code == sha printed in audit PDF)",
+      "rows": 36,
+      "note": "grade-admissible modest credit only; LLM role labels excluded (inv.2)"
+    }
+  ],
+  "warnings_summary": {
+    "contract_gated_unknown_path": {
+      "count": 68,
+      "examples": [
+        "BoringVault.exit (flow.out)",
+        "BoringVault.manage (exec.arbitrary)",
+        "BoringVault.manage (flow.out)",
+        "BoringVault.manage (flow.out)"
+      ]
+    },
+    "unresolved_reachability": {
+      "count": 6,
+      "examples": [
+        "CumulativeMerkleDrop.revokeRole (roles.revoke)",
+        "LayerZeroTellerWithRateLimiting.depositAndBridgeWithPermit (flow.out)",
+        "CumulativeMerkleDrop.grantRole (roles.grant)",
+        "RoleRegistry.grantRole (roles.grant)"
+      ]
+    },
+    "restricted_no_principal": {
+      "count": 11,
+      "examples": [
+        "LayerZeroTellerWithRateLimiting.denyAll (transfer_policy.configure)",
+        "LayerZeroTellerWithRateLimiting.allowAll (transfer_policy.configure)",
+        "LayerZeroTellerWithRateLimiting.denyFrom (transfer_policy.configure)",
+        "LayerZeroTellerWithRateLimiting.allowFrom (transfer_policy.configure)"
+      ]
+    },
+    "proxy_fallback_delegatecall": {
+      "count": 2,
+      "examples": [
+        "LRTSquaredCore.fallback ()",
+        "LRTSquaredAdmin.depositToStrategy ()"
+      ]
+    },
+    "audit_pre_fix_unpatched_llm_label": {
+      "count": 1,
+      "examples": [
+        "BeHYPEStakeModule.? ()"
+      ]
+    }
+  },
+  "protocol": "etherfi",
+  "protocol_id": 1,
+  "model_version": "proto-0.1",
+  "grade": "C",
+  "grade_numeric": 60.525,
+  "confidence_pct": 53.4,
+  "confidence_note": "assessed over 53.4% of value-weighted privileged surface",
+  "total_tracked_value_usd": 4159585667,
+  "decomposition_check": {
+    "grade": 60.525,
+    "sum_deductions": 39.474,
+    "residual": 0.001
+  },
+  "audit_credit": {
+    "equivalence_proven_rows": 36,
+    "unknown_rows": 173,
+    "note": "equivalence-proven = deployed code matches a sha printed in the audit PDF; grade-admissible modest credit only (inv.2)"
+  },
+  "findings": [
+    {
+      "principal": "Safe 1/5 0x427989bb12f4a390d11e7647d467dea02b9d2ee3",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 4047474843,
+      "value_band": ">$1B",
+      "severity_proven": 0.35,
+      "weakness": 0.85,
+      "weakest_gate": "Safe 1/5",
+      "points": 17.85,
+      "n_functions": 4,
+      "n_contracts": 4,
+      "example_functions": [
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 17.85
+    },
+    {
+      "principal": "EOA 0x9af1298993dc1f397973c62a5d47a284cf76844d",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 545296686,
+      "value_band": "$100M-$1B",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 10.206,
+      "n_functions": 6,
+      "n_contracts": 6,
+      "example_functions": [
+        "pause",
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 17.01
+    },
+    {
+      "principal": "EOA 0xd8f3803d8412e61e04f53e1c9394e13ec8b32550",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.9,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 5.249,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "sweepETH"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 14.58
+    },
+    {
+      "principal": "EOA 0x67e10b7764a99165665557b3e6cf24555bfc88c3",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 467568892,
+      "value_band": "$100M-$1B",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 2.624,
+      "n_functions": 5,
+      "n_contracts": 3,
+      "example_functions": [
+        "recoverERC20",
+        "sendToEtherFiRestaker",
+        "stEthClaimWithdrawals",
+        "withdrawEther"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 12.15
+    },
+    {
+      "principal": "EOA 0xe09d681299230404b509597206535cb3398f8dd7",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 467568890,
+      "value_band": "$100M-$1B",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 1.575,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "depositIntoStrategy",
+        "stEthRequestWithdrawal"
+      ],
+      "witness_tiers": [
+        "behavioral_observed"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 12.15
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "authority.replace",
+      "value_at_stake_usd": 79655013,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.75,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.857,
+      "n_functions": 29,
+      "n_contracts": 29,
+      "example_functions": [
+        "setAuthority"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 11.025
+    },
+    {
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 1121281,
+      "value_band": "$1M-$10M",
+      "severity_proven": 1.0,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "points": 0.49,
+      "n_functions": 3,
+      "n_contracts": 3,
+      "example_functions": [
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 10.5
+    },
+    {
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 1.0,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "points": 0.277,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 9.9
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "upgrade.implementation",
+      "value_at_stake_usd": 4058743866,
+      "value_band": ">$1B",
+      "severity_proven": 1.0,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.151,
+      "n_functions": 44,
+      "n_contracts": 22,
+      "example_functions": [
+        "upgradeTo",
+        "upgradeToAndCall"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 9.0
+    },
+    {
+      "principal": "timelock 0xcd425f44758a08baab3c4908f3e3de5776e45d7a",
+      "principal_kind": "timelock",
+      "capability": "flow.out",
+      "value_at_stake_usd": 3502650137,
+      "value_band": ">$1B",
+      "severity_proven": 0.9,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.082,
+      "n_functions": 6,
+      "n_contracts": 2,
+      "example_functions": [
+        "recoverERC20",
+        "recoverERC721",
+        "recoverETH"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 8.1
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "roles.configure",
+      "value_at_stake_usd": 79655013,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.049,
+      "n_functions": 27,
+      "n_contracts": 9,
+      "example_functions": [
+        "setPublicCapability",
+        "setRoleCapability",
+        "setUserRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 8.085
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 79655013,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.029,
+      "n_functions": 29,
+      "n_contracts": 29,
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 8.085
+    },
+    {
+      "principal": "Safe 4/7 0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 4058743866,
+      "value_band": ">$1B",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/7",
+      "points": 0.016,
+      "n_functions": 20,
+      "n_contracts": 16,
+      "example_functions": [
+        "pause",
+        "pauseUntil"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 7.35
+    },
+    {
+      "principal": "Safe 6/10 0xcdd57d11476c22d265722f68390b036f3da48c21",
+      "principal_kind": "safe",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 4058743866,
+      "value_band": ">$1B",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 6/10",
+      "points": 0.01,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 7.35
+    },
+    {
+      "principal": "EOA 0xf8a86ea1ac39ec529814c377bd484387d395421e",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.004,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 5.67
+    },
+    {
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.55,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "points": 0.003,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "beginDefaultAdminTransfer",
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 5.445
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 14371162,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.001,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 5.145
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "roles.grant",
+      "value_at_stake_usd": 4058743866,
+      "value_band": ">$1B",
+      "severity_proven": 0.55,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.001,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "grantRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 4.95
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "authority.replace",
+      "value_at_stake_usd": 14371162,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.75,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "setAuthority"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 4.725
+    },
+    {
+      "principal": "Safe 4/7 0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 467568892,
+      "value_band": "$100M-$1B",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/7",
+      "points": 0.0,
+      "n_functions": 9,
+      "n_contracts": 5,
+      "example_functions": [
+        "depositIntoStrategy",
+        "invalidateRequests",
+        "recoverERC20",
+        "sendToEtherFiRestaker",
+        "stEthClaimWithdrawals",
+        "stEthRequestWithdrawal"
+      ],
+      "witness_tiers": [
+        "behavioral_observed",
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 4.725
+    },
+    {
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.35,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "pause",
+        "setUserChainSwitchingEnabled"
+      ],
+      "witness_tiers": [
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 3.465
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.configure",
+      "value_at_stake_usd": 14371162,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 3,
+      "n_contracts": 1,
+      "example_functions": [
+        "setPublicCapability",
+        "setRoleCapability",
+        "setUserRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 3.465
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 14371162,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 3.465
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.grant",
+      "value_at_stake_usd": 14371162,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.55,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "grantRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 3.465
+    },
+    {
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.3,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 2.97
+    },
+    {
+      "principal": "Safe 3/7 0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_peer",
+      "value_at_stake_usd": 471980,
+      "value_band": "$100k-$1M",
+      "severity_proven": 0.3,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 3/7",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setPeer"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 2.97
+    },
+    {
+      "principal": "EOA 0x13edfc1b04d003c2a142e92fad838b925672b07f",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.835
+    },
+    {
+      "principal": "EOA 0x18deea881548a592285d9ba63f0f67dc97e28e99",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.835
+    },
+    {
+      "principal": "EOA 0x4a21d84eb5b8bd5254e6a2d0ca11aa64ed1b6b66",
+      "principal_kind": "eoa",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.835
+    },
+    {
+      "principal": "EOA 0xd55df81be2db8d2424ffe90a5e2b8ecb0c71886a",
+      "principal_kind": "eoa",
+      "capability": "exec.arbitrary",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "forwardExternalCall"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.835
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "ownership.transfer",
+      "value_at_stake_usd": 1754710,
+      "value_band": "$1M-$10M",
+      "severity_proven": 0.55,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 4,
+      "n_contracts": 4,
+      "example_functions": [
+        "transferOwnership"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 2.475
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "pause.set",
+      "value_at_stake_usd": 77255816,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.35,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "initializeOnUpgradeV2"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 2.205
+    },
+    {
+      "principal": "EOA 0x18deea881548a592285d9ba63f0f67dc97e28e99",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "refundDeposit"
+      ],
+      "witness_tiers": [
+        "policy_derived"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.025
+    },
+    {
+      "principal": "EOA 0xf14787f86d7be7cf4898a1c44cf73f0dfb5b377c",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "refundDeposit"
+      ],
+      "witness_tiers": [
+        "policy_derived"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.025
+    },
+    {
+      "principal": "EOA 0x9af1298993dc1f397973c62a5d47a284cf76844d",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "unpause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.025
+    },
+    {
+      "principal": "EOA 0x62a44d2493afc2b25b51b01706ed7ea10cf80e34",
+      "principal_kind": "eoa",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.9,
+      "weakest_gate": "EOA",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "invalidateRequests"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "move behind a strong multisig (>=k/n 0.67) or timelock: weakness 0.9 -> 0.15-0.2",
+      "raw_points": 2.025
+    },
+    {
+      "principal": "Safe 2/5 0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 2/5",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.733
+    },
+    {
+      "principal": "Safe 2/7 0x7859baa3e12b6480b15b77b069d8d0279ebc74ea",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 2/7",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.733
+    },
+    {
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "authorized_caller.rotate",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.55,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setRebalancer"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.732
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "flow.out",
+      "value_at_stake_usd": 86734223,
+      "value_band": "$10M-$100M",
+      "severity_proven": 0.25,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 4,
+      "n_contracts": 3,
+      "example_functions": [
+        "batchClaimWithdraw",
+        "claimWithdraw",
+        "initializeOnUpgradeV2",
+        "sweep"
+      ],
+      "witness_tiers": [
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 1.575
+    },
+    {
+      "principal": "Safe 2/5 0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.55,
+      "weakest_gate": "Safe 2/5",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "refundDeposit"
+      ],
+      "witness_tiers": [
+        "policy_derived"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.238
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.0,
+      "n_functions": 12,
+      "n_contracts": 12,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.102
+    },
+    {
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.102
+    },
+    {
+      "principal": "Safe 2/4 0x41dfc53b13932a2690c9790527c1967d8579a6ae",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.102
+    },
+    {
+      "principal": "Safe 2/4 0x71e2d6c34f569cc4df5802d675b208fb8ae3bcd6",
+      "principal_kind": "safe",
+      "capability": "pause.set",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.35,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 2,
+      "example_functions": [
+        "pause"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 1.102
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.945
+    },
+    {
+      "principal": "Safe 2/4 0x41dfc53b13932a2690c9790527c1967d8579a6ae",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "refundDeposit"
+      ],
+      "witness_tiers": [
+        "policy_derived"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.787
+    },
+    {
+      "principal": "Safe 2/4 0x71e2d6c34f569cc4df5802d675b208fb8ae3bcd6",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 2/4",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "refundDeposit"
+      ],
+      "witness_tiers": [
+        "policy_derived"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.787
+    },
+    {
+      "principal": "Safe 4/6 0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/6",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.787
+    },
+    {
+      "principal": "Safe 4/8 0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 4/8",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "rebalance",
+        "unpause"
+      ],
+      "witness_tiers": [
+        "idiom_structural",
+        "standard_exact"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.787
+    },
+    {
+      "principal": "Safe 6/10 0xcdd57d11476c22d265722f68390b036f3da48c21",
+      "principal_kind": "safe",
+      "capability": "flow.out",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.25,
+      "weakness": 0.35,
+      "weakest_gate": "Safe 6/10",
+      "points": 0.0,
+      "n_functions": 2,
+      "n_contracts": 1,
+      "example_functions": [
+        "execute",
+        "executeBatch"
+      ],
+      "witness_tiers": [
+        "idiom_structural"
+      ],
+      "counterfactual": "raise threshold ratio and/or add a timelock in front: lowers weakness toward 0.15",
+      "raw_points": 0.787
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "roles.revoke",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.4,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "revokeRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.54
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "roles.revoke",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.4,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "revokeRole"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.54
+    },
+    {
+      "principal": "timelock 0x70a64840a353c58f63333570f53dba0948bece3d",
+      "principal_kind": "timelock",
+      "capability": "timelock.set_delay",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "updateDelay"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.405
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "timelock.set_delay",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "updateDelay"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.405
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "lz_oapp.set_delegate",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setDelegate"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.405
+    },
+    {
+      "principal": "timelock 0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "principal_kind": "timelock",
+      "capability": "lz_oapp.set_peer",
+      "value_at_stake_usd": 0,
+      "value_band": "<$100k",
+      "severity_proven": 0.3,
+      "weakness": 0.15,
+      "weakest_gate": "timelock",
+      "points": 0.0,
+      "n_functions": 1,
+      "n_contracts": 1,
+      "example_functions": [
+        "setPeer"
+      ],
+      "witness_tiers": [
+        "standard_exact"
+      ],
+      "counterfactual": "already timelock-gated; residual is the timelock's controlling principal",
+      "raw_points": 0.405
+    }
+  ],
+  "warnings": [
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x7b57ad1a0aa89583130acfad024241170d24c13c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "revokeRole",
+      "capability": "roles.revoke",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x7c5c721ff970d86cede81cbb81914dd7c2dcb234",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "depositAndBridgeWithPermit",
+      "capability": "flow.out",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "bulkWithdraw",
+      "capability": "flow.out",
+      "principal": "0x92b10e02825986bac2375bdacafa3e89e3f612aa",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyAll",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowAll",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyFrom",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowFrom",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyTo",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowTo",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "denyOperator",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "allowOperator",
+      "capability": "transfer_policy.configure",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "proxy_fallback_delegatecall",
+      "contract": "LRTSquaredCore",
+      "address": "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+      "function": "fallback",
+      "note": "open fallback delegatecalls to a stored admin impl (setAdminImpl); reachability shifts to the impl-setter, not the public caller",
+      "missing_witness": "who controls setAdminImpl"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x9aa79c84b79816ab920bbce20f8f74557b514734",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xf9f7969c357ce6dfd7973098ea0d57173592bcca",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringGovernance",
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0xc83a99a259fc884a85adb899c418a46d92398935",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xe238e253b67f42ee3af194baf7aba5e2eadda1b8",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x6ee3aaccf9f2321e49063c4f8da775ddbd407268",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x31a4ae4dec55de29112870ef5fd8b55f7925bc97",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "proxy_fallback_delegatecall",
+      "contract": "LRTSquaredAdmin",
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "function": "depositToStrategy",
+      "note": "open fallback delegatecalls to a stored admin impl (setAdminImpl); reachability shifts to the impl-setter, not the public caller",
+      "missing_witness": "who controls setAdminImpl"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "UpgradeableBeacon",
+      "address": "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+      "function": "transferOwnership",
+      "capability": "ownership.transfer",
+      "principal": "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+      "note": "ownership.transfer gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "UpgradeableBeacon",
+      "address": "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+      "function": "upgradeTo",
+      "capability": "upgrade.implementation",
+      "principal": "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+      "note": "upgrade.implementation gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "CumulativeMerkleDrop",
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "function": "grantRole",
+      "capability": "roles.grant",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xd445c65e4821dbd4ed0114ecdf6325c69fad7653",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "setAuthority",
+      "capability": "authority.replace",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "function": "transferOwnership",
+      "capability": "ownership.transfer",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0x4d0ef2a55db2439a37507a893b624f89ec7a403c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "restricted_no_principal",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "setPeer",
+      "capability": "lz_oapp.set_peer",
+      "note": "restricted privileged fn with no resolved principal",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LayerZeroTellerWithRateLimiting",
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9993f3faf8ffd24a07669b8efc7d49541bb0e362",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0xc83a99a259fc884a85adb899c418a46d92398935",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "completeQueuedETHWithdrawals",
+      "capability": "flow.out",
+      "principal": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "completeQueuedWithdrawals",
+      "capability": "flow.out",
+      "principal": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "forwardExternalCall",
+      "capability": "exec.arbitrary",
+      "principal": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiNode",
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "function": "sweepFunds",
+      "capability": "flow.out",
+      "principal": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "PriorityWithdrawalQueue",
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "function": "requestWithdrawWithWeETH",
+      "capability": "flow.out",
+      "principal": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "RoleRegistry",
+      "address": "0x3b44a093b9736af765f98f3245998f63bc757970",
+      "function": "grantRole",
+      "capability": "roles.grant",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherFiRestaker",
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "function": "transferStETH",
+      "capability": "flow.out",
+      "principal": "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "RoleRegistry",
+      "address": "0x3b44a093b9736af765f98f3245998f63bc757970",
+      "function": "revokeRole",
+      "capability": "roles.revoke",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "unresolved_reachability",
+      "contract": "MembershipManager",
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "function": "unwrapForEEthAndBurn",
+      "capability": "flow.out",
+      "note": "authority_openness not_determined on privileged capability",
+      "missing_witness": "principal resolution"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "addEthAmountLockedForWithdrawal",
+      "capability": "flow.out",
+      "principal": "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "addEthAmountLockedForWithdrawal",
+      "capability": "flow.out",
+      "principal": "0x7d5706f6ef3f89b3951e23e557cdfbc3239d4e2c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "transferLockedEthForPriority",
+      "capability": "flow.out",
+      "principal": "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "withdraw",
+      "capability": "flow.out",
+      "principal": "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "LiquidityPool",
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "function": "withdraw",
+      "capability": "flow.out",
+      "principal": "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "Liquifier",
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "function": "unwrapL2Eth",
+      "capability": "flow.out",
+      "principal": "0xd789870bea40d056a4d26055d0befcc8755da146",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "EtherfiL1SyncPoolETH",
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "function": "lzReceive",
+      "capability": "flow.out",
+      "principal": "0x1a44076050125825900e736c501f859c50fe728c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AuctionManager",
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "function": "updateSelectedBidInformation",
+      "capability": "flow.out",
+      "principal": "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x8ea0b382d054dbebeb1d0ae47ee4ac433c730353",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xbe16605b22a7facef247363312121670dfe5afbe",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "TellerWithMultiAssetSupport",
+      "address": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x07fbd716eb652e4cd64f4be58daa61a4abd749f0",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "exit",
+      "capability": "flow.out",
+      "principal": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "exec.arbitrary",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "exec.arbitrary gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "BoringVault",
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "function": "manage",
+      "capability": "flow.out",
+      "principal": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "note": "flow.out gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "contract_gated_unknown_path",
+      "contract": "AccountantWithRateProviders",
+      "address": "0xf44bd12956a0a87c2c20113ddfe1537a442526b5",
+      "function": "pause",
+      "capability": "pause.set",
+      "principal": "0x9ffeef56dfb45a44c51543f3a08d0c91948e9f56",
+      "note": "pause.set gated by a contract principal whose own authority is not reduced to a key; weakest path unresolved (not scored, inv.2)",
+      "missing_witness": "controlling principal of the gating contract"
+    },
+    {
+      "kind": "audit_pre_fix_unpatched_llm_label",
+      "contract": "BeHYPEStakeModule",
+      "note": "audit LLM-labeled 'fix commit exists, not deployed' - hallucinatable role label; equivalence core still holds",
+      "missing_witness": "deterministic 'fixed in <sha>' phrase match in PDF"
+    }
+  ]
+}
