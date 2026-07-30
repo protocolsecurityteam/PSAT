@@ -1035,7 +1035,7 @@ describe("claimWitnessFacts — inspector verbose rows", () => {
       { auto_expiry: null, duration_bound_seconds: null }, // older verdict: no source key
     ]) {
       const facts = claimWitnessFacts({ claims: [observedClaim("pause.set", observed)] });
-      expect(facts).toContainEqual({ label: "Auto-expiry", value: "not determined (no freeze window read)" });
+      expect(facts).toContainEqual({ label: "Auto-expiry", value: "window not determined" });
       expect(facts).not.toContainEqual({
         label: "Auto-expiry",
         value: "indefinite latch (no self-recovery bound)",

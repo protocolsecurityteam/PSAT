@@ -1080,6 +1080,20 @@ as code-plane provenance.**
   51 distinct blocks in one run.** Fork verdicts are not pinned to a single block, so
   `model_version` + persisted inputs do not determine them. Either pin per run or
   publish the per-verdict block as part of the witness identity. **CONFIDENCE.**
+  **↳ PARTIALLY ADDRESSED (Unit 3).** The 78 `tier2` transcripts were worse than this
+  says: their fork was spawned with **no** `--fork-block-number`, so the height they
+  record is the preflight pin and *not provably* the height the fork was taken at.
+  The fork now carries the pin, and the height + the scope of the pin are published on
+  the verdict itself (B7 `witness.block_number` / `witness.block_source`). Two things
+  this does **not** buy, stated so nothing reads more into it: the 274 existing rows
+  and the 78 `tier2` rows in particular stay `not_determined` — an unpinned fork's
+  height is unrecoverable, and nothing is back-filled; and `invocation_pin` does not
+  make a run coherent. **The block is deliberately NOT in
+  `uq_effect_verdicts_identity`** — adding it converts that upsert into an append, so
+  multiple rows per key would exist with no selection rule and a consumer could
+  publish an older height's verdict as the current fact. It may only be added together
+  with an explicit latest-height-wins rule. A per-run pin remains a separate schema
+  decision (`jobs` has no run/batch column).
 - **NEW inv.5 anti-gaming finding B4b never states.** The fold proves the 2-day
   timelock's proposer/executor **is Safe 4/7 `0x2aca7102`** — so B4b's "not
   determined" cell is a coverage gap, not an unknowable. And **that same 4/7 directly
@@ -1543,6 +1557,8 @@ Population: `business` 2009, `time` 172, `pause` 17, `reentrancy` 10,
 | `claims[].tier` | `standard_exact` 353, `idiom_structural` 100, `behavioral_observed` 69, `policy_derived` 19 | **REQUIRED** — currently collected into `witness_tiers` but **never enters the arithmetic**. |
 | `effect_verdicts.transcript_ptr` | 274/274 | **REQUIRED** for inv.9 traceability (a MinIO pointer; the fact is inside the blob). |
 | `effect_verdicts.witness.revert_reason` | 39, **all `unknown`** | CONFIDENCE |
+| `effect_verdicts.witness.block_number` | **0/274 — the key is ABSENT on every existing row** | **CONFIDENCE, three-state; consume as cite + three-state only.** The height the verdict was observed at. Corrects `FIELDS.md` §7's `304/304, 51 distinct blocks`, which was wrong on both location and denominator: `witness`'s key universe across the 274 rows is 20 distinct keys (per-row 2–10), none a block key, and the 304 counted **transcript blobs** (those do carry it — 51 distinct heights, 25640764…25641259, span 495 blocks in one run; 7 jobs carry two heights each, so the pin is per stage INVOCATION). Emitted from now on by `harness._stamp_observation_height`, the single publication point every recipe's `emit()` passes through. **proven-present** = a positive height the probe demonstrably ran at — Tier 1 simulates at `hex(block_number)`, Tier 2 reports the `--fork-block-number` its own fork was spawned with (`anvil.fork_block_pin`). **There is no proven-absent state**: no verdict is observed at no block. **not_determined is the ABSENT key**, and it is the state every failure and absence path lands on — an unpinnable head (`_preflight` yields the `0` sentinel and disables Tier 1), a fork spawned unpinned, a Tier-0 index read (decides from event history, no single height), and a twin's plain cache hit (state-plane, stripped by `DEPLOYMENT_PLANE_KEYS`). **`0` is never published**: it is the failure sentinel and forks at genesis. Never arithmetic and never a gate — a scorer may cite it and must treat its absence as unknown, never as "current". All 274 existing rows stay `not_determined`; the 78 Tier-2 rows' true heights are **unrecoverable** and nothing is back-filled. Small-population: the 4 freeze rows (137/149/173/219) and the 7 two-block jobs are named as instances; the fix is argued from the code contract (an unpassed `--fork-block-number`), not from their count (B14). |
+| `effect_verdicts.witness.block_source` | **0/274 — the key is ABSENT on every existing row** | **CONFIDENCE, three-state; consume as cite + three-state only.** The SCOPE the pin above is shared across, published only ever alongside it — a height without its scope cannot be compared across rows, so the pair is stamped and stripped together and neither may be read alone. Closed vocabulary (`config.BLOCK_SOURCES`): `invocation_pin` \| `job_pin` \| `run_pin`; an unrecognized value publishes **nothing** rather than a free-text tag. **proven-present** = the named scope. Only `invocation_pin` is emitted today, and it explicitly does **not** make a run internally coherent (one run spanned 51 heights over 495 blocks); `job_pin`/`run_pin` are reserved and unemitted, because a per-run pin needs a run/batch column `jobs` does not have and is a separate schema decision. **No proven-absent state**; **not_determined is the ABSENT key**, on exactly the same failure paths as `block_number`. Consumption obligation: three-state + cite — two verdicts may be treated as one world state only when both carry the same height **and** a scope that spans them. Same small-population flags, same argument (B14). |
 
 ### B8. Value and perimeter — per-asset
 

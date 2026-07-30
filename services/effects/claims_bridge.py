@@ -269,6 +269,17 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "backing",
         "input_seeded",
         "contract_balance_seeded",
+        # WHEN the observation was taken and how far the pin that fixed it
+        # reaches (``config.BLOCK_SOURCES``). Both keys are absent together
+        # whenever the height is not proven — a failed head pin, a fork spawned
+        # unpinned, a cache hit that observed nothing at this deployment — and
+        # that absence is the third state: the verdict stands, its height does
+        # not. A consumer must not read an absent height as "current", and must
+        # not compare two verdicts as one world state unless both carry the same
+        # height; ``invocation_pin`` in particular does NOT make a run coherent
+        # (one run spanned 51 heights over 495 blocks).
+        "block_number",
+        "block_source",
     )
     summary = {k: raw[k] for k in keep if k in raw}
     summary.update(_reach_summary(verdict))
