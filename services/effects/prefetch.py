@@ -87,6 +87,21 @@ def install_prefetch(session: Session, chain_id: int, candidates: list[Any]) -> 
 
     pf = EffectsPrefetch(chain_id=chain_id, addresses=set(addresses))
 
+    # Contracts FIRST: a proxy row carrying function rows is hashed on its
+    # IMPLEMENTATION's bytecode rather than its forwarding stub
+    # (``orchestrator._hashable_code_address``), and that address is only known from the
+    # row. Loading bytecode before the rows would leave the redirect issuing one
+    # single-row query per proxy candidate — the exact N+1 this module removes, and the
+    # parity test's query budget catches it.
+    if contract_ids:
+        pf.contract_ids = set(contract_ids)
+        for contract in session.execute(select(Contract).where(Contract.id.in_(contract_ids))).scalars().all():
+            pf.contract_by_id[contract.id] = contract
+            implementation = (contract.implementation or "").strip().lower()
+            if contract.is_proxy and implementation.startswith("0x"):
+                addresses.add(implementation)
+                pf.addresses.add(implementation)
+
     if addresses:
         for addr, code in session.execute(
             select(BytecodeCache.address, BytecodeCache.bytecode).where(
@@ -98,9 +113,6 @@ def install_prefetch(session: Session, chain_id: int, candidates: list[Any]) -> 
                 pf.bytecode_by_addr[addr.lower()] = code
 
     if contract_ids:
-        pf.contract_ids = set(contract_ids)
-        for contract in session.execute(select(Contract).where(Contract.id.in_(contract_ids))).scalars().all():
-            pf.contract_by_id[contract.id] = contract
         for (cid,) in session.execute(
             select(UpgradeEvent.contract_id).where(UpgradeEvent.contract_id.in_(contract_ids)).distinct()
         ).all():

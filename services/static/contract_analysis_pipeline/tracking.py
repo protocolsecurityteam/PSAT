@@ -17,6 +17,7 @@ from eth_utils.crypto import keccak
 from schemas.contract_analysis import (
     AssociatedEvent,
     AssociatedEventInput,
+    ControllerProvenance,
     ControllerReadSpec,
     ControllerTrackingTarget,
     ControllerTypeComponent,
@@ -30,6 +31,7 @@ from .shared import (
     _contract_functions,
     _declaring_contract_name,
     _source_evidence,
+    external_bool_leaf_is_gate_shape,
 )
 
 
@@ -365,6 +367,25 @@ def _collect_state_var_operands(predicate_trees: Mapping[str, Any] | None) -> se
 _AUTHORITY_LEAF_ROLES = frozenset({"caller_authority", "delegated_authority"})
 
 
+def _leaf_asserts_caller_gate(leaf: Mapping[str, Any]) -> bool:
+    """Belt-and-braces twin of the classifier's discriminator: an
+    ``external_bool`` leaf may contribute a variable to ``caller_gate``
+    provenance only when its callee is gate-shaped. The classifier no longer
+    stamps ``delegated_authority`` on non-gate shapes, so on same-version
+    trees this never fires; it exists so a drifted or hand-built tree cannot
+    mint a control edge from a value-movement call
+    (``vault.enter(msg.sender, …)``) through the harvest alone."""
+    if leaf.get("kind") != "external_bool":
+        return True
+    descriptor = leaf.get("set_descriptor")
+    descriptor_signature = descriptor.get("callee_signature") if isinstance(descriptor, dict) else None
+    return external_bool_leaf_is_gate_shape(
+        leaf.get("callee_state_mutability"),
+        leaf.get("gate_kind"),
+        leaf.get("callee_signature") or descriptor_signature,
+    )
+
+
 def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None) -> dict[str, set[str]]:
     """Map each state-variable operand name to the set of ``authority_role``
     values of the leaves that reference it (direct operand reference only).
@@ -383,6 +404,13 @@ def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None
     def visit(leaf: dict[str, Any]) -> None:
         role = leaf.get("authority_role")
         if not isinstance(role, str):
+            return
+        if role in _AUTHORITY_LEAF_ROLES and not _leaf_asserts_caller_gate(leaf):
+            # An authority role on a non-gate-shaped external call must not
+            # make its state-var operands read as gated-on: the operands of
+            # ``vault.enter(msg.sender, ERC20(nativeWrapper), …)`` include
+            # the wrapper token, and counting the leaf's role for them minted
+            # WETH as a caller_gate controller of the Teller.
             return
         for operand in leaf.get("operands") or []:
             if isinstance(operand, dict) and operand.get("source") == "state_variable":
@@ -435,6 +463,16 @@ def _collect_authority_state_vars(predicate_trees: Mapping[str, Any] | None) -> 
     authority_vars: set[str] = set()
 
     def visit(leaf: dict[str, Any]) -> None:
+        # Only a leaf that itself asserts an authority check may promote its
+        # descriptor's contract into the caller-gate set: the descriptor names
+        # WHERE the check would live, the role says THAT a check was proven.
+        # A business/pause/reentrancy leaf carrying a descriptor (or an
+        # authority-role leaf whose callee is not gate-shaped) is not caller-
+        # gate evidence.
+        if leaf.get("authority_role") not in _AUTHORITY_LEAF_ROLES:
+            return
+        if not _leaf_asserts_caller_gate(leaf):
+            return
         descriptor = leaf.get("set_descriptor") or {}
         if not isinstance(descriptor, dict):
             return
@@ -450,6 +488,136 @@ def _collect_authority_state_vars(predicate_trees: Mapping[str, Any] | None) -> 
     for tree in trees.values():
         _walk_leaves(tree, visit)
     return authority_vars
+
+
+# The caller is observable in the EVM only through these two builtins (and
+# through helpers that themselves read one of them, which the recursive Slither
+# accessors below follow). A function that reads neither cannot condition on who
+# called it, so its missing tree is a determined "no caller gate here" rather
+# than an unanswered question.
+_CALLER_IDENTITY_BUILTINS = frozenset({"msg.sender", "tx.origin"})
+
+
+def _recursive_read(fn: Any, recursive_attr: str, direct_attr: str) -> set[str] | None:
+    """Names read by ``fn`` and everything it calls, including its modifiers.
+    ``None`` when the recursive accessor failed — not determined.
+
+    Modifiers are unioned explicitly: a guard written as ``onlyOwner`` lives in a
+    ``Modifier`` object, and reading only the function body would classify the
+    most common access-control shape in Solidity as caller-blind.
+
+    The ``direct_attr`` fallback covers an object that never exposed the
+    recursive accessor at all. It must NOT cover an accessor that exists and
+    raised: the direct attribute is a strictly narrower set (this function's own
+    body, not its callees), so substituting it turns "we could not read the
+    callees" into "the callees read nothing" — a gate reached through an internal
+    call disappears, its name drops out of the blind spot, and ``call_target``
+    (a claim of proven absence) gets minted from a failure to determine. That is
+    the one direction this whole function exists to prevent, so the failure is
+    propagated as not-determined instead.
+    """
+    names: set[str] = set()
+    for source in (fn, *(getattr(fn, "modifiers", None) or [])):
+        accessor = getattr(source, recursive_attr, None)
+        values: Any = None
+        if callable(accessor):
+            try:
+                values = accessor()
+            except Exception:
+                return None
+        if values is None:
+            values = getattr(source, direct_attr, None)
+        for variable in values or []:
+            name = getattr(variable, "name", None)
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
+def _caller_gate_blind_spot_vars(contract: Any, predicate_trees: Mapping[str, Any] | None) -> set[str] | None:
+    """State-variable names the caller-gate question was never ANSWERED for.
+
+    ``caller_gate`` is derived from the predicate leaves that were lowered.
+    ``call_target`` is then minted for every remaining external-contract slot —
+    i.e. from the *absence* of a lowered gate leaf, which is not the same fact as
+    "no gate exists". The builder attempts the externally reachable surface
+    (since G3 class R that includes ``fallback`` / ``receive``), but a function
+    whose gate could not be lowered yields no tree, so a gate living in such a
+    function is invisible and its address is published as a proven pure callee.
+
+    A function is a blind spot when it is externally reachable, has no lowered
+    tree, and observes the caller. Every state variable it reads is then a name
+    this contract cannot answer the gate question for. Functions that read
+    neither ``msg.sender`` nor ``tx.origin`` are excluded on evidence, not on
+    convenience: with no caller in scope there is no caller gate to miss.
+
+    Returns ``None`` when the surface could not be read at all — the same
+    not-determined answer, applied to every name. Two routes reach it: the
+    entry-point list could not be enumerated, or a recursive variable-read
+    accessor raised (see ``_recursive_read``). Both mean the blind-spot set is
+    incomplete, and an incomplete blind spot is indistinguishable from a small
+    one, which is what makes ``call_target`` mintable from a failure.
+
+    R2 status of that ``None`` arm, stated rather than implied: it has **zero
+    realised rows** and is a lower bound, not a firing proof — for BOTH routes.
+    The accessor route is reachable only when Slither's own
+    ``all_state_variables_read`` / ``all_solidity_variables_read`` raise, which
+    happens on no contract in the local corpus; it is covered by
+    ``test_accessor_failure_answers_not_determined_instead_of_narrowing``, which
+    makes the accessor raise by construction. Slither's
+    ``Contract.functions_entry_points`` is a property returning a list
+    comprehension, so it is never ``None`` for a real compiled contract; the arm
+    is reachable only by construction (any other object passed in this position
+    that cannot list its entry points) and is covered only by
+    ``test_unenumerable_entry_points_answer_not_determined``, which builds that
+    object by hand. It is kept because the alternative on an unreadable surface
+    is to mint ``call_target`` from a second failure to determine — the exact
+    defect this function exists to remove — not because it was observed firing.
+    """
+    entry_points = getattr(contract, "functions_entry_points", None)
+    if entry_points is None:
+        return None
+    trees = predicate_trees.get("trees") if isinstance(predicate_trees, dict) else None
+    lowered = set(trees) if isinstance(trees, dict) else set()
+
+    blind: set[str] = set()
+    by_full_name: dict[str, Any] = {}
+    for fn in entry_points:
+        full_name = getattr(fn, "full_name", None)
+        if isinstance(full_name, str):
+            by_full_name.setdefault(full_name, fn)
+        if getattr(fn, "visibility", None) not in ("external", "public"):
+            continue
+        if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
+            continue
+        if full_name in lowered:
+            continue
+        solidity_read = _recursive_read(fn, "all_solidity_variables_read", "solidity_variables_read")
+        if solidity_read is None:
+            # Whether this function even observes the caller is unknown, so it
+            # can neither be excluded on evidence nor have its names collected.
+            return None
+        if not (solidity_read & _CALLER_IDENTITY_BUILTINS):
+            continue
+        state_read = _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+        if state_read is None:
+            return None
+        blind |= state_read
+
+    # ``guard_extraction_uncertain`` names entry points whose caller-authority
+    # comparison the builder saw and could not lower. Those are treeless and
+    # caller-reading by construction, so the sweep above already covers them;
+    # unioning them explicitly keeps the dependency on that marker visible
+    # rather than incidental.
+    uncertain = predicate_trees.get("guard_extraction_uncertain") if isinstance(predicate_trees, dict) else None
+    for full_name in uncertain or []:
+        fn = by_full_name.get(full_name) if isinstance(full_name, str) else None
+        if fn is not None:
+            state_read = _recursive_read(fn, "all_state_variables_read", "state_variables_read")
+            if state_read is None:
+                return None
+            blind |= state_read
+    return blind
 
 
 def _collect_external_contract_state_vars_from_effects(
@@ -692,18 +860,38 @@ def _state_var_read_spec(
     getter_by_var: dict[str, str],
     member_path: tuple[str, ...] | None = None,
 ) -> ControllerReadSpec:
+    """Build the read spec for a state-var controller. Three getter states:
+
+    * public var — Solidity compiles an auto-getter named after the var:
+      ``strategy=getter_call, target=<name>``.
+    * private/internal var with a discovered same-contract getter
+      (``_build_getter_index``) — ``strategy=getter_call, target=<getter>``.
+    * private/internal var with NO getter — the var is not readable by
+      any function call, so no getter target exists to claim:
+      ``strategy=unknown`` (``target`` keeps the var name purely as an
+      identifier). The monitoring plane's selector-minting consumer
+      (``polling_plan._is_poll_decodable``) skips these. The RESOLUTION
+      plane's ``_getter_target`` does NOT skip: it falls back to
+      ``source`` (the same var name) and still probes the nonexistent
+      getter — the revert path there records the honest third state
+      (``value=None, observed_via="eth_call_error"`` + record_degraded),
+      so no false value publishes, but the probe is wasted; tightening
+      that consumer is a recorded follow-up, not this function's claim.
+      The type fields stay populated so type-shape guards (struct skip,
+      primitive-scalar snapshot skip) keep their inputs.
+    """
     sv = state_vars_by_name.get(name)
     type_obj = getattr(sv, "type", None) if sv is not None else None
     type_str = str(type_obj) if type_obj is not None else ""
     is_public = bool(getattr(sv, "visibility", None) == "public") if sv is not None else False
-    getter_name = name if is_public else getter_by_var.get(name, name)
+    getter_name = name if is_public else getter_by_var.get(name)
     components = _type_components(type_obj)
     projected_component = _component_for_member_path(components, member_path)
     spec: ControllerReadSpec = cast(
         ControllerReadSpec,
         {
-            "strategy": "getter_call",
-            "target": getter_name,
+            "strategy": "getter_call" if getter_name else "unknown",
+            "target": getter_name or name,
             "kind": "state_variable",
             "state_variable_name": name,
             "type": projected_component["type"] if projected_component is not None else type_str,
@@ -848,7 +1036,65 @@ def build_controller_tracking(
     # Union of two sources for "this state-var is an external contract":
     #   1. predicate_trees flagged it as authority_contract.address_source
     #   2. effects records an external_call from a function on it
-    authority_state_vars = _collect_authority_state_vars(predicate_trees) | external_contract_vars_from_effects
+    # This union answers ONLY "does this slot hold another contract's address",
+    # which is what ``kind`` means. It is NOT an authority claim: (2) is
+    # satisfied by any callee (``eETH``, ``lido``, ``liquidityPool``).
+    delegated_authority_vars = _collect_authority_state_vars(predicate_trees)
+    authority_state_vars = delegated_authority_vars | external_contract_vars_from_effects
+    # "Gates the caller" — the separate question. A leaf either delegates its
+    # authority check to the address (1) or names it directly in a
+    # caller_authority / delegated_authority operand. Kept apart from the union
+    # above so a persisted row can say which provenance it came from; see
+    # ``ControllerProvenance``.
+    caller_gate_vars = delegated_authority_vars | {
+        name for name, roles in authority_roles_by_var.items() if roles & _AUTHORITY_LEAF_ROLES
+    }
+
+    # Both inputs to the split must be REAL for either answer to be evidence.
+    # ``caller_gate`` is read out of ``predicate_trees`` alone, so when that
+    # artifact carries no trees every name falls through to the
+    # ``external_contract_vars_from_effects`` arm and a proven authority
+    # registry is stamped ``call_target`` — a proven-absent gate synthesized
+    # from a failure to determine, which downstream demotes its control edge.
+    # That artifact is a real production state, not a hypothetical: ``core.py``
+    # catches any predicate-builder exception and continues with
+    # ``{"schema_version": "semantic", "error": ...}``, then passes exactly
+    # that object here. With no trees NEITHER question was answered, so every
+    # name is not-determined and keeps its control edge.
+    #
+    # Empty ``trees`` is treated the same as absent. A successful build over a
+    # contract with no lowered guard leaf cannot distinguish "nothing gates
+    # anything" from "no gate was lowered", and the safe reading of that
+    # ambiguity is not-determined.
+    predicate_trees_available = (
+        isinstance(predicate_trees, dict)
+        and isinstance(predicate_trees.get("trees"), dict)
+        and bool(predicate_trees["trees"])
+    )
+
+    # Artifact-level availability is not enough: ``caller_gate`` is read out of
+    # the trees that were LOWERED, so a gate living in a function with no tree
+    # is invisible to it and the name falls through to ``call_target``. That is
+    # the same "absence of a proven constraint" error one level down, and it is
+    # realised on this corpus — see ``_caller_gate_blind_spot_vars``.
+    gate_blind_spot_vars = (
+        _caller_gate_blind_spot_vars(contract, predicate_trees) if predicate_trees_available else None
+    )
+
+    def _provenance_for(name: str) -> ControllerProvenance | None:
+        if not predicate_trees_available:
+            return None
+        if name in caller_gate_vars:
+            # Proven present. A lowered leaf gates on it; a blind spot
+            # elsewhere cannot subtract from evidence already in hand.
+            return "caller_gate"
+        if gate_blind_spot_vars is None or name in gate_blind_spot_vars:
+            # The gate question was never answered for this name.
+            return None
+        if name in external_contract_vars_from_effects:
+            return "call_target"
+        return None
+
     # Effects-discovered external-contract vars get added to the
     # referenced set so Pass 2 emits a tracking target for them even if
     # they don't appear as a leaf operand (e.g. ``hook`` written by
@@ -1029,21 +1275,25 @@ def build_controller_tracking(
                     "on implementation changes."
                 )
 
-        tracking_targets.append(
-            {
-                "controller_id": controller_id,
-                "label": name,
-                "source": name,
-                "kind": kind,  # type: ignore[typeddict-item]
-                "read_spec": read_spec_var,
-                "confidence": None,
-                "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
-                "writer_functions": writer_functions,
-                "associated_events": associated_events,
-                "polling_sources": [name],
-                "notes": notes,
-            }
-        )
+        target: ControllerTrackingTarget = {
+            "controller_id": controller_id,
+            "label": name,
+            "source": name,
+            "kind": kind,  # type: ignore[typeddict-item]
+            "read_spec": read_spec_var,
+            "confidence": None,
+            "tracking_mode": tracking_mode,  # type: ignore[typeddict-item]
+            "writer_functions": writer_functions,
+            "associated_events": associated_events,
+            "polling_sources": [name],
+            "notes": notes,
+        }
+        provenance = _provenance_for(name)
+        # Key omitted (not set to None) when neither question was answered:
+        # absent is the not-determined state all the way to the DB column.
+        if provenance is not None:
+            target["authority_provenance"] = provenance
+        tracking_targets.append(target)
         seen_ids.add(controller_id)
 
     for name, member_path in sorted(referenced_member_paths):

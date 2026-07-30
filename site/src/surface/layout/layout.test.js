@@ -383,7 +383,7 @@ describe("aggregateEdges", () => {
   });
 });
 
-describe("buildControlAdjacency — chain scope (inv. 13)", () => {
+describe("buildControlAdjacency — chain scope", () => {
   const CTRL = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const TWIN = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -417,7 +417,7 @@ describe("buildControlAdjacency — chain scope (inv. 13)", () => {
   });
 });
 
-describe("flowOnChain — canvas fund-flow scope (R3, inv. 13)", () => {
+describe("flowOnChain — canvas fund-flow scope", () => {
   const A = "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
   const B = "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
 
@@ -458,7 +458,7 @@ describe("flowOnChain — canvas fund-flow scope (R3, inv. 13)", () => {
   });
 });
 
-describe("buildGroupControllers — controls_detail chain keying (R4, inv. 13)", () => {
+describe("buildGroupControllers — controls_detail chain keying", () => {
   const machines = buildMachines(ETHERFI_COMPANY_RICH, functionData);
   const safeAddr = RICH_ADDRESSES.SAFE;
 
@@ -500,5 +500,103 @@ describe("buildGroupControllers — controls_detail chain keying (R4, inv. 13)",
     const { nodes } = buildGraphLayout(machines, [], principals, {}, "ethereum");
     const group = nodes.find((n) => n.type === "group" && n.id === safeAddr);
     expect(group.data.controllers[0].governs[0].functions).toEqual(["pauseLegacy"]);
+  });
+});
+
+describe("buildControlGraphIndex — callee edges are not control", () => {
+  it("does not walk external_call_target into the indirect governance path", () => {
+    const TARGET = "0x1111111111111111111111111111111111111111";
+    const CALLEE = "0x2222222222222222222222222222222222222222";
+    const CALLEE_OWNER = "0x3333333333333333333333333333333333333333";
+    const GATE = "0x4444444444444444444444444444444444444444";
+    const GATE_OWNER = "0x5555555555555555555555555555555555555555";
+
+    const companyData = {
+      contracts: [
+        {
+          address: TARGET,
+          control_graph: {
+            nodes: [
+              { address: TARGET, type: "contract", label: "Target" },
+              { address: CALLEE, type: "contract", label: "Token" },
+              { address: CALLEE_OWNER, type: "safe", label: "Token owner Safe", details: {} },
+              { address: GATE, type: "contract", label: "RoleRegistry" },
+              { address: GATE_OWNER, type: "safe", label: "Registry owner Safe", details: {} },
+            ],
+            edges: [
+              { from: TARGET, to: GATE, relation: "controller_value" },
+              { from: GATE, to: GATE_OWNER, relation: "controller_value" },
+              { from: TARGET, to: CALLEE, relation: "external_call_target" },
+              { from: CALLEE, to: CALLEE_OWNER, relation: "controller_value" },
+            ],
+          },
+        },
+      ],
+    };
+
+    const fn = {
+      controllers: [
+        { label: "roleRegistry", principals: [{ address: TARGET, resolved_type: "contract" }] },
+      ],
+    };
+    const { indirect } = collectPrincipals(fn, companyData);
+    const reached = indirect.map((p) => p.address);
+    // POSITIVE: the gate's owner Safe is genuine governance context.
+    expect(reached).toContain(GATE_OWNER);
+    // NEGATIVE: the callee's owner Safe cannot reach this function at all.
+    expect(reached).not.toContain(CALLEE_OWNER);
+  });
+});
+
+// Band assignment is a claim about a contract, not just a coordinate: band 2 is
+// "interfaces & plumbing" (holds no authority, holds no value) and band 0 is
+// "control surface". Both are read off summary-derived fields that are
+// three-state on the payload, so the not-determined member has to land somewhere
+// that asserts neither.
+describe("layoutGroupInterior banding — three-state summary inputs", () => {
+  // Bands are packed top-to-bottom and EMPTY bands take no space, so a band is
+  // only observable relative to a reference card packed in the same call: same
+  // row y => same band, greater y => a later band.
+  const REF0 = { address: "0xref0000000000000000000000000000000000000", name: "Ref Timelock", has_timelock: true, role_evidence: "witnessed" };
+  const REF1 = { address: "0xref1000000000000000000000000000000000000", name: "Ref Handler", role: "value_handler", role_evidence: "witnessed" };
+  const SUBJECT = "0xaaa0000000000000000000000000000000000001";
+
+  const relative = (reference, machine) => {
+    const subject = { address: SUBJECT, name: "Subject", ...machine };
+    const interior = layoutGroupInterior(
+      [{ id: reference.address }, { id: subject.address }],
+      [reference, subject],
+      0,
+    );
+    return {
+      ref: interior.positions.get(reference.address).y,
+      subject: interior.positions.get(subject.address).y,
+    };
+  };
+
+  it("puts a PROVEN timelock in the control band", () => {
+    const { ref, subject } = relative(REF0, { has_timelock: true, role: "utility", role_evidence: "witnessed" });
+    expect(subject).toBe(ref);
+  });
+
+  it("does not put a NOT-DETERMINED timelock flag in the control band", () => {
+    // NEGATIVE CONTROL for the test above: promoting every non-false flag would
+    // badge an unanalysed contract a control surface.
+    const { ref, subject } = relative(REF0, { has_timelock: null, role: "value_handler", role_evidence: "witnessed" });
+    expect(subject).toBeGreaterThan(ref);
+  });
+
+  it("keeps a role with NO summary evidence out of the plumbing band", () => {
+    // `role: "utility"` reached through nothing but nulls is not evidence that a
+    // contract is plumbing. It takes the neutral band-1 catchall instead, which
+    // is the reference card's band.
+    const { ref, subject } = relative(REF1, { role: "utility", role_evidence: "not_determined" });
+    expect(subject).toBe(ref);
+  });
+
+  it("still puts a WITNESSED utility role in the plumbing band", () => {
+    // POSITIVE CONTROL: hedging every utility row would empty band 2.
+    const { ref, subject } = relative(REF1, { role: "utility", role_evidence: "witnessed" });
+    expect(subject).toBeGreaterThan(ref);
   });
 });

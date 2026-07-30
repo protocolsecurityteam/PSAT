@@ -273,7 +273,7 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 def get(module: str, action: str, chain_id: int, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
 
-    *chain_id* is required (invariant 6): the v2 endpoint is chain-scoped via the
+    *chain_id* is required: the v2 endpoint is chain-scoped via the
     ``chainid`` query param, so a call with no chain can no longer silently hit
     mainnet. Callers thread the job/contract chain explicitly.
     """
@@ -576,14 +576,55 @@ _token_balance_lock = threading.Lock()
 _token_balance_last_call = 0.0
 
 
+# Etherscan's ``addresstokenbalance`` page size. ONE page is fetched, so a holder with
+# more assets than this is silently truncated — 7 local contracts sit exactly at the
+# cap, one of them holding $8.6B (all 7 have ``protocol_id IS NULL``, so no effects
+# holder set can reach them today; see ``selection._holdings_completeness`` for the
+# armed-population statement). Exported so a consumer can ask whether a holdings count
+# is at the cap (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in
+# a second place.
+TOKEN_BALANCE_PAGE_SIZE = 100
+
+
+def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
+    """Whether a holdings list may be missing assets because it hit the page cap.
+
+    Exactly-at-the-cap is NOT distinguishable from truncated without pagination, so
+    this answers "cannot rule truncation out" — the honest reading. Real pagination is
+    the actual fix and is deliberately not attempted here: it changes the request
+    count per contract against a live rate-limited API, which cannot be validated
+    inside this change's read budget.
+
+    ONE-DIRECTIONAL, and a caller must not invert it. ``True`` is a fact about the
+    page. ``False`` is not "the list is whole": pass it a count that a filter has
+    already thinned (a stored-row count, or ``results`` inside
+    :func:`get_token_balances`) and a full page reads as ``False``. Ask it about the
+    number of entries the ENDPOINT returned, or treat ``False`` as not-determined.
+    """
+    count = rows if isinstance(rows, int) else len(rows)
+    return count >= TOKEN_BALANCE_PAGE_SIZE
+
+
 def get_token_balances(address: str, chain_id: int) -> list[dict]:
-    """Return all ERC-20 token balances for *address* in a single call.
+    """Return this address's ERC-20 token balances — ONE page, cap
+    :data:`TOKEN_BALANCE_PAGE_SIZE`.
 
     Uses Etherscan's ``addresstokenbalance`` endpoint. Hardcoded to 1 req/s
     independent of the global rate limit since this endpoint is heavier.
 
     Returns a list of dicts with ``token_address``, ``token_name``,
-    ``token_symbol``, ``decimals``, and ``balance``.
+    ``token_symbol``, ``decimals``, ``balance``, ``price_usd`` and ``usd_value``.
+
+    WHAT AN EMPTY LIST DOES NOT MEAN. It conflates three states — "holds no
+    tokens", "the fetch failed", and (with the cap above) "we saw only the first
+    page". The failure path is now recorded as degraded rather than returning ``[]``
+    in silence, so at least the second is visible in the operational record; a
+    consumer of the STORED rows must still treat absence as unknown, not as zero.
+
+    ``usd_value`` is ``None`` whenever it could not be computed from data Etherscan
+    actually returned — including when ``TokenDivisor`` is missing, because the scale
+    is then a guess and the error mode is a factor of 10^n on a money figure. It is
+    never 0 to mean "unknown": 0 means priced and worth less than half a cent.
     """
     global _token_balance_last_call
     # Hardcoded 1 req/s rate limit for this endpoint
@@ -601,29 +642,62 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
             chain_id=chain_id,
             address=address,
             page="1",
-            offset="100",
+            offset=str(TOKEN_BALANCE_PAGE_SIZE),
         )
-    except RuntimeError:
+    except RuntimeError as exc:
+        # NOT silent: the caller writes an empty holdings set from this, which is
+        # indistinguishable downstream from "this contract holds no tokens".
+        record_degraded(
+            phase="token_balance_fetch",
+            exc=exc,
+            context={"address": address, "chain_id": chain_id},
+        )
+        logger.warning("token balance fetch failed for %s on chain %s: %s", address, chain_id, exc)
         return []
 
     results = []
     for entry in data.get("result", []):
         raw_balance = int(entry.get("TokenQuantity", "0") or "0")
         if raw_balance > 0:
-            decimals = int(entry.get("TokenDivisor", "18") or "18")
+            raw_divisor = entry.get("TokenDivisor")
+            try:
+                decimals = int(raw_divisor) if raw_divisor not in (None, "") else None
+            except (TypeError, ValueError):
+                decimals = None
             price_usd = float(entry.get("TokenPriceUSD", "0") or "0")
-            human_balance = raw_balance / (10**decimals)
-            usd_value = human_balance * price_usd if price_usd > 0 else None
+            # No money from a guessed scale: with no divisor the USD figure would be
+            # wrong by a factor of 10^n, and scoring weights on that figure. The column is NOT
+            # NULL so the conventional 18 is still stored, but the value fields say
+            # unknown rather than asserting a number derived from the guess.
+            if decimals is None or price_usd <= 0:
+                usd_value = None
+            else:
+                usd_value = (raw_balance / (10**decimals)) * price_usd
             results.append(
                 {
                     "token_address": (entry.get("TokenAddress") or "").lower(),
                     "token_name": entry.get("TokenName", ""),
                     "token_symbol": entry.get("TokenSymbol", ""),
-                    "decimals": decimals,
+                    "decimals": 18 if decimals is None else decimals,
+                    "decimals_reported": decimals is not None,
                     "balance": raw_balance,
-                    "price_usd": price_usd,
+                    "price_usd": price_usd if decimals is not None else None,
                     "usd_value": usd_value,
                 }
             )
-
+    # The page-size question is asked of the RAW response, never of ``results``. The
+    # loop above drops every zero-balance entry, so a full 100-entry page with any
+    # zero-balance entry produces fewer than 100 results and would read as "not
+    # truncated" — the signal destroyed one line above where it is read. ``returned``
+    # is what the endpoint actually paged.
+    returned = len(data.get("result") or [])
+    if token_balances_may_be_truncated(returned):
+        logger.warning(
+            "token balance fetch for %s on chain %s returned a FULL page (%d entries, %d with a balance): "
+            "holdings may be truncated and any total derived from them is a lower bound",
+            address,
+            chain_id,
+            returned,
+            len(results),
+        )
     return sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True)

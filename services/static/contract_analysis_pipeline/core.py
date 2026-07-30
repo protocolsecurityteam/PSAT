@@ -28,13 +28,11 @@ from .shared import _load_json, _select_subject_contract
 from .summaries import (
     _build_semantic_control_summary,
     _build_tracking_hints,
-    _derive_static_risk_level,
     _detect_contract_classification,
     _detect_pausability,
     _detect_timelock,
     _detect_upgradeability,
     _determine_control_model,
-    _summarize_slither,
 )
 from .tracking import build_controller_tracking
 
@@ -113,6 +111,34 @@ def _guard_vyper_version(project_dir: Path, meta: dict) -> None:
         )
 
 
+def _source_verified(meta: Mapping[str, Any]) -> bool | None:
+    """Whether the SOURCE this pipeline is reading came back verified, in three states.
+
+    The fact is the FETCH's, and both scaffolders carry it in ``contract_meta.json``:
+    ``services.discovery.fetch.scaffold`` from the Etherscan payload it is scaffolding,
+    ``static_worker._scaffold_project`` from ``contracts.source_verified``. ``None``
+    when the key is absent — an older workspace, a hand-built project dir, or a meta
+    file that could not be read — and it means "not recorded here", never "not
+    verified": the nullable ``contract_summaries.source_verified`` column and the
+    ``/api/company`` payload both have that third state, and the frontend's data
+    tooltip now says which of the two it is.
+
+    THIS IS NOT DERIVED FROM THE PROJECT TREE. It used to be
+    ``bool(project_dir.rglob("src/**/*.sol"))`` — whether the scaffolder happened to
+    write a Foundry ``src/`` layout, which is decided by the paths Etherscan's own
+    verification bundle uses (``contracts/``, ``@openzeppelin/``, ``lib/`` are all
+    normal). On the 2026-07-28 run that published FALSE for 9 of 90 contracts —
+    UpgradeableBeacon, EndpointV2, OneSig, two TimelockControllers, FiatTokenV2_2,
+    EtherfiL1SyncPoolETH, WithdrawalQueueERC721 and Lido — every one of them
+    Etherscan-verified, analysed from that verified source in the same job, and
+    ``contracts.source_verified = TRUE`` on all nine. The frontend renders the field
+    as a data-confidence penalty and names the contract as an example of unverified
+    source, so a layout accident scored and published as a fact about the contract.
+    """
+    value = meta.get("source_verified")
+    return value if isinstance(value, bool) else None
+
+
 def _slither_target(project_dir: Path, meta: dict) -> str:
     """For Vyper projects, hand Slither the main ``.vy`` file path
     instead of the project directory. The scaffolder writes a
@@ -186,7 +212,6 @@ def collect_contract_analysis_with_artifacts(
 
     with _phase("slither_parse", durations_ms):
         slither = Slither(_slither_target(project_dir, meta))
-    slither_output = _load_json(project_dir / "slither_results.json", {})
 
     subject_contract = _select_subject_contract(slither, meta.get("contract_name"))
     if subject_contract is None:
@@ -272,9 +297,19 @@ def collect_contract_analysis_with_artifacts(
     with _phase("upgradeability", durations_ms):
         upgradeability = _detect_upgradeability(subject_contract, project_dir, effects_artifact)
     with _phase("pausability", durations_ms):
-        pausability = _detect_pausability(subject_contract, project_dir, pause_info)
+        # Post-``claims``: the Plane-1 ``pause.set`` / ``pause.unset`` claims
+        # ride on the effects artifact and are the only detector that resolves a
+        # struct-member or ERC-7201-namespaced latch. ``predicate_trees_artifact``
+        # goes in as well because it is that matcher's input AND the source of
+        # ``pause_info``: the block above can substitute a stub for it without
+        # the claims block raising, and only the artifact itself records that.
+        pausability = _detect_pausability(
+            subject_contract, project_dir, pause_info, effects_artifact, predicate_trees_artifact
+        )
     with _phase("timelock", durations_ms):
-        timelock = _detect_timelock(subject_contract, project_dir, semantic_control["role_definitions"])
+        timelock = _detect_timelock(
+            subject_contract, project_dir, semantic_control["role_definitions"], effects_artifact
+        )
     with _phase("secondary_impl_pointers", durations_ms):
         try:
             secondary_impl_pointers = detect_secondary_impl_pointers(subject_contract)
@@ -287,7 +322,6 @@ def collect_contract_analysis_with_artifacts(
             record_degraded(phase="secondary_impl_slot", exc=exc, context={"project_dir": str(project_dir)})
             secondary_impl_pointers = []
     record_stage_metric("secondary_impl_pointers", len(secondary_impl_pointers))
-    slither_summary = _summarize_slither(slither_output)
     audit_alignment: AuditAlignment = {
         "status": "not_checked",
         "bytecode_match": "not_checked",
@@ -299,7 +333,6 @@ def collect_contract_analysis_with_artifacts(
         "is_upgradeable": upgradeability["is_upgradeable"],
         "is_pausable": pausability["is_pausable"],
         "has_timelock": timelock["has_timelock"],
-        "static_risk_level": _derive_static_risk_level(slither_summary["detector_counts"]),
         "standards": classification["standards"],
         "is_factory": classification["is_factory"],
         "is_nft": classification["is_nft"],
@@ -311,11 +344,10 @@ def collect_contract_analysis_with_artifacts(
             "address": meta.get("address", ""),
             "name": subject_contract.name,
             "compiler_version": meta.get("compiler_version", ""),
-            "source_verified": bool(list(project_dir.rglob("src/**/*.sol"))),
+            "source_verified": _source_verified(meta),
         },
         "analysis_status": {
             "static_analysis_completed": True,
-            "slither_completed": bool(slither_output),
             "errors": [],
         },
         "summary": summary,
@@ -325,7 +357,6 @@ def collect_contract_analysis_with_artifacts(
         "pausability": pausability,
         "timelock": timelock,
         "audit_alignment": audit_alignment,
-        "slither": slither_summary,
         "tracking_hints": _build_tracking_hints(semantic_control, upgradeability, pausability, timelock),
         "controller_tracking": controller_tracking,
         "secondary_impl_pointers": secondary_impl_pointers,

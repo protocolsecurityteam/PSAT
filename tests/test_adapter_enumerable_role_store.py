@@ -58,8 +58,8 @@ _CALLEE_SIG = "onlyOperatingMultisig(address)"
 _CALLEE_SELECTOR = "0x" + keccak(text=_CALLEE_SIG).hex()[:8]
 
 
-# The adapter itself does not branch on earned-public, but the handoff asks every
-# behavior-bearing test to run under both flag states; this makes that explicit.
+# The adapter itself does not branch on earned-public, but every behavior-bearing
+# test runs under both flag states; this makes that explicit.
 @pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
 def both_flags(request, monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
@@ -222,7 +222,7 @@ def _install_probe_stub(
 
     def _stub(rpc_url, method, params=None, **kwargs):
         if method == "eth_blockNumber":
-            # Pin-once height read for the ctx.block-None path (§A1).
+            # Pin-once height read for the ctx.block-None path.
             if blocknumber_fail:
                 raise RuntimeError("stubbed eth_blockNumber failure")
             return hex(head_block)
@@ -412,7 +412,7 @@ def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeyp
 
 @requires_postgres
 def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
-    # The drift arm (§Stage 4) keys on fold_frontier == the folded cursor height.
+    # The drift arm keys on fold_frontier == the folded cursor height.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -427,7 +427,7 @@ def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
-    # Spec §4 acceptance: the enumerated controllers render principal_type="controller"
+    # Acceptance: the enumerated controllers render principal_type="controller"
     # THROUGH project_capability_surface, carrying the trace for auditability.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -687,3 +687,74 @@ def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flag
     assert cap.kind == "finite_set"
     assert cap.members == [_MULTISIG.lower()]
     assert any(step.get("step") == "enumerable_role_store" for step in cap.trace)
+
+
+# ---------------------------------------------------------------------------
+# Unwitnessed empties decline; registry context is chain-scoped
+# and an error there is never "no candidates".
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(session, monkeypatch, both_flags):
+    # A live holder exists (candidate universe non-empty) but the real gate
+    # rejects every candidate: either the gate's one role is unheld or the gate
+    # admits callers outside the role model (hybrid msg.sender== gate). The two
+    # are indistinguishable, so an exact-empty "provably nobody" is unwitnessed.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members=set())  # gate passes nobody
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
+    assert cap.kind == "external_check_only"
+    assert "no_candidate_passed_gate" in (_extra(cap).get("basis") or [])
+    assert not _extra(cap).get("deferred_pending_index")
+
+
+@requires_postgres
+def test_registry_context_db_error_declines_not_empty_candidates(session, monkeypatch, both_flags):
+    # A DB error while reading the registry's own controllers must never
+    # shrink the candidate universe into a (possibly empty) member set.
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    _install_probe_stub(monkeypatch, members={_MULTISIG})
+
+    from services.resolution.adapters import enumerable_role_store as ers
+
+    monkeypatch.setattr(ers, "_registry_controller_context", lambda ctx, authority: None)
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
+    assert cap.kind == "external_check_only"
+    assert "registry_context_error" in (_extra(cap).get("basis") or [])
+
+
+@requires_postgres
+def test_registry_controller_context_is_chain_scoped(session, monkeypatch, both_flags):
+    # A same-address twin registry on another chain carries a controller value
+    # that must NOT leak into this chain's candidate universe (cross-chain twin
+    # aliasing inside the caller-set computation).
+    from db.models import Contract, ControllerValue
+    from services.resolution.adapters.enumerable_role_store import _registry_controller_context
+
+    twin_owner = "0x" + "77" * 20
+    mainnet_owner = "0x" + "88" * 20
+
+    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
+    twin = Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="scroll")
+    session.add(twin)
+    session.flush()
+    mainnet = session.query(Contract).filter(Contract.chain == "ethereum").one()
+    session.add(ControllerValue(contract_id=mainnet.id, controller_id="state_variable:owner", value=mainnet_owner))
+    session.add(ControllerValue(contract_id=twin.id, controller_id="state_variable:owner", value=twin_owner))
+    session.commit()
+
+    context = _registry_controller_context(_ctx(session), _PROXY.lower())
+    assert context is not None
+    controller_addrs, _labels = context
+    assert mainnet_owner in controller_addrs
+    assert twin_owner not in controller_addrs

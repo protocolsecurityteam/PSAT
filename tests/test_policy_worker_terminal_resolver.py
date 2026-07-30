@@ -1,4 +1,4 @@
-"""A4 wiring: the policy-worker contract-controller step resolver (SCORING §4)."""
+"""The policy-worker contract-controller step resolver used by the authority walk."""
 
 from __future__ import annotations
 
@@ -44,11 +44,18 @@ def test_resolver_returns_all_controller_planes(monkeypatch):
     assert [s["address"] for s in steps] == [OWNER, AUTHORITY]
 
 
-def test_resolver_returns_none_when_no_controller(monkeypatch):
+def test_resolver_returns_empty_when_canonical_getters_are_silent(monkeypatch):
+    """``[]`` from ``read_contract_controllers`` means every canonical getter
+    answered cleanly and named nothing — probe-set SILENCE, distinct from a
+    probe error (``None``) but NOT proof of absence: the finite getter set
+    cannot prove no controller exists (unpauser()/kernel()/*_admin()/
+    ERC-1967-admin contracts return the same []). The resolver propagates it
+    as ``[]`` so the walk reports ``controllers_not_determined`` with its
+    basis, never a proven absence and never "we could not look"."""
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: [])
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None
-    assert resolver(CONTRACT) is None
+    assert resolver(CONTRACT) == []
 
 
 def test_resolver_returns_none_on_probe_incomplete(monkeypatch):

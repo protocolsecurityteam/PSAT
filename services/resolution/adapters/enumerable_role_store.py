@@ -71,7 +71,13 @@ _TRACE_STEP = "enumerable_role_store"
 # folds it into the policy stage's timing artifact) surfaces a store the adapter
 # recognized-but-couldn't-fold (negative control), a fold/getter disagreement, or a
 # probe-transport blip, distinct from an ordinary cold-index deferral.
-_ADAPTER_DECLINE_REASONS = {"negative_control_passed", "role_fold_getter_mismatch", "probe_unavailable"}
+_ADAPTER_DECLINE_REASONS = {
+    "negative_control_passed",
+    "role_fold_getter_mismatch",
+    "probe_unavailable",
+    "no_candidate_passed_gate",
+    "registry_context_error",
+}
 _DECLINE_COUNTS: "Counter[str]" = Counter()
 
 
@@ -161,7 +167,14 @@ class EnumerableRoleStoreAdapter:
             return _check_only(authority, callee_selector, ["authority_unconfirmed_no_role_events"])
 
         active_holders = _fold_active_holders(rows)
-        controller_addrs, role_labels = _registry_controller_context(ctx, authority)
+        registry_context = _registry_controller_context(ctx, authority)
+        if registry_context is None:
+            # A DB error while resolving the registry's own controllers is NOT
+            # "no candidates" (R1): a shrunken candidate universe silently
+            # shrinks the survivor set, which is the false-empty shape this
+            # adapter must never produce. Settle to the gated probe.
+            return _check_only(authority, callee_selector, ["registry_context_error"])
+        controller_addrs, role_labels = registry_context
         candidates = sorted(active_holders | controller_addrs)
 
         probe = _probe_gate(
@@ -182,6 +195,19 @@ class EnumerableRoleStoreAdapter:
             return _check_only(authority, callee_selector, ["negative_control_passed"])
 
         members = sorted(probe.survivors)
+        if not members and candidates:
+            # Every candidate failed the real gate. If this gate were the pure
+            # role-allowlist the adapter models, its admitted set would be a
+            # subset of the candidate universe — zero survivors over a
+            # NON-empty universe means either the gate's one role is currently
+            # unheld or the gate admits callers outside the model (a hybrid /
+            # non-role gate, e.g. ``msg.sender == liquidityPool``). The two are
+            # indistinguishable here (role identity is dissolved by design), so
+            # an ``exact`` "provably nobody" would be unwitnessed — decline.
+            # An empty CANDIDATE universe (complete fold, all holders revoked,
+            # no registry controllers) stays the exact-empty arm below: there
+            # the emptiness is witnessed by the complete durable fold.
+            return _check_only(authority, callee_selector, ["no_candidate_passed_gate"])
 
         if _getter_crosscheck_enabled() and standard.enumerable_getter is not None:
             mismatch = _getter_crosscheck(
@@ -385,13 +411,24 @@ def _active_roles(rows: Any) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tuple[set[str], dict[str, str]]:
+def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tuple[set[str], dict[str, str]] | None:
     """The registry's own address-typed controller values (owner/admin — union'd
     into the candidate universe so a hybrid ``onlyX`` that also passes an owner is
     reachable), plus a role-hash → NAME map inverted from the registry's
     ``role_identifier`` rows for DISPLAY labels only (join on value; never a name
-    transform). Best-effort: any failure yields empties — the event fold is the
-    primary source."""
+    transform).
+
+    Chain-scoped: ``contracts`` rows are keyed ``(address, chain)`` and a bare
+    lower(address) read would resolve a second-chain registry authority to the
+    ETHEREUM contract's implementation and controller values — cross-chain twin
+    aliasing inside the caller-set computation. ``ctx.chain_id`` resolves through
+    the canonical registry; NULL ``contracts.chain`` is legacy-mainnet by
+    convention (same coalesce as ``services.discovery.upgrade_history``).
+
+    Returns ``None`` on any resolution error (unknown chain, DB failure): an
+    error is NOT an empty candidate set (R1) — the caller declines instead of
+    probing a silently-shrunken universe. A bare ctx with no session returns
+    empties (structural: there is no registry context to read)."""
     session = getattr(ctx, "session", None)
     if session is None:
         return set(), {}
@@ -399,21 +436,27 @@ def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tupl
         from sqlalchemy import func, or_, select
 
         from db.models import Contract, ControllerValue
+        from utils.chains import chain_by_id
+
+        chain_name = chain_by_id(ctx.chain_id).name
+
+        def _chain_scoped(address_predicate: Any) -> Any:
+            return address_predicate & (func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
 
         # Controller values may sit on the proxy row or the impl row (with the
         # proxy as deployment_address); accept either address as the registry.
         impl_row = session.execute(
-            select(Contract.implementation).where(func.lower(Contract.address) == authority).limit(1)
+            select(Contract.implementation).where(_chain_scoped(func.lower(Contract.address) == authority)).limit(1)
         ).first()
         impl = impl_row[0].lower() if impl_row and _is_address(impl_row[0]) else None
         addresses = [authority] + ([impl] if impl else [])
         rows = session.execute(
             select(ControllerValue.controller_id, ControllerValue.value)
             .join(Contract, ControllerValue.contract_id == Contract.id)
-            .where(or_(*[func.lower(Contract.address) == a for a in addresses]))
+            .where(_chain_scoped(or_(*[func.lower(Contract.address) == a for a in addresses])))
         ).all()
     except Exception:
-        return set(), {}
+        return None
 
     controller_addrs: set[str] = set()
     role_labels: dict[str, str] = {}
@@ -526,6 +569,13 @@ def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str 
     if source.get("source") == "state_variable":
         name = source.get("state_variable_name")
         value = (ctx.state_var_values or {}).get(name) if isinstance(name, str) else None
+        if _is_nonzero_address(value):
+            return value.lower()
+    if source.get("source") == "self_address":
+        # A1 Part A: a SELF-gate descriptor (the un-lowerable role gate lives
+        # on the analyzed contract itself — RoleRegistry.onlyUpgradeTimelock).
+        # Resolve to the analyzed deployment so the probe hits real storage.
+        value = ctx.contract_address
         if _is_nonzero_address(value):
             return value.lower()
     return None

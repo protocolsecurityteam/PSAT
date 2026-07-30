@@ -12,8 +12,8 @@ The module is deliberately small and stateless — every entry point opens
 its own short-lived session so the caller doesn't have to share its DB
 connection with potentially blocking advisory locks.
 
-The ``chain`` key is the canonical decimal-string chain id (``"1"``,
-``"8453"``) per invariant 11: callers may pass a chain name, alias, id,
+The ``chain`` key is always the canonical decimal-string chain id (``"1"``,
+``"8453"``): callers may pass a chain name, alias, id,
 or ``None``, and :func:`utils.chains.chain_cache_token` collapses them all
 onto the id token so a name-keyed writer and an id-keyed reader hit the
 same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
@@ -40,7 +40,11 @@ which try the blob first and transparently fall back to inline JSONB.
 That fallback is what lets pre-migration rows keep working while the
 backfill (``scripts/backfill_contract_materializations_to_blob.py``)
 catches up — and what insulates the pipeline from a transient Tigris
-outage when the inline copy still exists.
+outage when the inline copy still exists. When it does not, the read
+raises ``StorageContentIncomplete``: "the bucket could not answer" and
+"this row stored nothing" are different facts, and the caller
+(``services/resolution/recursive``) turns the second into an empty
+analysis that the effects probe is then seeded from.
 """
 
 from __future__ import annotations
@@ -62,6 +66,7 @@ from db.storage import (
     StorageError,
     StorageKeyMissing,
     _key_prefix,
+    content_shortfall,
     get_storage_client,
 )
 from utils.chains import chain_cache_token
@@ -80,7 +85,66 @@ logger = logging.getLogger(__name__)
 # selector for a UDT-param direct call — both change the persisted sink shape, so
 # an existing deployment must rebuild rather than serve materializations written
 # against the old heads.
-ANALYSIS_SCHEMA_VERSION = 2
+# v3: ``computed`` operands carry ``derived_from`` (the origins that reached the
+# value through the arguments of the computation that produced it), so the
+# predicate-tree output shape changed. Without this bump a materialized row keeps
+# serving trees in which a hash-commitment gate is unbound from the parameters it
+# commits, and the fix never reaches any deployment already in the cache.
+# v4: ``view_call`` / ``external_call`` operands now carry ``derived_from`` too,
+# and an un-lowerable single-address-param SELF gate is emitted as an
+# ``external_set`` descriptor instead of a bare-bool leaf. A v3 tree records
+# neither, so its caller-tainted role gate still reads PUBLIC — the fix would
+# never reach a deployment already in the cache. v4 also pins provenance frame
+# purity: a parameter's origin set never unions other call sites' arguments
+# (the entry-parameter Phi is excluded), so ``derived_from`` is frame-local.
+# Both landed within the unreleased v4 window — no v4 row was ever
+# materialized under the pre-purity shape (verified: local DB carries only
+# v2/v3 rows; production runs pre-v4 code).
+# Also in the same unreleased v4 window: operand
+# tie-breaking is now cross-process stable — ``provenance._digest`` derives
+# ``callee_args_digest`` from content instead of ``hash()``, so the operand
+# slots that previously flickered with PYTHONHASHSEED settle to one canonical
+# byte form. The tree SCHEMA gains and loses no key, but WHICH computed source
+# wins a slot changes, and ``derived_from`` on the winner is a witness input:
+# ``claims/matchers/_facts.param_constraints`` reads it to mint the
+# destination-constraint fragment. The verdict movement is retreat-from-proof
+# by construction (its magnitude is base-sample-dependent — the pre-fix
+# tie-break varies even at a fixed seed); that and the cache non-bump
+# decision are recorded at ``EFFECT_CACHE_SCHEMA_VERSION``
+# (db/effect_cache.py), where the probe-input consumers live. Noted per the
+# same-unreleased-version precedent rather than minting a version no row was
+# ever written under.
+# v5: an ``external_bool`` leaf carries ``authority_role='delegated_authority'``
+# (and its ``external_set``/``authority_contract`` descriptor) only when the
+# callee is GATE-SHAPED (view/pure/nonview_library, or the void-call
+# ``bytes32[]`` merkle-witness carve-out) — a v4 tree still stamps delegated
+# authority on value-movement calls (``permit(msg.sender,…)``,
+# ``transferFrom(msg.sender,…)``, ``burnShares(msg.sender,…)``,
+# ``vault.enter(msg.sender,…)``), and a materialized v4 row would keep minting
+# the fabricated ``caller_gate`` controllers those leaves produced (PR-161:
+# 21 controller rows, incl. wstETH published as a controller of
+# WithdrawalQueueERC721). Result-checked const-compare external_bool leaves
+# now also carry ``callee_state_mutability``/``callee_signature``/``gate_kind``.
+# Same v5 window: pause-var classification requires a LATCH shape (bool flag;
+# constant-toggle uint; a uint read by a revert-carrying modifier — directly
+# or through a helper call; or a uint a non-writer's revert read compares for
+# EQUALITY against a CONSTANT, tested on the predicate-leaf plane so
+# polarity-folded if/revert custom-error gates, getter hops, and mask
+# arithmetic all count, with a same-node IR fallback for degraded trees), so
+# a governed duration like OZ TimelockController's ``_minDelay`` — whose
+# revert read is RELATIONAL against a parameter — is no longer classified as
+# a pause var, and its comparison leaves lose the ``authority_role='pause'``
+# stamp v4 trees carried.
+# Same v5 window: ``subject.source_verified`` carries the FETCH's verification fact
+# out of ``contract_meta.json`` and has three states, where a v4 row holds a two-state
+# boolean computed as ``bool(project_dir.rglob("src/**/*.sol"))`` — a Foundry-layout
+# glob that published FALSE for 9 of 90 Etherscan-verified contracts on the 2026-07-28
+# run (Lido, WithdrawalQueueERC721, two TimelockControllers, …), all of them analysed
+# from that verified source in the same job. Serving a cached v4 subject would keep
+# republishing that FALSE into ``contract_summaries.source_verified`` and the
+# frontend's data-confidence axis; the version was already minted on this unreleased
+# branch and this rides it.
+ANALYSIS_SCHEMA_VERSION = 5
 
 
 def _builder_staleness_s() -> float:
@@ -199,15 +263,27 @@ def find_by_address(
 def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: str) -> dict | None:
     """Generic blob-or-inline read for analysis / tracking_plan columns.
 
-    Resolution order:
-      1. If ``blob_key_attr`` is set and storage is configured, GET the
-         blob and parse JSON.
-      2. On a transient blob fetch error, fall through to inline JSONB
-         when present — better to serve possibly-stale data than to
-         crash the pipeline. ``StorageKeyMissing`` is treated the same
-         (the row says we have a key but the bucket disagrees, so we
-         either had a wipe or the write never landed).
-      3. If neither a blob nor inline JSONB is available, return None.
+    Three outcomes, and a caller can tell them apart — which is the whole point,
+    because this function's output *is* the analysis state the resolution stage
+    reasons over and the effects probe is seeded from:
+
+      * a ``dict`` — **proven present**: read from the blob, or from the inline
+        JSONB when the blob is unreadable but inline holds a (possibly stale)
+        copy. Serving stale beats crashing the pipeline, and it is still a real
+        payload rather than a claim about the subject.
+      * ``None`` — **proven absent**: the row records no blob key *and* no
+        inline payload, so nothing was ever stored for this column. On the
+        working DB this is exactly the 6 ``status='failed'`` rows, where no
+        analysis was ever produced.
+      * ``StorageContentIncomplete`` — the row records a blob key and we could
+        not obtain its content, with no inline fallback. Returning ``None`` here
+        is what let a bucket outage read as "this contract has no analysis, no
+        plan, no predicate trees" at ``services/resolution/recursive`` — and that
+        verdict then gets cached as a witness. Which subclass says why, and the
+        type is the only thing ``workers.retry_policy`` sees:
+        ``StorageContentAbsent`` when the bucket answered and holds no such
+        object (determined — a retry re-asks an answered question), else
+        ``StorageContentNotDetermined`` (unreachable, unconfigured, corrupt).
 
     Callers that need to mutate the returned dict should ``copy.deepcopy``
     it themselves — the inline JSONB read returns the ORM-cached dict
@@ -215,59 +291,80 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     """
     blob_key: str | None = getattr(row, blob_key_attr, None)
     inline: dict | None = getattr(row, inline_attr, None)
+    subject = f"{getattr(row, 'chain', '?')}/{getattr(row, 'address', '?')}"
 
-    if blob_key:
-        client = get_storage_client()
-        if client is not None:
-            try:
-                body = client.get(blob_key)
-                parsed = json.loads(body.decode("utf-8"))
-                if isinstance(parsed, dict):
-                    return parsed
-                # The serializer always emits JSON objects for these
-                # payloads; a non-dict is corruption, not a normal case.
-                logger.warning(
-                    "contract_materializations: blob %s decoded to %s, expected dict",
-                    blob_key,
-                    type(parsed).__name__,
-                )
-            except (StorageError, StorageKeyMissing, ValueError) as exc:
-                if inline is not None:
-                    logger.warning(
-                        "contract_materializations: blob fetch for %s failed (%s); using inline JSONB",
-                        blob_key,
-                        exc,
-                    )
-                else:
-                    logger.error(
-                        "contract_materializations: blob %s unreadable (%s) and no inline fallback",
-                        blob_key,
-                        exc,
-                    )
-                    return None
-        else:
-            # blob_key set but storage unconfigured (e.g. test env that
-            # turned ARTIFACT_STORAGE_* off after the row was written) —
-            # silently fall through to inline if present, else None.
-            if inline is None:
-                logger.warning(
-                    "contract_materializations: blob_key %s but storage unconfigured; no inline fallback",
-                    blob_key,
-                )
+    if not blob_key:
+        if inline is None:
+            logger.info(
+                "contract_materializations: %s records no %s and no inline %s — nothing was stored",
+                subject,
+                blob_key_attr,
+                inline_attr,
+            )
+        return inline
 
-    return inline
+    reason: str | None = None
+    object_proven_absent = False
+    client = get_storage_client()
+    if client is None:
+        # blob_key set but storage unconfigured (e.g. an env that turned
+        # ARTIFACT_STORAGE_* off after the row was written). We cannot ask.
+        reason = "storage is not configured"
+    else:
+        try:
+            body = client.get(blob_key)
+            parsed = json.loads(body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+            # The serializer always emits JSON objects for these
+            # payloads; a non-dict is corruption, not a normal case.
+            reason = f"blob decoded to {type(parsed).__name__}, expected dict"
+        except StorageKeyMissing as exc:
+            # The bucket was asked about every candidate and holds none of them.
+            object_proven_absent = True
+            reason = str(exc)
+        except (StorageError, ValueError) as exc:
+            reason = str(exc)
+
+    if inline is not None:
+        logger.warning(
+            "contract_materializations: blob fetch for %s failed (%s); using inline JSONB",
+            blob_key,
+            reason,
+        )
+        return inline
+
+    logger.error(
+        "contract_materializations: %s %s=%s unreadable (%s) and no inline fallback",
+        subject,
+        blob_key_attr,
+        blob_key,
+        reason,
+    )
+    detail = {blob_key_attr: reason or "unknown"}
+    raise content_shortfall(
+        f"contract_materializations {subject}: {blob_key_attr}={blob_key} unreadable ({reason}) "
+        "and no inline fallback — this contract's payload could not be produced",
+        values=None,
+        proven_absent=detail if object_proven_absent else None,
+        not_determined=None if object_proven_absent else detail,
+    )
 
 
 def hydrate_analysis(row: ContractMaterialization) -> dict | None:
     """Load the row's ``analysis`` payload, transparently picking the
     blob path when ``analysis_blob_key`` is set and falling back to the
     inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (a corner case for ``status != 'ready'`` rows)."""
+    has no analysis (nothing was ever stored — the ``status='failed'``
+    corner case). Raises ``StorageContentIncomplete`` when a blob key is
+    recorded but its content cannot be obtained: that is not the same fact and
+    must not reach a consumer as an empty analysis."""
     return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
 
 
 def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
-    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``."""
+    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``, including the
+    ``StorageContentIncomplete`` third state."""
     return _hydrate(row, blob_key_attr="tracking_plan_blob_key", inline_attr="tracking_plan")
 
 
@@ -276,7 +373,10 @@ def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
     for revert/auth guards). Returns None if the cache row predates the
     predicate-pipeline migration (pre-c1d2e3f4a5b6) so callers can fall
     back to rebuilding the artifact from the analysis dict if they need
-    mapping-writer enumeration."""
+    mapping-writer enumeration. Raises ``StorageContentIncomplete`` when the
+    row records a blob key whose content cannot be obtained — "written before
+    the migration" and "the bucket is down" are different facts and the
+    fallback is only correct for the first."""
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
 
 

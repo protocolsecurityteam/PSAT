@@ -13,8 +13,8 @@ from db.models import EffectiveFunction, FunctionPrincipal
 # (``unknown``/``None``) — is NON-terminal: a way-point whose ultimate controlling
 # key is not yet established. Marking these non-terminal is the guard against the
 # over-claim bug where a ``resolved_type=contract`` row reads as a *settled*
-# principal to a consumer when the real key is still unknown (SCORING plan §4 /
-# SCORING_INVARIANTS inv-2: absence of a proven positive is never a proven fact).
+# principal to a consumer when the real key is still unknown: the absence of a
+# proven positive is never itself a proven fact.
 TERMINAL_PRINCIPAL_TYPES = frozenset({"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"})
 
 # Depth bound for the contract-principal terminal walk. A control chain deeper
@@ -28,6 +28,18 @@ DEFAULT_TERMINAL_MAX_DEPTH = 4
 # branching stays linear (pre-branch hops + one bounded walk per plane), never
 # exponential: a plane that itself forks fails closed instead of re-branching.
 _MAX_CONTROLLER_PLANES = 3
+
+# The canonical control getters the production resolver probes
+# (services/resolution/tracking._CONTROLLER_GETTER_SIGS derives its signatures
+# from these names; a test pins the two in sync). Named here because the walk
+# publishes them as the BASIS of a ``controllers_not_determined`` record:
+# silence from this finite probe set is evidence that THESE getters named
+# nothing — never proof that no controller exists. Chain-verified
+# counterexamples with the same silent-probes outcome: a PauserRegistry
+# controlled via ``unpauser()``, Lido's stETH via ``kernel()``, Curve admin
+# planes via ``ownership_admin()``/``emergency_admin()``, and transparent
+# proxies via the ERC-1967 admin slot — all invisible to this set.
+CANONICAL_CONTROLLER_GETTERS: tuple[str, ...] = ("owner", "authority", "admin")
 
 
 def is_terminal_principal_type(resolved_type: str | None) -> bool:
@@ -49,10 +61,13 @@ def resolve_terminal_principal(
 
     ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
     a sequence of already-classified ``{"address", "resolved_type", "details"}``
-    mappings (owner/authority/admin order) — or ``None``/empty when none is
-    fetched/verified. The injected callable is the only wire this function
+    mappings (owner/authority/admin order), ``[]`` when every canonical getter
+    (``CANONICAL_CONTROLLER_GETTERS``) answered cleanly and named none
+    (probe-set SILENCE — see below, not proof of absence), or ``None`` when
+    the planes could not be dispositively read (a probe error — not determined).
+    The injected callable is the only wire this function
     touches (integration callers back it with on-chain owner reads + classify;
-    unit tests stub it), so the walk itself is pure and deterministic (inv-11/12).
+    unit tests stub it), so the walk itself is pure and deterministic.
 
     Returns a terminal record ``{terminal, resolved_type, address, chain,
     status}``. ``terminal`` is True only when a single-plane walk reached a member
@@ -60,9 +75,37 @@ def resolve_terminal_principal(
     ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
     unknown`` fallback the witness bar requires, never a guessed key.
 
-    **Status taxonomy.** Single-plane outcomes: ``terminated`` / ``cycle`` /
-    ``depth_exceeded`` / ``unknown_unfetched`` (record shape unchanged, no extra
-    keys). When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
+    **Status taxonomy** (the full vocabulary of ``status``; every consumer of
+    ``terminal_principal`` reads from this list):
+
+    * ``terminated`` — the walk reached a ``TERMINAL_PRINCIPAL_TYPES`` member.
+    * ``cycle`` / ``depth_exceeded`` — bounded-walk fail-closed outcomes.
+    * ``multi_plane`` / ``ambiguous_controllers`` — parallel control planes
+      (see below).
+    * ``controllers_not_determined`` — the resolver's canonical getters were
+      ALL silent at the hop named by ``undetermined_at`` (basis recorded in
+      ``probes_silent``). Silence from a finite probe set is evidence those
+      getters named nothing, NEVER proof that no controller exists: contracts
+      governed via non-canonical getters (``unpauser()``, ``kernel()``,
+      Curve's ``*_admin()`` family) or the ERC-1967 admin slot produce exactly
+      this outcome while demonstrably controlled. Not determined — retryable
+      only with a wider probe basis.
+    * ``unknown_unfetched`` — the planes could not be dispositively read (a
+      transient probe error, or steps returned without a usable address) —
+      not determined, retryable next run.
+    * ``no_controller`` — a PROVEN absence of any controlling key. DECLARED
+      BUT CURRENTLY UNMINTABLE: no producer exists, because no basis available
+      to the resolver can earn it — the canonical-getter probe set can prove
+      only what it probed, and a genuinely-ownerless contract (WETH9, the ETH2
+      DepositContract) is indistinguishable from a non-canonically-governed
+      one on that evidence. The member stays documented so a future producer
+      with a real proof basis (and consumers) can adopt it; nothing may mint
+      it until then (zero-realised by design).
+
+    Every non-``terminated`` outcome fails closed to ``terminal=False`` /
+    ``resolved_type="unknown"``, so nothing downstream can read it as a key.
+
+    When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
     ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
     walk does NOT name one as THE key; instead it walks EACH plane to its own
     terminal and returns ``status="multi_plane"``, ``terminal=False``, a flat
@@ -142,11 +185,28 @@ def _walk_terminal(
             return _unknown("depth_exceeded")
         budget[0] -= 1
         steps = resolve_controllers(current)
-        if not steps:
-            # No controller fetched/verified -> unknown terminal.
+        if steps is None:
+            # The control planes could not be dispositively read (probe error) —
+            # not-determined, retryable next run.
             return _unknown("unknown_unfetched")
+        if not steps:
+            # Every canonical getter answered cleanly and named nothing —
+            # probe-set SILENCE, not proof of absence (see the status taxonomy:
+            # unpauser()/kernel()/*_admin()/ERC-1967-admin contracts produce
+            # exactly this outcome while demonstrably controlled). Published
+            # with its basis, and attributed to the hop whose getters were
+            # silent (``undetermined_at``) — on a multi-hop walk the chain may
+            # already carry REAL controllers, so the status must not read as a
+            # statement about the principal the record is published on.
+            return _unknown(
+                "controllers_not_determined",
+                probes_silent=list(CANONICAL_CONTROLLER_GETTERS),
+                undetermined_at=current,
+            )
         distinct = _distinct_controllers(steps)
         if not distinct:
+            # Steps were returned but none carried a usable address — fetched,
+            # unusable: not-determined, never a proven absence.
             return _unknown("unknown_unfetched")
         if len(distinct) > 1:
             controllers = list(distinct.keys())
@@ -259,7 +319,7 @@ def _function_principal_payload(
         "details": details,
         # A contract (or unresolved) principal is a non-terminal way-point, not a
         # settled key — consumers must treat it as ``unknown`` terminal, never as
-        # the controlling principal (SCORING plan §4). ``terminal_principal`` is a
+        # the controlling principal. ``terminal_principal`` is a
         # forward-compat passthrough: the terminal walk currently persists its
         # record on ``principal_labels.details`` only (join by address to get the
         # chain); nothing writes it into ``function_principals.details`` yet, so
@@ -293,6 +353,52 @@ def _role_value_from_origin(origin: str | None) -> int | str:
             return int(suffix)
         return suffix or "?"
     return origin
+
+
+def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mapping[str, Mapping[str, Any]]) -> dict:
+    """One ``authority_roles`` grant from the COLUMN, with each principal filled
+    in from this row's own classified ``FunctionPrincipal`` payload.
+
+    The column's grants carry the role plus bare member ADDRESSES — the capability
+    surface knows who holds the role, not what those addresses are (Safe / EOA /
+    timelock). The same addresses are published under ``controllers`` fully
+    classified, and every consumer that merges the two dedups by address keeping
+    the FIRST record it sees (``protocolScore.collectPrincipals`` reads role
+    grants before controllers). Publishing the bare record first would therefore
+    make a role-granted principal read LESS resolved than the identical address
+    under ``controllers`` — an unresolved-controller reading of an address whose
+    type is known. Classified fields win.
+
+    ``details`` is merged KEY-WISE with the classified keys on top, never
+    replaced wholesale: the grant's ``details`` is always the non-None
+    ``{"source": "semantic_capability:role_grant"}`` marker, so a blanket
+    "grant's non-null fields override" erased the classified quorum/delay
+    witness (a Safe's ``owners``/``threshold``, a timelock's ``delay``) from
+    the exact record ``protocolScore.safeScore`` / ``principalLabel`` read
+    first — publishing a recorded threshold as "not recorded" and dropping the
+    principal to the 0.55 unknown floor.
+    """
+    principals: list[Any] = []
+    for principal in grant.get("principals") or []:
+        if not isinstance(principal, dict):
+            principals.append(principal)
+            continue
+        classified = classified_by_address.get(str(principal.get("address", "")).lower())
+        if not classified:
+            principals.append(dict(principal))
+            continue
+        merged = dict(classified)
+        merged.update({key: value for key, value in principal.items() if value is not None and key != "details"})
+        grant_details = principal.get("details")
+        classified_details = classified.get("details")
+        if isinstance(grant_details, dict) and isinstance(classified_details, dict):
+            merged["details"] = {**grant_details, **classified_details}
+        elif classified_details is not None:
+            merged["details"] = classified_details
+        elif grant_details is not None:
+            merged["details"] = grant_details
+        principals.append(merged)
+    return {**dict(grant), "principals": principals}
 
 
 def _build_company_function_entry(
@@ -341,9 +447,42 @@ def _build_company_function_entry(
         )
         controller_entry["principals"].append(principal_dict)
 
-    authority_roles = list(authority_roles_by_key.values())
-    if not authority_roles and ef.authority_roles:
-        authority_roles = list(ef.authority_roles)
+    # Three states out, and the COLUMN decides all three whenever the principal
+    # fold witnesses nothing (``principal_type`` is ``controller`` on 100% of
+    # rows, so that is every row): a non-empty list is witnessed role grants,
+    # ``None`` is role-gated with the role not determined, ``[]`` is proven not
+    # role-gated. ``list(authority_roles_by_key.values())`` is a list on every
+    # path, so seeding the result with it published the column's ``None`` as the
+    # ``[]`` that NEGATES it — /api/company/{name}/functions served 0 nulls over
+    # 1,109 ether.fi rows whose pool holds 324, contradicting
+    # /api/analyses/{job} on the same rows. The two frontend coercers
+    # (surface/layout/controlGraph.js, protocolScore.js) still fold to ``[]``
+    # when they iterate, which is fine — a render loop publishes no verdict —
+    # but the payload has to carry the true value for a scorer to read.
+    authority_roles: Any
+    witnessed_roles = list(authority_roles_by_key.values())
+    if witnessed_roles:
+        authority_roles = witnessed_roles
+    elif ef.authority_roles:
+        classified_by_address: dict[str, dict[str, Any]] = {}
+        for controller_entry in controllers_by_label.values():
+            for principal in controller_entry.get("principals", []):
+                address = str((principal or {}).get("address", "")).lower()
+                if address:
+                    classified_by_address.setdefault(address, principal)
+        enriched = [
+            _enriched_role_grant(grant, classified_by_address)
+            for grant in ef.authority_roles
+            if isinstance(grant, dict)
+        ]
+        # A non-empty column that enriches to nothing was unreadable, not proven
+        # absent — the one way this branch could still mint the negating ``[]``.
+        # 0 realised: no persisted row carries a non-object grant (measured
+        # across every effective_functions row, jsonb_typeof(grant) <> 'object'
+        # on 0 of the 210 non-empty ones).
+        authority_roles = enriched or None
+    else:
+        authority_roles = ef.authority_roles
 
     controllers = list(controllers_by_label.values())
     has_more_specific_controller = any(
@@ -358,15 +497,38 @@ def _build_company_function_entry(
             or not all(_is_generic_authority_contract_principal(principal) for principal in entry["principals"])
         ]
 
+    # Imported inside the function, not at module scope: ``services.aggregations``'s
+    # package ``__init__`` imports ``company_overview``, which imports THIS module,
+    # so a top-level import here closes the cycle and kills a fresh interpreter on
+    # ``import services.policy`` (pinned by
+    # tests/test_worker_entrypoint_imports.test_policy_first_import_order, which is
+    # exactly how this was caught).
+    from services.aggregations.action_summary import describe_action
+
+    _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
+        ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
+    )
     entry: dict[str, Any] = {
         "function": ef.abi_signature or ef.function_name,
         "selector": ef.selector,
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
         "claims": list(getattr(ef, "claims", None) or []),
-        "action_summary": ef.action_summary,
+        # The quotable copy of the structured planes, reconciled against them
+        # and labelled with which shape it is. See
+        # services/aggregations/action_summary — this endpoint and analysis_detail
+        # are the two public surfaces that publish the sentence.
+        "action_summary": _action_summary_text,
+        "action_summary_kind": _action_summary_kind,
+        "action_summary_note": _action_summary_note,
         "authority_public": ef.authority_public,
+        # See analysis_detail: the three-state verdict rides alongside the bool,
+        # null when the row predates the column.
+        "authority_openness": getattr(ef, "authority_openness", None),
         "controllers": controllers,
+        # Three states, same as analysis_detail publishes for the same row: a
+        # non-empty list is witnessed, ``None`` is role-gated with the role not
+        # determined, ``[]`` is proven not role-gated. See the fold above.
         "authority_roles": authority_roles,
         "direct_owner": direct_owner,
         "signature_witnesses": signature_witnesses,

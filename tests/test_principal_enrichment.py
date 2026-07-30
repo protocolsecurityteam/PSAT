@@ -5,6 +5,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+)
 from services.policy.principal_enrichment import build_principal_labels
 from utils.concurrency import RpcExecutor
 
@@ -869,3 +873,237 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
             resolved_control_graph=resolved_graph,
             rpc_url="http://rpc.example",
         )
+
+
+def test_callee_edge_does_not_mint_controller_labels():
+    """``principal_labels`` inherits the gate/callee split from the edge relation.
+
+    The conflation surfaced here as well, labelling the Ethereum 2 deposit
+    contract a *controller* of StakingManager and the Curve stETH/ETH pool a
+    controller of Liquifier. Both are callees. The split is made once, at
+    ``control_graph_edges.relation``; this file's producer switches on that
+    field, so the fix reaches this plane without a second provenance rule.
+
+    Positive control: the gate keeps ``controller_value`` /
+    ``controller_<label>``. Negative control: the callee gets ``call_target``
+    and NONE of the controller labels.
+    """
+    target = "0x1111111111111111111111111111111111111111"
+    gate = "0x2222222222222222222222222222222222222222"
+    callee = "0x3333333333333333333333333333333333333333"
+
+    def _node(address: str, name: str) -> dict:
+        return {
+            "id": f"address:{address}",
+            "address": address,
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": name,
+            "contract_name": name,
+            "depth": 0 if address == target else 1,
+            "analyzed": address == target,
+            "details": {"address": address},
+            "artifacts": {},
+        }
+
+    resolved_graph = {
+        "nodes": [_node(target, "StakingManager"), _node(gate, "RoleRegistry"), _node(callee, "DepositContract")],
+        "edges": [
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{gate}",
+                "relation": "controller_value",
+                "label": "roleRegistry",
+                "source_controller_id": "external_contract:roleRegistry",
+                "notes": ["authority_provenance=caller_gate"],
+            },
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{callee}",
+                "relation": "external_call_target",
+                "label": "depositContractEth2",
+                "source_controller_id": "external_contract:depositContractEth2",
+                "notes": ["authority_provenance=call_target"],
+            },
+        ],
+    }
+
+    payload = build_principal_labels(
+        {"contract_address": target, "contract_name": "StakingManager", "functions": []},
+        resolved_control_graph=resolved_graph,
+    )
+    principals = {item["address"]: item for item in payload["principals"]}
+
+    gate_labels = set(principals[gate]["labels"])
+    assert "controller_value" in gate_labels
+    assert "controller_roleregistry" in gate_labels
+
+    callee_labels = set(principals[callee]["labels"])
+    assert "call_target" in callee_labels
+    assert "stakingmanager_calls_depositcontracteth2" in callee_labels
+    assert "controller_value" not in callee_labels
+    assert not any(label.startswith("controller_") for label in callee_labels)
+
+
+def test_unattributed_edge_does_not_mint_controller_labels():
+    """``controller_value_unattributed`` must mint NO ``controller_*`` label.
+
+    The relation means the tracked controller's ``authority_provenance`` was
+    ABSENT — neither "gates callers" nor "is merely called" was answered. The
+    edge exists only so the address stays visible; it moves no authority, so
+    every label that asserts control has to stay off it.
+
+    Today that holds by *fall-through*: ``_graph_labels_for_node`` has no arm for
+    the relation. This test is the pin — a future arm added to that dispatch
+    (however reasonable-looking) silently re-admits an unattributed edge to the
+    controller vocabulary, which is the over-claim this relation was
+    introduced to remove. Positive control: the sibling ``controller_value``
+    edge on the same graph still earns the full controller label set, so a
+    regression in the dispatch itself cannot pass by minting nothing at all.
+    """
+    target = "0x4444444444444444444444444444444444444444"
+    gate = "0x5555555555555555555555555555555555555555"
+    unattributed = "0x6666666666666666666666666666666666666666"
+
+    def _node(address: str, name: str) -> dict:
+        return {
+            "id": f"address:{address}",
+            "address": address,
+            "node_type": "contract",
+            "resolved_type": "contract",
+            "label": name,
+            "contract_name": name,
+            "depth": 0 if address == target else 1,
+            "analyzed": address == target,
+            "details": {"address": address},
+            "artifacts": {},
+        }
+
+    resolved_graph = {
+        "nodes": [_node(target, "Vault"), _node(gate, "RoleRegistry"), _node(unattributed, "LegacyAuthority")],
+        "edges": [
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{gate}",
+                "relation": EDGE_RELATION_CONTROLLER_VALUE,
+                "label": "roleRegistry",
+                "source_controller_id": "external_contract:roleRegistry",
+                "notes": ["authority_provenance=caller_gate"],
+            },
+            {
+                "from_id": f"address:{target}",
+                "to_id": f"address:{unattributed}",
+                "relation": EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+                "label": "legacyAuthority",
+                "source_controller_id": "external_contract:legacyAuthority",
+                "notes": ["authority_provenance=absent"],
+            },
+        ],
+    }
+
+    payload = build_principal_labels(
+        {"contract_address": target, "contract_name": "Vault", "functions": []},
+        resolved_control_graph=resolved_graph,
+    )
+    principals = {item["address"]: item for item in payload["principals"]}
+
+    # Positive control — the attributed gate keeps the whole controller set.
+    gate_labels = set(principals[gate]["labels"])
+    assert "controller_value" in gate_labels
+    assert "controller_legacyauthority" not in gate_labels
+    assert "controller_roleregistry" in gate_labels
+
+    # The pin: not-determined provenance earns no control vocabulary at all.
+    # ``call_target`` is equally forbidden — it is the OTHER proven answer, and
+    # the relation exists precisely because neither was proven.
+    unattributed_labels = set(principals[unattributed]["labels"])
+    assert not any(label.startswith("controller_") for label in unattributed_labels)
+    assert "controller_value" not in unattributed_labels
+    assert "authority_controller" not in unattributed_labels
+    assert "owner_controller" not in unattributed_labels
+    assert "call_target" not in unattributed_labels
+
+
+def test_authority_roles_present_with_none_does_not_crash_enrichment():
+    """Consumer guard: ``authority_roles`` is now PRESENT with value
+    ``None`` on a role-gated function whose role identity is not determined, and
+    ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
+    plain default iterated ``None`` and raised. Not-determined must contribute no
+    role principals, exactly as ``[]`` did."""
+    from services.policy.principal_enrichment import _collect_permissions
+
+    permissions, labels = _collect_permissions(
+        {
+            "contract_name": "Target",
+            "contract_address": "0x" + "ab" * 20,
+            "functions": [
+                {
+                    "function": "f()",
+                    "effect_labels": [],
+                    "authority_public": False,
+                    "authority_roles": None,
+                    "controllers": [],
+                    "direct_owner": None,
+                }
+            ],
+        }
+    )
+    assert permissions == {}
+    assert labels == {}
+
+
+def test_enriched_role_grant_keeps_the_classified_quorum_witness():
+    """``_enriched_role_grant`` exists so a role-granted principal
+    reads as resolved as the same address under ``controllers`` — but the
+    grant's ``details`` is ALWAYS the non-None ``{"source": ...}`` marker, so
+    a blanket "grant's non-null fields override" replaced the classified
+    ``details`` wholesale and erased the recorded quorum/delay.
+    ``protocolScore.collectPrincipals`` dedups by address keeping the FIRST
+    record (role grants before controllers), so the erased record is the one
+    the scorer and ``principalLabel`` read: a recorded 2/3 Safe fell to the
+    0.55 unknown floor and rendered without its "m/n". Details merge KEY-WISE,
+    classified keys on top, grant-only keys (the source marker) surviving."""
+    from services.governance.principals import _enriched_role_grant
+
+    classified = {
+        "0xaaa": {
+            "address": "0xaaa",
+            "resolved_type": "safe",
+            "label": "Ops Safe",
+            "details": {"owners": ["0x1", "0x2", "0x3"], "threshold": 2},
+        }
+    }
+    grant = {
+        "role": 8,
+        "principals": [
+            {"address": "0xaaa", "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
+        ],
+    }
+    merged = _enriched_role_grant(grant, classified)["principals"][0]
+    assert merged["resolved_type"] == "safe"
+    assert merged["label"] == "Ops Safe"
+    # The quorum witness survives AND the grant's provenance marker survives.
+    assert merged["details"]["owners"] == ["0x1", "0x2", "0x3"]
+    assert merged["details"]["threshold"] == 2
+    assert merged["details"]["source"] == "semantic_capability:role_grant"
+
+
+def test_enriched_role_grant_details_fallbacks():
+    """The two one-sided shapes: a classified record with no ``details`` keeps
+    the grant's marker; a grant principal with no ``details`` keeps the
+    classified witness untouched."""
+    from services.governance.principals import _enriched_role_grant
+
+    no_details_classified = {"0xaaa": {"address": "0xaaa", "resolved_type": "eoa"}}
+    grant = {
+        "role": 1,
+        "principals": [{"address": "0xaaa", "details": {"source": "semantic_capability:role_grant"}}],
+    }
+    merged = _enriched_role_grant(grant, no_details_classified)["principals"][0]
+    assert merged["details"] == {"source": "semantic_capability:role_grant"}
+    assert merged["resolved_type"] == "eoa"
+
+    classified = {"0xbbb": {"address": "0xbbb", "resolved_type": "timelock", "details": {"delay": 864000}}}
+    bare_grant = {"role": 2, "principals": [{"address": "0xbbb", "details": None}]}
+    merged = _enriched_role_grant(bare_grant, classified)["principals"][0]
+    assert merged["details"] == {"delay": 864000}

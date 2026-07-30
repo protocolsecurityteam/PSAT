@@ -1,4 +1,4 @@
-"""Tier-0 code-upgrade current-state check (EFFECTS_RESOLUTION_SPEC §3 / inv. 13).
+"""Tier-0 code-upgrade current-state check.
 
 An indexed UpgradeEvent proves only PAST capability; a present-tense "upgradeable
 now" claim requires the current capability be present NOW — impl slot still
@@ -70,7 +70,6 @@ def _candidate(principals: tuple[str, ...]) -> Candidate:
         selector="0x3659cfe6",
         function_name="upgradeTo",
         authority_public=False,
-        effect_targets=("impl",),
         principal_addresses=principals,
         deployment_address=PROXY,
     )

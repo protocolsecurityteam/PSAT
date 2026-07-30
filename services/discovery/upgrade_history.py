@@ -544,7 +544,7 @@ def project_to_events(
 
     from sqlalchemy import func, select
 
-    from db.models import Contract, UpgradeEvent
+    from db.models import UPGRADE_SOURCE_BACKFILL, Contract, UpgradeEvent
 
     out = {
         "proxies_seen": 0,
@@ -593,11 +593,15 @@ def project_to_events(
                 UpgradeEvent(
                     contract_id=proxy_contract.id,
                     proxy_address=proxy_addr,
+                    # The artifact carries no predecessor, so this is "not
+                    # recorded", not "no predecessor existed" — ``source`` is
+                    # what lets a reader tell those apart.
                     old_impl=None,
                     new_impl=impl,
                     block_number=evt.get("block_number"),
                     timestamp=ts_val,
                     tx_hash=evt.get("tx_hash"),
+                    source=UPGRADE_SOURCE_BACKFILL,
                 )
             )
             out["events_written"] += 1

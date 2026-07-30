@@ -80,7 +80,6 @@ def _candidate(sig: str) -> Candidate:
         selector=_sel(sig),
         function_name=sig.split("(")[0],
         authority_public=False,
-        effect_targets=("x",),
         principal_addresses=(PRINCIPAL,),
     )
 

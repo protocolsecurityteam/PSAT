@@ -37,7 +37,7 @@ from utils.logging import record_stage_metric
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
-from .predicate_types import PredicateTree
+from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
 from .writer_gate import apply_writer_gate_pass
@@ -195,6 +195,25 @@ def _is_elementary_token(token: str) -> bool:
     return token.startswith(_ELEMENTARY_PREFIXES)
 
 
+# Slither renders the two selectorless entry points as ordinary zero-argument
+# signatures, so every string-level canonicality test passed them and hashed
+# them: ``keccak("fallback()")[:4] = 0x552079dc``, ``keccak("receive()")[:4] =
+# 0xa3e76c0f``. Neither is a dispatch — a fallback is reached by calldata that
+# matches nothing, and a contract that really declared ``function fallback()``
+# would own 0x552079dc itself.
+SELECTORLESS_SIGNATURES = frozenset({"fallback()", "receive()"})
+
+
+def has_no_selector(signature: str | None) -> bool:
+    """True for the signatures that PROVABLY have no 4-byte selector.
+
+    Distinct from ``not is_canonical_abi_signature(...)``, which means "this
+    string was never lowered, so we cannot say". Consumers that need three
+    states publish ``""`` here (the ``effect_verdicts`` identity sentinel in
+    ``db/effect_cache.py``) and ``None`` for the unlowered case."""
+    return signature in SELECTORLESS_SIGNATURES
+
+
 def is_canonical_abi_signature(signature: str) -> bool:
     """True when every parameter token of ``signature`` is an EVM elementary type
     — i.e. ``keccak(signature)[:4]`` really is the function's ``msg.sig``.
@@ -203,7 +222,12 @@ def is_canonical_abi_signature(signature: str) -> bool:
     ``f(IFoo.PermitInput)``) means the signature was never lowered, so its hash
     names a dispatch that does not exist. This is the same rejection
     :func:`_canonical_signature` applies to its own output, shared so that every
-    consumer deriving a selector from a *string* can fail closed the same way."""
+    consumer deriving a selector from a *string* can fail closed the same way.
+
+    ``fallback()`` / ``receive()`` are rejected for the same reason: they parse
+    as canonical zero-argument signatures but their hash is not reachable."""
+    if has_no_selector(signature):
+        return False
     if "(" not in signature or not signature.endswith(")"):
         return False
     body = signature[signature.index("(") + 1 : -1]
@@ -289,12 +313,16 @@ def build_predicate_artifacts_with_pause_info(
         # discarded). Entry points are the API surface we report on
         # anyway, so this is the right iteration target.
         for fn in getattr(contract, "functions_entry_points", []) or []:
-            if not _is_externally_callable(fn):
+            if not _is_predicate_target(fn):
                 continue
             fns_attempted += 1
-            canonical = _canonical_signature(fn)
-            if canonical is not None and canonical != fn.full_name:
-                canonical_signatures[fn.full_name] = canonical
+            # fallback/receive have no signature to canonicalize and no
+            # selector to key: recording one would mint a dispatch that does
+            # not exist.
+            if not _is_fallback_or_receive(fn):
+                canonical = _canonical_signature(fn)
+                if canonical is not None and canonical != fn.full_name:
+                    canonical_signatures[fn.full_name] = canonical
             fn_started = time.monotonic()
             tree = build_predicate_tree(fn, uncertain_out=guard_uncertain)
             if tree is not None:
@@ -371,6 +399,16 @@ def build_predicate_artifacts_with_pause_info(
     # counts, not a degraded signal, so no WARNING is paired here.
     record_stage_metric("predicate_fns_attempted", fns_attempted)
     record_stage_metric("predicate_trees_built", len(trees))
+
+    # Stamp the absorbed-operand marker on every finished tree, AFTER the
+    # cross-contract passes (one of them can replace a root, and a replaced root
+    # that lost the marker must read as unmarked rather than inherit it). What the
+    # marker buys a consumer: an operand that is NOT in a leaf's lists is only
+    # evidence of absence on a tree built here. On a tree persisted earlier a
+    # two-slot comparison silently dropped one side, so the same absence is a gap.
+    # ``effects.calldata`` gates its proven-indefinite-freeze state on this.
+    for finished_tree in (*trees.values(), *check_trees.values()):
+        mark_operand_absorption_recorded(finished_tree)
 
     artifact = {
         "schema_version": SCHEMA_VERSION,
@@ -639,10 +677,19 @@ def _hint_identity(hint: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _is_fallback_or_receive(fn: Any) -> bool:
+    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
+        return True
+    return (getattr(fn, "name", "") or "") in ("fallback", "receive")
+
+
 def _is_externally_callable(fn: Any) -> bool:
     """External or public visibility, AND not a constructor /
     fallback / receive special function. Modifiers are not
-    functions in this sense."""
+    functions in this sense.
+
+    This is the *selector-bearing* surface. ``_is_predicate_target`` is the
+    surface a predicate tree is built for, and it is strictly wider."""
     visibility = getattr(fn, "visibility", None)
     if visibility not in ("external", "public"):
         return False
@@ -650,9 +697,25 @@ def _is_externally_callable(fn: Any) -> bool:
         return False
     # Slither tags special functions via name; receive/fallback also
     # have non-standard signatures.
-    name = getattr(fn, "name", "") or ""
-    if name in ("constructor", "fallback", "receive"):
+    if (getattr(fn, "name", "") or "") == "constructor":
         return False
-    if getattr(fn, "is_fallback", False) or getattr(fn, "is_receive", False):
+    if _is_fallback_or_receive(fn):
         return False
     return True
+
+
+def _is_predicate_target(fn: Any) -> bool:
+    """Every entry point a predicate tree must be attempted for: the
+    selector-bearing surface PLUS ``fallback`` / ``receive``.
+
+    Having no selector is not having no caller. Excluding them meant a tree was
+    never *built* for a fallback/receive, and the policy stage reads a missing
+    tree as "no gate found" — so an ``onlyOwner`` fallback published exactly the
+    same evidence as an open one. Absent-because-not-attempted and
+    absent-because-nothing-was-there have to be different states, and the only
+    way to reach the second is to attempt."""
+    if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
+        return False
+    if _is_fallback_or_receive(fn):
+        return True
+    return _is_externally_callable(fn)

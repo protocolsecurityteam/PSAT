@@ -27,6 +27,16 @@ export function buildControlGraphIndex(companyData) {
     for (const edge of cg.edges || []) {
       // safe_owner edges are UI noise — owners are rendered nested under their Safe.
       if (edge.relation === "safe_owner") continue;
+      // external_call_target says the from-node CALLS the to-node. Walking it
+      // in collectIndirectPath would publish the callee's owner Safe as
+      // "governance context" for a function that Safe cannot reach — the
+      // frontend half of the gate/callee conflation.
+      if (edge.relation === "external_call_target") continue;
+      // controller_value_unattributed says the target's authority_provenance
+      // was ABSENT — nothing proved it gates anyone. Walking it would publish
+      // an unproven governance path (a widened provenance tree enrolled pure
+      // constants and non-authority mappings this way).
+      if (edge.relation === "controller_value_unattributed") continue;
       const from = (edge.from || "").toLowerCase();
       const to = (edge.to || "").toLowerCase();
       if (!from || !to || from === to) continue;

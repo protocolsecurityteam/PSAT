@@ -139,14 +139,45 @@ def test_extract_governance_topics_skips_hand_rolled_oz():
 
 def test_extract_governance_topics_unknown_controller_id_falls_through():
     """A controller_id we don't have a semantic mapping for still produces
-    a tracked-topic entry — just under a ``controller_changed:<id>``
-    event_type so the scanner records the event but no specific sync
-    handler fires.
+    a tracked-topic entry — under the neutral ``state_changed:<id>``
+    event_type, because this plan proves nothing about the target gating
+    callers. The scanner records the event; no specific sync handler
+    fires and no control claim is published.
     """
     plan = {
         "tracked_controllers": [
             {
                 "controller_id": "state_variable:guardian",
+                "event_watch": {
+                    "events": [
+                        {
+                            "name": "GuardianSet",
+                            "signature": "GuardianSet(address,address)",
+                            "topic0": _topic0("GuardianSet(address,address)"),
+                            "inputs": [
+                                {"name": "previousGuardian", "type": "address", "indexed": True},
+                                {"name": "newGuardian", "type": "address", "indexed": True},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    topics = extract_governance_topics(plan)
+    assert len(topics) == 1
+    assert topics[0]["event_type"] == "state_changed:state_variable:guardian"
+
+
+def test_extract_governance_topics_unknown_controller_id_with_gate_proof():
+    """Same plan, plus the tracking plan's proof that a lowered predicate
+    leaf gates callers on ``guardian`` — now the controller claim IS
+    earned and the terminal fallback publishes it."""
+    plan = {
+        "tracked_controllers": [
+            {
+                "controller_id": "state_variable:guardian",
+                "authority_provenance": "caller_gate",
                 "event_watch": {
                     "events": [
                         {
@@ -537,8 +568,9 @@ def test_extract_governance_topics_tags_initializer():
 
 def test_extract_governance_topics_tags_fall_through_when_no_match():
     """When effect_tags don't match any canonical write target, the
-    classifier falls back to controller_id and ultimately
-    ``controller_changed:<id>``."""
+    classifier falls back to controller_id and ultimately to the terminal
+    form — neutral here, since this plan carries no gate proof for
+    ``guardian``."""
     plan = {
         "tracked_controllers": [
             {
@@ -558,7 +590,7 @@ def test_extract_governance_topics_tags_fall_through_when_no_match():
         ]
     }
     topics = extract_governance_topics(plan)
-    assert topics[0]["event_type"] == "controller_changed:state_variable:guardian"
+    assert topics[0]["event_type"] == "state_changed:state_variable:guardian"
     # Tags still ride along even when classification fell back.
     assert topics[0]["effect_tags"] == {"writes": ["guardian"]}
 

@@ -28,7 +28,6 @@ const ANALYSES = [
     company: "etherfi",
     address: ETHERFI_ADDR,
     contract_name: "Weeth",
-    risk_level: "low",
     is_proxy: true,
     upgrade_count: 2,
   },
@@ -37,7 +36,6 @@ const ANALYSES = [
     company: "etherfi",
     address: POOL_ADDR,
     contract_name: "LiquidityPool",
-    risk_level: "medium",
     upgrade_count: 0,
   },
 ];
@@ -47,7 +45,6 @@ const COMPANY_ETHERFI = {
     {
       address: ETHERFI_ADDR,
       name: "Weeth",
-      risk_level: "low",
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
@@ -58,7 +55,6 @@ const COMPANY_ETHERFI = {
     {
       address: POOL_ADDR,
       name: "LiquidityPool",
-      risk_level: "medium",
       upgrade_count: 0,
       controllers: {},
       functions: [],

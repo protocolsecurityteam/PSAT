@@ -294,8 +294,8 @@ def test_caller_keyed_time_check_stays_caller_authority(tmp_path):
 def test_logical_or_splits_into_or_subtree(tmp_path):
     """``require(msg.sender == owner || amount > threshold)`` should
     produce an OR root with two leaves: a caller_authority equality
-    and a comparison/business. Codex round-3 blocker #2 fix:
-    business preserved under OR so admission is correct."""
+    and a comparison/business. The business leaf is preserved under
+    OR so admission is correct."""
     sl = _compile(
         tmp_path,
         """
@@ -801,7 +801,7 @@ def test_confidence_low_for_unsupported(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# AuthorityClassifier rule expansion (v6 round-5 #1)
+# AuthorityClassifier rule expansion
 # ---------------------------------------------------------------------------
 
 
@@ -1164,7 +1164,7 @@ def test_issue120_mixed_allow_then_deny_then_tail(tmp_path):
 
 
 def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
-    """#120 round-2 point 1 — a revert-IF guard is a CFG sink, not a leak.
+    """#120 — a revert-IF guard is a CFG sink, not a leak.
     ``if (!auth[src]) revert(); if (b[src]) return false; return true;`` — the
     revert son of the first IF keeps a structural fall-through edge to the
     ENDIF merge, so without terminator-as-sink the ``!auth`` guard leaks into
@@ -1200,7 +1200,7 @@ def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_standalone_require_not_projected_public(tmp_path):
-    """#120 round-2 point 2 — a standalone ``require(cond)`` is a dominating
+    """#120 — a standalone ``require(cond)`` is a dominating
     positive guard, not an ignorable non-IF statement.
     ``require(wl[src]); if(bl[src]) return false; return true;`` — the builder
     only inspects IF nodes, so the ``require(wl)`` guard was dropped and the
@@ -1234,7 +1234,7 @@ def test_issue120_standalone_require_not_projected_public(tmp_path):
 
 
 def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
-    """#120 round-2 points 1+3c — a multi-revert guard chain must AND EVERY
+    """#120 — a multi-revert guard chain must AND EVERY
     guard. ``if(!authA[src]) revert(); if(!authB[src]) revert(); return true;``
     — both reverts leak their fall-through son to ENDIF, so pre-fix the tail
     dropped both guards (→ unattributable ``unsupported``, safe but lossy).
@@ -1270,7 +1270,7 @@ def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
 
 
 def test_issue120_single_revert_guard_is_positive_membership(tmp_path):
-    """#120 round-2 point 1 — the ``_branch_value_is_only_true`` sink change.
+    """#120 — the ``_branch_value_is_only_true`` sink change.
     ``if (!auth[src]) revert(); return true;`` — without treating the revert
     as a sink, the revert branch reaches the downstream ``return true`` and is
     misread as an *allow* branch, so its else-guard is skipped and the tail
@@ -1311,7 +1311,7 @@ def _assert_no_lone_falsy(tree):
 
 
 def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120 round-3 point 1 — a deny expressed as an internal helper call
+    """#120 — a deny expressed as an internal helper call
     (not an inline ``revert``) is still a CFG sink. ``if (!auth[src]) _deny();
     if (b[src]) return false; return true;`` where ``_deny`` always reverts.
     The ``_deny()`` EXPRESSION node keeps a structural fall-through edge to
@@ -1344,14 +1344,14 @@ def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
         ("auth", "truthy"),
         ("b", "falsy"),
     }, leaves
-    # The invariant the reviewer requires: no ``membership:falsy`` without a
-    # co-required ``truthy[auth]``.
+    # The invariant: no ``membership:falsy`` without a co-required
+    # ``truthy[auth]``.
     assert any(le["operator"] == "truthy" and _membership_var(le) == "auth" for le in leaves), leaves
     _assert_no_lone_falsy(tree)
 
 
 def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120 round-3 point 1, library variant — a ``LibraryCall`` to an
+    """#120, library variant — a ``LibraryCall`` to an
     always-reverting library function (``Guard.enforce()``) sinks control
     identically to the internal-call and inline-``revert`` forms. Same shape
     (``if (!auth[src]) Guard.enforce(); if (b[src]) return false; return
@@ -1386,7 +1386,7 @@ def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
-    """#120 round-3 point 2 backstop — a deny routed through a call whose
+    """#120 backstop — a deny routed through a call whose
     revert can't be PROVEN (an external call) must fail closed, not leak.
     ``if (!auth[src]) g.enforce(src); if (b[src]) return false; return true;``
     where ``g.enforce`` is an external interface call: ``_callee_always_reverts``
@@ -1417,3 +1417,243 @@ def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
     # Fail-closed: no lone cofinite opening survives.
     assert any(le["kind"] == "unsupported" for le in leaves), leaves
     _assert_no_lone_falsy(tree)
+
+
+def test_hash_commitment_leaf_keeps_its_computed_operand_and_names_what_it_commits(tmp_path):
+    """The Teller ``refundDeposit`` shape, reduced.
+
+    Two things must hold at once and they pull against each other:
+
+    1. The gate names the parameters the hash commits — without that a consumer
+       cannot tell which arguments the commitment pins, and the guard reads as a
+       constraint on ``nonce`` alone.
+    2. The ``computed`` operand SURVIVES. It is the only thing that says
+       *hash commitment* rather than *equality against storage*, and the
+       resolver routes on it: promoting a committed parameter into the operand
+       slot would turn a commitment gate into ``parameter``, i.e. "self-service,
+       anyone on their own argument" — an opening, from a fix.
+    """
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(uint256 => bytes32) history;
+            function refund(uint256 nonce, address receiver, uint256 amount) external {
+                require(history[nonce] == keccak256(abi.encode(receiver, amount)), "bad");
+                delete history[nonce];
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "refund")))
+    leaf = next(le for le in leaves if "keccak256" in str(le.get("operands")))
+    computed = next(o for o in leaf["operands"] if o["source"] == "computed")
+    computed_kind = computed.get("computed_kind")
+    assert computed_kind is not None and computed_kind.startswith("keccak256")
+    assert leaf["kind"] == "equality"
+    # (1) the commitment is bound to what it commits
+    derived_from = computed.get("derived_from")
+    assert derived_from is not None
+    bound = {(o.get("parameter_index"), o.get("parameter_name")) for o in derived_from if o["source"] == "parameter"}
+    assert bound == {(1, "receiver"), (2, "amount")}
+    # (2) and the committed parameters did NOT displace the operand or leak into
+    # the leaf's direct-operand parameter list.
+    assert [o["source"] for o in leaf["operands"]] == ["parameter", "computed"]
+    assert leaf["parameter_indices"] == [0]
+
+
+def test_computed_operand_without_argument_provenance_says_not_determined(tmp_path):
+    """``derived_from`` is ``None``, never omitted and never ``[]``, on a
+    computed operand nothing populated. ``op.get("derived_from") or []`` would
+    read this as "no parameter reaches it", which is a claim the pipeline has
+    not made."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public price;
+            function buy(uint256 qty) external payable {
+                require(msg.value == price * qty, "bad");
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "buy")))
+    computed = [o for le in leaves for o in le["operands"] if o["source"] == "computed"]
+    assert computed, leaves
+    assert all("derived_from" in o for o in computed)
+    assert all(o.get("derived_from") is None for o in computed)
+
+
+def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
+    """Absence means "the question does not apply", so it must be reserved for
+    operands that are not computed at all."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f() external view {
+                require(msg.sender == owner, "no");
+            }
+        }
+    """,
+    )
+    leaves = _all_leaves(build_predicate_tree(_function(sl, "f")))
+    operands = [o for le in leaves for o in le["operands"]]
+    assert operands
+    assert all("derived_from" not in o for o in operands if o["source"] != "computed")
+
+
+# ---------------------------------------------------------------------------
+# guard_extraction_uncertain — the producer half.
+#
+# Re-measured over the full 88-contract replay: every tree-less predicate
+# target has ZERO revert gates (the class-F/R widening lowered every gated
+# function the earlier count covered), so the marker has zero realised rows
+# on this corpus — a lower bound, not a proof of unreachability. These tests
+# are the fallback: the sentinel is reachable by construction (a caller-eq
+# gate whose subtree lowering fails) and the discriminator is precise in both
+# directions (a genuinely ungated / value-gated function is never flagged).
+# ---------------------------------------------------------------------------
+
+
+_CALLER_EQ_GATED = """
+    pragma solidity ^0.8.19;
+    contract C {
+        address public ownerVar;
+        function sweep(address to) external {
+            if (msg.sender != ownerVar) revert();
+            payable(to).transfer(address(this).balance);
+        }
+    }
+"""
+
+_VALUE_GATED = """
+    pragma solidity ^0.8.19;
+    contract C {
+        function sweep(uint256 amount) external {
+            require(amount > 0);
+            payable(msg.sender).transfer(amount);
+        }
+    }
+"""
+
+
+def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypatch):
+    """Constructed lowering failure: when no subtree can be built for a
+    function whose gate IS a direct caller EQ/NEQ compare, the builder must
+    flag the full_name instead of silently returning None (which the policy
+    would then read as 'unguarded')."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+
+    sl = _compile(tmp_path, _CALLER_EQ_GATED)
+    fn = _function(sl, "sweep")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    uncertain: set[str] = set()
+    tree = predicates_mod.build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is None
+    assert uncertain == {"sweep(address)"}
+
+
+def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, monkeypatch):
+    """Discriminator, adverse direction: the SAME constructed lowering failure
+    on a value-check gate (``require(amount > 0)``) must NOT flag the function
+    — a fail-closed sweep that marks real public functions unsupported is an
+    over-hedge the spec forbids."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+
+    sl = _compile(tmp_path, _VALUE_GATED)
+    fn = _function(sl, "sweep")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    uncertain: set[str] = set()
+    tree = predicates_mod.build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is None
+    assert uncertain == set()
+
+
+def test_uncertain_marker_not_fired_when_gate_lowers(tmp_path):
+    """Production path (no constructed failure): the caller-eq gate lowers into
+    a tree, so nothing is flagged — the marker only ever names functions whose
+    guard was seen AND lost."""
+    sl = _compile(tmp_path, _CALLER_EQ_GATED)
+    fn = _function(sl, "sweep")
+    uncertain: set[str] = set()
+    tree = build_predicate_tree(fn, uncertain_out=uncertain)
+    assert tree is not None
+    assert uncertain == set()
+
+
+def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_path, monkeypatch):
+    """End-to-end (compiled source -> artifact -> policy): the flagged
+    signature is carried as ``guard_extraction_uncertain`` on the predicate
+    artifact and build_effective_permissions routes it to ``unsupported`` with
+    the truthful reason, while a genuinely gate-less public function on the
+    same contract stays public."""
+    import services.static.contract_analysis_pipeline.predicates as predicates_mod
+    from services.policy.effective_permissions import build_effective_permissions
+    from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts
+
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public ownerVar;
+            uint256 public counter;
+            function sweep(address to) external {
+                if (msg.sender != ownerVar) revert();
+                payable(to).transfer(address(this).balance);
+            }
+            function ping() external {
+                counter += 1;
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+
+    monkeypatch.setattr(predicates_mod, "_build_subtree_from_gate", lambda gate, prov, function: None)
+    artifact = build_predicate_artifacts(contract)
+    assert artifact.get("guard_extraction_uncertain") == ["sweep(address)"]
+    assert "sweep(address)" not in (artifact.get("trees") or {})
+
+    target = {"subject": {"address": "0x" + "ab" * 20, "name": "C"}}
+    effects = {
+        "functions": {
+            "sweep(address)": {
+                "function": "sweep(address)",
+                "state_changing": True,
+                "state_writes": [],
+                "sinks": [],
+                "writer_selectors": [],
+            },
+            "ping()": {
+                "function": "ping()",
+                "state_changing": True,
+                "state_writes": ["counter"],
+                "sinks": [{"kind": "external_call", "target": "hook"}],
+                "writer_selectors": [],
+            },
+        }
+    }
+    payload = build_effective_permissions(
+        target,
+        capability_resolver_output={},
+        effects=effects,
+        predicate_trees=artifact,
+    )
+    sweep = next(f for f in payload["functions"] if f["function"] == "sweep(address)")
+    assert sweep.get("status") == "unsupported"
+    assert sweep.get("capability_expr", {}).get("unsupported_reason") == "guard_extraction_uncertain"
+    assert sweep.get("authority_public") is not True
+    # The unmarked sink-bearing sibling keeps the historical fall-through:
+    # genuinely ungated functions must stay public (no over-hedge).
+    ping = next(f for f in payload["functions"] if f["function"] == "ping()")
+    assert ping.get("status") == "public"
+    assert ping["authority_public"] is True

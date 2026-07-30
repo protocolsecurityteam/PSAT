@@ -16,8 +16,6 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     ContractBalance,
-    ControlGraphEdge,
-    ControlGraphNode,
     ControllerValue,
     Job,
     JobStage,
@@ -30,6 +28,7 @@ from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
 )
+from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
@@ -69,7 +68,7 @@ def _chain_id_for_job(job: Job) -> int:
 
 
 def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job's first-class ``chain_id`` (inv. 6).
+    """Canonical chain name for the job's first-class ``chain_id``.
 
     Stamped onto spawned child/dependency-provider jobs so a discovered
     contract inherits the parent's chain instead of cascading as ``None`` when
@@ -201,6 +200,8 @@ class ResolutionWorker(BaseWorker):
                         block_number=snapshot.get("block_number"),
                         details=cv.get("details"),
                         observed_via=cv.get("observed_via"),
+                        # Absent in the snapshot => NULL, not a guessed value.
+                        authority_provenance=cv.get("authority_provenance"),
                     )
                 )
             session.commit()
@@ -268,44 +269,17 @@ class ResolutionWorker(BaseWorker):
                 job.name or "Contract",
             )
 
-            # Write to control_graph_nodes and control_graph_edges tables
+            # Write to control_graph_nodes and control_graph_edges tables.
+            # Shared with the policy stage's graph-refresh rewrite: the same
+            # replace keeps the table plane equal to whichever graph artifact
+            # was stored last, instead of freezing it at the pre-refresh walk.
             if contract_row:
-                session.query(ControlGraphNode).filter(
-                    ControlGraphNode.contract_id == contract_row.id,
-                    deployment_scope(ControlGraphNode.deployment_address, deployment_address),
-                ).delete(synchronize_session=False)
-                session.query(ControlGraphEdge).filter(
-                    ControlGraphEdge.contract_id == contract_row.id,
-                    deployment_scope(ControlGraphEdge.deployment_address, deployment_address),
-                ).delete(synchronize_session=False)
-                for node in resolved_graph.get("nodes", []):
-                    session.add(
-                        ControlGraphNode(
-                            contract_id=contract_row.id,
-                            deployment_address=deployment_address,
-                            address=(node.get("address") or "").lower(),
-                            node_type=node.get("node_type"),
-                            resolved_type=node.get("resolved_type"),
-                            label=node.get("label"),
-                            contract_name=node.get("contract_name"),
-                            depth=node.get("depth"),
-                            analyzed=node.get("analyzed", False),
-                            details=node.get("details"),
-                        )
-                    )
-                for edge in resolved_graph.get("edges", []):
-                    session.add(
-                        ControlGraphEdge(
-                            contract_id=contract_row.id,
-                            deployment_address=deployment_address,
-                            from_node_id=edge.get("from_id", ""),
-                            to_node_id=edge.get("to_id", ""),
-                            relation=edge.get("relation"),
-                            label=edge.get("label"),
-                            source_controller_id=edge.get("source_controller_id"),
-                            notes=edge.get("notes"),
-                        )
-                    )
+                replace_control_graph_rows(
+                    session,
+                    contract_id=contract_row.id,
+                    deployment_address=deployment_address,
+                    resolved_graph=resolved_graph,
+                )
                 session.commit()
 
             # Queue analysis jobs for contracts discovered during resolution
@@ -355,7 +329,7 @@ class ResolutionWorker(BaseWorker):
     ) -> None:
         """Fetch ETH + token balances and store in contract_balances table.
 
-        ``chain_id`` is required (inv. 6): it scopes every Etherscan v2 read to
+        ``chain_id`` is required: it scopes every Etherscan v2 read to
         the job's chain so an L2 job records L2 balances/prices, not mainnet
         ones. A chainless balance fetch can no longer default to mainnet."""
         from utils.etherscan import get_eth_balance, get_native_price, get_token_balances, parallel_get
@@ -407,7 +381,7 @@ class ResolutionWorker(BaseWorker):
         # Clear old balances
         session.query(ContractBalance).filter(ContractBalance.contract_id == contract_row.id).delete()
 
-        # Native gas balance, valued in this chain's OWN native coin (inv. 5):
+        # Native gas balance, valued in this chain's OWN native coin:
         # the symbol/name are the registry's native_asset, and the USD quote is
         # that coin's price — an L2/alt-L1 balance is never labeled or priced as
         # mainnet ETH.
@@ -602,15 +576,15 @@ class ResolutionWorker(BaseWorker):
             if node.get("node_type") != "contract":
                 continue
 
-            # Always stamp the child's chain from the job's first-class chain
-            # (inv. 6): a chainless parent request must not leave the child
+            # Always stamp the child's chain from the job's first-class chain:
+            # a chainless parent request must not leave the child
             # chain-less, which would write Contract.chain=NULL and dedup-collide.
             child_chain = _chain_name_for_job(job)
 
             # Skip if a job already exists for this address on THIS chain —
             # case-insensitive (a checksummed admin submission is the same
             # contract) and chain-scoped so a same-address twin on another
-            # chain doesn't suppress this chain's child (inv. 12).
+            # chain doesn't suppress this chain's child.
             existing = find_existing_job_for_address(session, addr, chain=child_chain)
             if existing:
                 continue
@@ -624,7 +598,7 @@ class ResolutionWorker(BaseWorker):
                 "discovered_by": "resolution",
             }
             child_request["chain"] = child_chain
-            # Defense in depth (inv. 14): discovered contracts share the parent's
+            # Defense in depth: discovered contracts share the parent's
             # chain (chain-as-island), so a gated parent already implies a gated
             # child — but a disabled chain must never spawn analysis work, so the
             # gate is asserted here too.
@@ -749,12 +723,12 @@ class ResolutionWorker(BaseWorker):
         if not target_addresses:
             return
 
-        # Dependency provider B is on the same chain as A (v1 is chain-as-island,
-        # inv. 15). Derive from the job's first-class chain (inv. 6) so the edge's
+        # Dependency provider B is on the same chain as A (v1 is chain-as-island).
+        # Derive from the job's first-class chain so the edge's
         # provider_chain and any spawned provider job are chain-stamped even when
         # the request payload carries no chain.
         chain = _chain_name_for_job(job)
-        # Defense in depth (inv. 14): A's chain equals every provider B's chain, so
+        # Defense in depth: A's chain equals every provider B's chain, so
         # a gated parent implies gated providers — but a disabled chain must spawn
         # no provider jobs, so gate the whole emission here. In practice A is always
         # enabled (it is running), so this never fires on mainnet-only.

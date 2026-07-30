@@ -7,7 +7,6 @@ from typing import Literal, TypedDict
 from typing_extensions import NotRequired
 
 ControlModel = Literal["ownable", "role_control", "auth", "governance", "custom", "unknown"]
-RiskLevel = Literal["low", "medium", "high", "unknown"]
 UpgradeabilityPattern = Literal["uups", "transparent", "beacon", "custom", "none", "unknown"]
 TimelockPattern = Literal["oz_timelock", "governor_timelock", "custom", "none", "unknown"]
 CurrentHoldersStatus = Literal["unknown_static_only"]
@@ -22,6 +21,22 @@ ControllerKind = Literal[
     "computed",
     "unknown",
 ]
+# Why an address is attached to a contract at all. "The caller is checked
+# against this address" and "this address gets called" are different facts and
+# only the first is a control claim; a single set that unions them cannot say
+# which one a row came from.
+#
+#   caller_gate  — proven: a predicate leaf requires the caller to equal / be a
+#                  member of this address, or the leaf delegates its authority
+#                  check to it (``authority_contract.address_source``).
+#   call_target  — proven: an ``external_call`` sink invokes this address. NOT a
+#                  claim that it is proven *not* to be a gate; it is "called,
+#                  and no gate was proven".
+#
+# Absent/NULL is the third state — not determined (no provenance was computed
+# for this target, or the row predates the field). A consumer must not read it
+# as either value.
+ControllerProvenance = Literal["caller_gate", "call_target"]
 GuardKind = Literal[
     "caller_equals_storage",
     "caller_in_mapping",
@@ -45,34 +60,54 @@ class Subject(TypedDict):
     address: str
     name: str
     compiler_version: str
-    source_verified: bool
+    # THREE STATES. ``True``/``False`` are the fetch's answer about this address
+    # (Etherscan served verified source, or it did not); ``None`` is "the fetch fact
+    # did not reach this pipeline run", which is not the same claim and must not be
+    # rendered as one. It rides straight into the nullable
+    # ``contract_summaries.source_verified`` column and out onto
+    # ``/api/company/<slug>``.
+    source_verified: bool | None
 
 
 class AnalysisStatus(TypedDict):
+    # The IR-derived analysis (predicates, effects, claims, classification) is
+    # the whole of the static stage; there is no detector pass behind this flag.
     static_analysis_completed: bool
-    slither_completed: bool
     errors: list[str]
 
 
 class Summary(TypedDict):
+    # Every evidence field here is nullable, and ``None`` means the detector
+    # did not run, or ran on inputs a degraded upstream stage had already
+    # emptied. ``False`` / ``[]`` is the positive claim "it ran and found
+    # nothing" — but only as strong as the producer's own ran-check: it is an
+    # absence proof exactly to the extent that the producer tests every plane
+    # its evidence travels through, which is per-field (see
+    # ``_detect_pausability``, which tests two). ``contract_summaries`` has
+    # been nullable on all of them since the baseline migration; the producer
+    # is what emitted a proven-absence on 100% of rows regardless.
     control_model: ControlModel
     is_upgradeable: bool
-    is_pausable: bool
-    has_timelock: bool
-    static_risk_level: RiskLevel
-    standards: list[str]
-    is_factory: bool
-    is_nft: bool
+    is_pausable: bool | None
+    has_timelock: bool | None
+    standards: list[str] | None
+    is_factory: bool | None
+    is_nft: bool | None
 
 
 class ContractClassification(TypedDict):
+    # ``standards`` / ``is_erc*`` / ``is_nft`` are IR-derived (``contract.ercs()``
+    # plus a signature+event match) and run on every parse, so ``[]`` / ``False``
+    # here are MEASURED absences, independent of the Slither detector pass.
     standards: list[str]
     is_erc20: bool
     is_erc721: bool
     is_erc1155: bool
     is_nft: bool
-    is_factory: bool
-    factory_functions: list[str]
+    # ``is_factory`` alone reads the effects artifact's ``contract_creation``
+    # sinks: ``None`` when that artifact is degraded, i.e. not determined.
+    is_factory: bool | None
+    factory_functions: list[str] | None
     evidence: list[Evidence]
 
 
@@ -124,7 +159,10 @@ class UpgradeabilityAnalysis(TypedDict):
 
 
 class PausabilityAnalysis(TypedDict):
-    is_pausable: bool
+    # ``None`` = not determined (the claims plane, the only detector that
+    # resolves a struct-member / namespaced latch, did not run). Distinct from
+    # ``False``, which is a proven absence.
+    is_pausable: bool | None
     pause_functions: list[str]
     unpause_functions: list[str]
     gating_modifiers: list[str]
@@ -134,8 +172,17 @@ class PausabilityAnalysis(TypedDict):
 
 
 class TimelockAnalysis(TypedDict):
-    has_timelock: bool
+    # ``None`` = not determined (no IR to walk). Never ``False`` for "we did
+    # not look".
+    has_timelock: bool | None
     pattern: TimelockPattern
+    # The delay VALUE is a live read (``getMinDelay()``) and this module has no
+    # chain: ``delay`` is always ``None`` with ``delay_source: "not_read"``
+    # until one is threaded. A defaulted delay would fabricate a protective
+    # credit. ``delay_variables`` names where the value lives, which is what
+    # source alone can prove.
+    delay: int | None
+    delay_source: Literal["not_read", "chain_read"]
     delay_variables: list[str]
     queue_execute_functions: list[str]
     authorized_roles: list[str]
@@ -146,18 +193,6 @@ class AuditAlignment(TypedDict):
     status: str
     bytecode_match: str
     notes: list[str]
-
-
-class SlitherFinding(TypedDict):
-    check: str
-    impact: str
-    confidence: str
-    description: str
-
-
-class SlitherSummary(TypedDict):
-    detector_counts: dict[str, int]
-    key_findings: list[SlitherFinding]
 
 
 class TrackingHint(TypedDict):
@@ -246,6 +281,8 @@ class ControllerTrackingTarget(TypedDict):
     associated_events: list[AssociatedEvent]
     polling_sources: list[str]
     notes: list[str]
+    # Absent = not determined. See ``ControllerProvenance``.
+    authority_provenance: NotRequired[ControllerProvenance]
 
 
 class SecondaryImplPointer(TypedDict):
@@ -273,7 +310,6 @@ class ContractAnalysis(TypedDict):
     pausability: PausabilityAnalysis
     timelock: TimelockAnalysis
     audit_alignment: AuditAlignment
-    slither: SlitherSummary
     tracking_hints: list[TrackingHint]
     controller_tracking: list[ControllerTrackingTarget]
     # Split-proxy secondary-impl pointers detected on the primary impl. Optional

@@ -196,3 +196,102 @@ describe("matchesEra: defensive handling", () => {
     expect(matchesEra({}, null)).toBe(false);
   });
 });
+
+// An ABSENT era bound is not a bound value: folding `block_introduced` to -Infinity
+// and `block_replaced` to Infinity answered the hard block constraint "yes" from the
+// absence of the data the constraint tests. A poll-detected impl publishes
+// `block_introduced: null`.
+describe("matchesEra: an undetermined era window cannot satisfy a block constraint", () => {
+  const BOUNDED_COV = {
+    match_type: "impl_era",
+    match_confidence: "high",
+    impl_address: "0x9999999999999999999999999999999999999999",
+    covered_from_block: 18500000,
+    covered_to_block: 18600000,
+    date: "2023-12-01",
+  };
+
+  it("does not spread a bounded audit onto an era with no introduction block", () => {
+    const pollIntroduced = {
+      address: "0x3333333333333333333333333333333333333333",
+      block_introduced: null,
+      block_replaced: 19000000,
+      // No timestamps either, so the temporal fall-through has nothing and the
+      // only remaining signal is addrMatch — which is false here.
+    };
+    expect(matchesEra(BOUNDED_COV, pollIntroduced)).toBe(false);
+  });
+
+  it("does not spread a bounded audit onto an era whose successor block is unknown", () => {
+    // `block_replaced` PRESENT and null: a successor exists whose block was never
+    // determined, so the era's end is unknown rather than infinite.
+    const unknownEnd = {
+      address: "0x3333333333333333333333333333333333333333",
+      block_introduced: 19500000,
+      block_replaced: null,
+    };
+    expect(matchesEra(BOUNDED_COV, unknownEnd)).toBe(false);
+  });
+
+  it("still evaluates the constraint against a fully-bounded era", () => {
+    // POSITIVE CONTROL: declining on every era would drop every block-bounded match.
+    expect(matchesEra(BOUNDED_COV, IMPL_V1)).toBe(true);
+    expect(matchesEra({ ...BOUNDED_COV, covered_from_block: 19100000, covered_to_block: 19200000 }, IMPL_V1)).toBe(false);
+  });
+
+  it("still treats a missing block_replaced KEY as the open-ended current era", () => {
+    // POSITIVE CONTROL for the key-presence rule: the current impl's era really
+    // does run to now, and requiring both bounds would drop its matches.
+    const late = { ...BOUNDED_COV, covered_from_block: 19500000, covered_to_block: 19600000 };
+    expect(matchesEra(late, IMPL_V2_CURRENT)).toBe(true);
+  });
+});
+
+describe("matchesEra: the temporal branch applies the same rule to timestamps", () => {
+  const DATED_COV = {
+    match_type: "impl_era",
+    match_confidence: "high",
+    impl_address: "0x9999999999999999999999999999999999999999",
+    date: "2023-12-01",
+  };
+
+  it("does not place an audit inside an era with no introduction timestamp", () => {
+    const noStart = { address: "0x3333333333333333333333333333333333333333", timestamp_replaced: TS_FEB_2024 };
+    expect(matchesEra(DATED_COV, noStart)).toBe(false);
+  });
+
+  it("does not place an audit inside an era whose successor timestamp is unknown", () => {
+    const unknownEnd = {
+      address: "0x3333333333333333333333333333333333333333",
+      timestamp_introduced: TS_NOV_2023,
+      timestamp_replaced: null,
+    };
+    expect(matchesEra(DATED_COV, unknownEnd)).toBe(false);
+  });
+
+  it("does not answer the containment from an Infinity fold when the successor's timestamp was never recorded", () => {
+    // `block_replaced` proves a successor exists, but the producer writes
+    // `timestamp_replaced` only when the successor's log carried a timestamp —
+    // so this era provably ended at an unknown time. Its end is unknown, not
+    // infinite; only addrMatch is left, and this impl's address does not match.
+    const successorNoTs = {
+      address: "0x3333333333333333333333333333333333333333",
+      timestamp_introduced: TS_NOV_2023,
+      block_replaced: 19400000,
+    };
+    expect(matchesEra(DATED_COV, successorNoTs)).toBe(false);
+  });
+
+  it("still places an audit in a bounded era and in the open-ended current one", () => {
+    // POSITIVE CONTROLS: the grace-zone placement that drives every name-based
+    // match must survive, including the current impl's key-absent open end.
+    expect(matchesEra(DATED_COV, IMPL_V1)).toBe(true);
+    expect(matchesEra({ ...DATED_COV, date: "2024-06-01" }, IMPL_V2_CURRENT)).toBe(true);
+  });
+
+  it("still falls back to addrMatch when the era carries nothing", () => {
+    const bare = { address: "0x9999999999999999999999999999999999999999" };
+    expect(matchesEra(DATED_COV, bare)).toBe(true);
+    expect(matchesEra(DATED_COV, { address: "0x1111111111111111111111111111111111111111" })).toBe(false);
+  });
+});

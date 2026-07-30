@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _mainnet_hypersync_url() -> str:
-    """Mainnet HyperSync endpoint from the registry (inv. 5), not a hardcoded
+    """Mainnet HyperSync endpoint from the registry, not a hardcoded
     literal. The signature default for the enumerators below; callers thread the
     per-chain URL for non-mainnet scans."""
     from utils.chains import chain_by_id
@@ -56,7 +56,12 @@ class EnumerationResult(TypedDict):
     """Principal list + status; complete vs. truncated scans (silent [] would drop authorized addresses)."""
 
     principals: list[EnumeratedPrincipal]
-    status: str  # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
+    # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
+    # | "incomplete_ambiguous_writer_event" (an add/remove-conflicted event was
+    #   dropped: the fold is structurally missing that event's members)
+    # | "incomplete_no_writer_specs" (nothing was observed at all)
+    # | "incomplete_no_hypersync_coverage"
+    status: str
     pages_fetched: int
     last_block_scanned: int
     error: str | None
@@ -123,7 +128,7 @@ def _chain_key(chain: str | None) -> str:
 
 
 def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
-    """The HyperSync scan endpoint for *chain* (inv. 6).
+    """The HyperSync scan endpoint for *chain*.
 
     ``chain`` is the same name / decimal-id token the cache key uses. A chainless
     call fails loud (``require_chain`` raises) rather than defaulting the scan to
@@ -378,14 +383,22 @@ async def enumerate_mapping_allowlist(
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
 
     if not writer_specs:
+        # No writer specs means nothing was observed, not that the mapping
+        # provably has no members — "complete" here would publish a vacuous
+        # scan as an exhaustive one.
         return EnumerationResult(
-            principals=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
+            principals=[],
+            status="incomplete_no_writer_specs",
+            pages_fetched=0,
+            last_block_scanned=from_block,
+            error=None,
         )
 
     topic0_to_specs: dict[str, list[WriterEventSpec]] = {}
     for spec in writer_specs:
         topic0 = _event_topic0(spec["event_signature"])
         topic0_to_specs.setdefault(topic0, []).append(spec)
+    ambiguous_dropped = False
     for topic0, specs in list(topic0_to_specs.items()):
         directions = {spec["direction"] for spec in specs}
         if len(directions) <= 1:
@@ -398,10 +411,20 @@ async def enumerate_mapping_allowlist(
                 "specs": [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
             },
         )
+        ambiguous_dropped = True
         del topic0_to_specs[topic0]
     if not topic0_to_specs:
+        # Every writer event was ambiguous: the fold KNOWS it scanned nothing.
+        # Reporting "complete" here published exactly the same value as a real
+        # exhaustive empty scan (observed in production with pages_fetched=0
+        # below the first real log). The consumers already
+        # handle any non-"complete" status as a truncated enumeration.
         return EnumerationResult(
-            principals=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
+            principals=[],
+            status="incomplete_ambiguous_writer_event",
+            pages_fetched=0,
+            last_block_scanned=from_block,
+            error=None,
         )
 
     if hypersync_module is None:
@@ -434,7 +457,11 @@ async def enumerate_mapping_allowlist(
     current_from = from_block
     page_count = 0
     started = time.monotonic()
-    status: str = "complete"
+    # A fold that dropped an ambiguous writer event is incomplete BY
+    # CONSTRUCTION, whatever the scan does: members written only through the
+    # dropped event are invisible. Timeout/page-cap/error below may overwrite
+    # with their own (also non-"complete") status.
+    status: str = "incomplete_ambiguous_writer_event" if ambiguous_dropped else "complete"
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:
@@ -564,7 +591,15 @@ def enumerate_mapping_allowlist_sync(
     first so other processes see it, then to L1. ``incomplete_*`` and
     ``error`` results are cached at both tiers — re-running them inside
     the TTL would just hit the same bound; the caller sees the
-    ``status`` field and decides whether to act on partial data.
+    ``status`` field and decides whether to act on partial data. A
+    status that L2 cannot store would break that: the rejected write
+    leaves the prior row standing, so an in-TTL ``complete`` would be
+    served in place of the truncated verdict that superseded it. Adding
+    a status therefore has a schema obligation —
+    ``tests/test_mapping_enumeration_status_vocabulary.py`` scrapes this
+    module for the vocabulary and round-trips every member through the
+    real column, so an oversized one is a red suite, not a silent
+    republish.
     """
     specs_as_dicts = [dict(s) for s in writer_specs]
     cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
@@ -621,7 +656,7 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
-    # Per-chain scan URL (inv. 6): derive from ``chain`` unless the caller pinned
+    # Per-chain scan URL: derive from ``chain`` unless the caller pinned
     # an explicit URL or injected a client (tests). Mainnet is byte-identical to
     # the old default; an unknown/missing chain fails loud; a no-coverage chain
     # returns unavailable rather than silently scanning mainnet.
@@ -856,7 +891,7 @@ def enumerate_mapping_values_sync(
                 return result
             del _VALUE_CACHE[cache_key]
 
-    # Per-chain scan URL (inv. 6): see ``enumerate_mapping_allowlist_sync``.
+    # Per-chain scan URL: see ``enumerate_mapping_allowlist_sync``.
     if not kwargs.get("client") and not kwargs.get("hypersync_url"):
         scan_url = _scan_hypersync_url_for_chain(chain)
         if scan_url is None:

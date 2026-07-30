@@ -13,10 +13,25 @@ corpus pins solc ``0.8.27`` — the single version the offline CI ``test`` job
 installs — so the gate runs (never skips) in the default suite.
 
 The golden format carries a per-function ``claims`` list of
-``{claim_id, tier}`` records, so the gate pins the Plane-1
+``{claim_id, tier, witness}`` records, so the gate pins the Plane-1
 ``(contract, selector, claim_id, tier)`` tuples alongside the legacy
 ``effect_labels``. A matcher edit that silently mints or drops a claim on a
 corpus function fails the gate.
+
+The ``witness`` is pinned in full. It was not, and that made every field INSIDE a
+witness invisible to this gate: a producer could move a destination from proven
+to guessed, rebind an ``exec.arbitrary`` call target from one address parameter
+to another, or drop a corroborating gate, and the ``(claim_id, tier)`` pair the
+gate diffed would not move a byte. A zero-diff means something only when the
+golden PINS the field, so the field is pinned.
+
+``predicate_tree`` is pinned as a compact summary for the same reason, and it is
+the one the rest of the golden cannot express: "this public function has no
+predicate tree" is today published as a positive assertion of *unguarded*, so a
+fixture whose gate the extractor misses is indistinguishable here from a function
+that genuinely has no gate. The summary records tree presence, root operator and
+the leaf authority roles — the three things that move when a missed gate starts
+being found.
 
 It also pins the per-function ``value_flows`` — every field of every flow fact,
 including the destination/amount lattice kinds, their per-site breakdowns and
@@ -36,12 +51,15 @@ import os
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "label_corpus" / "golden.json"
 
-GOLDEN_SCHEMA_VERSION = 3
+# 4: ``claims[].witness`` and ``predicate_tree`` pinned per function.
+# 5: per-function ``action_summary`` pinned — the PROSE copy of the labels, which a
+# narrowed structured witness does not move.
+GOLDEN_SCHEMA_VERSION = 5
 
 # Frozen fixture corpus for the effect-labels A/B golden gate. Every entry is a
 # small synthetic source that reproduces one real-world claim SHAPE — either a
@@ -163,6 +181,91 @@ MANIFEST: list[dict[str, Any]] = [
         "solc_version": "0.8.27",
         "source_path": "tests/fixtures/contracts/label_corpus/cast_wrapped_pull.sol",
     },
+    {
+        # Parameter destinations that are NOT freely chosen — hash
+        # commitment, mapping allowlist, storage equality — plus the
+        # unconstrained negative control that must not narrow with them.
+        "address": "0x00000000000000000000000000000000000000b0",
+        "name": "ConstrainedDestinations",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/constrained_destinations.sol",
+    },
+    {
+        # The corpus had ZERO delegatecall_execution rows. Direct
+        # storage-setter destination, caller-keyed mapping element (must resolve
+        # not-determined), and the library-routed shape whose recorded sink names
+        # the LIBRARY's parameter instead of this contract's storage variable.
+        "address": "0x00000000000000000000000000000000000000c0",
+        "name": "DelegatecallRoutes",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/delegatecall_routes.sol",
+    },
+    {
+        # exec.arbitrary parameter BINDING. Every prior corpus exec.arbitrary
+        # fixture had a single address parameter, so the pick was forced and any
+        # implementation passed. This one puts two address parameters in the read
+        # set with the NON-FIRST as the destination, and adds the branched /
+        # reassigned / written-after-call shapes whose honest answer is
+        # not-determined. Shared with tests/test_claims_upgrade_exec_matchers.py.
+        "address": "0x00000000000000000000000000000000000000d0",
+        "name": "ExecBinding",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/claims_upgrade_exec/exec_arbitrary_binding.sol",
+    },
+    {
+        # G3 classes F and R: caller-gated functions that end up with no
+        # predicate tree, which reads downstream as a positive claim of
+        # "unguarded". Carries the discriminating sibling for class F.
+        "address": "0x00000000000000000000000000000000000000e0",
+        "name": "TreeAbsentPublics",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/tree_absent_publics.sol",
+    },
+    {
+        # A timed pause latch with a compiler-produced duration bound and an
+        # indefinite latch in the same contract, so a bound may not be published
+        # for the latch that has none.
+        "address": "0x00000000000000000000000000000000000000f0",
+        "name": "TimedLatch",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/timed_latch.sol",
+    },
+    {
+        # A bucket rate limiter in front of a value move, with the
+        # limiter-free sibling that must publish a byte-identical flow witness
+        # (the corpus form of "a rate limit does not change how much can leave"),
+        # plus a same-named-different-selector decoy that must earn nothing.
+        "address": "0x0000000000000000000000000000000000000110",
+        "name": "RateLimitedFlow",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/rate_limited_flow.sol",
+    },
+    {
+        # The only ``policy_derived`` producer in the corpus. One body call
+        # resolves onto CastWrappedPull above and inherits its standard_exact
+        # flow.in at the policy tier; the second resolves onto AssetRecovery —
+        # an interface-typed-parameter callee, joinable only through the
+        # canonical ``abi_selector`` key — and inherits its flow.out.
+        # See the fixture header: that row going empty again means the
+        # canonical half of the join regressed.
+        "address": "0x0000000000000000000000000000000000000100",
+        "name": "PolicyCaller",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/label_corpus/policy_caller.sol",
+        # Stands in for a control snapshot: state variable -> the corpus address
+        # the policy stage resolved it to.
+        "policy_controller_values": {
+            "vault": "0x00000000000000000000000000000000000000a0",
+            "recovery": "0x0000000000000000000000000000000000000070",
+        },
+    },
 ]
 
 # Directories that are Foundry build output, never source; excluded from the
@@ -282,7 +385,73 @@ _FLOW_KEYS = (
     "amount_kinds",
     "target_param_index",
     "amount_param_index",
+    # Routed flows only: the identity of the op(s) carrying the move — the
+    # mandatory-gate transparency join reads exactly this, so the gate must
+    # show a change to it (the corpus is blind to fields it does not pin).
+    "router_ops",
 )
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively render a witness for the golden.
+
+    Anything the JSON encoder cannot represent becomes ``{"__unpinnable__":
+    "<TypeName>"}`` — the TYPE only, never ``repr``. A Slither object's repr
+    embeds its ``id()``, so pinning it would make the golden differ between two
+    runs of the same code and the gate would report noise as behaviour change.
+    The marker is deliberately loud: a witness field that lands here is a field
+    this gate cannot protect, and that should be visible in the golden rather
+    than silently dropped.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
+        return value
+    if isinstance(value, float):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (set, frozenset)):
+        # Producer sets carry no order; sort so the golden is a function of the
+        # membership rather than of this interpreter's hash seed.
+        return sorted(_json_safe(v) for v in value)
+    return {"__unpinnable__": type(value).__name__}
+
+
+# Predicate-tree leaf fields worth pinning per function. The full tree is large
+# and mostly restates the source expression; these three are what a change in
+# guard EXTRACTION moves.
+def _tree_leaves(tree: Any) -> Iterable[dict[str, Any]]:
+    if not isinstance(tree, dict):
+        return
+    leaf = tree.get("leaf")
+    if isinstance(leaf, dict):
+        yield leaf
+    for child in tree.get("children") or []:
+        yield from _tree_leaves(child)
+
+
+def _predicate_tree_record(tree: Any) -> dict[str, Any]:
+    """Compact, discriminating summary of one function's predicate tree.
+
+    ``"present": false`` is the shape the whole G3 class turns on — a public
+    function with a real caller gate whose tree the extractor never built reads
+    from every consumer as *unguarded*. Pinning presence here is what lets a
+    corpus fixture of that class go red when the extractor starts finding the
+    gate; ``effect_labels``, ``claims`` and ``value_flows`` all stay identical
+    across exactly that fix.
+    """
+    if tree is None:
+        return {"present": False}
+    leaves = list(_tree_leaves(tree))
+    return {
+        "present": True,
+        "root_op": str(tree.get("op") or "") if isinstance(tree, dict) else "",
+        "leaf_count": len(leaves),
+        "authority_roles": sorted({str(leaf.get("authority_role") or "") for leaf in leaves}),
+        "leaf_kinds": sorted({str(leaf.get("kind") or "") for leaf in leaves}),
+        "references_msg_sender": any(bool(leaf.get("references_msg_sender")) for leaf in leaves),
+    }
 
 
 def _flow_record(flow: Any) -> dict[str, Any]:
@@ -296,22 +465,87 @@ def _flow_record(flow: Any) -> dict[str, Any]:
     return {key: flow[key] for key in _FLOW_KEYS if key in flow}
 
 
-def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
+def _apply_policy_derivations(
+    entry: dict[str, Any],
+    effects: Mapping[str, Any],
+    effects_by_address: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Run the production cross-contract pass over ``effects`` in place.
+
+    This is the ONLY way a ``policy_derived`` claim exists: the tier is minted
+    exclusively here, ``build_claims`` is forbidden from producing it, and the
+    corpus previously stopped at ``build_claims``. So the weakest tier in the
+    vocabulary had no golden row anywhere, and a consumer that mishandles it
+    could not be caught by this gate.
+
+    The manifest's ``policy_controller_values`` stands in for the control
+    snapshot the policy worker reads — ``{state var -> resolved address}`` — and
+    the callee claims come from the OTHER corpus contracts, so the join is the
+    production one end to end rather than a hand-written claim.
+    """
+    from services.static.claims import resolve_claim_precedence
+    from services.static.cross_contract import build_callee_claim_map, derive_cross_contract_claims
+
+    controller_values = {
+        f"contract:{var}": {"value": address} for var, address in (entry.get("policy_controller_values") or {}).items()
+    }
+    if not controller_values:
+        return
+    enriched = derive_cross_contract_claims(
+        effects,
+        controller_values,
+        build_callee_claim_map({addr: dict(art) for addr, art in effects_by_address.items()}),
+    )
+    for fn_sig, new_claims in enriched.items():
+        record = (effects.get("functions") or {}).get(fn_sig)
+        if not isinstance(record, dict):
+            continue
+        record["claims"] = resolve_claim_precedence(list(record.get("claims") or []) + list(new_claims))
+
+
+def extract_contract(
+    entry: dict[str, Any],
+    workdir: Path,
+    *,
+    effects_by_address: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Compile one corpus contract and return its golden record.
 
     Copies the project into ``workdir`` (fresh, no cached build output),
     compiles it with Slither pinned to the manifest solc version, runs the
     production sequence, and flattens the effects artifact into sorted function
-    tuples.
+    tuples. ``effects_by_address`` carries the already-compiled siblings a
+    cross-contract derivation may read; without it the policy pass is skipped
+    (``build_golden`` supplies it).
     """
-    from services.resolution.capability_resolver import _selector_for_signature
+    subject, effects, predicate_trees = _compile_and_attach(entry, workdir)
+    if effects_by_address:
+        _apply_policy_derivations(entry, effects, effects_by_address)
+    return _flatten_record(entry, subject, effects, predicate_trees)
+
+
+def _compile_and_attach(entry: dict[str, Any], workdir: Path):
+    """Compile one corpus contract and run the static plane's attach/project
+    steps, returning ``(subject, effects, predicate_trees)``."""
     from services.static.claims import attach_claims_to_effects, project_effect_labels
 
     subject, effects, predicate_trees, claims_artifact = _compile_subject(entry, workdir)
     attach_claims_to_effects(effects, claims_artifact)
     project_effect_labels(effects)
+    return subject, effects, predicate_trees
+
+
+def _flatten_record(
+    entry: dict[str, Any],
+    subject: Any,
+    effects: Mapping[str, Any],
+    predicate_trees: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Flatten one compiled contract's artifacts into its golden record."""
+    from services.resolution.capability_resolver import _selector_for_signature
 
     canonical = predicate_trees.get("canonical_signatures") or {}
+    trees = predicate_trees.get("trees") or {}
     functions: list[dict[str, Any]] = []
     for full_name, info in (effects.get("functions") or {}).items():
         selector = _selector_for_signature(full_name, canonical) or info.get("selector") or ""
@@ -320,12 +554,32 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
                 "full_name": full_name,
                 "selector": selector,
                 "effect_labels": sorted(info.get("effect_labels") or []),
-                # Plane-1 claims: only claim_id + tier are pinned (the witness is
-                # replayable and verbose; the A/B gate diffs the sentence-bearing
-                # tuple). Sorted for a deterministic golden.
+                # The PROSE COPY of the labels/targets, and the version a reader
+                # quotes (``summaries._action_summary``). Pinned because a witness
+                # narrowed in the structured plane leaves this sentence intact: the
+                # corpus already holds functions whose ``destination_kind`` is
+                # ``not_determined`` while this string says "Executes arbitrary
+                # external calldata from the contract.", and the gate could see
+                # only the former. Empty string, never None, so presence is uniform.
+                "action_summary": str(info.get("action_summary") or ""),
+                # Plane-1 claims: claim_id, tier AND the full witness. The
+                # witness is where the evidence lives — which parameter a call
+                # target bound to, which gate corroborated a selector, whether a
+                # destination was proven or guessed — and none of it moves the
+                # (claim_id, tier) pair, so pinning the pair alone let every
+                # witness-level regression through. Sorted by the full serialized
+                # record so two claims with the same id and tier still order
+                # deterministically.
                 "claims": sorted(
-                    ({"claim_id": c["claim_id"], "tier": c["tier"]} for c in (info.get("claims") or [])),
-                    key=lambda c: (c["claim_id"], c["tier"]),
+                    (
+                        {
+                            "claim_id": c["claim_id"],
+                            "tier": c["tier"],
+                            "witness": _json_safe(c.get("witness") or {}),
+                        }
+                        for c in (info.get("claims") or [])
+                    ),
+                    key=lambda c: (c["claim_id"], c["tier"], json.dumps(c["witness"], sort_keys=True)),
                 ),
                 # Producer order, NOT sorted: the flow list's ordering is itself
                 # part of the contract (same-contract flows precede routed ones),
@@ -349,10 +603,30 @@ def extract_contract(entry: dict[str, Any], workdir: Path) -> dict[str, Any]:
                     ),
                     key=lambda s: (s["target"], s["selector"], s["origin"]),
                 ),
+                # Delegatecall sinks, pinned separately because they are NOT
+                # ``external_call`` kind and so were invisible above — the corpus
+                # recorded a delegatecall only when a library wrapper happened to
+                # leave an external_call beside it. The target is the whole
+                # question: the direct route names this contract's storage
+                # variable, the library route names the LIBRARY's parameter (a
+                # symbol that does not exist here), and a caller-keyed mapping
+                # element names an IR reference, which is the shape whose only
+                # honest answer is not-determined.
+                "delegatecall_sinks": sorted(
+                    (
+                        {"target": str(s.get("target") or ""), "origin": str(s.get("origin") or "")}
+                        for s in (info.get("sinks") or [])
+                        if isinstance(s, dict) and s.get("kind") == "delegatecall"
+                    ),
+                    key=lambda s: (s["target"], s["origin"]),
+                ),
                 # The persisted compatibility display targets
                 # (``EffectiveFunction.effect_targets``): a resolved head changes
                 # this user-visible string, so pin it too.
                 "effect_targets": sorted(str(t) for t in (info.get("effect_targets") or [])),
+                # Plane-0 guard evidence. Keyed by the function's full name, the
+                # same key ``predicate_trees["trees"]`` uses.
+                "predicate_tree": _predicate_tree_record(trees.get(full_name)),
             }
         )
     functions.sort(key=lambda row: (row["full_name"], row["selector"]))
@@ -394,9 +668,17 @@ def build_golden(
     *,
     workdir: Path,
 ) -> dict[str, Any]:
-    """Compute the full golden document for ``entries`` under ``workdir``."""
+    """Compute the full golden document for ``entries`` under ``workdir``.
+
+    Two phases, because the cross-contract policy tier needs every sibling's
+    claims in hand before any record is flattened. Each contract is still
+    compiled exactly once."""
     entries = list(entries) if entries is not None else corpus_entries()
-    contracts = [extract_contract(entry, workdir) for entry in entries]
+    compiled = [(entry, *_compile_and_attach(entry, workdir)) for entry in entries]
+    effects_by_address = {entry["address"].lower(): effects for entry, _subject, effects, _trees in compiled}
+    for entry, _subject, effects, _trees in compiled:
+        _apply_policy_derivations(entry, effects, effects_by_address)
+    contracts = [_flatten_record(entry, subject, effects, trees) for entry, subject, effects, trees in compiled]
     contracts.sort(key=lambda c: c["address"])
     return {
         "schema_version": GOLDEN_SCHEMA_VERSION,

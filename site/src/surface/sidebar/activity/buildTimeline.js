@@ -3,7 +3,7 @@
 // boundary:
 //   - monitored_events: captured from the enrollment block forward, ALL kinds.
 //   - upgrade_history:   back-filled to deployment, UPGRADES only (proxy only).
-// See site/prototypes/activity-tab/HANDOFF.md §5. No React — unit-testable.
+// No React — unit-testable.
 
 import { shortenAddress } from "../../../graph.js";
 import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../monitoring/format.js";
@@ -11,25 +11,53 @@ import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
 // Dedup key for an upgrade across both stores. The upgrade_history artifact
-// carries no tx_hash/log_index (HANDOFF §5b), so a post-enrollment upgrade —
+// carries no tx_hash/log_index, so a post-enrollment upgrade —
 // which appears in BOTH stores — is matched on (block, new-implementation).
 function upgradeKey(block, implAddr) {
   return `${block == null ? "?" : block}:${String(implAddr || "").toLowerCase()}`;
 }
 
 // [{ from, to, addr }] eras from oldest→newest impls; the current impl runs to ∞.
+//
+// An unknown boundary is `null`, never a boundary VALUE. `block_introduced` folded
+// to 0 made a block-less impl's era start at genesis and swallow the impl
+// attribution of every earlier event; `block_replaced` folded to Infinity made it
+// run to now — the same ±infinity spread that was removed server-side.
+// `synthesize_from_events` emits `block_number: null` for a poll-detected upgrade,
+// so both are reachable.
+//
+// KEY PRESENCE is the successor discriminator, and it comes from the producer, not
+// from a guess: `_build_implementation_timeline`
+// (services/discovery/upgrade_history.py) writes `block_replaced` from the NEXT
+// upgrade event unconditionally, so the key is absent only on the last record —
+// the current impl, which really does run to now — and present-but-null exactly
+// when a successor exists whose block was never determined. Same distinction
+// `services/audits/coverage.ImplWindow.successor` makes: `to == null` alone does
+// NOT mean "still current".
 function implEras(proxy) {
   const impls = Array.isArray(proxy?.implementations) ? proxy.implementations : [];
-  return impls.map((im) => ({
-    addr: im.address,
-    from: typeof im.block_introduced === "number" ? im.block_introduced : 0,
-    to: typeof im.block_replaced === "number" ? im.block_replaced : Infinity,
-  }));
+  return impls.map((im) => {
+    const hasSuccessor = im != null && Object.prototype.hasOwnProperty.call(im, "block_replaced");
+    return {
+      addr: im.address,
+      from: typeof im.block_introduced === "number" ? im.block_introduced : null,
+      to: typeof im.block_replaced === "number" ? im.block_replaced : hasSuccessor ? null : Infinity,
+    };
+  });
 }
 
 function implAt(eras, block) {
   if (block == null) return null;
+  // The no-upgrade-events shape: `_build_implementation_timeline` returns the bare
+  // `{address: current_impl}` when there are no events, so this proxy has only ever
+  // had one impl and any block is under it. That is a fact about the LIST, not a
+  // guessed introduction block, which is why it is stated separately from the scan.
+  if (eras.length === 1 && eras[0].from == null && eras[0].to === Infinity) return eras[0].addr;
   for (const era of eras) {
+    // An era with an undetermined boundary cannot be SHOWN to contain a block.
+    // Attribution is a positive claim ("this event ran under that implementation")
+    // and it is left off rather than guessed.
+    if (era.from == null || era.to == null) continue;
     if (block >= era.from && block < era.to) return era.addr;
   }
   return null;

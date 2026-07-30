@@ -164,8 +164,8 @@ function collectPrincipals(fn) {
 function classifyAction(fn) {
   // Claims (Plane 1) drive severity when present; the name-substring arms below
   // stay a fallback only for claim-less (stale) rows. The score defers the
-  // effects bridge's behavioral_observed tier (§5.2): score over the pre-observed
-  // view so verdicts never move the score until SCORING_INVARIANTS.md.
+  // effects bridge's behavioral_observed tier: score over the pre-observed view,
+  // so verdicts never move the score while their consumption stays unspecified.
   fn = scoreClaimsView(fn);
   if (hasClaims(fn)) {
     return scoreForClaims(fn) || { kind: "other", severity: 0 };
@@ -203,6 +203,12 @@ function collectActions(contracts) {
         kind: action.kind,
         severity: action.severity,
         weight: action.severity * importance,
+        // Set only when the claim that produced this severity carries a tier with
+        // no single-contract evidence, so the severity was attenuated for
+        // PROVENANCE and not because the action is less dangerous. Carried into
+        // the example meta below: an unexplained lower number reads as a smaller
+        // risk instead of weaker evidence.
+        provenanceTier: action.provenance_tier || null,
         principals: collectPrincipals(fn),
       });
     }
@@ -210,6 +216,20 @@ function collectActions(contracts) {
   return actions;
 }
 
+// RECORDED, NOT FIXED. A function whose open arm is
+// SELF-KEYED — `DelegationManager.undelegate(address)`, where `msg.sender == staker`
+// needs no authority but `msg.sender != staker` requires an operator or the
+// delegation approver — scores here as a plain public action, at the same 0.1 an
+// unconditionally permissionless one gets. The distinction that is lost is real (a
+// third party can be force-undelegated only through the gated arm) and it is worth
+// scoring, but nothing in the persisted plane carries it: `authority_public` and
+// `authority_openness` are whole-function verdicts, and `capability_expr` records
+// the resolved caller set, not a per-arm split with a self-keyed marker. Deriving
+// one here would mean re-deciding the earned-public algebra from prose, which is
+// the producer's job and a scoring-vocabulary extension, not a consumer-side
+// split. Verified not to be a laundering-safety gap in the meantime: the current
+// score is the SEVERE reading of both arms, so the missing distinction can only
+// make a protocol read better than it does today, never worse.
 function actionProtectionScore(action) {
   if (action.principals.length === 0) {
     // A consumed one-shot initializer is inert — the open path can never be
@@ -236,7 +256,7 @@ function auditBriefScore(audit) {
 function coverageMaps(auditCoverage) {
   // Keyed by the composite (chain, address) entity token, not bare address: a
   // CREATE2 twin on two chains has one coverage row each, and bare keying would
-  // let one overwrite the other (inv. 13).
+  // let one overwrite the other.
   const byEntity = new Map();
   for (const row of asArray(auditCoverage?.coverage)) {
     if (row.address) byEntity.set(entityKey(row.chain, row.address), row);
@@ -288,7 +308,7 @@ function safeguardScore(actions) {
 
 function upgradeScore(contracts, actions, coverageByAddress) {
   // Keyed by the composite (chain, address) entity token so a cross-chain twin's
-  // upgrade actions don't fold into each other (inv. 13).
+  // upgrade actions don't fold into each other.
   const byContract = new Map();
   for (const action of actions) {
     if (action.kind !== "upgrade") continue;
@@ -321,7 +341,7 @@ function upgradeScore(contracts, actions, coverageByAddress) {
 
 function pauseScore(contracts, actions) {
   // Keyed by the composite (chain, address) entity token so a cross-chain twin's
-  // pause/unpause actions stay attributed to their own chain (inv. 13).
+  // pause/unpause actions stay attributed to their own chain.
   const byContract = new Map();
   for (const action of actions) {
     if (!action.contract?.address) continue;
@@ -372,6 +392,11 @@ function auditScore(contracts, coverageByAddress) {
 function dataConfidenceScore(contracts, actions) {
   const contractRows = contracts.map((contract) => {
     const checks = [
+      // Deliberate collapse, and only on THIS axis: `false` (the fetch says the
+      // source is not verified) and `null` (the fetch fact never reached the
+      // summary) both score 0 because the axis measures how much is KNOWN about
+      // the contract, and neither state is knowledge that it is verified. They are
+      // kept apart everywhere they are stated in words — see buildDataTooltip.
       contract.source_verified === true ? 1 : 0,
       asArray(contract.functions).length > 0 ? 1 : 0,
     ];
@@ -472,6 +497,10 @@ function actionExample(action, reason) {
     meta: [
       action.kind,
       principals ? `by ${principals}` : emptyMeta,
+      // Names the provenance when the claim behind this action carries no
+      // single-contract evidence (a cross-contract inference), so the reader is
+      // not left to read an attenuated severity as a smaller hazard.
+      action.provenanceTier === "policy_derived" ? "cross-contract inference" : null,
       shortAddress(address),
     ].filter(Boolean).join(" · "),
     contractAddress: address,
@@ -816,9 +845,19 @@ function buildDataTooltip(contracts, actions) {
       : "Proxy and principal metadata is mostly present.";
 
   const negativeExamples = [
+    // Two states, two sentences. `false` is the fetch's answer about the contract;
+    // `null` is the absence of that answer, and calling it "unverified" asserts
+    // something nobody measured — the payload serves both (81 true / 9 false on the
+    // 2026-07-28 corpus, plus nulls) and one chip labelled every non-true row
+    // "source unverified".
     ...contracts
-      .filter((contract) => contract.source_verified !== true)
-      .map((contract) => contractExample(contract, "Source is not marked verified.", "source unverified")),
+      .filter((contract) => contract.source_verified === false)
+      .map((contract) => contractExample(contract, "Source is not verified.", "source unverified")),
+    ...contracts
+      .filter((contract) => contract.source_verified == null)
+      .map((contract) =>
+        contractExample(contract, "Source verification was not recorded for this contract.", "verification not recorded"),
+      ),
     ...contracts
       .filter((contract) => asArray(contract.functions).length === 0)
       .map((contract) => contractExample(contract, "No callable functions were discovered.", "functions missing")),

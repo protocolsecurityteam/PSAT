@@ -446,14 +446,57 @@ describe("custom-named slots", () => {
 
   it("renders an unknown custom slot via the fallback prose path", () => {
     // No renderer for a slot named 'guardian' → falls through to the
-    // raw key-value fallback.
+    // terminal-form fallback. The producer only mints this stem when the
+    // tracking plan proved the slot gates callers, so the control wording
+    // is earned here.
     const result = decodeEvent(
       evt("controller_changed:state_variable:guardian", {
         guardian: ADDR_A,
         effect_tags: { writes: ["guardian"] },
       }),
     );
-    expect(result.title).toBe("controller changed:state variable:guardian");
+    expect(result.title).toBe("Controller changed: guardian");
     expect(result.sub).toContain("guardian");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Neutral terminal type — the producer's unproven-target fallback
+// ---------------------------------------------------------------------------
+
+describe("state_changed:<controller_id>", () => {
+  // Verbatim shape of a served row: an ordinary ERC-20 transfer on an
+  // enrolled governance token, whose _balances slot the tracking plan
+  // never proved to gate anything.
+  const transferRow = {
+    event_type: "state_changed:state_variable:_balances",
+    data: {
+      to: "0x951af4267c8fbcd1c5a8c38e15b122768e44559a",
+      from: "0x0000000000000000000000000000000000000000",
+      value: 22661724000000000000,
+      effect_tags: { writes: ["_allowances", "_balances", "_totalSupply"] },
+    },
+  };
+
+  it("never renders a control claim in the timeline title", () => {
+    const result = decodeEvent(transferRow);
+    expect(result.title).toBe("State changed: _balances");
+    expect(result.title.toLowerCase()).not.toContain("controller");
+    expect(result.sub).toContain("to: 0x951a");
+  });
+
+  it("is a state event, not an ownership/role/upgrade one", () => {
+    expect(eventKind(transferRow)).toBe("state");
+    expect(eventKindLabel(transferRow)).toBe("State change");
+    expect(eventSeverity(transferRow)).toBe("routine");
+  });
+
+  it("still reports what the emitter wrote when tags name a known slot", () => {
+    // A neutral type does not suppress a renderer the tags do earn.
+    const result = decodeEvent({
+      event_type: "state_changed:state_variable:custom",
+      data: { old_owner: ADDR_A, new_owner: ADDR_B, effect_tags: { writes: ["owner"] } },
+    });
+    expect(result.title).toBe("Ownership transferred");
   });
 });

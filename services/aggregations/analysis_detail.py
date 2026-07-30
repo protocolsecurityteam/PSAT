@@ -11,7 +11,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from db.models import (
@@ -26,8 +26,92 @@ from db.models import (
 # Indirect through ``routers.deps`` so tests get a single patch point for
 # ``SessionLocal``/``get_all_artifacts``.
 from routers import deps
+from services.aggregations.action_summary import describe_action
+from services.policy.capability_surface import capability_currency
 
 logger = logging.getLogger(__name__)
+
+
+def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
+    """One ``principal_labels`` row as published, with two assertions narrowed.
+
+    ``confidence`` is NOT published under that name. The column is a
+    NAMING-BRANCH label: ``principal_enrichment._display_name`` returns ``"high"``
+    both for the ``safe_signer`` branch (an on-chain-verified fact) and for the
+    final fallback, where it means only *"``resolved_type`` was not the literal
+    string ``unknown``"*, and both print ``high``. Distribution: ``high`` 1,376 /
+    ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
+    ``resolved_type == "unknown"`` and no such row exists, so the field is
+    two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
+    express "I did not determine this" — a state an evidence column has to keep
+    distinct from a determined answer.
+    Published as ``naming_rule``, which is what it measures. A real per-principal
+    confidence has to come from whether the identity was verified on-chain (Safe
+    ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
+    needs wiring this consumer does not own, and inventing one from this column
+    would be manufacturing the evidence the rename exists to stop claiming.
+
+    ``label`` is byte-identical to ``display_name`` on 1,556/1,556 rows, so a
+    consumer reading both believed there were two facts. It is published only when
+    the two actually differ.
+    """
+    out: dict[str, Any] = {
+        "address": row.address,
+        "display_name": row.display_name,
+        "resolved_type": row.resolved_type,
+        "labels": list(row.labels or []),
+        # Which naming branch produced ``display_name``. Never an epistemic
+        # confidence, and never omitted — key-absence marks a pre-rename payload.
+        "naming_rule": row.confidence,
+        "details": row.details or {},
+        "graph_context": list(row.graph_context or []),
+    }
+    if row.label is not None and row.label != row.display_name:
+        out["label"] = row.label
+    return out
+
+
+def _artifacts_or_degrade(
+    session: Session,
+    job_id: Any,
+    not_determined: dict[str, str],
+    proven_absent: dict[str, str],
+) -> dict[str, Any]:
+    """``get_all_artifacts`` for a page that may render partially.
+
+    ``get_all_artifacts`` fails closed, because a short dict is
+    indistinguishable from "the job produced fewer artifacts". This page is
+    allowed to render what did load — but only by naming what did not, in the
+    two maps published as ``artifacts_not_determined`` (the bucket could not be
+    asked) and ``artifacts_body_absent`` (the bucket answered; the row asserts a
+    key nothing is stored under). Every artifact this payload carries is
+    consumed as evidence about the contract, and the two shortfalls are not the
+    same evidence — one may resolve itself, the other never will.
+
+    NO ``site/`` CONSUMER, and this is why. Nothing in the SPA
+    fetches this merged payload at all: ``grep`` over ``site/src`` finds
+    ``/api/analyses`` only as the LISTING (``App.jsx``) plus two per-artifact reads
+    (``EntityActivity`` → ``upgrade_history``, ``layout/dependencies`` →
+    ``dependency_graph_viz``), both of which go through
+    ``routers/analyses``'s artifact endpoint and already receive the same three
+    answers on the wire via ``X-PSAT-Artifact-State``. So wiring a consumer for
+    these two maps means building a page that reads the multi-MB payload, which is
+    a feature and not a consumer-side split. The maps stay published for API
+    consumers; the SPA's equivalent distinction is served by the header.
+    """
+    try:
+        return deps.get_all_artifacts(session, job_id)
+    except deps.StorageContentIncomplete as exc:
+        logger.error(
+            "analysis detail for job %s is missing %d artifact bodies (%d not determined, %d proven absent)",
+            job_id,
+            len(exc.not_determined) + len(exc.proven_absent),
+            len(exc.not_determined),
+            len(exc.proven_absent),
+        )
+        not_determined.update(exc.not_determined)
+        proven_absent.update(exc.proven_absent)
+        return dict(exc.values or {})
 
 
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
@@ -51,7 +135,9 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         return None
 
     # Load artifacts (for those still stored as artifacts)
-    all_artifacts = deps.get_all_artifacts(session, job.id)
+    not_determined: dict[str, str] = {}
+    body_absent: dict[str, str] = {}
+    all_artifacts = _artifacts_or_degrade(session, job.id, not_determined, body_absent)
 
     # Fall back to address lookup when copy_static_cache has reassigned
     # the Contract row to a newer job. Chain-scoped so we don't pick up
@@ -120,7 +206,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             # back to job.request['chain'].
             req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
-            # chain_id is required (inv. 6): bind the resolver's live reads to the
+            # chain_id is required: bind the resolver's live reads to the
             # job's first-class chain_id, falling back to the registry-backed
             # derivation from the job's chain string (mirrors the M0.2 backfill).
             from db.models import derive_job_chain_id
@@ -158,7 +244,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         proxy_stmt = select(Job).where(Job.address == proxy_address).order_by(Job.updated_at.desc()).limit(1)
         proxy_job = session.execute(proxy_stmt).scalar_one_or_none()
         if proxy_job:
-            proxy_artifacts = deps.get_all_artifacts(session, proxy_job.id)
+            proxy_artifacts = _artifacts_or_degrade(session, proxy_job.id, not_determined, body_absent)
             for fallback_name in ("upgrade_history", "dependency_graph_viz", "dependencies"):
                 if fallback_name in payload:
                     continue
@@ -174,7 +260,7 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         impl_stmt = select(Job).where(Job.address == impl_addr).order_by(Job.updated_at.desc()).limit(1)
         impl_job = session.execute(impl_stmt).scalar_one_or_none()
         if impl_job:
-            _inherit_from_impl(session, payload, job, impl_job, impl_addr)
+            _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
 
     # Add subject info from contract_analysis if available
     if isinstance(all_artifacts.get("contract_analysis"), dict):
@@ -195,6 +281,17 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         if synthesized:
             payload["upgrade_history"] = synthesized
 
+    if not_determined:
+        # Names whose row exists but whose body the bucket could not be asked
+        # about. Without this the SPA reads their absence from ``payload`` as
+        # proof the analysis never produced them.
+        payload["artifacts_not_determined"] = dict(sorted(not_determined.items()))
+    if body_absent:
+        # Names whose row exists and whose object the bucket says it does not
+        # hold. Also not "the analysis never produced them" — but unlike the map
+        # above, re-asking will not change the answer.
+        payload["artifacts_body_absent"] = dict(sorted(body_absent.items()))
+
     return payload
 
 
@@ -207,7 +304,8 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
         ).scalars()
     )
 
-    ef_list = _serialize_effective_functions(ef_rows)
+    index_head = _index_frontier(session, contract_row)
+    ef_list = _serialize_effective_functions(ef_rows, index_head=index_head)
     if ef_list:
         payload["effective_permissions"] = {
             "functions": ef_list,
@@ -225,19 +323,7 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
     )
     if pl_rows:
         payload["principal_labels"] = {
-            "principals": [
-                {
-                    "address": p.address,
-                    "display_name": p.display_name,
-                    "label": p.label,
-                    "resolved_type": p.resolved_type,
-                    "labels": list(p.labels or []),
-                    "confidence": p.confidence,
-                    "details": p.details or {},
-                    "graph_context": list(p.graph_context or []),
-                }
-                for p in pl_rows
-            ],
+            "principals": [_principal_label_payload(p) for p in pl_rows],
             "contract_name": contract_row.contract_name,
             "contract_address": contract_row.address,
         }
@@ -268,7 +354,27 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
             payload["resolved_control_graph"] = _build_control_graph(contract_row.address, cgn_rows, cge_rows)
 
 
-def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dict[str, Any]]:
+def _index_frontier(session: Session, contract_row: Contract) -> int | None:
+    """The durable event index's own frontier for this contract's chain — the
+    yardstick ``capability_currency`` measures a capability's fold height
+    against. A local read; ``None`` when the chain has no cursors at all, which
+    keeps the currency verdict ``not_determined`` rather than inventing a head.
+    """
+    from db.models import IndexedEventCursor
+    from utils.chains import UnknownChainError, chain_by_name
+
+    try:
+        chain_id = chain_by_name(contract_row.chain or "ethereum").chain_id
+    except (UnknownChainError, AttributeError):
+        return None
+    return session.execute(
+        select(func.max(IndexedEventCursor.last_indexed_block)).where(IndexedEventCursor.chain_id == chain_id)
+    ).scalar()
+
+
+def _serialize_effective_functions(
+    ef_rows: list[EffectiveFunction], *, index_head: int | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for ef in ef_rows:
         direct_owner = None
@@ -288,22 +394,43 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
                 signature_witnesses.append(principal_dict)
             else:
                 controller_principals.append(principal_dict)
+        _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
+            ef.action_summary, getattr(ef, "claims", None), ef.effect_labels
+        )
         entry: dict[str, Any] = {
             "function": ef.abi_signature or ef.function_name,
             "selector": ef.selector,
             "effect_labels": list(ef.effect_labels or []),
             "effect_targets": list(ef.effect_targets or []),
             "claims": list(getattr(ef, "claims", None) or []),
-            "action_summary": ef.action_summary,
+            # The quotable copy of the structured planes, reconciled against them
+            # and labelled with which shape it is: 130 local rows say
+            # "Performs a contract action." (no evidence at all), 528 restate
+            # effect_targets as a "write", and the 20 arbitrary-execution rows
+            # outlived the narrowing of the structured exec.arbitrary claim. See
+            # services/aggregations/action_summary.
+            "action_summary": _action_summary_text,
+            "action_summary_kind": _action_summary_kind,
+            "action_summary_note": _action_summary_note,
             "authority_public": ef.authority_public,
+            # Three-state authority verdict beside the bool it splits. NULL on a
+            # row written before the column existed — passed through as null so
+            # a consumer can tell "this row never carried the distinction" from
+            # the resolver's own 'not_determined'.
+            "authority_openness": getattr(ef, "authority_openness", None),
             "controllers": [{"principals": controller_principals}] if controller_principals else [],
-            "authority_roles": ef.authority_roles or [],
+            # Three states preserved: a non-empty list is witnessed, ``None``
+            # is role-gated with the role not determined (the enumerable
+            # role-store dissolves role identity by design), ``[]`` is proven
+            # not role-gated. ``or []`` folded the middle into the last.
+            "authority_roles": _authority_roles_state(ef.authority_roles),
             "direct_owner": direct_owner,
             "signature_witnesses": signature_witnesses,
         }
         capability_expr = getattr(ef, "capability_expr", None)
         if capability_expr is not None:
             entry["capability_expr"] = capability_expr
+            entry["capability_currency"] = capability_currency(capability_expr, index_head=index_head)
         conditions = getattr(ef, "conditions", None)
         if conditions is not None:
             entry["conditions"] = conditions
@@ -312,6 +439,19 @@ def _serialize_effective_functions(ef_rows: list[EffectiveFunction]) -> list[dic
             entry["status"] = status
         out.append(entry)
     return out
+
+
+def _authority_roles_state(column: Any) -> Any:
+    """The ``authority_roles`` column, with one guard: a non-empty list whose
+    members are ALL non-objects was unreadable as role grants, not a witnessed
+    role requirement — serve the not-determined ``None``, exactly as the
+    company serializer does when the same list enriches to nothing
+    (``services/governance/principals.py``), so the two surfaces derive the
+    same state from the same row. 0-realised on observed rows (0 non-object
+    grants of 210 non-empty ones)."""
+    if isinstance(column, list) and column and not any(isinstance(grant, dict) for grant in column):
+        return None
+    return column
 
 
 def _build_control_snapshot(contract_row: Contract, cv_rows: Sequence[ControllerValue]) -> dict[str, Any]:
@@ -345,6 +485,12 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "contract_name": n.contract_name,
                 "depth": n.depth,
                 "analyzed": n.analyzed,
+                # ``analyzed=false`` is four populations; this says which, and
+                # ``null`` is the honest fifth ("not determined") for rows
+                # written before the column. ``graph_max_depth`` is what makes
+                # "beyond_depth_horizon" checkable against ``depth``.
+                "analysis_state": n.analysis_state,
+                "graph_max_depth": n.graph_max_depth,
                 "details": n.details or {},
             }
             for n in cgn_rows
@@ -363,8 +509,21 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
     }
 
 
-def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl_job: Job, impl_addr: str) -> None:
-    impl_artifacts = deps.get_all_artifacts(session, impl_job.id)
+def _inherit_from_impl(
+    session: Session,
+    payload: dict[str, Any],
+    job: Job,
+    impl_job: Job,
+    impl_addr: str,
+    not_determined: dict[str, str] | None = None,
+    body_absent: dict[str, str] | None = None,
+) -> None:
+    impl_artifacts = _artifacts_or_degrade(
+        session,
+        impl_job.id,
+        not_determined if not_determined is not None else {},
+        body_absent if body_absent is not None else {},
+    )
     for fallback_name in (
         "contract_analysis",
         "control_snapshot",
@@ -390,7 +549,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             )
             if impl_efs:
                 payload["effective_permissions"] = {
-                    "functions": _serialize_effective_functions(impl_efs),
+                    "functions": _serialize_effective_functions(impl_efs, index_head=_index_frontier(session, impl_c)),
                     "contract_name": impl_c.contract_name,
                     "contract_address": impl_c.address,
                 }
@@ -424,9 +583,7 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
             )
             if impl_pls:
                 payload["principal_labels"] = {
-                    "principals": [
-                        {"address": p.address, "label": p.label, "resolved_type": p.resolved_type} for p in impl_pls
-                    ],
+                    "principals": [_principal_label_payload(p) for p in impl_pls],
                 }
 
         if "contract_name" not in payload and impl_c.contract_name:
@@ -437,7 +594,6 @@ def _inherit_from_impl(session: Session, payload: dict[str, Any], job: Job, impl
                 "is_upgradeable": impl_c.summary.is_upgradeable,
                 "is_pausable": impl_c.summary.is_pausable,
                 "has_timelock": impl_c.summary.has_timelock,
-                "static_risk_level": impl_c.summary.risk_level,
                 "standards": list(impl_c.summary.standards or []),
             }
 

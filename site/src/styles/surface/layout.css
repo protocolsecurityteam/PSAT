@@ -1018,6 +1018,23 @@
   text-align: right;
 }
 
+/* Additive. A holding whose USD value was never determined is not a money
+   figure, so it does not take the money colour. Higher specificity than the
+   rule above by one class, and reachable only from the new `unpriced` marker —
+   no existing element gains or loses a declaration. */
+.ps-balance-usd.unpriced {
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* Additive. Coverage/asymmetry disclosure lines under the balances header. */
+.ps-balance-coverage {
+  color: #64748b;
+  font-size: 9px;
+  line-height: 1.35;
+  padding: 2px 0;
+}
+
 /* Clickable principal cards */
 .ps-principal-clickable {
   cursor: pointer;
@@ -2352,7 +2369,7 @@
   line-height: 1.45;
 }
 
-/* Witness facts (SCORING plan §7.3): verbose destination/expiry/backing/reach
+/* Witness facts: verbose destination/expiry/backing/reach
    rows in the function inspector. */
 .ps-witness-facts {
   margin: 0;

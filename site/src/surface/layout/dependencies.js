@@ -185,6 +185,7 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
 
   let result = null;
   let sawResponse = false; // at least one id returned a response (even an empty graph)
+  let sawUnknown = false; // at least one id left the question open
   let lastError = null;
   for (const id of ids) {
     try {
@@ -197,16 +198,31 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
       // A present-but-empty graph is a definitive "no dependencies" — keep
       // trying the other ids in case one carries the real graph.
     } catch (e) {
-      // 404 / not-this-job — try the next id.
+      // Only a 404 is a proven negative — "there is no such artifact under this
+      // id" — and may stay silent while the next id is tried. Every other
+      // non-answer leaves the question open: a 500, a 502/504 from the edge
+      // while a web machine is autostopping, and a network failure, which `api`
+      // rethrows with no `status` at all. Keying this to one code is what let a
+      // failed read stand in as a fact about the contract, so the default is the
+      // hedge and the proven negative is the exception.
+      if (e?.status !== 404) sawUnknown = true;
       lastError = e;
     }
   }
-  // Cache a positive graph or a confirmed empty; never cache a hard failure, so
-  // a transient error retries on the next open instead of masquerading as
-  // "no dependencies" for the rest of the session.
-  if (result || sawResponse) {
+  // Cache a positive graph or a proven empty; never cache a non-answer, so a
+  // transient failure retries on the next open instead of masquerading as
+  // "no dependencies" for the rest of the session. One id that left the
+  // question open is enough to disqualify an empty sibling: the sibling proves
+  // only that *it* has no graph, not that the contract has no dependencies. In
+  // that case the caller gets the error state ("couldn't load"), and `_cache`
+  // is left unset so a later healthy fetch can still answer.
+  if (result) {
     _cache.set(cacheKey, result);
     return result;
+  }
+  if (sawResponse && !sawUnknown) {
+    _cache.set(cacheKey, null);
+    return null;
   }
   throw lastError || new Error("Dependency graph unavailable");
 }

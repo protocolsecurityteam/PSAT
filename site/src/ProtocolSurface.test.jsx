@@ -696,7 +696,6 @@ describe("ProtocolSurface — stage-1 selection model", () => {
         {
           address: VAULT,
           name: "Vault",
-          risk_level: "low",
           is_proxy: true,
           proxy_type: "ERC1967",
           upgrade_count: 2,
@@ -1023,7 +1022,6 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
       {
         address: GOV,
         name: "GovTimelock",
-        risk_level: "low",
         is_proxy: false,
         controllers: {},
         job_id: "gov-job",
@@ -1032,7 +1030,6 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
       {
         address: GPOOL,
         name: "GovernedPool",
-        risk_level: "medium",
         is_proxy: true,
         proxy_type: "ERC1967",
         upgrade_count: 1,

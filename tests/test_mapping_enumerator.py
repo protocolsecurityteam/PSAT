@@ -931,3 +931,78 @@ def test_value_cache_rekey_distinguishes_specs():
     )
     assert calls2["n"] >= 1  # distinct specs → distinct key → real scan
     assert [e["key"] for e in r2["entries"]] == [b.lower()]
+
+
+# ---------------------------------------------------------------------------
+# G2 HIT 2: a knowingly incomplete fold must not report status="complete".
+# ---------------------------------------------------------------------------
+
+
+def _conflicted_specs():
+    add_spec = {
+        "mapping_name": "whitelist",
+        "event_signature": "WhitelistSet(address,bool)",
+        "event_name": "WhitelistSet",
+        "key_position": 0,
+        "indexed_positions": [],
+        "direction": "add",
+        "writer_function": "setWhitelisted(address,bool)",
+    }
+    return [add_spec, {**add_spec, "direction": "remove", "writer_function": "unsetWhitelisted(address,bool)"}]
+
+
+def test_all_ambiguous_writer_events_report_incomplete_not_complete():
+    client, calls = _fake_client([])
+    result = _run(
+        _enumerate(
+            "0xCC00000000000000000000000000000000000001",
+            cast(Any, _conflicted_specs()),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["principals"] == []
+    assert result["status"] == "incomplete_ambiguous_writer_event"
+    assert calls["n"] == 0
+
+
+def test_partially_ambiguous_scan_still_folds_clean_topics_but_not_complete():
+    rely_topic = _event_topic0("Rely(address)")
+    alice = _addr("a11ce")
+    client, _ = _fake_client([([_log(rely_topic, indexed_args=[alice], block=5)], None)])
+    specs = _conflicted_specs() + [
+        {
+            "mapping_name": "wards",
+            "event_signature": "Rely(address)",
+            "event_name": "Rely",
+            "key_position": 0,
+            "indexed_positions": [0],
+            "direction": "add",
+            "writer_function": "rely(address)",
+        }
+    ]
+    result = _run(
+        _enumerate(
+            "0xCC00000000000000000000000000000000000001",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert [p["address"] for p in result["principals"]] == [alice]
+    assert result["status"] == "incomplete_ambiguous_writer_event"
+
+
+def test_no_writer_specs_reports_incomplete_not_complete():
+    result = _run(
+        _enumerate(
+            "0xCC00000000000000000000000000000000000001",
+            cast(Any, []),
+            from_block=0,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["principals"] == []
+    assert result["status"] == "incomplete_no_writer_specs"

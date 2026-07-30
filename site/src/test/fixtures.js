@@ -8,7 +8,6 @@ export const ANALYSIS_LIST = [
     company: "etherfi",
     address: "0x1111111111111111111111111111111111111111",
     contract_name: "Weeth",
-    risk_level: "low",
     is_proxy: true,
     upgrade_count: 2,
   },
@@ -17,7 +16,6 @@ export const ANALYSIS_LIST = [
     company: "etherfi",
     address: "0x2222222222222222222222222222222222222222",
     contract_name: "LiquidityPool",
-    risk_level: "medium",
     upgrade_count: 0,
   },
   {
@@ -25,7 +23,6 @@ export const ANALYSIS_LIST = [
     company: "lido",
     address: "0x3333333333333333333333333333333333333333",
     contract_name: "stETH",
-    risk_level: "low",
   },
 ];
 
@@ -34,7 +31,6 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x1111111111111111111111111111111111111111",
       name: "Weeth",
-      risk_level: "low",
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
@@ -45,7 +41,6 @@ export const ETHERFI_COMPANY = {
     {
       address: "0x2222222222222222222222222222222222222222",
       name: "LiquidityPool",
-      risk_level: "medium",
       upgrade_count: 0,
       controllers: {},
       functions: [],
@@ -142,7 +137,6 @@ export const ETHERFI_COMPANY_RICH = {
     {
       address: VAULT_ADDR,
       name: "Vault",
-      risk_level: "low",
       is_proxy: true,
       proxy_type: "ERC1967",
       upgrade_count: 2,
@@ -161,7 +155,6 @@ export const ETHERFI_COMPANY_RICH = {
     {
       address: POOL_ADDR,
       name: "LiquidityPool",
-      risk_level: "medium",
       is_proxy: false,
       upgrade_count: 0,
       controllers: {},

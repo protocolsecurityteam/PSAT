@@ -84,3 +84,32 @@ describe("CompanyOverview — cross-chain same-address twins", () => {
     expect(contractsLabel.closest(".company-hero-stat").querySelector(".company-hero-stat-value").textContent).toBe("2");
   });
 });
+
+describe("CompanyOverview — hero subtitle before coverage loads", () => {
+  it('renders "—" for reports on file while the coverage fetch is unanswered, never 0', async () => {
+    // Company payload answers; coverage never resolves within the test —
+    // an unanswered count must not be asserted as "0 reports on file".
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/slowco",
+      () => ({
+        protocol_id: 43,
+        contracts: [],
+        principals: [],
+        fund_flows: [],
+        ownership_hierarchy: [],
+      }),
+    );
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/slowco/audit_coverage",
+      () => new Promise(() => {}),
+    );
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/slowco/functions",
+      () => ({ functions: {} }),
+    );
+    render(<CompanyOverview companyName="slowco" onNavigateToSurface={() => {}} />);
+    const subtitle = await screen.findByText(/reports on file/);
+    expect(subtitle.textContent).toContain("— reports on file");
+    expect(subtitle.textContent).not.toMatch(/\b0 reports on file/);
+  });
+});

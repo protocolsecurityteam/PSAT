@@ -144,6 +144,22 @@ def build_callee_claim_map(
             claims = [c for c in (fn_record.get("claims") or []) if _propagatable(c)]
             if not claims:
                 continue
+            # Join keys, canonical first. The caller's sink records the
+            # CANONICAL dispatch selector (its ``_callee_signature`` lowers
+            # interface/enum/struct params), while the record's own
+            # ``selector`` is keccak of the DECLARED signature — not a real
+            # selector when a parameter is user-typed, which made every such
+            # callee invisible to this join (AssetRecovery
+            # ``sweepTo(IERC20,address,uint256)`` keyed 0x38541c00, sink says
+            # 0x0aeef8c8). ``abi_selector`` is the canonical value stamped by
+            # ``attach_claims_to_effects``; its ABSENCE (older artifact,
+            # unlowerable signature) is not-determined, so the declared-form
+            # key is kept as the fallback that preserves the elementary-
+            # signature joins those artifacts still support.
+            keys: set[str] = set()
+            abi_selector = fn_record.get("abi_selector")
+            if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
+                keys.add(abi_selector.lower())
             raw_selector = fn_record.get("selector")
             selector = (
                 raw_selector
@@ -151,7 +167,9 @@ def build_callee_claim_map(
                 else _compute_selector(str(fn_sig))
             )
             if selector:
-                selector_claims.setdefault(selector.lower(), []).extend(claims)
+                keys.add(selector.lower())
+            for key in keys:
+                selector_claims.setdefault(key, []).extend(claims)
         if selector_claims:
             callee_map[address.lower()] = selector_claims
     return callee_map

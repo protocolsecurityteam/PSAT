@@ -15,9 +15,20 @@ from typing import Any, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.models import (
+    EDGE_RELATION_CONTROLLER_VALUE,
+    EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
+    EDGE_RELATION_EXTERNAL_CALL_TARGET,
+)
+from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
-from schemas.resolved_control_graph import ResolvedControlGraph, ResolvedGraphEdge, ResolvedGraphNode
+from schemas.resolved_control_graph import (
+    ResolvedAnalysisState,
+    ResolvedControlGraph,
+    ResolvedGraphEdge,
+    ResolvedGraphNode,
+)
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
@@ -47,6 +58,29 @@ class UnresolvedProxyError(RuntimeError):
 
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
+
+
+def _coerce_resolved_type(value: object) -> str:
+    """A ``resolved_type`` that was never determined must surface as the
+    vocabulary's not-determined token (``"unknown"``), never as a fabricated
+    concrete one.
+
+    ``str(payload.get("resolved_type", "unknown"))`` only defaults on an
+    ABSENT key; a key PRESENT with value ``None`` reaches ``str(None)`` and
+    mints the literal ``"None"`` — a token in no vocabulary
+    (``schemas.control_tracking.ResolvedControllerType``) that is truthy and
+    ``!= "unknown"``, so every downstream three-way branch reads it as a
+    concrete, determined type. The literal string ``"None"`` is likewise
+    coerced: it can arrive from a previously stored graph (the policy-stage
+    refresh pre-seeds from the persisted artifact) and means the same absence.
+    """
+    if value is None:
+        return "unknown"
+    text = str(value)
+    if not text or text == "None":
+        return "unknown"
+    return text
+
 
 _MATERIALIZE_METRIC_LOCK = threading.Lock()
 
@@ -126,7 +160,10 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
         return None
     if not isinstance(result, dict):
         return None
-    name = str(result.get("ContractName", "")).strip()
+    # ``or ""`` not a ``.get`` default: a key PRESENT with ``None`` would reach
+    # ``str(None)`` and fabricate the name "None" (same shape as the
+    # ``resolved_type`` bug ``_coerce_resolved_type`` guards).
+    name = str(result.get("ContractName") or "").strip()
     return name or None
 
 
@@ -157,7 +194,9 @@ def _build_effective_permissions(
         # its role principals from the graph (consumed below in
         # ``_role_principals_from_effective_permissions``). Was debug-only — surface
         # it as a degraded breadcrumb so the gap is visible in stage_errors.
-        address = str((analysis.get("subject") or {}).get("address", "")) or "<unknown>"
+        # ``or ""`` before ``str``: a subject with ``address: None`` must fall
+        # through to "<unknown>", not read as the truthy string "None".
+        address = str((analysis.get("subject") or {}).get("address") or "") or "<unknown>"
         record_degraded(
             phase="recursive_effective_permissions",
             exc=exc,
@@ -193,7 +232,7 @@ def _build_static_artifacts(
     persistent row. The tempdir is cleaned up at function exit.
     """
     result = fetch(effective_address, chain_id=chain_id)
-    contract_name = str(result.get("ContractName", "Contract"))
+    contract_name = str(result.get("ContractName") or "Contract")
     project_name = _workspace_name(contract_name, effective_address, workspace_prefix)
 
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
@@ -208,7 +247,7 @@ def _build_static_artifacts(
 def _chain_name_for_materialization(chain_id: int) -> str:
     """Canonical chain name used as the ``contract_materializations`` cache key
     component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` so mainnet
-    cache keys are unchanged. An unregistered id fails loud (inv. 6): the old
+    cache keys are unchanged. An unregistered id fails loud: the old
     ``PSAT_DEFAULT_CHAIN`` env fallback is gone, so a bad chain_id can no longer
     key an L2's artifacts under mainnet."""
     from utils.chains import require_chain
@@ -236,7 +275,7 @@ def _materialize_with_cross_process_cache(
         fixture-isolated test, or the DB is unreachable).
     """
     # Chain threaded from the job/contract (via ``_chain_name_for_materialization``
-    # at the walk entry). A chainless call is a data bug (inv. 6): fail loud
+    # at the walk entry). A chainless call is a data bug: fail loud
     # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
     from utils.chains import require_chain
 
@@ -277,7 +316,7 @@ def _materialize_with_cross_process_cache(
         }
 
     def _source_hash_fn() -> str | None:
-        # Cross-chain code-plane reuse key (inv. 1). ``get_source`` is
+        # Cross-chain code-plane reuse key. ``get_source`` is
         # in-memory + PG cached, so on the build path this shares the fetch
         # ``_build_static_artifacts`` makes; on a keccak hit it is never called.
         from services.discovery.fetch import source_content_hash
@@ -319,6 +358,19 @@ def _materialize_with_cross_process_cache(
     # fresh dict per call, but the inline path returns the SQLAlchemy
     # JSONB-cached dict, so the deepcopy is still required to avoid
     # downstream mutations leaking back into the ORM identity map.
+    #
+    # ``StorageContentIncomplete`` propagates deliberately, all the way out of
+    # ``resolve_control_graph`` (``_materialize_for_pending`` re-raises it rather
+    # than degrading the contract; the worker's classifier calls the
+    # not-determined subclass transient so the stage re-runs, and the
+    # proven-absent one terminal so it does not re-ask an answered question).
+    # ``or {}`` below is therefore only ever
+    # applied to a *proven* absence — a row that stored nothing. If the payload
+    # merely could not be read, an empty analysis here means "this contract has
+    # no functions, no plan and no predicate trees", and that verdict is what
+    # the effects probe is seeded from and what gets cached under the witness
+    # schema version. A retried stage can still become right; a witness built
+    # on {} is already wrong and cached.
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
     # ``predicate_trees`` is absent on rows written before the
@@ -450,6 +502,73 @@ def _materialize_contract_artifacts(
     }
 
 
+def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysisState | None:
+    """Why this node is (or is not) analysed.
+
+    ``analyzed`` is a non-nullable bool, so its ``False`` is four different
+    populations at once — a principal that was never a candidate, a contract
+    whose materialization failed, a contract the depth horizon cut off, and
+    "cannot say". The first says nothing adverse, the second is a fact about
+    the contract, the third is a fact about *our walk*, and only the fourth is
+    an absence of knowledge. Derived once here, at the end of the walk, because
+    this is the only place that holds ``max_depth`` alongside every node.
+
+    Returns ``None`` — not determined — for an analyzable contract inside the
+    horizon that is nonetheless unanalysed with no recorded failure. That
+    combination is not known to be reachable, and inventing a value for it
+    would be exactly the error this field exists to remove.
+    """
+    if node.get("analyzed"):
+        return "analyzed"
+    details = node.get("details")
+    if isinstance(details, dict) and details.get("materialize_error"):
+        return "attempt_failed"
+    resolved_type = node.get("resolved_type")
+    if resolved_type in ANALYZABLE_TYPES:
+        if int(node.get("depth") or 0) > max_depth:
+            return "beyond_depth_horizon"
+        return None
+    if resolved_type and resolved_type not in {"unknown", "None"}:
+        # ``not_analyzable``, not ``not_a_contract``: the test is membership of
+        # ANALYZABLE_TYPES, and the largest population outside it is Gnosis
+        # Safes (230 of the local corpus's 1,236), which ARE contracts. The old
+        # token stated something literally false about every one of them.
+        #
+        # ``"None"`` is excluded alongside ``"unknown"``: it is ``str(None)``,
+        # a not-determined type that leaked through an unguarded
+        # stringification (producers now coerce it via ``_coerce_resolved_type``,
+        # but a stored graph from before that fix can still carry the token
+        # into this recomputation via the policy refresh's pre-seed).
+        # ``not_analyzable`` is a positive claim — "analysis was never
+        # applicable" — and an undetermined type proves no such thing.
+        return "not_analyzable"
+    return None
+
+
+def _resolved_type_rank(resolved_type: str | None) -> int:
+    """How much a ``resolved_type`` claims. A more specific answer may replace a
+    vaguer one; the reverse is a loss of information.
+
+    ``"contract"`` is the GENERIC answer — "there is code here" — and every
+    analysed node was previously stamped with it unconditionally, so an address
+    already classified ``timelock`` (carrying its ``delay``) was overwritten the
+    moment the walk analysed it. Whether the type survived came down to walk
+    order: it did only when the node happened to be re-ensured as a controller
+    of a LATER-processed contract. 41 of the local corpus's 47 timelock nodes
+    survived that way; the rest read ``contract``.
+
+    Equal ranks keep last-write-wins, which is the pre-existing behaviour for
+    two specific classifications of the same address.
+    """
+    if not resolved_type:
+        return -1
+    if resolved_type == "unknown":
+        return 0
+    if resolved_type == "contract":
+        return 1
+    return 2
+
+
 def _ensure_node(
     nodes: dict[str, ResolvedGraphNode],
     *,
@@ -488,7 +607,7 @@ def _ensure_node(
     if analyzed:
         current["analyzed"] = True
         current["node_type"] = "contract"
-    if resolved_type != "unknown" or not current.get("resolved_type"):
+    if _resolved_type_rank(resolved_type) >= _resolved_type_rank(current.get("resolved_type")):
         current["resolved_type"] = resolved_type  # type: ignore[typeddict-item]
     if label:
         current["label"] = label
@@ -568,8 +687,13 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
     for function in effective_permissions.get("functions", []):
         if not isinstance(function, dict):
             continue
-        function_signature = str(function.get("function", ""))
-        for role_grant in function.get("authority_roles", []):
+        function_signature = str(function.get("function") or "")
+        # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
+        # ``None`` on a role-gated function whose role identity is not
+        # determined, and a dict default only fires on an
+        # ABSENT key — so the plain default would iterate None and raise.
+        # Not-determined contributes no role principals, exactly as [] did.
+        for role_grant in function.get("authority_roles") or []:
             if not isinstance(role_grant, dict):
                 continue
             role = _safe_role_int(role_grant.get("role"))
@@ -592,7 +716,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                     address,
                     {
                         "address": address,
-                        "resolved_type": str(principal.get("resolved_type", "unknown")),
+                        "resolved_type": _coerce_resolved_type(principal.get("resolved_type")),
                         "details": details,
                         "roles": set(),
                         "functions": set(),
@@ -602,7 +726,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                 if function_signature:
                     payload["functions"].add(function_signature)
                 if payload.get("resolved_type") in {None, "", "unknown"} and principal.get("resolved_type"):
-                    payload["resolved_type"] = str(principal.get("resolved_type"))
+                    payload["resolved_type"] = _coerce_resolved_type(principal.get("resolved_type"))
                 merged_details = dict(payload["details"])
                 merged_details.update(details)
                 payload["details"] = merged_details
@@ -623,7 +747,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                     address,
                     {
                         "address": address,
-                        "resolved_type": str(principal.get("resolved_type", "unknown")),
+                        "resolved_type": _coerce_resolved_type(principal.get("resolved_type")),
                         "details": details,
                         "roles": set(),
                         "functions": set(),
@@ -632,7 +756,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
                 if function_signature:
                     payload["functions"].add(function_signature)
                 if payload.get("resolved_type") in {None, "", "unknown"} and principal.get("resolved_type"):
-                    payload["resolved_type"] = str(principal.get("resolved_type"))
+                    payload["resolved_type"] = _coerce_resolved_type(principal.get("resolved_type"))
                 merged_details = dict(payload["details"])
                 merged_details.update(details)
                 merged_details.setdefault("controller_label", controller_label)
@@ -650,6 +774,44 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
             }
         )
     return sorted(serialized, key=lambda item: str(item["address"]))
+
+
+# Only these leaf roles prove that being IN the mapping confers authority;
+# same set as the static plane's caller-gate promotion (`_AUTHORITY_LEAF_ROLES`
+# in services/static/contract_analysis_pipeline/tracking.py).
+_MAPPING_HARVEST_AUTHORITY_ROLES = frozenset({"caller_authority", "delegated_authority"})
+
+
+def _mapping_leaf_confers_authority(leaf: Mapping[str, Any]) -> bool:
+    """Does *leaf* prove that membership in its mapping CONFERS authority?
+
+    The harvest publishes every enumerated member as a ``mapping_member``
+    control edge — a member of CONTROL_EDGE_RELATIONS, i.e. a scorer input and
+    a published control claim — so it must not out-claim the leaf the static
+    plane lowered. Three discriminators, all read from that same leaf:
+
+    - ``authority_role``: only an authority-bearing role qualifies. A
+      ``business`` membership read (a duplicate-registration guard, an
+      accounting map) says nothing about who controls the contract. An ABSENT
+      role is a pre-schema tree — not-determined, so no authority is earned
+      and nothing is harvested from it.
+    - polarity: ``operator == "falsy"`` means the gate passes when the caller
+      is NOT in the set (a denylist, an already-enrolled guard). Members of
+      such a set are the blocked population, the exact opposite of
+      authorities.
+    - ``confidence``: an explicit ``"low"`` from the static plane disqualifies
+      (today unreachable for authority roles — ``_derive_confidence`` floors
+      them at medium — but the harvest must not depend on that staying true).
+      Absent confidence is not lowered evidence and does not disqualify on
+      its own.
+    """
+    if leaf.get("authority_role") not in _MAPPING_HARVEST_AUTHORITY_ROLES:
+        return False
+    if leaf.get("operator") == "falsy":
+        return False
+    if leaf.get("confidence") == "low":
+        return False
+    return True
 
 
 def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any] | None) -> list[WriterEventSpec]:
@@ -676,6 +838,8 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
 
         leaf = node.get("leaf")
         if not isinstance(leaf, dict):
+            return
+        if not _mapping_leaf_confers_authority(leaf):
             return
         descriptor = leaf.get("set_descriptor")
         if not isinstance(descriptor, dict):
@@ -776,7 +940,7 @@ def _replay_mapping_principals(
         result = enumerate_mapping_allowlist_sync(
             address,
             mapping_specs,
-            # inv. 6: the scan URL is derived from the walk's chain, not a mainnet
+            # The scan URL is derived from the walk's chain, not a mainnet
             # default. Mainnet ("1") is byte-identical to the prior chain-less call.
             chain=str(chain_id),
             bearer_token=hypersync_token,
@@ -826,6 +990,21 @@ def _replay_mapping_principals(
 
     for principal in enumerated:
         member_addr = principal["address"]
+        if member_addr.lower() == address.lower():
+            # A contract enumerated as a member of its OWN mapping (e.g. a
+            # timelock granting itself a Solady `_roles` role) is real on-chain
+            # state, but as a control edge it is degenerate: X->X asserts
+            # nothing, yet the raw graph plane serves it verbatim through the
+            # analysis-detail API, and the _ensure_node call below would merge
+            # principal fields (controller_label/mapping_name/...) onto the
+            # contract's own node and clobber its label with the mapping name.
+            # Skip the self edge. (The value closure and the Surface
+            # indirect-path index each drop self loops on their own.)
+            logger.debug(
+                "mapping_enumerator: skipping self-membership edge",
+                extra={"address": address, "mapping_name": principal["mapping_name"]},
+            )
+            continue
         _ensure_node(
             nodes,
             address=member_addr,
@@ -923,7 +1102,7 @@ def resolve_control_graph(
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
     """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
 
-    ``chain_id`` is required (inv. 6): it scopes the two chain-sensitive reads
+    ``chain_id`` is required: it scopes the two chain-sensitive reads
     inside the walk — the ``contract_materializations`` cache key (via the
     chain's canonical name) and the mapping-writer replay's scan floor. A
     chainless walk can no longer run as mainnet; callers thread the job's chain."""
@@ -972,7 +1151,13 @@ def resolve_control_graph(
                 continue
             node_id = node.get("id")
             if isinstance(node_id, str):
-                nodes[node_id] = cast(ResolvedGraphNode, dict(node))
+                seeded = dict(node)
+                # A stored graph written before the ``str(None)`` guard can
+                # carry the fabricated ``"None"`` type; coerce it back to the
+                # not-determined token at the boundary so it can neither win a
+                # ``_resolved_type_rank`` merge nor read as a concrete type.
+                seeded["resolved_type"] = _coerce_resolved_type(seeded.get("resolved_type"))
+                nodes[node_id] = cast(ResolvedGraphNode, seeded)
         for edge in initial_graph.get("edges", []):
             if not isinstance(edge, dict):
                 continue
@@ -993,7 +1178,19 @@ def resolve_control_graph(
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
         """Materialize one pending contract's artifacts. Returns
         ``(artifacts, error)`` so the caller wires the success and error
-        branches deterministically on the main thread."""
+        branches deterministically on the main thread.
+
+        Storage failing to answer is the one case that does NOT come back as an
+        error tuple. Every other materialize failure is a fact about the
+        contract or its compile, and the caller degrades that contract to
+        ``analyzed=False`` and walks on. An unreadable bucket is a fact about
+        us: the analysis may exist and simply be out of reach, the same outage
+        hits every sibling in the level, and degrading would let the whole walk
+        return normally so nothing above ever re-runs. Propagating is what makes
+        the stage retryable (``workers/retry_policy`` classifies both storage
+        types below as transient), and a retry is the only thing that can turn
+        not-determined into a fact.
+        """
         address = pending["address"]
         preloaded = pending.get("artifacts")
         if preloaded is not None:
@@ -1009,6 +1206,8 @@ def resolve_control_graph(
                 chain_id=chain_id,
             )
             return artifacts, None
+        except (StorageContentIncomplete, StorageUnavailable):
+            raise
         except Exception as exc:
             return None, exc
 
@@ -1057,9 +1256,12 @@ def resolve_control_graph(
 
         for pending, (_pending, outcome) in zip(level_pending, materialized):
             if isinstance(outcome, BaseException):
-                # ``_materialize_for_pending`` already converts every internal
-                # failure to ``(None, exc)`` — anything reaching here is a
-                # genuine bug, surface it.
+                # ``_materialize_for_pending`` converts every failure it is
+                # entitled to answer for into ``(None, exc)``. What arrives
+                # here is either a genuine bug or storage declining to answer,
+                # which it re-raises on purpose. Both must leave this function:
+                # the walk cannot describe a graph it could not read, and the
+                # stage above is what retries.
                 raise outcome
             artifacts, mat_exc = outcome
             address = pending["address"]
@@ -1101,12 +1303,27 @@ def resolve_control_graph(
             snapshot = artifacts["snapshot"]
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
-            contract_name = str(subject.get("name", address))
+            contract_name = str(subject.get("name") or address)
+            # The classifier's answer, not a hardcoded "contract". A timelock
+            # that is itself analysed used to lose its type AND its ``delay``
+            # here: EtherFiTimelock's own node read ``resolved_type=contract``
+            # with no delay, and that delay is a credit-bearing scoring input.
+            # ``_cached_classify`` is the same memo the controller/principal
+            # wiring already uses, so a nested contract reached as someone's
+            # controller is a cache hit; a root costs one classification.
+            analyzed_type, analyzed_details = _cached_classify(address)
             node_details: dict[str, object] = {"address": address}
+            if analyzed_type in {"", "unknown"}:
+                # Classification did not answer. "contract" is what we DO know
+                # (the artifacts materialized), and it is the generic rank, so
+                # it cannot overwrite a specific type set elsewhere.
+                analyzed_type = "contract"
+            else:
+                node_details.update(analyzed_details)
             contract_node_id = _ensure_node(
                 nodes,
                 address=address,
-                resolved_type="contract",
+                resolved_type=analyzed_type,
                 label=contract_name,
                 depth=depth,
                 node_type="contract",
@@ -1137,9 +1354,9 @@ def resolve_control_graph(
                 controller_address = str(controller_value.get("value", "")).lower()
                 if not controller_address.startswith("0x") or len(controller_address) != 42:
                     continue
-                resolved_type = str(controller_value.get("resolved_type", "unknown"))
+                resolved_type = _coerce_resolved_type(controller_value.get("resolved_type"))
                 details = dict(controller_value.get("details", {}))
-                controller_label = str(controller_value.get("source", controller_id))
+                controller_label = str(controller_value.get("source") or controller_id)
                 controller_node_type = "contract" if resolved_type in ANALYZABLE_TYPES else "principal"
                 controller_node_id = _ensure_node(
                     nodes,
@@ -1150,15 +1367,42 @@ def resolve_control_graph(
                     node_type=controller_node_type,
                     details=details,
                 )
+                # A slot the contract only CALLS is not a controller of it.
+                # Provenance ABSENT is the third state and gets the third
+                # relation: neither question was answered, so the address was
+                # enrolled from a predicate tree without ever being shown to
+                # gate a caller. ``controller_value`` would assert an authority
+                # nothing proved (one widening of the enrolled-target set minted
+                # 37 such targets in a single merge — pure constants like
+                # HUNDRED_PERCENT_IN_BPS, non-authority mappings like _balances,
+                # 28 of them surviving the primitive-scalar skip);
+                # ``external_call_target`` would assert the opposite unproven
+                # fact. The unattributed relation keeps the edge visible and
+                # moves no authority.
+                #
+                # This is NOT the forbidden demotion of a proven authority to a
+                # mere callee: that rule protects an authority that was actually
+                # established. Here the not-determined input reaches a
+                # not-determined relation.
+                provenance = controller_value.get("authority_provenance")
+                if provenance == "call_target":
+                    relation = EDGE_RELATION_EXTERNAL_CALL_TARGET
+                elif provenance == "caller_gate":
+                    relation = EDGE_RELATION_CONTROLLER_VALUE
+                else:
+                    relation = EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED
                 _add_edge(
                     edges,
                     {
                         "from_id": contract_node_id,
                         "to_id": controller_node_id,
-                        "relation": "controller_value",
+                        "relation": relation,
                         "label": controller_label,
                         "source_controller_id": controller_id,
-                        "notes": [f"resolved_type={resolved_type}"],
+                        "notes": [
+                            f"resolved_type={resolved_type}",
+                            f"authority_provenance={provenance or 'not_determined'}",
+                        ],
                     },
                 )
 
@@ -1185,7 +1429,7 @@ def resolve_control_graph(
                 principal_address = str(principal_value["address"]).lower()
                 if principal_address == address:
                     continue
-                resolved_type = str(principal_value.get("resolved_type", "unknown"))
+                resolved_type = _coerce_resolved_type(principal_value.get("resolved_type"))
                 details = dict(principal_value["details"])
                 if resolved_type == "unknown":
                     resolved_type, classified_details = _cached_classify(principal_address)
@@ -1268,6 +1512,9 @@ def resolve_control_graph(
     record_stage_metric("recursive_levels", _levels)
     record_stage_metric("recursive_classify_hits", classify_stats["hits"])
     record_stage_metric("recursive_classify_misses", classify_stats["misses"])
+
+    for _node in nodes.values():
+        _node["analysis_state"] = _analysis_state(_node, max_depth)
 
     graph: ResolvedControlGraph = {
         "schema_version": "0.1",

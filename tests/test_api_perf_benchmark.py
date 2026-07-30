@@ -188,7 +188,6 @@ def seeded(db_session, storage_bucket, _simulated_prod_rtt):
                 is_upgradeable=False,
                 is_pausable=True,
                 has_timelock=False,
-                risk_level="low",
                 is_factory=False,
                 source_verified=True,
                 standards=["ERC20"],

@@ -577,3 +577,97 @@ class TestProcessFanoutParity:
         # the cache lock isn't collapsing concurrent misses.
         assert len(seq_stats["classify_calls"]) == 60
         assert len(par_stats["classify_calls"]) <= 60 * 2
+
+
+class TestGraphRefreshRewritesTables:
+    """The graph refresh must rewrite the CGN/CGE tables, not just the
+    artifact — role_principal edges are projected only at this stage, and an
+    artifact-only rewrite leaves the persisted plane a strict subset of what
+    the artifact (and principal_labels) assert."""
+
+    @staticmethod
+    def _run_process(monkeypatch: pytest.MonkeyPatch, *, contract_row: Any) -> tuple[list[dict], dict]:
+        worker = PolicyWorker()
+        session = MagicMock()
+        session.execute.return_value.scalar_one_or_none.return_value = contract_row
+        job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1, "proxy_address": "0x" + "77" * 20})
+
+        contract_analysis = _minimal_contract_analysis()
+        control_snapshot = _minimal_snapshot()
+        resolved_graph = _graph_with_nodes([])
+        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
+        refreshed_graph = {
+            "schema_version": "0.1",
+            "root_contract_address": TARGET_ADDRESS,
+            "max_depth": 6,
+            "nodes": [],
+            "edges": [
+                {
+                    "from_id": f"address:{TARGET_ADDRESS}",
+                    "to_id": "address:" + "0x" + "ee" * 20,
+                    "relation": "role_principal",
+                    "label": "roles 1",
+                    "source_controller_id": None,
+                    "notes": [],
+                }
+            ],
+        }
+
+        def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
+            return {
+                "contract_analysis": contract_analysis,
+                "control_snapshot": control_snapshot,
+                "resolved_control_graph": resolved_graph,
+                "control_tracking_plan": tracking_plan,
+            }.get(name)
+
+        replace_calls: list[dict] = []
+
+        def fake_replace(_session: Any, *, contract_id: int, deployment_address: Any, resolved_graph: Any):
+            replace_calls.append(
+                {
+                    "contract_id": contract_id,
+                    "deployment_address": deployment_address,
+                    "resolved_graph": resolved_graph,
+                }
+            )
+            return len(resolved_graph.get("nodes", [])), len(resolved_graph.get("edges", []))
+
+        monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
+        monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
+        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
+        monkeypatch.setattr(
+            "workers.policy_worker.build_effective_permissions",
+            lambda *a, **kw: {"schema_version": "1", "functions": []},
+        )
+        monkeypatch.setattr("workers.policy_worker.resolve_control_graph", lambda **kw: (refreshed_graph, {}))
+        monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
+        monkeypatch.setattr("workers.policy_worker.write_effective_function_rows", lambda *a, **kw: 0)
+        monkeypatch.setattr("workers.policy_worker.replace_control_graph_rows", fake_replace)
+        monkeypatch.setattr(
+            PolicyWorker,
+            "_enrich_cross_contract",
+            lambda self, session, job, contract_analysis, control_snapshot, **kw: {},
+        )
+
+        worker.process(session, cast(Any, job))
+        return replace_calls, refreshed_graph
+
+    def test_refreshed_graph_is_written_to_the_tables(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        contract_row = SimpleNamespace(id=42, address=TARGET_ADDRESS)
+        replace_calls, refreshed_graph = self._run_process(monkeypatch, contract_row=contract_row)
+
+        assert len(replace_calls) == 1, "policy stage must rewrite CGN/CGE once, with the refreshed graph"
+        call = replace_calls[0]
+        assert call["contract_id"] == 42
+        # The impl-in-proxy-context deployment scoping the row writes use.
+        assert call["deployment_address"] == "0x" + "77" * 20
+        assert call["resolved_graph"] is refreshed_graph
+        assert any(edge["relation"] == "role_principal" for edge in call["resolved_graph"]["edges"])
+
+    def test_no_contract_row_skips_the_table_rewrite(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without a Contract row there is nothing to key the rows on; the
+        artifact-only path (already loudly degraded upstream) must not crash
+        or write."""
+        replace_calls, _ = self._run_process(monkeypatch, contract_row=None)
+        assert replace_calls == []

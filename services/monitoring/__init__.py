@@ -51,10 +51,15 @@ def emit_monitor_cycle(
 
     ``started`` is a ``time.monotonic()`` stamp from the top of the cycle.
     Counts go in ``extra``/``detail`` (queryable), never the message text.
-    ``partial=True`` (an RPC chunk failed mid-scan, a sub-unit raised) flips
-    the heartbeat to ``degraded`` so the fleet view distinguishes a healthy
-    quiet cycle from a degraded one. Called once per cycle regardless of
-    outcome — including the 0-active-contracts and 0-event branches.
+    ``partial=True`` means some unit of the cycle failed to be observed —
+    an RPC chunk failed or went unanswered, a sub-unit raised, a per-call
+    error came back, or an answered call yielded nothing parseable (the
+    emitting loop's docstring defines its exact grounds; an observed value,
+    including a type's conventional empty like the zero address, is never
+    one of them). It flips the heartbeat to ``degraded`` so the fleet view
+    distinguishes a healthy quiet cycle from a degraded one. Called once
+    per cycle regardless of outcome — including the 0-active-contracts and
+    0-event branches.
     ``extra_detail`` carries daemon-specific fields (the scanner's
     ``max_lag_blocks`` / ``windows_scanned`` / ``budget_exhausted``, the
     poller's rotation-slice counts) so a pass still emits exactly one

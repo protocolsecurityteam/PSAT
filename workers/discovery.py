@@ -43,17 +43,42 @@ logger = logging.getLogger("workers.discovery")
 
 
 def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[dict]) -> None:
-    """Upsert audit report rows into the relational table."""
+    """Upsert audit report rows into the relational table.
+
+    Two shapes make an artifact entry produce no row of its own: a missing
+    identity field, and a ``url`` another entry in the same batch already
+    claimed (the upsert is keyed on ``(protocol_id, url)``, so the later entry
+    overwrites the earlier one). Both are reported — the artifact's entry count
+    and the table's row count disagreeing is otherwise invisible.
+    """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from db.models import AuditReport
+
+    incomplete: list[dict[str, str]] = []
+    collisions: list[dict[str, str]] = []
+    claimed_by: dict[str, str] = {}
 
     for report in reports:
         auditor = str(report.get("auditor") or "").strip()
         title = str(report.get("title") or "").strip()
         url = str(report.get("url") or "").strip()
         if not url or not auditor or not title:
+            incomplete.append(
+                {
+                    "missing": ",".join(
+                        field for field, value in (("url", url), ("auditor", auditor), ("title", title)) if not value
+                    ),
+                    "url": url or "",
+                    "auditor": auditor or "",
+                    "title": title or "",
+                }
+            )
             continue
+        overwritten = claimed_by.get(url)
+        if overwritten is not None:
+            collisions.append({"url": url, "overwritten_title": overwritten, "kept_title": title})
+        claimed_by[url] = title
         classified_commits = report.get("classified_commits") or None
 
         stmt = pg_insert(AuditReport).values(
@@ -91,6 +116,30 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
     # Core upserts do not synchronize SQLAlchemy's identity map. Keep the
     # worker/test session consistent for callers that read audit rows next.
     session.expire_all()
+
+    if incomplete or collisions:
+        lost = len(incomplete) + len(collisions)
+        logger.warning(
+            "Audit sync for protocol %s: %d of %d artifact entries produced no row "
+            "(%d missing url/auditor/title, %d url collisions): %s",
+            protocol_id,
+            lost,
+            len(reports),
+            len(incomplete),
+            len(collisions),
+            {"incomplete": incomplete[:10], "collisions": collisions[:10]},
+        )
+        record_degraded(
+            phase="audit_report_sync",
+            exc=RuntimeError(f"{lost} of {len(reports)} audit entries produced no row"),
+            context={
+                "protocol_id": protocol_id,
+                "entries": len(reports),
+                "distinct_urls_upserted": len(claimed_by),
+                "incomplete": incomplete[:10],
+                "collisions": collisions[:10],
+            },
+        )
 
 
 def _deployer_cascade_protocol_id(session: Session, deployer: str | None) -> int | None:

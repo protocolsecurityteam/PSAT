@@ -147,6 +147,8 @@ def test_is_top_singleton_invariant():
         Source(kind="top", block_context_kind="x")
     with _pytest.raises(ValueError, match="bare sentinel"):
         Source(kind="top", member_path=("x",))
+    with _pytest.raises(ValueError, match="bare sentinel"):
+        Source(kind="top", derived_from=frozenset())
 
 
 def test_source_unknown_kind_raises():
@@ -347,6 +349,102 @@ def test_solidity_call_keccak_classified_as_computed(tmp_path):
     has_sig = any(_has_source_kind(srcs, "signature_recovery") for srcs in eng.provenance.sources.values())
     assert has_computed
     assert not has_sig, "keccak256 was misclassified as signature_recovery"
+
+
+def _keccak_sources(eng) -> frozenset[Source]:
+    """The source set of the outermost ``keccak256`` result in a run."""
+    for srcs in eng.provenance.sources.values():
+        for source in srcs:
+            if source.kind == "computed" and (source.computed_kind or "").startswith("keccak256"):
+                return srcs
+    raise AssertionError(f"no keccak256 computed source. map={dict(eng.provenance.sources)}")
+
+
+def test_keccak_binds_the_parameters_it_commits_through_abi_encode(tmp_path):
+    """The un-hedged half of ``..._classified_as_computed``: the hash is
+    ``computed``, AND the parameters it commits are still named. Nesting is what
+    makes this non-trivial — ``x`` reaches ``keccak256`` only through
+    ``abi.encode``, whose own origins have to be spliced in."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f(uint256 x, address to) external view returns (bytes32) {
+                return keccak256(abi.encode(x, to, owner));
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    eng = ProvenanceEngine(fn)
+    eng.run()
+    keccak = next(
+        s for s in _keccak_sources(eng) if s.kind == "computed" and (s.computed_kind or "").startswith("keccak256")
+    )
+    assert keccak.derived_from is not None, "argument provenance reported as not-determined"
+    assert {(o.parameter_index, o.parameter_name) for o in keccak.derived_from if o.kind == "parameter"} == {
+        (0, "x"),
+        (1, "to"),
+    }
+    assert {o.state_variable_name for o in keccak.derived_from if o.kind == "state_variable"} == {"owner"}
+    # The derivation shape survives alongside the binding — a consumer must still
+    # be able to tell a hash commitment from a plain equality against storage.
+    assert any(o.kind == "computed" and (o.computed_kind or "").startswith("abi.encode") for o in keccak.derived_from)
+    # Members are stored stripped so the projection can never nest.
+    assert all(o.derived_from is None for o in keccak.derived_from)
+
+
+def test_keccak_over_constants_is_determined_empty_not_unknown(tmp_path):
+    """The proven-absent state: nothing but constants reached the hash. This
+    must be distinguishable from "nobody worked it out" (``None``)."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            function f() external pure returns (bytes32) {
+                return keccak256("MINTER_ROLE");
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    eng = ProvenanceEngine(fn)
+    eng.run()
+    keccak = next(s for s in _keccak_sources(eng) if s.kind == "computed")
+    assert keccak.derived_from == frozenset()
+
+
+def test_msg_value_computed_source_reports_not_determined(tmp_path):
+    """The third state, live: ``msg.value`` mints a ``computed`` source outside
+    the Solidity-call handler, so its argument provenance is genuinely
+    unpopulated. It must say ``None``, not ``frozenset()`` — the latter would
+    assert that nothing reached it, which is a claim nobody made."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            uint256 public total;
+            function f() external payable {
+                total = msg.value;
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    eng = ProvenanceEngine(fn)
+    eng.run()
+    computed = [
+        s
+        for srcs in eng.provenance.sources.values()
+        for s in srcs
+        if s.kind == "computed" and s.computed_kind == "msg.value"
+    ]
+    assert computed, f"no msg.value computed source. map={dict(eng.provenance.sources)}"
+    assert all(s.derived_from is None for s in computed)
 
 
 def test_external_call_classified(tmp_path):
@@ -868,3 +966,103 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
     assert has_ok_with_external, (
         f"unpacked `ok` didn't inherit external_call source. map={dict(eng.provenance.sources)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ``callee_args_digest`` is content-stable across processes/seeds.
+# ---------------------------------------------------------------------------
+
+_DIGEST_SNIPPET = """
+import sys
+sys.path.insert(0, {repo!r})
+from services.static.contract_analysis_pipeline.provenance import Source, _digest
+a = frozenset({{
+    Source(kind="parameter", parameter_index=0, parameter_name="who"),
+    Source(kind="state_variable", state_variable_name="owner"),
+    Source(
+        kind="view_call",
+        callee="registry",
+        callee_signature="hasRole(address,uint256)",
+        callee_args_digest=_digest(frozenset({{Source(kind="msg_sender")}})),
+    ),
+}})
+b = frozenset({{Source(kind="parameter", parameter_index=1, parameter_name="amt")}})
+print(_digest(a), _digest(b))
+"""
+
+
+def _digests_under_seed(seed: str) -> list[str]:
+    import os
+    import subprocess
+
+    repo = str(Path(__file__).resolve().parents[1])
+    env = dict(os.environ, PYTHONHASHSEED=seed)
+    out = subprocess.run(
+        [sys.executable, "-c", _DIGEST_SNIPPET.format(repo=repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.split()
+
+
+def test_callee_args_digest_is_seed_independent():
+    """The digest of the same SourceSet is byte-identical under different
+    PYTHONHASHSEED values (it is content-derived, not ``hash()``-derived), and
+    two different SourceSets still get different digests (the discriminating
+    role the field exists for)."""
+    run_a = _digests_under_seed("0")
+    run_b = _digests_under_seed("12345")
+    assert run_a == run_b, f"digest varies with hash seed: {run_a} vs {run_b}"
+    assert run_a[0] != run_a[1], "different SourceSets collapsed to one digest"
+
+
+def test_operand_tie_break_is_seed_independent():
+    """Two computed Sources tied on every sort-key field before the digest
+    (same kind, no parameter/state/callee identity) must
+    resolve to the SAME published operand in every process. Before the fix the
+    winner was ordered by a ``hash()``-seeded digest string; 37-46 operand
+    slots flickered across 25/88 production units."""
+    import os
+    import subprocess
+
+    repo = str(Path(__file__).resolve().parents[1])
+    snippet = """
+import sys
+sys.path.insert(0, {repo!r})
+from services.static.contract_analysis_pipeline.provenance import ProvenanceMap, Source, _digest
+from services.static.contract_analysis_pipeline.predicates import _operand_for_value
+
+
+class _Fake:
+    name = "v_0"
+
+
+sources = frozenset({{
+    Source(
+        kind="computed",
+        computed_kind="BinaryType.AND",
+        callee_args_digest=_digest(frozenset({{Source(kind="parameter", parameter_index=0)}})),
+    ),
+    Source(
+        kind="computed",
+        computed_kind="call(uint256,uint256)",
+        callee_args_digest=_digest(frozenset({{Source(kind="parameter", parameter_index=1)}})),
+    ),
+}})
+prov = ProvenanceMap(sources={{"v_0": sources}})
+print(_operand_for_value(_Fake(), prov)["computed_kind"])
+"""
+    winners = set()
+    for seed in ("0", "1", "31337"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", snippet.format(repo=repo)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        winners.add(out.stdout.strip())
+    assert len(winners) == 1, f"operand winner flickers with hash seed: {winners}"

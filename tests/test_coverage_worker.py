@@ -4,8 +4,8 @@ Exercises the readiness-gated claim, the stuck-job escape hatch, and the
 source-equivalence-enabled refresh path. Network calls into
 ``services.audits.source_equivalence`` are stubbed at module scope so
 the real coverage code runs end-to-end without GitHub / Etherscan
-traffic — per the test-hygiene rule in the handoff prompt: never rely
-on env-var-controlled divergence; stub the network helpers directly.
+traffic — per the test-hygiene rule: never rely on env-var-controlled
+divergence; stub the network helpers directly.
 """
 
 from __future__ import annotations

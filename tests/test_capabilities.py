@@ -75,12 +75,32 @@ def test_intersect_finite_exact_with_lower_yields_lower():
     assert out.membership_quality == "lower_bound"
 
 
-def test_intersect_finite_disjoint_yields_empty():
+def test_intersect_finite_disjoint_yields_structural_and_not_empty():
+    """INVERTED (was ``test_intersect_finite_disjoint_yields_empty``, which
+    pinned the G2 HIT 3 defect): two independently-resolved NON-empty caller
+    sets that do not overlap are self-refuting evidence on a deployed function
+    ({liquidityPool} ∩ {upgradeTimelock} = ∅ on requestWithdraw), never a
+    witnessed exact-empty "provably nobody". The AND keeps both conjuncts
+    visible; the policy layer reads it as not-determined."""
     a = CapabilityExpr.finite_set([ADDR_A])
     b = CapabilityExpr.finite_set([ADDR_B])
     out = intersect(a, b)
-    assert out.kind == "finite_set"
-    assert out.members == []
+    assert out.kind == "AND"
+    assert [c.members for c in out.children] == [[ADDR_A], [ADDR_B]]
+    assert out.members is None
+
+
+def test_intersect_inherited_empty_stays_exact_empty():
+    """Emptiness INHERITED from an already-witnessed-empty input (all-revoked
+    role store, empty-by-design ceiling) keeps resolving: the witness lives in
+    the input, not in the intersection."""
+    empty = CapabilityExpr.finite_set([], quality="exact")
+    other = CapabilityExpr.finite_set([ADDR_A])
+    for a, b in ((empty, other), (other, empty), (empty, empty)):
+        out = intersect(a, b)
+        assert out.kind == "finite_set"
+        assert out.members == []
+        assert out.membership_quality == "exact"
 
 
 def test_intersect_idempotent():
@@ -282,9 +302,9 @@ def test_negate_blacklist_yields_finite():
 
 
 def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
-    # ROLEGATE_FIX_SPEC §8 residual: a lower_bound cofinite ("at least these are
-    # denied") complements to a lower_bound finite set — not a provably-complete
-    # "exact" one, which would falsely claim we enumerated everyone the gate admits.
+    # A lower_bound cofinite ("at least these are denied") complements to a
+    # lower_bound finite set — not a provably-complete "exact" one, which would
+    # falsely claim we enumerated everyone the gate admits.
     bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
     out = negate(bl)
     assert out.kind == "finite_set"
@@ -385,18 +405,25 @@ def test_attach_conditions_preserves_blacklist_quality():
     assert any(c.description == "whenNotPaused" for c in out.conditions)
 
 
-def test_default_cofinite_serializes_identically_to_pre_field():
-    # The P1 no-op guarantee: an exact cofinite's wire dict must NOT gain a
-    # blacklist_quality key, so every stored cofinite is byte-identical to before this
-    # field existed; a lower_bound cofinite DOES carry it for Part 2.
+def test_every_cofinite_states_its_denylist_quality():
+    # INVERTED (was ``test_default_cofinite_serializes_identically_to_pre_field``,
+    # which pinned the emit-when-non-default rule as correct).
+    # That rule made ABSENCE mean ``exact``, so a consumer that had never heard of
+    # the key read every cofinite denylist as a COMPLETE exclusion — a default
+    # that made the STRONG claim. Byte-identity with the pre-field wire shape is
+    # no longer a goal; stating the quality is.
     from services.resolution.capability_resolver import capability_to_dict
 
     exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B]))
-    assert "blacklist_quality" not in exact
-    assert set(exact.keys()) == {"kind", "blacklist", "membership_quality", "confidence"}
+    assert exact["blacklist_quality"] == "exact"
+    assert set(exact.keys()) == {"kind", "blacklist", "membership_quality", "confidence", "blacklist_quality"}
 
     lower = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
     assert lower["blacklist_quality"] == "lower_bound"
+
+    # And it is emitted ONLY on a denylist, so absence means "not a denylist"
+    # rather than "a complete denylist".
+    assert "blacklist_quality" not in capability_to_dict(CapabilityExpr.finite_set([ADDR_A]))
 
 
 # ---------------------------------------------------------------------------

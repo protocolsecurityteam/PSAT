@@ -37,12 +37,15 @@ def _isolated_cache():
 def _stub_batch_probe_rpc(monkeypatch):
     """Offline: the batched classify probe hits the wire. Return all-error so the
     code falls back to the sequential classifier, which uses the per-call probes
-    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock."""
+    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock. The
+    lazy negative-control probe rides ``_eth_call_raw`` — an empty return means
+    the control passes, keeping these cache-behavior tests type-neutral."""
     monkeypatch.setattr(
         tracking,
         "_rpc_batch_request_with_status",
         lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
     )
+    monkeypatch.setattr(tracking, "_eth_call_raw", lambda *a, **k: "0x")
 
 
 def test_clear_empties_process_cache(monkeypatch):
@@ -194,6 +197,14 @@ def test_mutable_safe_details_use_short_ttl(monkeypatch):
     owners["v"] = ["0x" + "1" * 40, "0x" + "2" * 40]  # owner-set changed on-chain
     _kind2, details2 = classify_resolved_address("https://rpc", addr)
     assert details2["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]  # short TTL forced a re-probe
+
+
+def test_erc1967_implementation_is_a_mutable_detail():
+    """The ERC-1967 implementation slot moves on every upgrade, so a
+    classification witnessing it must age on the short TTL like owners/
+    threshold/delay — a long-TTL entry would serve the pre-upgrade
+    implementation as current for up to 30 minutes."""
+    assert "erc1967_implementation" in tracking._MUTABLE_DETAIL_KEYS
 
 
 def test_pinned_block_mutable_details_keep_long_ttl(monkeypatch):

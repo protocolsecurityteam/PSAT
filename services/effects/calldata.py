@@ -1,4 +1,4 @@
-"""Per-class calldata + entry-point synthesis (EFFECTS_RESOLUTION_SPEC §4.1–§4.5).
+"""Per-class calldata + entry-point synthesis, one synthesizer per effect class.
 
 Turns the STATIC facts a candidate already carries — ABI param types, sinks,
 state writes, value-flow taint, predicate trees, resolved principals — into the
@@ -8,17 +8,18 @@ recorded fixtures.
 
 Every synthesizer returns ``None`` when the facts are too thin to build an
 honest probe. That is the load-bearing property: a recipe fed guessed calldata
-would mint a witness for a call the contract never actually performs, and §8's
+would mint a witness for a call the contract never actually performs, and the
 fail-closed discipline only holds if the inputs are real. Thin facts ⇒ no plan
 ⇒ the class stays ``unknown``.
 
 A class emitting NO plans across a whole protocol is a normal outcome, not a
 symptom. Measured on etherfi (2026-07-21): value-out and supply produced zero
 plans over all 265 candidates, because every value-moving function there already
-carries a ``flow.out`` claim and §6's cascade selects BLANK-claim functions only.
-The fact plumbing is fine — those functions do carry ``direction: "out"`` in the
-effects artifact; they are simply already explained. This is §6.2 working as
-designed: as the claims matchers grow, the simulation workload shrinks.
+carries a ``flow.out`` claim and the selection cascade selects BLANK-claim
+functions only. The fact plumbing is fine — those functions do carry
+``direction: "out"`` in the effects artifact; they are simply already explained.
+That is the cascade working as designed: as the claims matchers grow, the
+simulation workload shrinks.
 
 Decision points are deliberately concentrated and named so the live-validation
 loop can adjust them without re-deriving the module:
@@ -29,8 +30,8 @@ loop can adjust them without re-deriving the module:
 * :func:`_arg_values` — the address/uint/other substitution policy.
 * :data:`NEUTRAL_CALLER` — the identity a blast-radius probe uses when the entry
   point has no resolved principal.
-* :func:`read_max_pause_duration` — inv. 10: the bound is READ off the latch's
-  own guard leaf, never hardcoded and never scraped from source text.
+* :func:`read_max_pause_duration` — the bound is READ off the latch's own guard
+  leaf, never hardcoded and never scraped from source text.
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ from db.models import EffectiveFunction, FunctionPrincipal
 from db.queue import get_artifact
 from services.effects.anvil import EntryPoint, ForkFixture
 from services.effects.config import (
+    DURATION_BOUND_GUARD_CONSTANT,
+    DURATION_BOUND_NO_TIME_REFERENCE,
+    DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
@@ -58,7 +62,7 @@ from services.effects.config import (
     SHAPE_STORAGE_DETERMINED,
 )
 from services.effects.seeding import SEED_UNIT_DECIMALS
-from services.effects.selection import Candidate
+from services.effects.selection import AssetHolding, Candidate
 from services.policy.effective_permissions import _abi_signature
 from services.resolution.differential_probe import (
     _default_value_for_type,
@@ -68,7 +72,7 @@ from services.resolution.differential_probe import (
 
 logger = logging.getLogger(__name__)
 
-# The attacker identity substituted at a taint-identified address param (§4.2).
+# The attacker identity substituted at a taint-identified address param.
 SENTINEL_ADDRESS = "0x" + "ee" * 20
 
 # Caller for a blast-radius entry point with no resolved principal — a plain
@@ -118,6 +122,7 @@ SEED_AMOUNT = 2**128
 # above this is not a freeze window (it is a chain-id, an amount, a role hash).
 _MAX_PLAUSIBLE_DURATION_S = 365 * 24 * 3600
 
+
 _AUTHORITY_ROLES = ("caller_authority", "delegated_authority")
 
 
@@ -128,7 +133,7 @@ _AUTHORITY_ROLES = ("caller_authority", "delegated_authority")
 
 @dataclass(frozen=True)
 class ValueOutPlanInputs:
-    """§4.2 inputs: call F as the resolved principal, plus a sentinel variant that
+    """Value-out inputs: call F as the resolved principal, plus a sentinel variant that
     puts the attacker identity at the taint-identified address param."""
 
     contract_address: str
@@ -138,10 +143,11 @@ class ValueOutPlanInputs:
     taint_param_reaches_sink: bool = False
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
-    # §5b downstream value-reach: the protocol's witnessed value-holders the recipe
+    # Downstream value-reach: the protocol's witnessed value-holders the recipe
     # measures against, and the acting deployment's own balance floor.
-    value_holders: tuple[tuple[str, float], ...] = ()
+    value_holders: tuple[AssetHolding, ...] = ()
     acting_balance_usd: float = 0.0
+    protocol_tvl_usd: float | None = None
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
     input_token_hints: tuple[str, ...] = ()
@@ -168,7 +174,7 @@ class ValueOutPlanInputs:
     # and it must never enter the code-plane behaviour cache.
     inputs_vacuous: bool = False
     # ERC-20 analogue of the native ``contract_balance`` seed: assets the acting
-    # deployment PROVABLY holds (§16.6-A), so a payout the contract's live balance
+    # deployment PROVABLY holds, so a payout the contract's live balance
     # cannot cover can be reached by seeding the CONTRACT's own token balance. A
     # verdict proven under it is a CAPABILITY claim (would move IF funded) and
     # carries the same weaker ``contract_balance_seeded`` qualifier.
@@ -177,7 +183,7 @@ class ValueOutPlanInputs:
 
 @dataclass(frozen=True)
 class SupplyPlanInputs:
-    """§4.5 inputs: the recipe reads ``totalSupply`` around a call to F made as
+    """Supply inputs: the recipe reads ``totalSupply`` around a call to F made as
     the resolved principal."""
 
     token_address: str
@@ -199,7 +205,7 @@ class SupplyPlanInputs:
     # See :class:`ValueOutPlanInputs`.
     contract_holdings: tuple[str, ...] = ()
     # NO ``static_shape``. The supply recipe reads a destination shape only to
-    # collect a §9 discrepancy and discards the shape itself, and the supply
+    # collect a discrepancy and discards the shape itself, and the supply
     # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
     # the effects artifact never emits — so threading one here computed nothing
     # and then dropped it.
@@ -207,7 +213,7 @@ class SupplyPlanInputs:
 
 @dataclass(frozen=True)
 class TimelockPlanInputs:
-    """§9.5 Tier-2 inputs: schedule an operation, advance past the delay, execute
+    """Tier-2 timelock inputs: schedule an operation, advance past the delay, execute
     it — the sequence Tier 1 cannot reach, because ``eth_simulateV1`` issues one
     block with no ``blockOverrides`` and so can never satisfy a
     ``block.timestamp`` gate.
@@ -234,7 +240,7 @@ class TimelockPlanInputs:
     # honest input when the delay cannot be read: the contract's own check
     # rejects a zero delay, and the recipe records that revert verbatim.
     schedule_calldata_zero: str
-    # ``getMinDelay()`` — read, never assumed (§0.0.2).
+    # ``getMinDelay()`` — read, never assumed.
     delay_calldata: str
     gate_ref: str
     sentinel_address: str | None = None
@@ -255,7 +261,7 @@ class TimelockPlanInputs:
 
 @dataclass(frozen=True)
 class AuthorityPlanInputs:
-    """§4.4 inputs: ``probe_calldata`` exercises the gate G that F mutates;
+    """Authority-change inputs: ``probe_calldata`` exercises the gate G that F mutates;
     ``mutate_calldata`` is the call to F itself."""
 
     contract_address: str
@@ -268,7 +274,7 @@ class AuthorityPlanInputs:
 
 @dataclass(frozen=True)
 class PausePlanInputs:
-    """§4.1 inputs. ``predicted_guard_set`` is static's set — the SCORED
+    """Freeze/pause inputs. ``predicted_guard_set`` is static's set — the SCORED
     denominator; ``entry_points`` are the probes we could actually synthesize for
     it (a subset), and the observed blast radius stays a lower bound."""
 
@@ -280,6 +286,12 @@ class PausePlanInputs:
     max_pause_duration: int | None
     gate_ref: str
     fixtures: tuple[ForkFixture, ...] = ()
+    # Which of the three ``DURATION_BOUND_*`` states produced
+    # ``max_pause_duration``. ``None`` there is two different facts — the latch
+    # cannot expire, or we could not find its window — and only this field tells
+    # them apart. Defaulted to ``not_determined`` so a caller that omits it can
+    # never assert the indefinite reading by accident.
+    duration_bound_source: str = DURATION_BOUND_NOT_DETERMINED
 
 
 @dataclass(frozen=True)
@@ -576,8 +588,8 @@ def _declared_param_names(fn: "FunctionFacts", count: int) -> list[str]:
 
 def _lattice_amount_indexes(fn: "FunctionFacts", types: Sequence[str], directions: frozenset[str] | None) -> set[int]:
     """Parameter slots the static flow lattice resolved as the AMOUNT of a value
-    flow — the dispositive "this argument is the quantity" fact (§4.2 mirror of
-    :func:`_lattice_taint_index`). Absent on artifacts predating the field.
+    flow — the dispositive "this argument is the quantity" fact (the value-out
+    mirror of :func:`_lattice_taint_index`). Absent on artifacts predating the field.
 
     ``param_derived`` counts alongside ``param``: its index is the slot of the
     caller input the contract converted into the amount (``transfer(receiver,
@@ -871,7 +883,7 @@ def _scalar_arg_value(
     return None
 
 
-# §4.2 executor synthesis. ``exec.arbitrary`` is the static claim for "this
+# Executor synthesis. ``exec.arbitrary`` is the static claim for "this
 # function forwards a caller-supplied destination together with a caller-supplied
 # calldata blob", proven off the IR read set of a body call op; its witness names
 # the two PARAMETERS. ``low_level_value_call`` + a ``param`` destination is the
@@ -912,15 +924,23 @@ def _forwards_param_destination(fn: "FunctionFacts") -> bool:
 
 
 def _named_executor_slots(fn: "FunctionFacts", types: Sequence[str]) -> tuple[int, int] | None:
-    """The two slots the ``exec.arbitrary`` witness NAMES, when both name a
-    parameter of the right shape. The witness carries entry-parameter names read
-    off the IR, so this is the precise answer where it exists."""
+    """The two slots the ``exec.arbitrary`` witness PROVES, when both name a
+    parameter of the right shape.
+
+    A name counts only when its ``*_kind`` is ``param`` — i.e. the IR put that
+    parameter in the call's destination / calldata operand position. The other
+    kinds publish no name, and a witness written before those kinds existed
+    carries a name with no kind at all: that is an unread question, not a proof,
+    so it falls through to the ABI-uniqueness reasoning below exactly as a
+    ``not_determined`` would."""
     names = _declared_param_names(fn, len(types))
     for claim in fn.effect_info.get("claims") or []:
         if not isinstance(claim, dict) or claim.get("claim_id") != _EXEC_ARBITRARY_CLAIM:
             continue
         witness = claim.get("witness")
         if not isinstance(witness, dict):
+            continue
+        if witness.get("destination_kind") != "param" or witness.get("calldata_kind") != "param":
             continue
         destination, payload = witness.get("destination_param"), witness.get("calldata_param")
         if not isinstance(destination, str) or not isinstance(payload, str) or not destination or not payload:
@@ -1055,7 +1075,7 @@ def _target_member_kinds(flow: Mapping[str, Any]) -> list[str]:
 
 
 def static_destination_shape(fn: "FunctionFacts", directions: frozenset[str]) -> str | None:
-    """The §4.2 destination shape static PROVES for F, or ``None``.
+    """The destination shape static PROVES for F, or ``None``.
 
     A universal, and it has to be earned across EVERY out-flow the function has:
     one site paying a caller-named address makes the function caller-redirectable
@@ -1174,7 +1194,7 @@ def _mandatory_state_pairs(tree: Any) -> set[tuple[str, str | None]]:
 
 def guarded_functions(trees: Mapping[str, Any], pairs: Iterable[tuple[str, str | None]]) -> list[str]:
     """Every function whose MANDATORY gate reads one of ``pairs`` — static's
-    predicted guard set (the §4.1 scored denominator).
+    predicted guard set (the scored denominator for the freeze/pause class).
 
     Matching is on the state-variable NAME; ``member_path`` is a refinement that
     is NOT required to agree. It cannot be: an ERC-7201 latch is recorded as a
@@ -1215,20 +1235,20 @@ def _authority_roles(tree: Any) -> set[str]:
 
 
 def _gate_ref(tree: Any) -> str:
-    """A gate STRUCTURE descriptor (inv. 12) — authority roles, never an address.
+    """A gate STRUCTURE descriptor — authority roles, never an address.
 
     ``gate:none`` is emitted for a tree-less function, which covers BOTH a
     proven-ungated one and one whose real gate the static plane could not lower
     (``guard_extraction_uncertain`` and the rest of the tree-less residue) — so
     it is not on its own a claim that no gate exists. It never has to be: the
     other half of the cache identity is the kernel ``behavior_hash``, which is
-    the whole metadata-stripped runtime bytecode (§7 item 2, immutables masked).
+    the whole metadata-stripped runtime bytecode (immutables masked).
     The gate lives inside that bytecode, so two rows can share a ``gate:none``
     only when their code — and therefore their gate — is identical, and masking
     an immutable authority erases the ADDRESS a gate compares against, never the
     comparison. ``tests/test_effects_hashing.py`` pins that.
 
-    The consumers of an absent role (the §4.4 gate-moving pick, the §4.1 pauser
+    The consumers of an absent role (the authority-change gate-moving pick, the pauser
     probe) each fail closed to a probe that is not synthesized, so a gate that
     did not lower costs recall, never a widened verdict.
     """
@@ -1237,7 +1257,7 @@ def _gate_ref(tree: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# §4.2 value-out / §4.5 supply
+# value-out / supply
 # ---------------------------------------------------------------------------
 
 _OUT_DIRECTIONS = frozenset({"out", "eth_out"})
@@ -1315,7 +1335,7 @@ def _taint_index(fn: FunctionFacts, types: Sequence[str], directions: frozenset[
 
 @dataclass(frozen=True)
 class _ProbeInputs:
-    """What §4.2 and §4.5 both need out of one synthesis pass."""
+    """What the value-out and supply synthesizers both need out of one pass."""
 
     calldata: str
     taint_param_reaches_sink: bool
@@ -1327,7 +1347,7 @@ class _ProbeInputs:
 def _value_probe_inputs(
     fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> _ProbeInputs | None:
-    """The probe inputs shared by §4.2 and §4.5."""
+    """The probe inputs shared by the value-out and supply synthesizers."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
@@ -1367,7 +1387,7 @@ def _value_probe_inputs(
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
-    """§4.2. Applicable when static says the function moves value OUT. A gated
+    """Applicable when static says the function moves value OUT. A gated
     function needs a resolved principal — a probe from the zero address only ever
     proves that the gate rejected it — but a PUBLIC function has no principal to
     resolve, so it is probed from :data:`NEUTRAL_CALLER`, an arbitrary non-zero
@@ -1397,6 +1417,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         sentinel_calldata=sentinel_calldata,
         value_holders=candidate.value_holders,
         acting_balance_usd=candidate.acting_balance_usd,
+        protocol_tvl_usd=candidate.protocol_tvl_usd,
         input_token_hints=input_token_hints(fn, token_addresses=_token_arg_candidates(candidate, token_params)),
         token_param_indexes=token_params,
         seeded_calldata=seeded,
@@ -1405,14 +1426,14 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         native_payout=has_native_payout(fn),
         static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
         inputs_vacuous=built.inputs_vacuous,
-        # Measured holdings only (§0.0.2) — the seed derives its token from what
+        # Measured holdings only — the seed derives its token from what
         # the deployment provably holds, never a hardcoded asset.
         contract_holdings=tuple(candidate.input_token_addresses),
     )
 
 
 def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInputs | None:
-    """§4.5. Applicable when static says the function mints or burns."""
+    """Applicable when static says the function mints or burns."""
     labels = {str(lbl) for lbl in (fn.effect_info.get("effect_labels") or [])}
     if not (_flow_directions(fn) & _SUPPLY_DIRECTIONS or labels & _SUPPLY_DIRECTIONS):
         return None
@@ -1490,7 +1511,7 @@ def _dual_role_principal(session: Session, candidate: Candidate, schedule_select
     ``EXECUTOR_ROLE``), so the probe needs a principal the resolution plane put
     behind both. Preferring the intersection is what keeps this honest: the
     alternative — writing the role into storage so the gate passes — is exactly
-    what §9.3 forbids, because such a probe reverts on the gate, not on a missing
+    what a probe may not do, because it would revert on the gate, not on a missing
     asset. When the two do not intersect we still probe as the executor and let
     the contract reject the schedule, which the recipe records verbatim."""
     principals = [p.lower() for p in candidate.principal_addresses if isinstance(p, str) and p]
@@ -1512,7 +1533,7 @@ def _probe_salt(candidate: Candidate) -> bytes:
 def synthesize_timelock(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> TimelockPlanInputs | None:
-    """§9.5. Applicable when F is a proven arbitrary-call executor whose contract
+    """Applicable when F is a proven arbitrary-call executor whose contract
     also exposes the scheduling half and its own minimum delay.
 
     The operation scheduled is an ERC-20 transfer to the sentinel of an asset the
@@ -1641,7 +1662,7 @@ def _seeded_probe_calldata(
 
 
 # ---------------------------------------------------------------------------
-# §4.4 authority-change
+# authority-change
 # ---------------------------------------------------------------------------
 
 
@@ -1692,7 +1713,7 @@ def _authority_gate_target(facts: ContractFacts, fn: FunctionFacts) -> str | Non
 
 
 def synthesize_authority(candidate: Candidate, facts: ContractFacts, fn: FunctionFacts) -> AuthorityPlanInputs | None:
-    """§4.4. Applicable when F writes state that some other function reads as a
+    """Applicable when F writes state that some other function reads as a
     mandatory caller-authority gate. The mutation keeps encoder defaults — we do
     not guess a grantee; the recipe only opens on a gate that opens to ALL the
     random identities, so a guessed one could never help."""
@@ -1721,13 +1742,13 @@ def synthesize_authority(candidate: Candidate, facts: ContractFacts, fn: Functio
 
 
 # ---------------------------------------------------------------------------
-# §4.1 pause (Tier 2)
+# freeze/pause (Tier 2)
 # ---------------------------------------------------------------------------
 
 
 def _claim_latch_pairs(session: Session, function_id: int) -> set[tuple[str, str | None]]:
     """Latch ``(var, member)`` pairs from a persisted ``pause.set`` claim witness.
-    Usually empty — the §6 cascade selects BLANK-claim functions — so this is the
+    Usually empty — the selection cascade selects BLANK-claim functions — so this is the
     corroborating path, not the primary one."""
     from services.effects.prefetch import get_prefetch
 
@@ -1813,24 +1834,333 @@ def _principals_by_selector(session: Session, contract_id: int) -> dict[str, str
     return out
 
 
-def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> int | None:
-    """A guard leaf that compares ``block.timestamp`` against a constant AND reads
-    the latch itself IS that latch's freeze window. Scoped to the latch because a
-    contract can carry two latches with different semantics (one indefinite, one
-    timed) and the wrong constant is a wrong witness, not a rounding error."""
+def _compared_operands(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A leaf's operands UNION the additive sub-operands it absorbed.
+
+    A Solidity comparison holds two operands, and the pause-window question needs
+    three facts (the clock, the latch, the offset) — so before
+    ``absorbed_operands`` existed this reader's positive branch was unreachable
+    from any compiled source (measured over 11 guard shapes).
+    ``absorbed_operands`` is the sibling list the leaf builder now records; taking
+    the union here is the whole widening.
+
+    Trees persisted before that field simply have no key, and this reads them
+    exactly as it did: absent ⇒ the old two-operand answer. What that answer may
+    NOT be used for is a conclusion drawn from an operand's ABSENCE — see
+    :func:`_absorption_recorded`, which is the positive marker that separates
+    "this comparison read nothing more" from "we do not know what it read".
+    """
+    absorbed = leaf.get("absorbed_operands")
+    extra = [op for op in absorbed if isinstance(op, dict)] if isinstance(absorbed, list) else []
+    return [*_operands(leaf), *extra]
+
+
+# Root-node marker stamped by ``predicate_artifacts.build_predicate_artifacts`` on
+# every tree built by a builder that records absorbed operands
+# (``predicates._stamp_absorbed_operands``). Duplicated as a literal for the same
+# reason ``"op"``/``"leaf"`` are: the effects plane reads static's persisted JSON and
+# does not import the static package.
+_OPERAND_ABSORPTION_RECORDED = "recorded"
+
+
+# Operand sources that stand for an expression whose CONTENTS were not recorded, so
+# the operand may be HIDING a clock read:
+#   * ``computed`` — any arithmetic / hash / encode result the absorption recorder did
+#     not decompose (it handles ``+``/``-`` one level deep and nothing else).
+#   * ``top`` — provenance saturation.
+#   * ``view_call`` / ``external_call`` — an operand that names a CALLEE the recorder
+#     never entered. Reading time through a helper is the mainstream idiom, not a
+#     curiosity: ``_blockTimestamp()`` in Uniswap V3's pool, ``clock()`` in OZ
+#     Governor, ``oracle.nowSeconds()`` on any time oracle. Reproduced from compiled
+#     Solidity: ``require(!frozen || _clock() > unpauseAt)`` records
+#     ``{view_call _clock(), state_variable unpauseAt}`` and no ``block_context``
+#     operand appears anywhere in the tree, so "no clock here" was a false proof about
+#     a freeze that demonstrably expires.
+# None of these may be read as "this operand is not a clock". The named, decomposed
+# sources are deliberately absent from this set: ``state_variable``, ``constant``,
+# ``parameter``, ``msg_sender``/``tx_origin``/``signature_recovery``,
+# ``self_address``, ``block_context``. Each is a fact the builder resolved and none
+# is an unentered expression — a stored timestamp or a caller-supplied deadline is
+# not a clock (no passage of time changes it without a transaction). A
+# ``block_context`` operand is not OPAQUE — its kind is right there — but three of
+# its kinds ARE the clock, which is what the two sets below express.
+_OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_call"})
+
+# The static plane maps every ``block.*`` global to ``source="block_context"`` with
+# ``block_context_kind`` = the suffix — and ``now``, the pre-0.7 spelling, IS
+# ``block.timestamp`` verbatim. Two sets because the two uses have different unit
+# constraints:
+#   * demotion (rule 1: a clock anywhere in a latch-reading tree denies the
+#     proven-indefinite state) counts every kind that advances on its own —
+#     ``block.number`` lifts a freeze by itself just as a timestamp does;
+#   * the SECONDS arithmetic (``saw_timed_latch_guard`` + the constant harvest) may
+#     count only second-denominated clocks: a ``block.number`` comparison constant
+#     is a BLOCK COUNT, and harvesting one as ``duration_bound_seconds`` would
+#     misstate the window by the block-time factor (216000 blocks ≈ 30 days, not
+#     2.5 days).
+_SECONDS_CLOCK_KINDS = frozenset({"timestamp", "now"})
+_CLOCK_KINDS = frozenset({"timestamp", "now", "number"})
+
+# Comparison operators under which a constant BOUNDS ITS OTHER SIDE FROM ABOVE, keyed
+# by the slot the constant sits in (``operands`` is the comparison's two slots in IR
+# left-right order, which is what makes the question answerable at all). ``eq``/``ne``
+# and the unary ``truthy``/``falsy`` are deliberately absent: neither bounds anything.
+# Measured over the 5,089 persisted leaves in the local database: every one carries an
+# ``operator`` (lte 324, gte 225, lt 170, gt 88, plus the non-ordering kinds), so an
+# ABSENT operator is a hand-built leaf and is read as undecidable rather than defaulted.
+_CONSTANT_IS_UPPER_BOUND = {0: frozenset({"gt", "gte"}), 1: frozenset({"lt", "lte"})}
+
+
+def _absorption_recorded(tree: Any) -> bool:
+    """Whether this tree's operand lists are known-complete for the additive shape.
+
+    An operand list is LOSSY by construction: a comparison leaf holds two slots, so
+    ``block.timestamp - pausedUntil < 2592000`` records ``{pausedUntil, 2592000}``
+    and the clock is simply gone. ``absorbed_operands`` is what recovers it — but a
+    MISSING ``absorbed_operands`` has two meanings, and only this marker tells them
+    apart:
+
+    * marker present ⇒ the builder ran the absorption recorder over every
+      comparison in this tree, so no key means the comparison read no additive
+      sub-expression. An operand's absence is then evidence.
+    * marker ABSENT ⇒ the tree was built before the widening (every
+      ``contract_materializations.predicate_trees`` row in the database is such a
+      tree, and bumping the effects stage does not re-run the static stage). An
+      operand's absence says nothing at all, so no conclusion may be drawn FROM it.
+
+    That distinction is load-bearing for exactly one caller: the
+    ``no_time_reference`` state of :func:`_duration_from_trees` is a claim that no
+    leaf reading the latch touches a clock — a proof BY ABSENCE, and the most
+    severe freeze statement this system makes. Reproduced on compiled source:
+    ``require(block.timestamp - pausedUntil < 2592000)`` reads as
+    ``(2592000, "guard_constant")`` from a tree built at this HEAD and, with
+    ``absorbed_operands`` stripped to the persisted shape, as PROVEN INDEFINITE —
+    the same source, the opposite answer, in the severe direction.
+    """
+    return isinstance(tree, dict) and tree.get("operand_absorption") == _OPERAND_ABSORPTION_RECORDED
+
+
+def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> int | None:
+    """The constant this comparison PROVES is a ceiling on the clock-to-latch gap, or
+    ``None`` when the comparison's shape does not establish one.
+
+    The harvest used to take the max plausible constant out of
+    ``operands ∪ absorbed_operands``, blind to which SIDE of the comparison it sat on
+    and to the operator — so three shapes a compiler really produces published a
+    number that is not the freeze window at all, in the severity-REDUCING direction
+    (``duration_bound_seconds`` is read as a mitigation, gated on fork confirmation):
+
+        require(block.timestamp + 3600 < pausedUntil)   → 3600  = a LEAD TIME
+        require(block.timestamp > pausedUntil + 300)    → 300   = a COOLDOWN offset
+        require(block.timestamp - pausedUntil > 600)    → 600   = a MINIMUM elapsed
+
+    In all three the real expiry is a storage timestamp (etherfi's shape, which the
+    reader's own docstring says must be ``not_determined``).
+
+    ONE shape is decidable from what the static plane records, and it is the only one
+    admitted here: the comparison's two slots hold the CONSTANT on one side and the
+    collapsed representative of an additive group on the other, and that group holds
+    BOTH a seconds clock and the latch — i.e. the compared expression is the signed
+    time DIFFERENCE between the clock and the latch, and the constant is its bound.
+    Both subtraction orders are admissible (elapsed ``clock - latch`` and remaining
+    ``latch - clock`` bound the same gap by the same magnitude), which is what makes
+    this arm answerable without the sign the recorder does not keep. Compiled and
+    verified: ``block.timestamp - pausedUntil < 2592000``,
+    ``2592000 > block.timestamp - pausedUntil`` and
+    ``pausedUntil - block.timestamp < 2592000`` all resolve; the ``> 600`` twin of the
+    first does not.
+
+    NOT ADMITTED, and the reason is a missing producer fact rather than a judgment
+    about the shape: when the absorbed group is ``{latch, constant}`` (the mainstream
+    ``require(block.timestamp < pausedUntil + MAX_PAUSE)``) or ``{clock, constant}``,
+    the answer turns entirely on the SIGN with which the constant entered that group —
+    ``latch + C`` bounds the gap by C and ``latch - C`` does not — and
+    ``predicates._stamp_absorbed_operands`` records neither the sign nor the side
+    (``absorbed_operands`` is a SORTED list of both inner operands of an ADDITION *or*
+    a SUBTRACTION). Two sources with opposite meanings therefore produce byte-identical
+    evidence here, and the honest answer for that family is ``not_determined``. The
+    recall cost is real and is stated rather than discovered later; recovering it needs
+    the static producer to stamp the additive sign, which this module cannot do.
+    Reading the sign out of ``leaf["expression"]`` is available and deliberately
+    refused: this reader's whole history is the removal of a source-text fallback.
+
+    Two further conditions, both about not being fooled by what the leaf does NOT say:
+
+    * exactly TWO slots. "Which side" is meaningless otherwise, and a 3-slot leaf is a
+      real persisted shape (560 of the 5,089 local leaves), not only a hand-built one —
+      a threshold/oracle leaf can carry more. None of the 560 holds a latch, a clock
+      and a plausible constant today, so this refuses nothing that was being answered.
+    * no FOREIGN clock anywhere in the leaf. A leaf whose operand union carries
+      both a seconds clock and ``block.number`` cannot say which clock the constant is
+      denominated against, and harvesting a block count as seconds understates a
+      ~30-day gate as 2.5 days (216000 blocks ≈ 30 days). The outer reader already
+      refuses a leaf with NO seconds clock; this refuses the MIXED one, which absorption
+      across a mixed expression is what makes reachable.
+    """
+    operands = _operands(leaf)
+    if len(operands) != 2:
+        return None
+    raw_absorbed = leaf.get("absorbed_operands")
+    absorbed = [op for op in raw_absorbed if isinstance(op, dict)] if isinstance(raw_absorbed, list) else []
+    # The compared side must be a clock-to-latch difference: both facts inside ONE
+    # additive group, which no two-slot operand list can fake.
+    if all(str(op.get("block_context_kind") or "") not in _SECONDS_CLOCK_KINDS for op in absorbed):
+        return None
+    if all(str(op.get("state_variable_name") or "") not in latch_vars for op in absorbed):
+        return None
+    clock_kinds = {str(op.get("block_context_kind") or "") for op in (*operands, *absorbed)}
+    if clock_kinds & (_CLOCK_KINDS - _SECONDS_CLOCK_KINDS):
+        return None
+    operator = str(leaf.get("operator") or "")
     best: int | None = None
+    for slot, operand in enumerate(operands):
+        if operator not in _CONSTANT_IS_UPPER_BOUND[slot]:
+            continue
+        value = _parse_int(operand.get("constant_value"))
+        if value is None or not 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
+            continue
+        # Two plausible constants cannot both be the ceiling in a two-slot comparison,
+        # but the MAX is kept as the tie-break for the same reason the reader's other
+        # ambiguities take it: the value is consumed as a severity reducer, so the
+        # longest candidate window is the least mitigating reading.
+        best = value if best is None else max(best, value)
+    return best
+
+
+def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tuple[int | None, str]:
+    """The latch's freeze window and HOW it was established.
+
+    A guard leaf whose SHAPE proves a constant is a ceiling on the gap between the
+    clock and the latch IS that latch's window (``guard_constant``) —
+    :func:`_window_ceiling_constant` is that shape test, and it is the whole of the
+    harvest: taking the largest plausible constant out of the operand union instead
+    published a lead time, a cooldown offset or a minimum-elapsed as the freeze window,
+    and a block count as seconds off a mixed-clock leaf. Scoped to the
+    latch because a contract can carry two latches with different semantics (one
+    indefinite, one timed) and the wrong constant is a wrong witness, not a rounding
+    error.
+
+    ``no_time_reference`` is the PROOF of an indefinite latch: some guard leaf DOES
+    read the latch (so the gate was lowered and we are looking at it) and no leaf
+    reading it touches a clock, so no passage of time can lift the freeze — a plain
+    ``bool frozen`` gate. A latch no lowered leaf reads at all is
+    ``not_determined``, never indefinite: that is the tree-absent case, and the
+    governing rule is that absence of a proven bound is not proof that no bound
+    exists. ``not_determined`` is likewise the honest answer
+    for the shape this reader cannot resolve: the guard DOES compare the latch
+    against ``block.timestamp`` (so the latch is timed and the freeze does expire)
+    but the window itself is not in the code — etherfi's ``PausableUntil`` stores
+    it (``$.pauseUntilDuration``, bounded by ``MIN``/``MAX_PAUSE_DURATION`` inside
+    a different function's guard), so only a live read of that state or a
+    cross-function derivation could name it. All 4 proven ``freeze_pause``
+    verdicts in the local corpus are that shape, and every one of them published
+    ``null`` — rendered as "indefinite latch (no self-recovery bound)" on the
+    function inspector, about a latch called ``pauseUntil``.
+
+    ``no_time_reference`` IS A PROOF BY ABSENCE, so it carries two preconditions
+    beyond the leaf-local one, and neither is optional. Both are asked of the WHOLE
+    gate tree that reads the latch, never of the latch-reading leaf alone: a
+    leaf-local reading of "no clock here" was unsound in both directions a real
+    compiler produces, and a leaf-local reading of "nothing unread here" is unsound
+    for exactly the same reason — the clock and the latch end up in sibling leaves.
+
+    1. A SIBLING LEAF MAY HOLD THE CLOCK. Solidity lowers ``||``/``&&`` into
+       separate leaves, so ``require(!frozen || block.timestamp > unpauseAt)``
+       yields one leaf holding ``{frozen}`` and another holding
+       ``{timestamp, unpauseAt}``. No leaf holds both, and the freeze
+       demonstrably expires. This is not an edge case: :func:`_latch_pairs` admits
+       only ``bool``-typed writes (or the ERC-7201 pseudo-slot) and a ``bool``
+       cannot be compared against ``block.timestamp`` in ANY leaf, so for the whole
+       two-variable timed-pause family (``bool paused`` + ``uint pauseExpiry``) the
+       leaf-local answers were only ``not_determined`` or proven-most-severe. So
+       the clock is looked for across the WHOLE gate tree that reads the latch: a
+       clock anywhere in it means time may lift this freeze, and the honest state
+       is ``not_determined``. Deliberately conservative — a pure conjunction
+       ``!frozen && block.timestamp > x`` genuinely IS indefinite and is demoted
+       too, because a tree walk cannot tell a lowered disjunction from a lowered
+       conjunction and the cost of being wrong is asymmetric.
+    2. THE OPERAND LISTS MUST BE KNOWN-COMPLETE (:func:`_absorption_recorded`). A
+       pre-widening tree drops the clock out of ``block.timestamp - pausedUntil <
+       2592000`` entirely, so its absence proves nothing. Every persisted tree in
+       the database is such a tree, which is why this state has ZERO realised rows
+       locally: it is reachable by construction and test-covered (the compiled
+       ``TimedLatch`` corpus fixture), and it will start being realised when the
+       static stage next re-runs. That is the honest reading of a lower bound, not
+       a dead branch. The marker's promise is bounded in the same way the recorder
+       is — ADDITIVE, one level deep, and it never enters a callee — so an OPAQUE
+       operand (:data:`_OPAQUE_OPERAND_SOURCES`) ANYWHERE in a latch-reading tree
+       denies the proof too. Two shapes, both compiled: ``block.timestamp / 2 >
+       pausedUntil`` records ``{computed, pausedUntil}`` (the recorder does not
+       decompose a quotient, so the clock is inside an operand nobody read), and
+       ``require(!frozen || _clock() > unpauseAt)`` — reading time through an
+       internal view helper or a time oracle, the Uniswap-V3 / OZ-Governor idiom —
+       records ``{view_call _clock(), unpauseAt}`` in the SIBLING leaf with no
+       ``block_context`` operand anywhere, so rule 1 does not see it either. Scoping
+       this to the tree rather than the leaf is what makes the two rules symmetric:
+       both ask "could this tree be hiding a clock from me", and neither may be
+       answered from the two slots of one comparison.
+
+       THE RECALL COST IS LARGE AND IS THE POINT, so it is stated rather than
+       discovered later. A tree here is a whole FUNCTION's lowered guard set, so an
+       unrelated leaf makes the whole tree opaque: SafeMath ``add``/``sub``, an
+       ``allowance()`` read, ``toTypedDataHash``, an internal helper's return.
+       Projected over the 75 local materializations with the marker force-stamped
+       (nothing persisted carries it yet, so the realised delta today is 0 either
+       way): of the 16 latches the static plane names, 9 reached the proven state
+       before and 1 does after; treating every compared state variable as a
+       hypothetical latch, 379 reached it before and 149 after. Every move is OFF the
+       proven state and none onto it, which is the only direction this reader is
+       allowed to be wrong in — a false "most severe freeze there is" is a claim
+       about a contract, ``not_determined`` is a claim about our evidence. Nothing in
+       the demoted set showed a plausible hidden clock, and the reader cannot tell
+       that from a real one: ``oracle.isExpired()`` is an ``external_bool`` leaf that
+       hides the entire time check, which is why the test cannot be narrowed to
+       ordering comparisons. Same conservatism as rule 1, one order louder.
+
+    When several leaves each prove a ceiling the MAX is taken: the value is consumed
+    as a severity reducer, so the longest candidate window is the least mitigating
+    reading of ambiguous evidence.
+    """
+    best: int | None = None
+    saw_latch_guard = False
+    saw_timed_latch_guard = False
+    clock_in_a_latch_tree = False
+    latch_read_from_lossy_tree = False
     for tree in trees.values():
+        tree_reads_latch = False
+        tree_reads_clock = False
+        tree_holds_opaque_operand = False
         for leaf in _all_leaves(tree):
-            operands = _operands(leaf)
-            if not any(op.get("block_context_kind") == "timestamp" for op in operands):
-                continue
+            operands = _compared_operands(leaf)
+            clock_kinds = {str(op.get("block_context_kind") or "") for op in operands}
+            leaf_reads_clock = not clock_kinds.isdisjoint(_CLOCK_KINDS)
+            tree_reads_clock = tree_reads_clock or leaf_reads_clock
+            if any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
+                tree_holds_opaque_operand = True
             if not any(str(op.get("state_variable_name") or "") in latch_vars for op in operands):
                 continue
-            for op in operands:
-                value = _parse_int(op.get("constant_value"))
-                if value is not None and 0 < value <= _MAX_PLAUSIBLE_DURATION_S:
-                    best = value if best is None else max(best, value)
-    return best
+            tree_reads_latch = True
+            saw_latch_guard = True
+            if clock_kinds.isdisjoint(_SECONDS_CLOCK_KINDS):
+                continue
+            saw_timed_latch_guard = True
+            value = _window_ceiling_constant(leaf, latch_vars)
+            if value is not None:
+                best = value if best is None else max(best, value)
+        if tree_reads_latch and tree_reads_clock:
+            clock_in_a_latch_tree = True
+        if tree_reads_latch and (not _absorption_recorded(tree) or tree_holds_opaque_operand):
+            latch_read_from_lossy_tree = True
+    if best is not None:
+        # A resolved window is positive evidence: all three facts were present in one
+        # leaf's union, which no lossy list can fake, so neither precondition above
+        # applies to it.
+        return best, DURATION_BOUND_GUARD_CONSTANT
+    if saw_timed_latch_guard or not saw_latch_guard:
+        return None, DURATION_BOUND_NOT_DETERMINED
+    if clock_in_a_latch_tree or latch_read_from_lossy_tree:
+        return None, DURATION_BOUND_NOT_DETERMINED
+    return None, DURATION_BOUND_NO_TIME_REFERENCE
 
 
 def _parse_int(value: Any) -> int | None:
@@ -1847,8 +2177,12 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
-def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int | None:
-    """Inv. 10: the pause bound is READ, never hardcoded — and it is per-LATCH.
+def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> tuple[int | None, str]:
+    """The pause bound is READ, never hardcoded — and it is per-LATCH.
+    Returns ``(seconds_or_None, source)`` where ``source`` is one of the three
+    ``DURATION_BOUND_*`` states; the pair is the whole point, because
+    ``None`` alone cannot say whether the latch has no window or whether we
+    failed to find one.
 
     A contract can hold an indefinite latch and a timed one at once; the writer
     function pins which. An indefinite latch legitimately yields ``None`` (the
@@ -1865,8 +2199,24 @@ def read_max_pause_duration(facts: ContractFacts, latch_vars: set[str]) -> int |
     (``claims_bridge._observed_summary``) reads a bound as a severity REDUCER. A
     cooldown, a minimum, or an unrelated timer picked up by the name pattern would
     therefore have discounted an indefinite freeze. No bound is the correct and
-    conservative output: ``duration_bound_seconds is None`` + ``auto_expiry is
-    None`` already means "indefinite latch, most severe"."""
+    conservative output — but "no bound" and "no bound FOUND" are different facts
+    and the returned ``source`` is what keeps them apart. The old contract
+    ("``duration_bound_seconds is None`` + ``auto_expiry is None`` means indefinite
+    latch, most severe") was false on every row that had it: the corpus's four
+    proven rows are all ``pauseUntil`` — a latch that expires — and they published
+    exactly that pair.
+
+    What is deliberately NOT read here, stated so the gap is not mistaken for an
+    oversight: etherfi's window lives in ``$.pauseUntilDuration``, a storage value
+    with a public getter, bounded by ``MIN_PAUSE_DURATION``/``MAX_PAUSE_DURATION``
+    inside ``setPauseUntilDuration``'s own guard. Reading it means either a live
+    ``eth_call`` (a per-deployment observation — it would belong in the state-plane
+    residue, never in the code-plane ``details`` this value rides) or a
+    cross-function derivation the static plane does not record (the latch write's
+    assigned-expression origins are not in the effects artifact). Selecting the
+    getter by NAME is the identifier matching this docstring already refuses. So
+    the honest published state for that shape is ``not_determined``, and the fork
+    still cross-checks any bound this reader DOES find by warping past it."""
     return _duration_from_trees(facts.trees, latch_vars)
 
 
@@ -1883,7 +2233,7 @@ def _entry_point_for(
     resolved principal is still probed, from a neutral identity: it may be public,
     and skipping it could only lose a witness.
 
-    ``caller_override`` forces a specific caller (the §1 A2 pauser-identity probe):
+    ``caller_override`` forces a specific caller (the pauser-identity probe):
     a predicted victim whose OWN principal could not be resolved is additionally
     probed from the pause principal, so a gate the neutral caller can't pass is
     still exercised by a caller that can."""
@@ -1913,9 +2263,9 @@ def _entry_point_for(
 def _pauser_identity_probes(
     facts: ContractFacts, predicted: Sequence[str], principals: Mapping[str, str], pauser: str
 ) -> list[EntryPoint]:
-    """§1 A2 follow-up (cause a): a PREDICTED pause victim whose own caller could not
-    be resolved is probed from ``NEUTRAL_CALLER`` and rejected by its auth gate
-    pre-pause, hiding any freeze from the diff (bucket B / unresolved-victim cause).
+    """A PREDICTED pause victim whose own caller could not be resolved is probed from
+    ``NEUTRAL_CALLER`` and rejected by its auth gate pre-pause, hiding any freeze
+    from the diff.
     Add a second probe of each such victim from the PAUSE principal — often the ops
     multisig, which reaches many gated functions.
 
@@ -1947,7 +2297,7 @@ def _pauser_identity_probes(
 
 
 # ---------------------------------------------------------------------------
-# Token-precondition seeding (§4.1 blast-radius honesty)
+# Token-precondition seeding (blast-radius honesty)
 # ---------------------------------------------------------------------------
 
 
@@ -2053,7 +2403,7 @@ def _token_seed_fixtures(
 
 
 # ---------------------------------------------------------------------------
-# Input-asset seeding (§4.2 / §4.5 preconditions) — Tier 1
+# Input-asset seeding (value-out / supply preconditions) — Tier 1
 # ---------------------------------------------------------------------------
 
 # Directions whose asset the ACTING PRINCIPAL must already hold for the call to
@@ -2205,7 +2555,7 @@ def seeded_calldata(
 def synthesize_pause(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> PausePlanInputs | None:
-    """§4.1. Applicable when F writes a latch-shaped state variable.
+    """Applicable when F writes a latch-shaped state variable.
 
     ``predicted_guard_set`` is static's read-set for that latch and remains the
     SCORED denominator even when empty. The entry points PROBED are a separate
@@ -2213,7 +2563,7 @@ def synthesize_pause(
     unsupported guard leaf), we fall back to probing every state-changing entry
     point rather than skipping the class. The observed radius is a lower bound
     either way, and an observed member static did not predict is routed as the
-    §9 ``observed_guard_not_predicted`` vocabulary-growth discrepancy — which is
+    ``observed_guard_not_predicted`` vocabulary-growth discrepancy — which is
     exactly what that channel is for."""
     latch = _claim_latch_pairs(session, candidate.function_id) or _latch_pairs(fn)
     if not latch:
@@ -2232,7 +2582,7 @@ def synthesize_pause(
     entry_points = [ep for ep in (_entry_point_for(facts, name, principals) for name in probe_names) if ep is not None]
     if not entry_points:
         return None
-    # cause (a) recovery: also probe each predicted victim that has no resolved
+    # Unresolved-victim recovery: also probe each predicted victim that has no resolved
     # principal from the pause principal, so a freeze a foreign caller can't reach
     # pre-pause is still witnessed. Only over the PREDICTED set (not the fallback),
     # union semantics keep the observed radius a sound lower bound.
@@ -2246,18 +2596,20 @@ def synthesize_pause(
     # getter read-back and lands on the state-bearing deployment, never the impl.
     # The seeds are visible to the pause tx itself (a pause gated on the
     # principal's token stake succeeds on the fork regardless of live holdings) —
-    # same gate-relative semantics as the ETH balance seed above (inv. 12: the
-    # verdict binds the gate structure, not the principal's current funding).
+    # same gate-relative semantics as the ETH balance seed above: the verdict binds
+    # the gate structure, not the principal's current funding.
     callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
     token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
     fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)
+    duration, duration_source = read_max_pause_duration(facts, latch_vars)
     return PausePlanInputs(
         contract_address=candidate.probe_target,
         principal=principal,
         pause_calldata=pause_calldata,
         entry_points=tuple(entry_points),
         predicted_guard_set=tuple(predicted),
-        max_pause_duration=read_max_pause_duration(facts, latch_vars),
+        max_pause_duration=duration,
+        duration_bound_source=duration_source,
         gate_ref=_gate_ref(fn.tree),
         fixtures=fixtures,
     )
@@ -2281,7 +2633,7 @@ def synthesize(session: Session, candidate: Candidate) -> CandidatePlanInputs:
     fn = resolve_function(facts, candidate.selector)
     if fn is None:
         return CandidatePlanInputs()
-    # §5c: a blank candidate (restrict_families is None) is synthesized for every
+    # A blank candidate (restrict_families is None) is synthesized for every
     # class; a claim-enrolled candidate only for the value/supply families it was
     # re-enrolled for, so already-explained functions are not re-simulated whole.
     allow = candidate.restrict_families

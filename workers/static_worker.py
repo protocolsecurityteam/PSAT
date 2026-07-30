@@ -914,6 +914,13 @@ class StaticWorker(BaseWorker):
             "source_format": contract_row.source_format or "flat",
             "source_file_count": contract_row.source_file_count or len(sources),
             "remappings": list(contract_row.remappings or []),
+            # Carried, not defaulted: the discovery fetch already answered this and
+            # the column keeps all three answers (TRUE 230 / FALSE 1 / NULL 410 on the
+            # 2026-07-28 corpus). ``or``-ing a default here would erase the NULL, which
+            # is the state that says the fetch fact never reached this row. Consumed by
+            # ``core._source_verified`` and published as
+            # ``contract_summaries.source_verified``.
+            "source_verified": contract_row.source_verified,
         }
         build_settings = {
             "evm_version": contract_row.evm_version or "shanghai",
@@ -1903,12 +1910,17 @@ class StaticWorker(BaseWorker):
             return None
 
         # ``predicate_trees`` and ``effects`` are the semantic artifacts
-        # consumed by policy resolution.
-        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2) + "\n")
+        # consumed by policy resolution. ``default=str`` is defence in depth:
+        # a stray non-JSON analyzer object (a Slither ``Constant`` reached
+        # ``derived_from.callee`` before provenance stringified it) must
+        # degrade to its string form rather than kill the whole static job.
+        (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
-            (project_dir / "predicate_trees.json").write_text(json.dumps(semantic_predicate_trees, indent=2) + "\n")
+            (project_dir / "predicate_trees.json").write_text(
+                json.dumps(semantic_predicate_trees, indent=2, default=str) + "\n"
+            )
         if semantic_effects is not None:
-            (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2) + "\n")
+            (project_dir / "effects.json").write_text(json.dumps(semantic_effects, indent=2, default=str) + "\n")
 
         store_artifact(session, job.id, "contract_analysis", data=analysis_data)
         if semantic_predicate_trees is not None:
@@ -1978,7 +1990,6 @@ class StaticWorker(BaseWorker):
                 is_upgradeable=summary.get("is_upgradeable"),
                 is_pausable=summary.get("is_pausable"),
                 has_timelock=summary.get("has_timelock"),
-                risk_level=summary.get("static_risk_level"),
                 is_factory=summary.get("is_factory"),
                 is_nft=summary.get("is_nft"),
                 standards=summary.get("standards", []),

@@ -28,9 +28,11 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DataError
 
 from db.models import MappingEnumerationCache, SessionLocal
 from utils.chains import chain_cache_token
+from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +162,17 @@ def upsert(
 ) -> None:
     """Upsert the EnumerationResult for the key. Commits its own
     short-lived transaction so the row is visible to other processes
-    immediately. Failures are swallowed and logged — the cache is a
-    pure optimization; a write failure must not break the resolution
-    pipeline that just produced a valid enumeration.
+    immediately.
+
+    Transient failures (connection reset, deadlock, statement timeout)
+    are swallowed and logged — the cache is a pure optimization and a
+    lost write must not break the resolution pipeline that just produced
+    a valid enumeration. ``DataError`` is not that: it means the value
+    the code produced does not fit the schema the code declares, so
+    retrying can never help and the *silence* is the damage — a rejected
+    upsert leaves the previous row intact, and an in-TTL ``complete``
+    then outlives the truncated re-scan that should have replaced it.
+    Those raise, after a degraded breadcrumb.
     """
     chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
@@ -193,6 +203,26 @@ def upsert(
         )
         session.execute(stmt)
         session.commit()
+    except DataError as exc:
+        session.rollback()
+        record_degraded(
+            phase="mapping_enumeration_cache_schema",
+            exc=exc,
+            context={
+                "chain": chain_norm,
+                "address": addr_norm,
+                "status": str(result.get("status")),
+                "status_len": len(str(result.get("status", ""))),
+            },
+        )
+        logger.error(
+            "mapping_enumeration_cache: upsert rejected by schema for chain=%s address=%s status=%r: %s",
+            chain_norm,
+            addr_norm,
+            result.get("status"),
+            exc,
+        )
+        raise
     except Exception as exc:
         logger.warning(
             "mapping_enumeration_cache: upsert failed for chain=%s address=%s: %s",

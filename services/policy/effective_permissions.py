@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
 from schemas.contract_analysis import ContractAnalysis
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import (
+    AuthorityRoleGrant,
     EffectiveFunctionPermission,
     EffectivePermissions,
     PrincipalResolution,
@@ -26,9 +27,15 @@ from schemas.effective_permissions import (
     ResolvedControllerGrant,
     ResolvedPrincipal,
 )
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import (
+    capability_role_grants,
+    capability_surface_openness,
+    capability_surface_status,
+    project_capability_surface,
+)
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
+    has_no_selector,
     is_canonical_abi_signature,
 )
 
@@ -162,8 +169,14 @@ def _abi_signature_and_selector(
     signature. Hashing a string that still names a user-defined type publishes a
     4-byte value the chain will never dispatch on, and the row's own signature
     column would then disagree with its selector — a wrong answer where no
-    answer is the honest one."""
+    answer is the honest one.
+
+    It is ``""`` for ``fallback()`` / ``receive()``: those PROVABLY have no
+    selector, which is a different answer from "we could not derive one", and
+    ``""`` is the sentinel ``db/effect_cache.py`` already fixes for them."""
     abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
+    if has_no_selector(abi_sig):
+        return abi_sig, ""
     if not is_canonical_abi_signature(abi_sig):
         return abi_sig, None
     return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]
@@ -448,6 +461,83 @@ def _effect_record_is_state_changing_entry_point(record: Mapping[str, Any]) -> b
     return record.get("state_changing") is True
 
 
+#: The four ``EffectInfo`` mutability facts, in the order they are documented.
+MUTABILITY_FIELDS = ("state_changing", "state_writes", "sinks", "writer_selectors")
+
+_NOT_DETERMINED: dict[str, Any] = dict.fromkeys(MUTABILITY_FIELDS)
+
+
+def _is_unselectored_entry_point(signature: str) -> bool:
+    """``fallback`` / ``receive`` — externally observable, but not selector-bearing."""
+    return signature.split("(")[0] in ("fallback", "receive")
+
+
+def _mutability_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Project an effects ``EffectInfo`` onto the four persisted mutability columns.
+
+    ``None`` on any field means NOT DETERMINED and is a different fact from
+    ``false`` / ``[]``. Three record shapes produce it, all measured against the
+    107 production ``effects`` artifacts (2415 function records):
+
+    * **No record, or a malformed field.** A missing effects artifact is a live
+      production branch — ``policy_worker`` passes ``effects=None`` whenever the
+      artifact is not a dict and the stage continues — and a present-but-wrongly-
+      typed value is not evidence of emptiness, so it does not collapse to ``[]``.
+
+    * **``fallback`` / ``receive`` → ``state_changing`` is not determined** (36
+      records; 15 of them carry a proven state write). ``_is_state_changing_entry_point``
+      returns ``False`` for these because they have no selector, NOT because it
+      proved them non-mutating: WETH9's ``fallback()`` writes ``balanceOf``.
+      Copying that ``False`` into a column read as evidence would publish a proven
+      absence over a proven presence. Their sinks and writes are real and are
+      published.
+
+    * **A view/pure entry point whose derived writes contradict it → the derived
+      effect facts are not determined** (100 records). Records exist only for
+      external/public/fallback/receive functions, so ``state_changing is False``
+      on a named one means the compiler typed it ``view``/``pure`` — and the
+      compiler forbids ``SSTORE`` there. The writes are OZ-v5 namespaced-storage
+      getters (``paused()`` "writing" ``PausableStorageLocation``) and struct
+      copies (``previewUpdateExchangeRate``); ``assembly_state_access`` is
+      ``false`` on all 100, so nothing existing catches them. The contradiction is
+      resolved in favour of the compiler for ``state_changing`` and withheld for
+      everything derived from the same lowering — including ``sinks``, which
+      carries the identical claim under a ``state_write`` kind tag.
+
+    ``state_writes`` empty on a view is NOT a contradiction and stays ``[]``.
+    """
+    if not isinstance(record, Mapping) or not record:
+        return dict(_NOT_DETERMINED)
+
+    signature = str(record.get("function") or "")
+    raw_state_changing = record.get("state_changing")
+    state_changing = raw_state_changing if isinstance(raw_state_changing, bool) else None
+
+    out: dict[str, Any] = {
+        "state_changing": None if _is_unselectored_entry_point(signature) else state_changing,
+        "state_writes": record.get("state_writes"),
+        "sinks": record.get("sinks"),
+        "writer_selectors": record.get("writer_selectors"),
+    }
+    if not isinstance(out["state_writes"], list):
+        out["state_writes"] = None
+    if not isinstance(out["sinks"], list):
+        out["sinks"] = None
+    if not isinstance(out["writer_selectors"], list) or not all(
+        isinstance(sel, str) for sel in out["writer_selectors"]
+    ):
+        out["writer_selectors"] = None
+
+    contradicts_view = (
+        state_changing is False and not _is_unselectored_entry_point(signature) and bool(out["state_writes"])
+    )
+    if contradicts_view:
+        out["state_writes"] = None
+        out["sinks"] = None
+        out["writer_selectors"] = None
+    return out
+
+
 def _function_records_from_semantic_artifacts(
     *,
     capability_dicts: Mapping[str, dict[str, Any]],
@@ -518,19 +608,24 @@ def _function_records_from_semantic_artifacts(
             "effect_labels": list(effect_info.get("effect_labels") or []),
             "claims": list(effect_info.get("claims") or []),
             "action_summary": effect_info.get("action_summary") or "Performs a contract action.",
+            **_mutability_fields(effect_info),
         }
         if signature not in capability_dicts:
             if signature in predicate_trees_by_function:
                 record["capability_expr"] = _unsupported_capability("missing_semantic_capability_for_predicate_tree")
                 record["status"] = "unsupported"
-            elif signature in abi_only_signatures or signature in assembly_only_signatures:
-                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
-                record["status"] = "unsupported"
             elif signature in guard_uncertain_signatures:
                 # The static stage found a caller-authority (msg.sender EQ/NEQ)
                 # guard it could not lower into a tree. Absence here is "guard
                 # not extracted", not "unguarded" — fail closed, never public.
+                # Checked BEFORE the abi/assembly-only arms: a marked signature
+                # is usually also state-changing, and the specific evidence ("a
+                # caller guard was SEEN") must not be shadowed by the generic
+                # "authority not extracted" reason.
                 record["capability_expr"] = _unsupported_capability("guard_extraction_uncertain")
+                record["status"] = "unsupported"
+            elif signature in abi_only_signatures or signature in assembly_only_signatures:
+                record["capability_expr"] = _unsupported_capability("assembly_only_authority_not_extracted")
                 record["status"] = "unsupported"
             elif resolver_output_available:
                 record["capability_expr"] = _public_capability()
@@ -554,6 +649,7 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
         "conditions": conditions or None,
         "status": capability_surface_status(cap_dict, surface),
         "authority_public": surface.authority_public,
+        "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
 
@@ -637,13 +733,35 @@ def build_effective_permissions(
             else function_record.get("action_summary", "Performs a contract action.")
         )
 
+        # Three-state role half (see ``capability_role_grants``): the
+        # capability's own verdict replaces the historical literal ``[]`` that
+        # every one of 1,773 persisted rows carried. The verdict is read from
+        # whichever capability THIS record actually carries — the resolver's
+        # when it produced one, otherwise the policy-minted shape
+        # (``_public_capability`` / ``_unsupported_capability``): those rows
+        # are published with a capability_expr, so their role half must be the
+        # projection of that same dict, not a blanket ``None``. ``None`` is
+        # reserved for a record carrying no capability at all ("nothing was
+        # read").
+        resolved_capability = capability_dicts.get(fn_signature)
+        minted_capability = function_record.get("capability_expr")
+        role_source_capability = (
+            resolved_capability
+            if resolved_capability is not None
+            else (minted_capability if isinstance(minted_capability, dict) else None)
+        )
+        authority_roles_out = cast(
+            "list[AuthorityRoleGrant] | None",
+            capability_role_grants(role_source_capability) if role_source_capability is not None else None,
+        )
+
         function_permission: EffectiveFunctionPermission = {
             "function": fn_signature,
             "abi_signature": abi_signature,
             "selector": selector,
             "direct_owner": direct_owner,
             "authority_public": False,
-            "authority_roles": [],
+            "authority_roles": authority_roles_out,
             "controllers": controller_grants,
             "effect_targets": effect_targets_out,
             "effect_labels": effect_labels_out,
@@ -651,6 +769,14 @@ def build_effective_permissions(
             "action_summary": action_summary_out,
             "notes": notes,
         }
+        # The artifact is what ``policy_worker`` hands the row writer, so the
+        # mutability witness has to survive this hop or the columns are NULL in
+        # production while every record-layer test passes.
+        mutability = _mutability_fields(effects_record)
+        function_permission["state_changing"] = mutability["state_changing"]
+        function_permission["state_writes"] = mutability["state_writes"]
+        function_permission["sinks"] = mutability["sinks"]
+        function_permission["writer_selectors"] = mutability["writer_selectors"]
 
         # Semantic capability columns: when a CapabilityExpr is supplied for this
         # function, it dictates capability_expr / conditions / status /
@@ -667,6 +793,12 @@ def build_effective_permissions(
             # conditional_universal short-circuits authority_public.
             if cap_columns["authority_public"]:
                 function_permission["authority_public"] = True
+            # The three-state verdict travels WITH the record: the writer's
+            # ``cap_dict is None`` branch reads ``fn.get("authority_openness")``,
+            # so dropping it here left the column NULL on every row the policy
+            # layer minted — and NULL is documented as "written before the
+            # column existed", which is false for a fresh row.
+            function_permission["authority_openness"] = cap_columns["authority_openness"]
         else:
             if function_record.get("capability_expr") is not None:
                 function_permission["capability_expr"] = function_record["capability_expr"]
@@ -676,6 +808,19 @@ def build_effective_permissions(
                 function_permission["status"] = function_record["status"]
             if function_record.get("authority_public") is True:
                 function_permission["authority_public"] = True
+            # Policy-minted capabilities (``_public_capability`` /
+            # ``_unsupported_capability``) get the SAME openness projection a
+            # resolver capability gets: ``open`` for the earned-public
+            # fall-through, ``not_determined`` for every fail-closed reroute
+            # (guard_extraction_uncertain / assembly_only / resolver-missing).
+            # The answer was already computable from the dict this record
+            # publishes; leaving the key absent published NULL with a meaning
+            # ("pre-column legacy row") the row does not have.
+            if isinstance(minted_capability, dict):
+                minted_surface = project_capability_surface(minted_capability)
+                function_permission["authority_openness"] = capability_surface_openness(
+                    minted_capability, minted_surface
+                )
 
         functions.append(function_permission)
 

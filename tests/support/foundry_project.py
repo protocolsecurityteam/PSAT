@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 def write_foundry_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
-    """Write ``src/<contract_name>.sol`` plus the sidecar meta/results files the
-    pipeline expects, pinned to solc 0.8.19 with no build output."""
+    """Write ``src/<contract_name>.sol`` plus the ``contract_meta.json`` sidecar
+    the pipeline expects, pinned to solc 0.8.19 with no build output."""
     project_dir = tmp_path / contract_name
     (project_dir / "src").mkdir(parents=True)
     (project_dir / "foundry.toml").write_text(
@@ -27,5 +27,4 @@ def write_foundry_project(tmp_path: Path, contract_name: str, source_code: str) 
         )
         + "\n"
     )
-    (project_dir / "slither_results.json").write_text(json.dumps({"results": {"detectors": []}}) + "\n")
     return project_dir

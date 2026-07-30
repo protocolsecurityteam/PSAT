@@ -29,6 +29,8 @@ from typing import Any, cast
 
 from eth_utils.crypto import keccak
 
+from .shared import external_bool_leaf_is_gate_shape
+
 try:
     from slither.core.declarations import SolidityVariable  # type: ignore[import]
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
@@ -100,6 +102,7 @@ from .provenance import (
     ProvenanceMap,
     Source,
     SourceSet,
+    arg_origins,
     is_top,
 )
 from .revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, Polarity, RevertDetector, RevertGate
@@ -308,8 +311,7 @@ def _build_subtree_from_gate(
 
     # If gate is in a cross-fn helper, walk the call chain to build
     # parameter bindings for the helper, then run provenance on the
-    # helper with those bindings. Full caller-side
-    # ParameterBindingEnv per v4 plan §predicates (round-2 #2 fix).
+    # helper with those bindings — a full caller-side ParameterBindingEnv.
     operating_fn = gate.containing_function or function
     if operating_fn is not function:
         # Pass the caller's already-computed provenance down so
@@ -532,7 +534,7 @@ def _build_subtree_from_value(
         # the operand reads a recognized guard var. The cross-function
         # pause shape (``_requireNotPaused`` calling
         # ``if (_paused) revert``) hits this path.
-        return make_leaf_node(_build_truthy_leaf(cond_value, prov, gate))
+        return make_leaf_node(_self_gate_or_truthy_leaf(cond_value, prov, gate, function))
     return make_leaf_node(leaf)
 
 
@@ -576,7 +578,7 @@ def _build_leaf_from_gate(
         # truthy/falsy leaf from the original condition. This covers
         # ``require(!flag)`` where flag is a bool state var read
         # directly through a Phi.
-        return _build_truthy_leaf(cond, prov, gate)
+        return _self_gate_or_truthy_leaf(cond, prov, gate, function)
     return leaf
 
 
@@ -621,8 +623,70 @@ def _build_internal_call_leaf(
         return None
     callee, sub_prov, return_value, inner = resolved
     if inner is None:
-        return _build_truthy_leaf(return_value, sub_prov, gate)
+        # The callee's return is not lowerable to a typed leaf (a named return
+        # assigned inside ``assembly`` — Solady ``EnumerableRoles``). The leaf
+        # is built in the CALLEE's frame, where the caller the CALL SITE passed
+        # in is not represented at all, which is how the caller vanishes.
+        # Re-attach the call-site argument origins so the caller-taint
+        # default can see them.
+        leaf = _build_truthy_leaf(return_value, sub_prov, gate)
+        return _attach_call_site_arg_origins(leaf, ir, prov)
     return _classify_leaf_from_ir(inner, sub_prov, gate, callee)
+
+
+def _call_site_arg_origins(ir: Any, caller_prov: ProvenanceMap) -> set[Source]:
+    """Flattened origins of an internal call's arguments, read in the CALLER's
+    frame. Members carry ``derived_from=None`` (``arg_origins`` strips them),
+    so nesting stays bounded at one level."""
+    origins: set[Source] = set()
+    for arg in getattr(ir, "arguments", ()) or ():
+        origins.update(arg_origins(_operand_value_provenance(arg, caller_prov)))
+    return origins
+
+
+def _attach_call_site_arg_origins_to_tree(tree: PredicateTree, ir: Any, caller_prov: ProvenanceMap) -> PredicateTree:
+    """``_attach_call_site_arg_origins`` over every leaf of a subtree built in
+    the callee's frame."""
+    if not isinstance(tree, dict):
+        return tree
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        if isinstance(leaf, dict):
+            _attach_call_site_arg_origins(cast(LeafPredicate, leaf), ir, caller_prov)
+        return tree
+    for child in tree.get("children") or []:
+        _attach_call_site_arg_origins_to_tree(child, ir, caller_prov)
+    return tree
+
+
+def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: ProvenanceMap) -> LeafPredicate:
+    """Union the CALL-SITE argument origins into the leaf's operand
+    ``derived_from``.
+
+    Only touches operands that already publish ``derived_from`` (``computed`` /
+    ``view_call`` / ``external_call``), so it neither invents the field on an
+    operand where absence means "does not apply" nor changes an operand's
+    identity — a state-var attribution stays a state-var attribution. Sorted
+    by the published key for cross-process determinism.
+
+    ``references_msg_sender`` is deliberately NOT set: the caller reached the
+    gate through a call argument, not as a direct operand, and the static flag
+    is read as the latter.
+    """
+    origins = _call_site_arg_origins(ir, caller_prov)
+    if not origins:
+        return leaf
+    for op in leaf.get("operands") or []:
+        if op.get("source") not in ("computed", "view_call", "external_call"):
+            continue
+        existing = op.get("derived_from") or []
+        merged = list(existing)
+        for origin in sorted(origins, key=_published_source_key):
+            rendered = _source_to_operand(origin, nested=True)
+            if rendered not in merged:
+                merged.append(rendered)
+        op["derived_from"] = merged
+    return leaf
 
 
 def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> PredicateTree | None:
@@ -733,6 +797,11 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
             return None
     if op_name is None or not children:
         return None
+    # Every child above was built in the CALLEE's frame, where the caller the
+    # call site passed in has no representation — that is where it is lost.
+    # Re-attach the call-site argument origins onto the children's collapsing
+    # operands so the caller-taint default can see them.
+    children = [_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children]
     # Polarity propagates the same way as the inline AND/OR case in
     # _build_subtree_from_value's main path.
     if gate.polarity == "allowed_when_true":
@@ -1466,12 +1535,116 @@ def _build_binary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function:
         leaf["authority_role"] = _classify_authority_equality(leaf, kind)
         if kind == "equality" and function is not None:
             _stamp_param_keyed_authority_mapping(ir, prov, function, leaf)
+        _stamp_absorbed_operands(ir, prov, gate, function, leaf)
         return leaf
     # AND/OR at the binary level — these would normally be handled by
     # short-circuit evaluation; for now we treat as unsupported and
     # let the predicate-tree composition layer (week 2) split them
     # into AND/OR tree nodes properly.
     return _unsupported_leaf(reason=f"binary_op_{op_name}_unsupported", expression=str(ir))
+
+
+# Slither ``BinaryType`` names that make an expression an OFFSET of its other
+# operand. A product, a quotient or a shift is not an offset and is never read as
+# one: ``block.timestamp < pausedUntil * 2`` carries no window length, and
+# publishing its ``2`` as a duration would be a two-second freeze bound on an
+# open-ended latch — the severity-REDUCER direction, from arithmetic nobody read.
+_ADDITIVE_BINARY_TYPES = ("ADDITION", "SUBTRACTION")
+
+
+def _stamp_absorbed_operands(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None, leaf: LeafPredicate
+) -> None:
+    """Record the operands an ADDITIVE sub-expression contributed and the leaf could
+    not hold.
+
+    A Solidity comparison lowers to a leaf with exactly TWO operands, and when one
+    side is arithmetic the operand recorder keeps ONE sub-operand and discards the
+    rest. Measured on compiled source: ``block.timestamp < pausedUntil +
+    MAX_PAUSE`` records ``{timestamp, MAX_PAUSE}`` — the latch is gone — while
+    ``block.timestamp - pausedUntil < 2592000`` records ``{pausedUntil, 2592000}``
+    — the clock is gone. Three facts do not fit in two slots, so a reader asking
+    "does this guard compare the CLOCK against this LATCH plus a fixed WINDOW?"
+    could not be answered from any source shape, and every timed pause latch in
+    the corpus published ``duration_bound_seconds: null`` — which the consumer
+    contract read as *indefinite latch, most severe*. An extraction failure was
+    being published as a proof about the contract.
+
+    This is deliberately NOT a change to ``operands``: it is a sibling list of
+    what the comparison ALSO read, so every existing operand consumer keeps the
+    exact list it had (the value-flow lattice folds a source set to one origin and
+    degrades to ``indeterminate`` the moment a set carries two, so widening
+    ``operands`` would silently collapse amount kinds protocol-wide).
+
+    Additive only, ONE level deep, and absent when nothing was absorbed — so
+    absence means "no additive sub-expression fed this comparison", never "there
+    was one and we could not read it": a nested ``a + b * c`` records ``a`` and the
+    opaque ``computed`` operand for ``b * c``, which is a not-determined marker a
+    reader must treat as such.
+    """
+    if function is None:
+        return
+    absorbed: list[Operand] = []
+    for side in (getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)):
+        if side is None:
+            continue
+        defining = _find_defining_ir(side, getattr(gate, "node", None), function)
+        if not isinstance(defining, Binary):
+            continue
+        if str(getattr(defining, "type", "")).split(".")[-1] not in _ADDITIVE_BINARY_TYPES:
+            continue
+        for inner in (getattr(defining, "variable_left", None), getattr(defining, "variable_right", None)):
+            if inner is None:
+                continue
+            op = _operand_for_value(inner, prov)
+            _attach_int_constant_value(op, inner)
+            absorbed.append(op)
+    if not absorbed:
+        return
+    # Deterministic order: the list is evidence, and two runs must publish the
+    # same bytes. ``_published_source_key`` is the same canonical key the operand
+    # sort uses elsewhere in this module.
+    leaf["absorbed_operands"] = sorted(absorbed, key=lambda o: _operand_sort_key(o))
+
+
+def _operand_sort_key(op: Operand) -> tuple[str, ...]:
+    return tuple(
+        str(op.get(key) or "")
+        for key in (
+            "source",
+            "state_variable_name",
+            "parameter_name",
+            "block_context_kind",
+            "computed_kind",
+            "constant_value",
+        )
+    )
+
+
+def _attach_int_constant_value(op: Operand, value: Any) -> None:
+    """Resolve a compile-time ``constant`` state variable's INTEGER literal onto an
+    absorbed operand.
+
+    Scoped to :func:`_stamp_absorbed_operands` on purpose. ``uint256 public
+    constant MAX_PAUSE = 30 days`` is a value the compiler fixed, so reading it is
+    not the name-matching heuristic ``read_max_pause_duration`` refuses — but
+    attaching it to every ``state_variable`` operand would change what resolution
+    and the claims matchers see on operands they already read, which is not this
+    item's surface.
+    """
+    if op.get("source") != "state_variable" or op.get("constant_value") is not None:
+        return
+    variable = getattr(value, "non_ssa_version", None) or value
+    if not getattr(variable, "is_constant", False):
+        return
+    literal = getattr(variable, "expression", None)
+    converted = getattr(literal, "converted_value", None)
+    if converted is None:
+        return
+    try:
+        op["constant_value"] = str(int(str(converted), 0))
+    except (TypeError, ValueError):
+        return
 
 
 def _stamp_param_keyed_authority_mapping(ir: Any, prov: ProvenanceMap, function: Any, leaf: LeafPredicate) -> None:
@@ -1754,7 +1927,10 @@ def _try_external_auth_oracle(
 
     EIP-1271 specifically: the magic value 0x1626ba7e identifies
     the comparison as an isValidSignature check; emit signature_auth.
-    Generic case: emit external_bool with delegated_authority.
+    Generic case: emit external_bool; delegated_authority only when the
+    callee is gate-shaped (``external_bool_leaf_is_gate_shape``) — a
+    result-checked EFFECTFUL call whose args include the caller moves
+    the caller's own value and is published as business.
     """
     left = ir.variable_left
     right = ir.variable_right
@@ -1808,7 +1984,23 @@ def _try_external_auth_oracle(
         operands=operands,
         gate=gate,
     )
-    leaf["authority_role"] = "delegated_authority"
+    # Same discriminator as ``_build_external_bool_leaf``: a result-checked
+    # EFFECTFUL call whose args include the caller
+    # (``require(bEIGEN.transferFrom(msg.sender, …) == true)``) moves the
+    # caller's own value — not an authorization oracle. Only a gate-shaped
+    # callee may publish delegated_authority. The mutability is stamped on
+    # the leaf so downstream (permissionless_shapes, tracking) can apply the
+    # identical judgment instead of reading an absent key as not-determined.
+    callee_mutability = _callee_state_mutability(call_ir)
+    callee_signature = _callee_signature(call_ir)
+    leaf["callee_state_mutability"] = callee_mutability
+    if callee_signature is not None:
+        leaf["callee_signature"] = callee_signature
+    leaf["gate_kind"] = gate.kind
+    if external_bool_leaf_is_gate_shape(callee_mutability, gate.kind, callee_signature):
+        leaf["authority_role"] = "delegated_authority"
+    else:
+        leaf["authority_role"] = "business"
     return leaf
 
 
@@ -2008,9 +2200,10 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     # from a void merkle-witness verification.
     leaf["gate_kind"] = gate.kind
     leaf["callee_signature"] = callee_signature
-    # Authority classification for external_bool: delegated_authority
-    # if the call target traces to a state_variable AND any arg
-    # traces to msg_sender or signature_recovery.
+    # Inputs to the authority classification below: does the call target
+    # trace to a state_variable, and does any arg trace to msg_sender /
+    # signature_recovery? That fingerprint alone never decides — the
+    # gate-shape branch below is the contract.
     target_sources = _sources_from_destination(ir, prov)
     has_state_target = any(s.kind == "state_variable" for s in target_sources)
     target_state_var = next(
@@ -2021,7 +2214,17 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
         any(s.kind in ("msg_sender", "tx_origin", "signature_recovery") for s in _sources_for_value(a, prov))
         for a in getattr(ir, "arguments", ())
     )
-    if has_state_target and has_caller_arg:
+    # The state-target + caller-arg fingerprint alone is not authority
+    # evidence: ``vault.enter(msg.sender, …)``, ``token.permit(msg.sender,
+    # …)`` and ``eETH.burnShares(msg.sender, …)`` all match it while the
+    # msg.sender argument is the funds/burn subject. Only a gate-shaped
+    # callee (see ``external_bool_leaf_is_gate_shape``) may publish the
+    # delegated-authority claim and its resolvable descriptor.
+    if (
+        has_state_target
+        and has_caller_arg
+        and external_bool_leaf_is_gate_shape(leaf.get("callee_state_mutability"), gate.kind, callee_signature)
+    ):
         leaf["authority_role"] = "delegated_authority"
         descriptor = _build_generic_external_set_descriptor(
             callee_name=callee_name,
@@ -2035,6 +2238,100 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     else:
         leaf["authority_role"] = "business"
     leaf["expression"] = f"{callee_name}(...)"
+    return leaf
+
+
+def _self_gate_or_truthy_leaf(cond: Any, prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate:
+    """The bare-bool fallback leaf, upgraded to a SELF-GATE descriptor only
+    when the fallback carries nothing an authority resolver could use.
+
+    Order matters. ``_build_truthy_leaf``'s operand resolution recovers the
+    underlying state variable for the common shapes — an inlined
+    ``committeeMemberStates[_member].registered`` membership read, a pause flag,
+    a struct member — and that state-var name is what controller enrollment and
+    the pause/reentrancy passes key on. Replacing such a leaf with a probe
+    descriptor would trade a named authority variable for a selector: strictly
+    less. Only when the fallback's operands are ALL opaque (no state variable,
+    no descriptor — the Solady assembly-role case, where the operand is the bare
+    result of a read the lifter could not model) is the self-gate the better
+    answer."""
+    leaf = _build_truthy_leaf(cond, prov, gate)
+    if leaf.get("set_descriptor"):
+        return leaf
+    if any((op or {}).get("source") == "state_variable" for op in leaf.get("operands") or []):
+        return leaf
+    self_gate = _build_self_gate_leaf(prov, gate, operating_fn)
+    return self_gate if self_gate is not None else leaf
+
+
+def _build_self_gate_leaf(prov: ProvenanceMap, gate: RevertGate, operating_fn: Any) -> LeafPredicate | None:
+    """The SELF-gate descriptor for an un-lowerable caller gate.
+
+    Emitted only when leaf lowering has already FAILED (the classify fallback)
+    and the gate lives in a function the resolver can probe directly:
+
+      * public/external ``view`` (an ``eth_call fn(candidate)`` reverts iff the
+        gate rejects the candidate — the probed unit is the whole function, so
+        ``operator`` is always ``truthy`` regardless of the inner polarity);
+      * exactly one ``address`` parameter;
+      * that parameter carries caller taint in this frame (the call chain
+        bound it to ``msg.sender`` / ``tx.origin``);
+      * declared on a contract, not a library (a library function has no
+        selector on the analyzed deployment).
+
+    The emitted leaf mirrors the external-call form of the identical gate
+    (weETH's ``roleRegistry.onlyUpgradeTimelock(msg.sender)``): kind
+    ``external_bool`` with an ``external_set`` descriptor, so the enumerable
+    role-store adapter — which already answers this gate correctly for every
+    OTHER contract — can fold + probe it. The authority is ``self_address``,
+    resolved to the analyzed deployment at evaluation time. When no adapter
+    recognizes the store, the resolver settles to a gated external check —
+    still strictly better evidence than the bare-bool business fallback this
+    replaces, which projected PUBLIC (RoleRegistry.upgradeTo)."""
+    fn = gate.containing_function or operating_fn
+    if fn is None:
+        return None
+    if getattr(fn, "visibility", None) not in ("public", "external"):
+        return None
+    if not getattr(fn, "view", False):
+        return None
+    declarer = getattr(fn, "contract_declarer", None) or getattr(fn, "contract", None)
+    if declarer is None or getattr(declarer, "is_library", False):
+        return None
+    params = list(getattr(fn, "parameters", []) or [])
+    if len(params) != 1 or str(getattr(params[0], "type", "")) != "address":
+        return None
+    caller_kinds = ("msg_sender", "tx_origin")
+    param_sources = _operand_value_provenance(params[0], prov)
+    if not any(getattr(s, "kind", None) in caller_kinds for s in param_sources):
+        return None
+    signature = getattr(fn, "full_name", None)
+    if not (isinstance(signature, str) and "(" in signature and signature.endswith(")")):
+        return None
+    selector = _selector_for_signature(signature)
+    caller_operand: Operand = {"source": "msg_sender"}
+    leaf = _make_leaf(
+        kind="external_bool",
+        operator="truthy",
+        operands=[caller_operand],
+        gate=gate,
+    )
+    leaf["authority_role"] = "delegated_authority"
+    leaf["callee_state_mutability"] = "view"
+    leaf["gate_kind"] = gate.kind
+    leaf["callee_signature"] = signature
+    leaf["set_descriptor"] = cast(
+        SetDescriptor,
+        {
+            "kind": "external_set",
+            "key_sources": [dict(caller_operand)],
+            "authority_contract": {"address_source": {"source": "self_address"}},
+            "callee_function": getattr(fn, "name", None),
+            "callee_signature": signature,
+            "callee_selector": selector,
+        },
+    )
+    leaf["expression"] = f"{getattr(fn, 'name', signature)}(msg.sender)"
     return leaf
 
 
@@ -2160,6 +2457,49 @@ def _source_sort_key(source: Source) -> tuple[str, ...]:
         str(source.computed_kind),
         str(source.block_context_kind),
         str(source.storage_slot),
+        _derived_from_sort_key(source.derived_from),
+    )
+
+
+def _published_source_key(source: Source) -> tuple[str, ...]:
+    """Order over the fields a Source actually *publishes* to an operand.
+
+    ``callee_args_digest`` is deliberately excluded. It is never emitted, so
+    two Sources that differ only in the digest render identically and their
+    relative order cannot matter. (The digest is content-stable now —
+    ``provenance._digest`` hashes the sorted canonical member keys — so
+    including it would no longer vary run to run, but it still orders nothing
+    a reader can see.)
+    """
+    return (
+        str(source.kind),
+        str(source.parameter_index),
+        str(source.parameter_name),
+        str(source.state_variable_name),
+        str(source.member_path),
+        str(source.callee),
+        str(source.callee_signature),
+        str(source.callee_selector),
+        str(source.constant_value),
+        str(source.value_type),
+        str(source.computed_kind),
+        str(source.block_context_kind),
+        str(source.storage_slot),
+    )
+
+
+def _derived_from_sort_key(derived_from: frozenset[Source] | None) -> str:
+    """Canonical string for ``Source.derived_from`` inside ``_source_sort_key``.
+
+    ``str()`` of a frozenset is iteration-ordered, which is the exact
+    nondeterminism ``_source_sort_key`` exists to remove, so the members are
+    sorted by their published key first. Recursion terminates at one level:
+    every member is stored with ``derived_from=None``.
+    """
+    if derived_from is None:
+        return "None"
+    return "|".join(
+        "\x1f".join(_published_source_key(origin)) for origin in sorted(derived_from, key=_published_source_key)
     )
 
 
@@ -2218,7 +2558,7 @@ def _derived_view_call_source(sources: SourceSet) -> Source | None:
     return min((s for s in sources if s.kind == "view_call"), key=_source_sort_key, default=None)
 
 
-def _source_to_operand(source: Source) -> Operand:
+def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
     op: Operand = {"source": source.kind}  # type: ignore[typeddict-item]
     if source.parameter_index is not None:
         op["parameter_index"] = source.parameter_index
@@ -2244,6 +2584,24 @@ def _source_to_operand(source: Source) -> Operand:
         op["computed_kind"] = source.computed_kind
     if source.block_context_kind is not None:
         op["block_context_kind"] = source.block_context_kind
+    if source.kind in ("computed", "view_call", "external_call") and not nested:
+        # Always emitted on a computed / view_call / external_call operand, and
+        # only there, so absence is "the question does not apply" rather than a
+        # silent third meaning. (view_call/external_call are included because
+        # the call's argument provenance — the caller, in the RoleRegistry
+        # shape — must survive onto the operand; the digest alone is opaque.)
+        # ``null`` is not-determined; a list (possibly empty) is determined.
+        # ``nested`` renders the members, whose own ``derived_from`` was
+        # stripped by ``arg_origins`` after being spliced into this list —
+        # emitting ``null`` there would read as an unknown that isn't one.
+        op["derived_from"] = (
+            None
+            if source.derived_from is None
+            else [
+                _source_to_operand(origin, nested=True)
+                for origin in sorted(source.derived_from, key=_published_source_key)
+            ]
+        )
     return op
 
 

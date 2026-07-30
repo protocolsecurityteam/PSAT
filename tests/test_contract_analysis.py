@@ -17,7 +17,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "contracts"
 FIXTURE_INDEX_PATH = FIXTURES_DIR / "index.json"
 
 
-def _write_project(tmp_path: Path, contract_name: str, source_code: str, slither_output: dict | None = None) -> Path:
+def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
     project_dir = tmp_path / contract_name
     (project_dir / "src").mkdir(parents=True)
     (project_dir / "foundry.toml").write_text(
@@ -34,25 +34,18 @@ def _write_project(tmp_path: Path, contract_name: str, source_code: str, slither
         )
         + "\n"
     )
-    (project_dir / "slither_results.json").write_text(
-        json.dumps(
-            slither_output
-            or {
-                "results": {
-                    "detectors": [
-                        {
-                            "check": "reentrancy-events",
-                            "impact": "Medium",
-                            "confidence": "Medium",
-                            "description": "Sample finding",
-                        }
-                    ]
-                }
-            }
-        )
-        + "\n"
-    )
     return project_dir
+
+
+_CLASSIFICATION_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+contract C {
+    address public owner;
+    uint256 public value;
+    function poke(uint256 v) external { require(msg.sender == owner, "no"); value = v; }
+}
+"""
 
 
 def _fixture_source(relative_path: str) -> str:
@@ -130,7 +123,6 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
         tmp_path,
         "UpgradeFactory",
         _fixture_source("composed/upgrade_factory_uups.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -147,7 +139,9 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
     assert analysis["timelock"]["has_timelock"] is False
     assert analysis["timelock"]["pattern"] == "none"
     assert analysis["contract_classification"]["is_factory"] is True
-    assert "createChild()" in analysis["contract_classification"]["factory_functions"]
+    factory_functions = analysis["contract_classification"]["factory_functions"]
+    assert factory_functions is not None, "None means the effects artifact was degraded, not that there are none"
+    assert "createChild()" in factory_functions
     assert analysis["upgradeability"]["implementation_slots"] == []
     create_child = _semantic_function(analysis, "createChild()")
     # sink_ids come from the semantic effects artifact and end with
@@ -161,7 +155,6 @@ def test_collect_contract_analysis_detects_erc721_as_nft(tmp_path):
         tmp_path,
         "Collectible",
         _fixture_source("nft/collectible_erc721.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -176,7 +169,6 @@ def test_state_write_in_internal_helper_surfaces_on_caller(tmp_path):
         tmp_path,
         "IndirectOwnerPause",
         _fixture_source("pause/indirect_owner_pause.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -190,7 +182,6 @@ def test_contract_creation_sink_classified(tmp_path):
         tmp_path,
         "UpgradeFactory",
         _fixture_source("composed/upgrade_factory_uups.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -232,7 +223,6 @@ def test_additional_semantic_sink_kinds_surface_on_semantic_summary(
         tmp_path,
         contract_name,
         _fixture_source(fixture_name),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -246,7 +236,6 @@ def test_external_call_in_internal_helper_surfaces_on_caller(tmp_path):
         tmp_path,
         "IndirectExternalCallControl",
         _fixture_source("calls/indirect_external_call_control.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -260,7 +249,6 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
         tmp_path,
         "AuthModifierController",
         _fixture_source("composed/auth_modifier_controller.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -348,7 +336,6 @@ def test_controller_tracking_falls_back_to_state_only_without_events(tmp_path):
         tmp_path,
         "OwnerNoEvent",
         _fixture_source("tracking/owner_update_no_event.sol"),
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -390,7 +377,6 @@ def test_non_authority_external_calls_with_caller_args_not_classified_as_authori
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -426,7 +412,6 @@ def test_void_role_registry_upgrader_is_controller_ref(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -462,7 +447,6 @@ def test_external_role_getter_name_is_not_tracked_as_role_identifier(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -510,7 +494,6 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -562,7 +545,6 @@ def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -610,7 +592,6 @@ def test_opaque_external_role_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
@@ -659,10 +640,83 @@ def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-        slither_output={"results": {"detectors": []}},
     )
 
     analysis = collect_contract_analysis(project_dir)
     semantic = _semantic_function(analysis, "execute()")
     assert "policy" in semantic["controller_refs"]
     assert "external_contract_call" in semantic["effect_labels"]
+
+
+# ---------------------------------------------------------------------------
+# Classification: which of these fields can honestly be not-determined.
+# Preserved from tests/test_slither_detector_outage.py, which was deleted with
+# the vestigial detector-output reader; these two tests are about the
+# IR-derived classification plane and never depended on it.
+# ---------------------------------------------------------------------------
+
+
+def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
+    """``is_factory`` is the ONLY classification field that is not IR-derived:
+    it reads the effects artifact's ``contract_creation`` sinks. ``core``
+    substitutes ``{"schema_version", "error"}`` when ``build_effects`` raises,
+    and ``false`` would then assert that a contract deploys nothing on the
+    strength of never having looked."""
+    from slither import Slither  # noqa: PLC0415
+
+    from services.static.contract_analysis_pipeline.summaries import (  # noqa: PLC0415
+        _detect_contract_classification,
+    )
+    from tests.support.foundry_project import write_foundry_project  # noqa: PLC0415
+
+    project = write_foundry_project(tmp_path, "C", _CLASSIFICATION_SOURCE)
+    contract = next(c for c in Slither(str(project)).contracts if c.name == "C")
+
+    degraded = _detect_contract_classification(contract, tmp_path, {"schema_version": "semantic", "error": "boom"})
+    assert degraded["is_factory"] is None
+    assert degraded["factory_functions"] is None
+    # The IR-derived half is unaffected -- the sentinel narrows one field.
+    assert degraded["standards"] == []
+    assert degraded["is_nft"] is False
+
+    ran = _detect_contract_classification(contract, tmp_path, {"functions": {}})
+    assert ran["is_factory"] is False, "an effects artifact that ran and found no creation sink is a PROVEN absence"
+    assert ran["factory_functions"] == []
+
+
+def test_standards_absence_is_measured_not_missing(tmp_path):
+    """A proposal to null ``standards`` on the reasoning that ``{}`` on
+    61/92 rows meant "no detector ran" was rejected by measurement: ``standards``
+    comes from ``contract.ercs()`` plus a signature+event match off the IR, not
+    from any detector pass, and it is non-empty on 31 of the 88 local contracts
+    -- every real token among them. Nulling it would suppress a true negative,
+    so this pins that it stays a list."""
+    from slither import Slither  # noqa: PLC0415
+
+    from services.static.contract_analysis_pipeline.summaries import (  # noqa: PLC0415
+        _detect_contract_classification,
+    )
+    from tests.support.foundry_project import write_foundry_project  # noqa: PLC0415
+
+    erc20 = """
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.19;
+    contract C {
+        mapping(address => uint256) public balanceOf;
+        mapping(address => mapping(address => uint256)) public allowance;
+        uint256 public totalSupply;
+        event Transfer(address indexed from, address indexed to, uint256 value);
+        event Approval(address indexed owner, address indexed spender, uint256 value);
+        function transfer(address to, uint256 v) external returns (bool) { balanceOf[to] += v; return true; }
+        function approve(address s, uint256 v) external returns (bool) { allowance[msg.sender][s] = v; return true; }
+        function transferFrom(address f, address t, uint256 v) external returns (bool) {
+            balanceOf[f] -= v; balanceOf[t] += v; return true;
+        }
+    }
+    """
+    project = write_foundry_project(tmp_path, "C", erc20)
+    contract = next(c for c in Slither(str(project)).contracts if c.name == "C")
+    # No effects artifact at all: standards must still resolve.
+    classification = _detect_contract_classification(contract, tmp_path, None)
+    assert "ERC20" in classification["standards"]
+    assert classification["is_factory"] is None

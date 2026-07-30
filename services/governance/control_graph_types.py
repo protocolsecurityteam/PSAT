@@ -49,7 +49,7 @@ nothing.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -86,6 +86,36 @@ def _chain_key(chain: str | None) -> str:
     from services.aggregations.company_overview import _coalesce_chain
 
     return _coalesce_chain(chain)
+
+
+def _coherent_analysis_state(node: Any) -> str | None:
+    """The ``analysis_state`` the resolution walk itself would stamp on this
+    node's CURRENT ``resolved_type`` — the single source of truth is
+    ``services.resolution.recursive._analysis_state``, applied to the row's own
+    fields.
+
+    Used after a type upgrade so the pair stays coherent: the walk left
+    ``analysis_state`` NULL because the type was ``unknown`` at walk time, and
+    folding in ``safe`` without revisiting the state leaves a row that types an
+    address as a Safe while claiming its analyzability was never determined.
+
+    ``graph_max_depth`` NULL (legacy rows) suppresses the depth comparison by
+    using an unreachable horizon: without the walk's recorded horizon we cannot
+    honestly claim ``beyond_depth_horizon``, and the fallthrough for analyzable
+    types is ``None`` — which leaves the column NULL, not a guess.
+    """
+    # Lazy import: module-level would re-create the resolution↔policy package
+    # cycle this file's callers already tiptoe around.
+    from services.resolution.recursive import _analysis_state
+
+    max_depth = node.graph_max_depth if isinstance(node.graph_max_depth, int) else (node.depth or 0) + 1
+    walk_node = {
+        "analyzed": bool(node.analyzed),
+        "details": node.details if isinstance(node.details, dict) else {},
+        "resolved_type": node.resolved_type,
+        "depth": node.depth or 0,
+    }
+    return _analysis_state(cast(Any, walk_node), max_depth)
 
 
 def _merge_intrinsic(into: dict[str, Any], src: Mapping[str, Any]) -> None:
@@ -205,6 +235,22 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
             missing = {k: v for k, v in node_intrinsic.items() if k not in current}
             if missing:
                 node.details = {**current, **missing}
+                changed = True
+
+        # analysis_state coherence: the walk stamped NULL ("not determined")
+        # while the type was ``unknown``; once this pass types the node, the
+        # pair ('safe', NULL) reads "typed as a Safe, analyzability not
+        # determined" — a claim the same row refutes. Stamp exactly what the
+        # walk would now derive from the row's own fields, and only onto NULL:
+        # a determined state ('analyzed', 'attempt_failed', ...) is never
+        # overwritten. Also heals rows a prior type-only reconcile already
+        # upgraded (type unchanged this run, state still NULL). For analyzable
+        # upgrades (timelock / proxy_admin) the derivation returns None and the
+        # column honestly stays NULL. Converges: a second run changes nothing.
+        if node.resolved_type == new_type and node.analysis_state is None:
+            derived_state = _coherent_analysis_state(node)
+            if derived_state is not None:
+                node.analysis_state = derived_state
                 changed = True
 
         if changed:

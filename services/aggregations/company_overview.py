@@ -36,6 +36,7 @@ from typing import Any, Callable, Iterator
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
+from db.jsonb import jsonb_has_payload
 from db.models import (
     Contract,
     ContractBalance,
@@ -46,6 +47,7 @@ from db.models import (
     FunctionPrincipal,
     Job,
     JobStatus,
+    PrincipalLabel,
     Protocol,
     TvlSnapshot,
     UpgradeEvent,
@@ -54,6 +56,7 @@ from db.models import (
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
+from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, token_balances_may_be_truncated
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -92,7 +95,7 @@ class GovernanceView:
 
 def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
     """Whether ``job`` and a Contract row (its ``chain`` name) are on the same
-    chain (inv. 12). Both sides resolve to a registry chain id — the job from its
+    chain. Both sides resolve to a registry chain id — the job from its
     first-class ``chain_id`` (else derived from ``request["chain"]``), the
     contract from its name string — so aliases (``"mainnet"``≡``"ethereum"``) and
     a NULL contract chain (legacy mainnet) fold to mainnet and agree, keeping
@@ -160,7 +163,7 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
         # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
         # and a raw string compare would drop legitimate rows on alias / NULL
         # mismatch); chain agreement is enforced in Python below via the registry
-        # so a mainnet job never pairs with a same-address L2 contract (inv. 12).
+        # so a mainnet job never pairs with a same-address L2 contract.
         # On mainnet-only data every pair agrees, so output is unchanged.
         rows = session.execute(
             select(Job, Contract.chain)
@@ -278,7 +281,7 @@ def resolve_implementation_contracts(
 
     ``impl_job_by_entity`` is keyed by the composite entity token
     (:func:`_entity_key`, ``"<chain>::<addr>"``) of the impl job's OWN chain, so
-    a proxy resolves its implementation on the proxy's own chain (inv. 13). A
+    a proxy resolves its implementation on the proxy's own chain. A
     same-address impl twin on two of a protocol's chains no longer collapses
     last-wins across chains — each chain keeps its own impl job.
 
@@ -422,6 +425,7 @@ def _prefetch_child_tables(
         "balances": {},
         "cgn": {},
         "cge": {},
+        "terminal_walk": {},
     }
     if not contract_ids:
         return out
@@ -481,6 +485,11 @@ def _prefetch_child_tables(
     # but reads as a footgun.
     cgn_principal_lookup = aliased(ControlGraphNode, name="cgn_principal_lookup")
     cge_target_cgn = aliased(ControlGraphNode, name="cge_target_cgn")
+    # ``jsonb_has_payload``, not a SQL null test, on both timelock-delay clauses
+    # here and in ``_node_keep_predicate``: a JSONB column written from a Python
+    # ``None`` holds the jsonb scalar null, which passes a null test. The
+    # ``has_key`` checks that follow are false on that value, so the pair reads
+    # as one contradictory row rather than a node with no resolved details.
     cgn_principal_addr_subq = (
         select(func.lower(cgn_principal_lookup.address))
         .where(
@@ -488,7 +497,7 @@ def _prefetch_child_tables(
             or_(
                 cgn_principal_lookup.resolved_type.in_(_PRINCIPAL_TYPES_SQL),
                 and_(
-                    cgn_principal_lookup.details.is_not(None),
+                    jsonb_has_payload(cgn_principal_lookup.details),
                     or_(
                         cgn_principal_lookup.details.has_key("delay"),
                         cgn_principal_lookup.details.has_key("delay_seconds"),
@@ -508,7 +517,7 @@ def _prefetch_child_tables(
             func.lower(node_ref.address).in_(cgn_principal_addr_subq),
             func.lower(node_ref.address).in_(edge_source_addr_subq),
             and_(
-                node_ref.details.is_not(None),
+                jsonb_has_payload(node_ref.details),
                 or_(
                     node_ref.details.has_key("delay"),
                     node_ref.details.has_key("delay_seconds"),
@@ -711,25 +720,61 @@ def _prefetch_child_tables(
         return local, rows
 
     def _upgrade_count(s: Session) -> tuple[dict[int, int], int]:
+        """Upgrade TRANSACTIONS per contract, not Upgraded logs.
+
+        The payload's ``upgrade_count`` renders as literal "N upgrades" text,
+        so the unit must be exercises of upgrade authority. One transaction can
+        emit several ``Upgraded`` logs against the same proxy (a within-tx
+        swap-and-restore emits two), and a per-log count published "7 upgrades"
+        over 5 transactions. Distinct ``tx_hash`` is the honest cardinality
+        that the persisted rows can actually support — counting distinct
+        *resting-implementation changes* would need old→new impl continuity,
+        and ``old_impl`` is NULL on every backfill-written row. Rows with NULL
+        ``tx_hash`` (the poll writer detects a slot change without a tx) are
+        each their own observed upgrade: they cannot be grouped by
+        transaction, and folding them together would undercount.
+        """
         local: dict[int, int] = {}
-        for cid, count in s.execute(
-            select(UpgradeEvent.contract_id, func.count(UpgradeEvent.id))
+        for cid, distinct_tx, null_tx in s.execute(
+            select(
+                UpgradeEvent.contract_id,
+                func.count(func.distinct(UpgradeEvent.tx_hash)),
+                func.count(UpgradeEvent.id).filter(UpgradeEvent.tx_hash.is_(None)),
+            )
             .where(UpgradeEvent.contract_id.in_(id_list))
             .group_by(UpgradeEvent.contract_id)
         ).all():
-            local[cid] = count
+            local[cid] = distinct_tx + null_tx
         return local, len(local)
 
     def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
+        """Block + timestamp of THE last upgrade event — one row, both fields.
+
+        Formerly two independent ``MAX`` aggregates over the same group, which
+        can name two different events the moment a poll-detected row (NULL
+        ``block_number`` by design) coexists with a block-carrying one. The
+        published pair describes "the last upgrade", so both halves must come
+        from the same qualifying row. Ordering mirrors the chat plane's
+        documented total order (services/chat/data.py): timestamp leads
+        because every writer sets it; block NULLS FIRST under DESC so a
+        poll-detected latest row wins over an older block-carrying one; ``id``
+        makes the order total.
+        """
         local: dict[int, dict[str, Any]] = {}
         for cid, last_block, last_ts in s.execute(
             select(
                 UpgradeEvent.contract_id,
-                func.max(UpgradeEvent.block_number),
-                func.max(UpgradeEvent.timestamp),
+                UpgradeEvent.block_number,
+                UpgradeEvent.timestamp,
             )
             .where(UpgradeEvent.contract_id.in_(id_list))
-            .group_by(UpgradeEvent.contract_id)
+            .order_by(
+                UpgradeEvent.contract_id,
+                UpgradeEvent.timestamp.desc().nullslast(),
+                UpgradeEvent.block_number.desc().nullsfirst(),
+                UpgradeEvent.id.desc(),
+            )
+            .distinct(UpgradeEvent.contract_id)
         ).all():
             local[cid] = {"block": last_block, "timestamp": last_ts}
         return local, len(local)
@@ -752,6 +797,51 @@ def _prefetch_child_tables(
             )
         ).scalars():
             local.setdefault(n.contract_id, []).append(n)
+            rows += 1
+        return local, rows
+
+    def _terminal_walk(s: Session) -> tuple[dict[str, dict[str, Any]], int]:
+        """``{lower(address): terminal_principal record}`` from ``principal_labels``.
+
+        The terminal-controller walk (``services/governance/principals.resolve_terminal_principal``)
+        is persisted ONLY on ``principal_labels.details`` — 1,556 rows written, and
+        the one consumer that handles its whole status vocabulary correctly,
+        ``claimsVocab.terminalControllerNote``, could never receive it because
+        ``_build_principal_lookup`` never joined the table. A permanently
+        disconnected plane, not a rare shape.
+
+        Keyed by address, not by ``(contract_id, address)``: the walk answers "what
+        ultimately controls THIS address", and the local corpus has 0 addresses
+        whose record differs between the subject contracts that recorded it (22
+        distinct addresses across 180 rows). A narrow projection with the jsonb
+        ``has_key`` filter in the WHERE clause, so contracts with no walk cost
+        nothing.
+
+        CHAIN SCOPE, stated rather than claimed: the read is scoped by
+        ``contract_id`` (chain-scoped through ``contracts.chain``) but the returned
+        MAP is keyed by a bare lowercase address, which is the pre-existing shape of
+        the whole ``principal_lookup`` plane — ``principal_labels`` /
+        ``control_graph_nodes`` / ``controller_values`` carry no chain column at all,
+        and ``_build_principal_lookup`` already merges every source into one
+        bare-address dict. So a protocol spanning two chains could in
+        principle have one chain's walk annotate the other's node. Not realised: the
+        control/policy plane is 100% ethereum, and 0 addresses carry differing
+        records. Closing it means giving that plane a chain key, which is a
+        producer-side schema change, not a consumer split.
+        """
+        local: dict[str, dict[str, Any]] = {}
+        rows = 0
+        for address, details in s.execute(
+            select(PrincipalLabel.address, PrincipalLabel.details).where(
+                PrincipalLabel.contract_id.in_(id_list),
+                jsonb_has_payload(PrincipalLabel.details),
+                PrincipalLabel.details.has_key("terminal_principal"),
+            )
+        ).all():
+            record = (details or {}).get("terminal_principal")
+            if not isinstance(record, dict) or not address:
+                continue
+            local.setdefault(address.lower(), record)
             rows += 1
         return local, rows
 
@@ -791,6 +881,7 @@ def _prefetch_child_tables(
         ("fp_function_detail", "fp_function_detail", _fp_function_detail),
         ("upgrade_events_count", "upgrade_events_count", _upgrade_count),
         ("upgrade_events_last", "upgrade_events_last", _upgrade_last),
+        ("terminal_walk", "terminal_walk", _terminal_walk),
     ]
 
     engine = session.get_bind()
@@ -964,6 +1055,7 @@ def _build_principal_lookup(
     contracts_by_job_id: dict[Any, Contract],
     controller_values_by_cid: dict[int, list[ControllerValue]],
     cgn_by_cid: dict[int, list[ControlGraphNode]],
+    terminal_walk_by_address: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     lookup: dict[str, dict[str, Any]] = {}
     seen_contract_ids: set[int] = set()
@@ -973,7 +1065,12 @@ def _build_principal_lookup(
             continue
         seen_contract_ids.add(contract.id)
         summary = contract.summary
-        contract_type = "timelock" if summary and summary.has_timelock else "contract"
+        # ``is True``: the column is three-state, and only a proven timelock earns
+        # the strong ``timelock`` type (priority 3, a settled key for
+        # ``terminalControllerNote``). A NULL or a missing row falls to
+        # ``contract`` — the WEAK, non-terminal way-point type — so the
+        # not-determined case cannot be promoted into a settled controller.
+        contract_type = "timelock" if summary is not None and summary.has_timelock is True else "contract"
         _record_principal_lookup(
             lookup,
             address=contract.address,
@@ -1001,6 +1098,43 @@ def _build_principal_lookup(
                 label=node.contract_name or node.label,
                 details=node.details,
             )
+
+    # The terminal-controller walk, forwarded from ``principal_labels`` — the only
+    # place it is persisted. Its one correct consumer,
+    # ``claimsVocab.terminalControllerNote`` (rendered by ``InspectorCard``),
+    # handles all six statuses and could never receive the data.
+    #
+    # Deliberately narrow, and it is the narrowness that keeps this attributable:
+    #
+    # * ONLY ``terminal_principal`` is forwarded. ``principal_labels.details`` also
+    #   carries ``terminal``, ``signer_overlap`` and ``shared_deployer``, and
+    #   forwarding ``terminal`` would let one plane's typing publish a SETTLED key
+    #   (``terminalControllerNote`` returns null on ``terminal === true``) beside a
+    #   ``resolved_type`` from another plane that still says ``contract`` — an
+    #   inconsistent record, and in the reassuring direction. The other two are
+    #   attribution facts with their own hedged copy and their own review.
+    # * only addresses the lookup ALREADY carries are annotated. Admitting new
+    #   addresses would widen the published principal set, which is a different
+    #   change from connecting the renderer.
+    # * ``setdefault``, so a record already merged in from a CGN/CV ``details``
+    #   payload wins — this pass adds the fact where it is missing, never
+    #   overwrites one that arrived with the row.
+    #
+    # Status vocabulary: see ``services.governance.principals`` (the single
+    # declaration point). Non-terminated statuses all render through
+    # ``terminalControllerNote``'s honest "unresolved (<status>)" fall-through,
+    # including ``controllers_not_determined`` — the canonical-getter-silence
+    # state that replaced the refuted ``no_controller`` proven-absence claim
+    # (persisted pre-fix rows may still carry the old token until the next
+    # policy run rewrites them; the renderer folds it into the same unresolved
+    # copy, so no reader can mistake either for a settled key).
+    for address, record in (terminal_walk_by_address or {}).items():
+        entry = lookup.get(address)
+        if entry is None:
+            continue
+        details = dict(entry.get("details") or {})
+        details.setdefault("terminal_principal", record)
+        entry["details"] = details
 
     return lookup
 
@@ -1127,6 +1261,9 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
+    # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
+    # fact about the address, not about the subject contract that recorded it.
+    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # type: ignore[assignment]
 
     # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
     # contract_id buckets. The flow/principal passes key on the primary impl
@@ -1168,7 +1305,9 @@ def build_governance_view(
             if extra_all:
                 fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
 
-    principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
+    principal_lookup = _build_principal_lookup(
+        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
+    )
 
     contracts: list[dict[str, Any]] = []
     owner_groups: dict[str, list[dict]] = {}
@@ -1243,7 +1382,13 @@ def build_governance_view(
         # a pause_toggle EffectiveFunction surfacing).
         if is_proxy:
             caps_set.add("upgradeable")
-        if summary_row and summary_row.is_pausable:
+        # ``is True``, not truthiness: the column is three-state and a ``None``
+        # means the pause detector did not answer (or there is no summary row at
+        # all). A capability chip is a positive claim — "this contract can be
+        # paused" — so only a proven ``True`` earns one. Absence of the chip is
+        # NOT published as proof of the opposite; the three-state flag below is
+        # where a consumer reads that.
+        if summary_row is not None and summary_row.is_pausable is True:
             caps_set.add("pause")
         capabilities: list[str] = sorted(caps_set)
 
@@ -1256,9 +1401,21 @@ def build_governance_view(
         if not contract_name:
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
-        is_factory = summary_row.is_factory if summary_row else False
-        has_timelock = summary_row.has_timelock if summary_row else False
-        is_pausable = summary_row.is_pausable if summary_row else False
+        # Three states through the payload. ``False`` used to be published for a
+        # contract that HAS NO SUMMARY ROW — 3 of the 56 entries the endpoint
+        # serves on the local corpus (lower bound; every dependency-only contract
+        # without a summary takes this path) — so "this contract cannot be paused
+        # / has no timelock / is not
+        # a factory" was asserted on the strength of never having looked. The
+        # producer's own columns are three-state (``bool | None``), and a row
+        # whose column is NULL means the detector ran and could not tell; both
+        # routes to "nobody answered" publish ``None`` here, and
+        # ``summary_evidence`` below names WHICH route it was — the two are
+        # different questions for whoever wants to fix it (re-run the stage vs
+        # improve the detector), and the same answer for anyone reading the flag.
+        is_factory = summary_row.is_factory if summary_row else None
+        has_timelock = summary_row.has_timelock if summary_row else None
+        is_pausable = summary_row.is_pausable if summary_row else None
         control_model = summary_row.control_model if summary_row else None
 
         name_lower = contract_name.lower()
@@ -1268,19 +1425,36 @@ def build_governance_view(
             role = "value_handler"
         elif any(s in standards for s in ("ERC20", "ERC721", "ERC1155")):
             role = "token"
-        elif has_timelock or control_model == "governance":
+        elif has_timelock is True or control_model == "governance":
             role = "governance"
-        elif is_factory:
+        elif is_factory is True:
             role = "factory"
         else:
             role = "utility"
 
+        # ``role`` has no not-determined member and every consumer needs one:
+        # each branch above except the last fires on a POSITIVE fact (a name, an
+        # observed value effect, a declared standard, a proven timelock/factory),
+        # so only the ``utility`` fall-through can be reached by a chain of
+        # not-determined inputs. Published as its own key rather than folded into
+        # ``role`` so the existing role vocabulary — read by the canvas, the
+        # layout bands and ``protocolScore`` — keeps its meaning, and a consumer
+        # that cares can refuse to treat this row's ``utility`` as evidence.
+        role_evidence = (
+            "witnessed"
+            if role != "utility" or (summary_row is not None and has_timelock is not None and is_factory is not None)
+            else "not_determined"
+        )
+
         balance_contract = lookup_contract or contract_row
         balances_list = []
         total_usd = 0.0
+        unvalued_rows = 0
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
                 usd = float(b.usd_value) if b.usd_value is not None else None
+                if usd is None:
+                    unvalued_rows += 1
                 balances_list.append(
                     {
                         "token_symbol": b.token_symbol,
@@ -1289,11 +1463,49 @@ def build_governance_view(
                         "raw_balance": b.raw_balance,
                         "decimals": b.decimals,
                         "usd_value": usd,
+                        # ``usd_value: null`` and ``usd_value: 0`` are one
+                        # truthiness test apart in JS and mean opposite things —
+                        # "we do not know what this holding is worth" (1,001 of
+                        # 1,376 local rows) versus "priced, and worth less than
+                        # half a cent" (100 rows). The state is published rather
+                        # than left to be inferred from the value's shape.
+                        #
+                        # ``not_determined`` deliberately does not name a CAUSE:
+                        # ``utils/etherscan`` distinguishes "no price returned"
+                        # from "no token divisor returned" (which would make any
+                        # USD figure wrong by 10^n), but neither writer persists
+                        # ``decimals_reported``, so the DB cannot tell them apart
+                        # and this payload must not pretend otherwise.
+                        "usd_value_state": "measured" if usd is not None else "not_determined",
+                        # Kept for continuity, and NOT a money fact: the producer
+                        # writes 0 for "no price known" on 1,001 local rows (a
+                        # further 6 rows hold a real sub-1e-8 price truncated to
+                        # 0 by Numeric(20,8) — 0 is ambiguous even between those
+                        # two), so a consumer reading this column directly reads
+                        # them as worthless. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                     }
                 )
                 if usd:
                     total_usd += usd
+        # Whether this contract's holdings list is the whole set. There is no
+        # ``complete`` member ON PURPOSE: the Etherscan holdings fetch returns ONE
+        # page capped at ``TOKEN_BALANCE_PAGE_SIZE`` and neither writer persists
+        # the raw page length, so nothing here can prove a short list was not a
+        # truncated one (the loop that stores rows drops zero-balance entries, so
+        # a full page can store fewer than the cap). At-the-cap is therefore the
+        # only positive statement available — ``token_balances_may_be_truncated``'s
+        # own one-directional contract — and the other arm is not-determined,
+        # never "whole".
+        holdings_coverage = {
+            "rows": len(balances_list),
+            "page_cap": TOKEN_BALANCE_PAGE_SIZE,
+            "state": ("may_be_incomplete" if token_balances_may_be_truncated(len(balances_list)) else "not_determined"),
+            # Rows inside the stored set whose USD value was never determined.
+            # ``total_usd`` skips them, so any non-zero total is a lower bound
+            # whenever this is non-zero — independently of truncation.
+            "unvalued_rows": unvalued_rows,
+        }
 
         entry: dict[str, Any] = {
             # Canonical lowercase: node ids and selection keys downstream
@@ -1315,20 +1527,28 @@ def build_governance_view(
             "owner": owner,
             "controllers": controllers,
             "control_model": control_model,
-            "risk_level": summary_row.risk_level if summary_row else None,
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
             "upgrade_count": upgrade_count,
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
             "role": role,
+            "role_evidence": role_evidence,
             "standards": standards,
             "value_effects": value_effects,
             "is_pausable": is_pausable,
             "has_timelock": has_timelock,
+            "is_factory": is_factory,
+            # Which route a ``None`` on the three flags above took: ``absent``
+            # means no ContractSummary row exists for this entry (nor for its
+            # implementation), ``present`` means the row exists and the column
+            # itself is NULL. Never omitted, so key-absence marks a pre-fix
+            # payload rather than either state.
+            "summary_evidence": "present" if summary_row is not None else "absent",
             "capabilities": capabilities,
             "balances": balances_list,
             "total_usd": round(total_usd, 2) if total_usd > 0 else None,
+            "holdings_coverage": holdings_coverage,
         }
 
         graph_contract = lookup_contract or contract_row
@@ -1363,7 +1583,7 @@ def build_governance_view(
     # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
     # latter were analysed standalone in older runs). Keyed by the composite
     # entity token (a proxy's impl is on the proxy's own chain) so a same-address
-    # standalone on ANOTHER chain isn't collapsed away (inv. 13).
+    # standalone on ANOTHER chain isn't collapsed away.
     impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
@@ -1416,7 +1636,7 @@ def build_governance_view(
     # cid → the composite entity token of the contract's OWN (chain, address).
     # The whole attribution fold below stays in composite-entity space so a
     # same-address twin on another chain never merges into this chain's
-    # authority sets (inv. 13): two standalone CREATE2 twins render to distinct
+    # authority sets: two standalone CREATE2 twins render to distinct
     # ``<chain>::<address>`` keys, so ``assign_primary_controllers`` runs a
     # separate contest per chain. The per-principal OUTPUT fields (primary_for /
     # co_controls / controls_detail / other_callers) are rendered back to BARE
@@ -1579,6 +1799,25 @@ def build_governance_view(
         p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
 
+    # Per-edge ``capabilities``: what THE SOURCE can do to THE TARGET, from
+    # the same FunctionPrincipal-derived machinery that feeds
+    # ``controls_detail`` — so an edge chip and the principal's own detail
+    # panel can never disagree about the same (source, target) pair.
+    # ``detail_acc`` (principal sources; includes the one-hop governance
+    # passthrough) is consulted first, then ``caller_detail`` (contract
+    # sources with direct FP rights). A source with no witnessed rights on
+    # the target publishes ``[]`` — same convention as the contract-level
+    # list: a capability chip is a positive claim, and its absence is not
+    # published as proof of inability (the edge itself still states the
+    # ownership/controller relationship via ``type``).
+    for flow in fund_flows:
+        src_lc = (flow.get("from") or "").lower()
+        target_entity = _entity_key(flow.get("to_chain"), flow.get("to"))
+        detail = detail_acc.get(src_lc, {}).get(target_entity)
+        if detail is None:
+            detail = caller_detail.get(target_entity, {}).get(src_lc)
+        flow["capabilities"] = sorted(detail["capabilities"]) if detail else []
+
     # Per-contract "other callers": principal-callers holding FP authority that
     # are neither the contract's primary owner nor a co-controller of it — the
     # permissionless / lower-privilege long tail (e.g. AuctionManager's
@@ -1664,7 +1903,6 @@ def _build_flows_and_principals(
     principal_lookup: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
-    contract_by_addr = {c["address"].lower(): c for c in contracts if c["address"]}
     # Control relations are intra-chain, so every flow carries a single chain
     # (from_chain == to_chain). Dedup is per-chain so a same-address twin on
     # another chain keeps its own edge instead of colliding on the bare pair.
@@ -1677,14 +1915,17 @@ def _build_flows_and_principals(
         if key in flow_seen:
             return
         flow_seen.add(key)
-        target = contract_by_addr.get(to_addr, {})
         fund_flows.append(
             {
                 "from": from_addr,
                 "to": to_addr,
                 "type": flow_type,
                 "lane": lane,
-                "capabilities": target.get("capabilities", []),
+                # Filled by build_governance_view once caller_detail exists:
+                # the SOURCE's witnessed rights on the target, never the
+                # target's own capability union — an edge is a claim about the
+                # relationship, and the frontend renders it as a per-edge chip.
+                "capabilities": [],
                 "from_chain": chain_tok,
                 "to_chain": chain_tok,
             }
@@ -1702,7 +1943,7 @@ def _build_flows_and_principals(
 
     # Keyed by composite ``<chain>::<address>`` entity, not bare address: two
     # standalone twins share an address, so a bare key would resolve both to one
-    # chain's Contract row and collapse the other chain's principals (inv. 13).
+    # chain's Contract row and collapse the other chain's principals.
     lookup_contract_by_entity: dict[str, Contract | None] = {}
     for entry in contracts:
         if entry.get("address"):
@@ -1936,9 +2177,9 @@ def _coalesce_chain(chain: str | None) -> str:
 def _entity_key(chain: str | None, address: str | None) -> str:
     """Composite ``"<chain>::<address>"`` entity key, byte-identical to the
     frontend ``entityKey`` (site/src/surface/entityKey.js) so a backend-built
-    functions map aligns with the frontend's per-(chain, address) lookups
-    (multichain invariant 13). ``"::"`` appears in neither a chain name nor a
-    ``0x`` address, so the composite is collision-free."""
+    functions map aligns with the frontend's per-(chain, address) lookups.
+    ``"::"`` appears in neither a chain name nor a ``0x`` address, so the
+    composite is collision-free."""
     return f"{_coalesce_chain(chain)}::{str(address or '').lower()}"
 
 
@@ -1983,7 +2224,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     # proxy node (their functions surface there), so they get no standalone
     # entry — mirrors the canvas dedup for split-proxy admin impls. Keyed by the
     # composite entity token (the secondary is on its proxy's chain) so a
-    # same-address standalone on another chain isn't suppressed (inv. 13).
+    # same-address standalone on another chain isn't suppressed.
     secondary_impl_entities = {
         _entity_key(cr.chain, s)
         for cr in contracts_by_job_id.values()
@@ -1995,7 +2236,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     # should show — for a proxy: its EIP-1967 impl plus any split-proxy secondary
     # impls; for a plain contract: its own row. The key is the composite entity
     # token so a CREATE2 twin at the same address on two chains keeps each
-    # chain's own analysis instead of collapsing last-wins (inv. 13).
+    # chain's own analysis instead of collapsing last-wins.
     entity_key_to_ef_cids: dict[str, list[int]] = {}
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
@@ -2038,6 +2279,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     controller_values_by_cid: dict[int, list[ControllerValue]] = {}
     cgn_by_cid: dict[int, list[ControlGraphNode]] = {}
+    terminal_walk_by_address: dict[str, dict[str, Any]] = {}
     if relevant_contract_ids:
         id_list = list(relevant_contract_ids)
         with _time_phase(timings_ms, "principal_lookup_inputs"):
@@ -2049,7 +2291,23 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 select(ControlGraphNode).where(ControlGraphNode.contract_id.in_(id_list))
             ).scalars():
                 cgn_by_cid.setdefault(n.contract_id, []).append(n)
-    principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
+            # Same terminal-walk forwarding as the main path: the per-function
+            # principal payload built below is what ``InspectorCard`` renders
+            # ``terminalControllerNote`` from, so wiring only ``build_governance_view``
+            # would connect the plane on one endpoint and leave it dark on the other.
+            for address, details in session.execute(
+                select(PrincipalLabel.address, PrincipalLabel.details).where(
+                    PrincipalLabel.contract_id.in_(id_list),
+                    jsonb_has_payload(PrincipalLabel.details),
+                    PrincipalLabel.details.has_key("terminal_principal"),
+                )
+            ).all():
+                record = (details or {}).get("terminal_principal")
+                if isinstance(record, dict) and address:
+                    terminal_walk_by_address.setdefault(address.lower(), record)
+    principal_lookup = _build_principal_lookup(
+        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
+    )
 
     out: dict[str, list[dict[str, Any]]] = {}
     with _time_phase(timings_ms, "serialize"):
@@ -2116,7 +2374,7 @@ def all_addresses_for_protocol(
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
     # template name. Keyed by the composite entity token (a proxy's impl is on
     # the proxy's own chain) so a same-address twin on another chain doesn't
-    # display the other chain's name (inv. 13).
+    # display the other chain's name.
     impl_name_by_entity = {
         _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }

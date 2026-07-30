@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session, make_transient_to_detached
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import (
+    CONTROLLER_OBSERVED_VIA_EVENT_LOG,
+    CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
+    UPGRADE_SOURCE_EVENT_SCAN,
+    UPGRADE_SOURCE_POLL,
     Contract,
     ControllerValue,
     MonitoredContract,
@@ -50,13 +54,13 @@ from services.monitoring.event_topics import (
     parse_any_log,
     parse_tracked_log,
 )
-from services.monitoring.polling_plan import decode_poll_value
+from services.monitoring.polling_plan import decode_poll_outcome
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.chains import UnknownChainError, chain_by_name
 from utils.rpc import (
     MAX_BATCH_SIZE,
-    rpc_batch_request,
+    rpc_batch_request_classified,
     rpc_request,
 )
 
@@ -68,7 +72,7 @@ MAX_BLOCK_RANGE = 2000
 DEFAULT_SCAN_INTERVAL = int(os.getenv("PROTOCOL_SCAN_INTERVAL", "600"))
 DEFAULT_POLL_INTERVAL = int(os.getenv("PROTOCOL_POLL_INTERVAL", "600"))
 # Poller rotation slice — how many needs_polling contracts one pass claims,
-# ordered oldest-cursor-first. Bounds the pass to O(slice) memory (design §1.3).
+# ordered oldest-cursor-first. Bounds the pass to O(slice) memory.
 DEFAULT_POLL_CONTRACTS_PER_PASS = 500
 
 # monitored_events must only ingest confirmed logs — a reorg-rewound event
@@ -83,7 +87,7 @@ FETCHER_MIN_BISECT_SPAN = 125
 # Reason stamped on the enrollment-queue row when the watcher's relational sync
 # observes an on-chain controller rotation (owner/admin/authority/implementation).
 # Closes the gap where a rotation installs a new governance Safe that would
-# otherwise stay unmonitored until the slow sweep (design §2.3 call-site 5).
+# otherwise stay unmonitored until the slow sweep.
 _GOVERNANCE_ROTATION_REASON = "governance_rotation"
 
 # Write targets whose sync actually installs a new privileged controller — the
@@ -125,7 +129,7 @@ def _scan_float_env(name: str, default: float) -> float:
 
 
 def _max_getlogs_range_for(chain: str) -> int:
-    """Per-chain getLogs window width from the registry (inv. 10). Mainnet's
+    """Per-chain getLogs window width from the registry. Mainnet's
     registry value equals ``MAX_BLOCK_RANGE`` so mainnet is unchanged; an
     unresolvable chain falls back to the fleet-wide constant."""
     try:
@@ -135,7 +139,7 @@ def _max_getlogs_range_for(chain: str) -> int:
 
 
 def _confirmation_depth_for(chain: str) -> int:
-    """Per-chain reorg-confirmation depth (inv. 10). An explicit
+    """Per-chain reorg-confirmation depth. An explicit
     ``PSAT_SCAN_CONFIRMATION_DEPTH`` override still wins fleet-wide (operator
     lever); otherwise the registry's per-chain depth applies. Mainnet's registry
     value equals ``DEFAULT_CONFIRMATION_DEPTH`` so mainnet is unchanged."""
@@ -582,7 +586,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 )
             )
 
-    # Layer-1 singleton gate (design §2.4): a scan pass runs only under the
+    # Layer-1 singleton gate: a scan pass runs only under the
     # per-chain daemon lease. Acquire at pass start; a chain whose lease is
     # held elsewhere is skipped. If none are held we still beat (note=
     # 'lease_lost') so the fleet view sees a live-but-yielding process, not a
@@ -1104,8 +1108,8 @@ def _sync_relational_tables(
 
     A controller rotation (owner/admin/authority/implementation actually
     moving) marks the protocol dirty so the enrollment reconciler picks up any
-    newly-installed governance Safe within one drain tick (design §2.3
-    call-site 5) instead of waiting for the slow sweep.
+    newly-installed governance Safe within one drain tick instead of waiting
+    for the slow sweep.
     """
     if not mc.contract_id:
         return
@@ -1145,6 +1149,11 @@ def _sync_relational_tables(
                         new_impl=new_impl,
                         block_number=parsed.get("block_number"),
                         tx_hash=parsed.get("tx_hash"),
+                        # timestamp stays NULL: a log carries a block, not a
+                        # block time, and the scanner reads historical windows
+                        # so detection time is not a usable stand-in. NULL is
+                        # read as "not determined" by every consumer.
+                        source=UPGRADE_SOURCE_EVENT_SCAN,
                     )
                 )
                 # Coverage windows are derived from UpgradeEvent history, so a
@@ -1170,7 +1179,14 @@ def _sync_relational_tables(
                     rotated = True
                 c.admin = str(new_value)
 
-        if _update_controller_value_rows(session, mc, write_target, new_value):
+        if _update_controller_value_rows(
+            session,
+            mc,
+            write_target,
+            new_value,
+            observed_via=CONTROLLER_OBSERVED_VIA_EVENT_LOG,
+            block_number=parsed.get("block_number"),
+        ):
             if write_target in _GOVERNANCE_ROTATION_WRITE_TARGETS:
                 rotated = True
 
@@ -1217,6 +1233,9 @@ def _update_controller_value_rows(
     mc: MonitoredContract,
     write_target: str,
     new_value: object,
+    *,
+    observed_via: str,
+    block_number: int | None = None,
 ) -> bool:
     """Write *new_value* into every ControllerValue row keyed by the
     three canonical controller_id forms the analyzer emits
@@ -1228,6 +1247,38 @@ def _update_controller_value_rows(
     ``protocolAdmin`` propagates through either path without per-slot
     code. Returns True iff a row's value actually moved — the caller uses
     that to decide whether a governance rotation needs re-enrollment.
+
+    When the value moves, ``resolved_type`` and ``details`` are CLEARED, not
+    carried over. They are the classifier's answer about the OLD address:
+    ``("safe", {"address", "owners", "threshold"})`` or
+    ``("timelock", {"address", "delay", "owner"})``. This function has no RPC
+    and cannot re-classify, so the only honest states are NULL — not
+    determined, re-derived by the next resolution run.
+
+    Carrying them is not a cosmetic staleness. ``company_overview`` republishes
+    the stale payload under the NEW address (``_record_principal_lookup`` keys
+    on ``cv.value`` while merging ``cv.details``), and
+    ``_principal_lookup_type`` promotes on ``details`` alone via
+    ``_has_timelock_delay`` — so a Timelock -> EOA rotation publishes a
+    freshly-installed EOA as ``resolved_type="timelock"`` carrying the old
+    ``delay``, which is a credit-bearing scoring input. That is a safety-inflating
+    false credit, on top of a false statement about a named individual's keys.
+    A Safe -> Safe rotation is the milder half: the new Safe inherits the old
+    one's ``owners``/``threshold`` and ``details["address"]`` stays the OLD
+    Safe, which ``setdefault("address", addr)`` downstream cannot correct
+    because the key is already present.
+
+    ``block_number``/``observed_via`` are reassigned for the same reason: they
+    described the old read. The poll path knows no block, so it passes None —
+    "not determined", never the stale one.
+
+    Rows are updated in place rather than appended. ``controller_values`` is
+    read as CURRENT state by every consumer (company_overview's ``controllers``
+    map, capability_resolver, enrollment, chat) with no ordering or dedup, and
+    the resolution worker deletes-then-reinserts the whole per-contract set on
+    each run, so an append-only key would multiply every existing read without
+    accumulating coherent history. The history planes are ``upgrade_events``
+    and the ``principal_history`` artifact.
     """
     if not mc.contract_id:
         return False
@@ -1251,6 +1302,10 @@ def _update_controller_value_rows(
     for cv in cv_rows:
         if cv.value != nv:
             cv.value = nv
+            cv.resolved_type = None
+            cv.details = None
+            cv.block_number = block_number
+            cv.observed_via = observed_via
             changed = True
     return changed
 
@@ -1270,8 +1325,8 @@ def _sync_relational_from_poll(
     flows through the generic ControllerValue updater so custom slots
     (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
 
-    A controller rotation marks the protocol dirty (design §2.3 call-site 5)
-    so a newly-installed governance Safe is enrolled within one drain tick.
+    A controller rotation marks the protocol dirty so a newly-installed
+    governance Safe is enrolled within one drain tick.
     The caller only reaches here when ``new_value != old_value``, so an
     implementation swap (or a governance-relevant slot moving) is always a real
     change.
@@ -1289,8 +1344,21 @@ def _sync_relational_from_poll(
                     proxy_address=mc.address,
                     old_impl=str(old_value) if old_value else None,
                     new_impl=str(new_value),
-                    block_number=0,
-                    tx_hash="",
+                    # A poll reads a slot, not a log: no block and no tx are
+                    # knowable here. NULL says that; 0 would claim the upgrade
+                    # happened before the genesis deployment, and since every
+                    # consumer orders by block_number NULLS LAST, this row
+                    # would sort to the front of the era sequence and shift
+                    # every impl window by one.
+                    block_number=None,
+                    tx_hash=None,
+                    # Detection time, not a block time — bounded above by one
+                    # poll interval. Only ``source`` distinguishes the two
+                    # readings of this column; leaving it NULL is what
+                    # collapsed every post-upgrade audit to low confidence
+                    # once before (upgrade_history.project_to_events).
+                    timestamp=datetime.now(timezone.utc),
+                    source=UPGRADE_SOURCE_POLL,
                 )
             )
             _refresh_coverage_after_upgrade(session, contract.protocol_id)
@@ -1298,7 +1366,16 @@ def _sync_relational_from_poll(
                 mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
         return
 
-    if _update_controller_value_rows(session, mc, field_name, new_value):
+    # A poll reads a slot; no block is knowable here, so block_number goes
+    # NULL rather than keeping the block of the previous (now wrong) read.
+    if _update_controller_value_rows(
+        session,
+        mc,
+        field_name,
+        new_value,
+        observed_via=CONTROLLER_OBSERVED_VIA_STORAGE_POLL,
+        block_number=None,
+    ):
         if field_name in _GOVERNANCE_ROTATION_WRITE_TARGETS:
             contract = session.get(Contract, mc.contract_id)
             if contract is not None and contract.protocol_id:
@@ -1335,7 +1412,7 @@ def _apply_poll_result(
     entry: dict,
     raw: str | None,
     new_events: list[MonitoredEvent],
-) -> None:
+) -> bool:
     """Decode one poll result and, when the value changed, persist the new
     ``last_known_state``, emit a ``state_changed_poll`` event, and run the
     downstream sync (proxy write-through, relational, reanalysis, per-entry
@@ -1343,18 +1420,32 @@ def _apply_poll_result(
 
     The computation is identical to the pre-rotation inline driver; only the
     framing moved from a single flat loop to per-chunk dispatch.
+
+    Only answered, error-free RPC results reach here — the poll loop routes
+    errored calls to the contract's ``last_poll_status`` map instead — so an
+    unparsed decode below means exactly "the call returned nothing
+    parseable" (empty ``0x`` / short body / undecodable type), never a
+    swallowed revert.
+
+    Returns True iff the response parsed as the entry's declared type — an
+    observed outcome. That includes a parse to the type's conventional
+    empty (the zero address), which by ``decode_poll_outcome``'s contract
+    stays out of ``last_known_state``: an answered zero is a value the
+    wire delivered, not a missing one. False means the answer contained
+    nothing parseable and is the caller's signal to publish the entry as
+    ``no_value`` rather than ``ok``.
     """
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
-        return
-    new_value = decode_poll_value(raw, entry.get("type_kind"), entry.get("type"))
+        return False
+    new_value, parsed = decode_poll_outcome(raw, entry.get("type_kind"), entry.get("type"))
     if new_value is None:
-        return
+        return parsed
 
     state = dict(mc.last_known_state or {})
     old_value = state.get(field_name)
     if new_value == old_value:
-        return
+        return True
 
     # Always record the new value in last_known_state, even on the
     # first observation — subsequent polls then have a baseline.
@@ -1370,7 +1461,7 @@ def _apply_poll_result(
             mc.address,
             new_value,
         )
-        return
+        return True
 
     # Suppress when the event scanner already recorded the same
     # mutation. Per-entry suppress lists come from the enrollment-
@@ -1397,7 +1488,7 @@ def _apply_poll_result(
                 mc.address,
                 field_name,
             )
-            return
+            return True
 
     event = MonitoredEvent(
         id=uuid.uuid4(),
@@ -1475,6 +1566,7 @@ def _apply_poll_result(
             exc,
             extra={"exc_type": type(exc).__name__},
         )
+    return True
 
 
 def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
@@ -1485,32 +1577,65 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     from the static analyzer's tracked_controllers, plus vendored proxy
     storage slots and Safe/Timelock standard ABIs.
 
-    Rotation (design §2.2): each pass claims only the
+    Rotation: each pass claims only the
     ``PSAT_POLL_CONTRACTS_PER_PASS`` least-recently-polled active
     ``needs_polling`` contracts (``last_polled_at ASC NULLS FIRST``), so the
     pass is O(slice) in memory rather than O(all monitored contracts). Their
     plan entries are expanded and packed into ``MAX_BATCH_SIZE``-call chunks —
     a contract's calls never split across a chunk — and each chunk is decoded,
     synced, stamped (``last_polled_at`` = server ``now()``), committed, and its
-    events notified, all on its own. A chunk whose batch RPC fails — or whose
-    write side deadlocks against the scanner's cohort UPDATE — is rolled back
-    and left unstamped so its contracts sort first next pass (retry-first), and
-    the pass continues with the remaining chunks, reporting ``partial``. Only a
-    Postgres deadlock is recovered per-chunk; any other database error
-    (e.g. a lost connection) is re-raised to end the pass honestly.
+    events notified, all on its own.
+
+    Per-entry outcomes are published: an answered chunk overwrites each of
+    its contracts' ``last_poll_status`` with
+    ``{field: "ok" | "error" | "no_value"}`` for every entry dispatched
+    this pass — ``ok`` = the call answered and its body parsed as the
+    entry's declared type, INCLUDING the type's conventional empty (a
+    zero-address ``owner()`` on a renounced contract is an observed
+    value, published ``ok``, even though ``decode_poll_outcome``'s
+    storage convention keeps it out of ``last_known_state``); ``error`` =
+    the node answered THIS call with a per-call JSON-RPC error (e.g. a
+    revert on a getter the address doesn't expose); ``no_value`` = the
+    call answered without error but returned nothing that parses as the
+    declared type (empty ``0x`` from a codeless address or permissive
+    fallback, short body, undecodable type). A field absent from the map
+    was not polled. The status map is what keeps a dead entry
+    distinguishable from a never-polled one.
+
+    Statuses are written only from batches the node actually answered. A
+    wholesale transport failure (``rpc_batch_request_classified`` reports
+    those slots as ``transport`` instead of raising) observed nothing, so
+    it publishes nothing: the chunk neither overwrites statuses nor
+    stamps, its contracts sort first next pass (retry-first — an outage
+    self-heals and must not masquerade as an earned per-entry negative).
+    Per-call ``error`` entries DO stamp and rotate normally:
+    always-reverting entries exist in persisted pre-``unknown``-strategy
+    plans, and an unstamped-on-revert rule would pin their contracts to
+    the front of the rotation forever — their outcome is published, not
+    retried. Any errored, unparseable, or transport-failed entry marks
+    the pass ``partial``; an answered conventional-empty does not — it
+    is a successful observation, and a pass made only of those is a
+    healthy (``running``) pass.
+
+    A chunk whose write side deadlocks against the scanner's cohort UPDATE
+    is rolled back and left unstamped so its contracts sort first next pass
+    (retry-first), and the pass continues with the remaining chunks,
+    reporting ``partial``. Only a Postgres deadlock is recovered per-chunk;
+    any other database error (e.g. a lost connection) is re-raised to end
+    the pass honestly.
 
     Contracts whose ``monitoring_config`` lacks a ``polling_plan`` still
     rotate (they get stamped with an empty chunk) — the reconciler
     (``services/monitoring/reconciler.py``) backfills the plan within its
     interval so this is a bounded transient on freshly-migrated rows.
 
-    Singleton correctness (design §2.4): the poll path is gated by the
+    Singleton correctness: the poll path is gated by the
     ``protocol_poller:<chain>`` daemon lease and — unlike the scan path — the
     lease is **load-bearing, not belt-and-braces**. ``state_changed_poll`` rows
     carry ``tx_hash=''`` / block 0 and stay ``log_index NULL``, so they sit
     outside the partial identity index by design; there is no Layer-2 idempotency
     to catch a duplicate poll detection. Two concurrent poll passes without the
-    lease MAY double-insert poll events (accepted, documented as design Risk #7).
+    lease MAY double-insert poll events — an accepted risk.
     """
     started = time.monotonic()
     slice_size = int(os.getenv("PSAT_POLL_CONTRACTS_PER_PASS", str(DEFAULT_POLL_CONTRACTS_PER_PASS)))
@@ -1607,6 +1732,9 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
 
     new_events: list[MonitoredEvent] = []
     chunks_failed = 0
+    chunks_transport_failed = 0
+    entry_errors = 0
+    entries_no_value = 0
 
     for chunk_chain, chunk in chunks:
         chunk_ids = [mc.id for mc, _ in chunk]
@@ -1619,17 +1747,28 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                 dispatch.append((mc, len(batch_calls), entry))
                 batch_calls.append(call)
 
-        if batch_calls:
-            try:
-                results = rpc_batch_request(chunk_rpc_url, batch_calls)
-            except Exception as exc:
-                logger.warning("Batch RPC failed during poll: %s", exc, extra={"exc_type": type(exc).__name__})
-                # Leave this chunk's contracts unstamped so they sort first
-                # (retry-first) next pass; press on with the remaining chunks.
-                chunks_failed += 1
-                continue
-        else:
-            results = []
+        # ``_classified`` keeps the two failure shapes apart: a reverting
+        # getter is an answered call (``"error"``, an earned per-entry
+        # negative), while a batch the node never answered leaves its
+        # slots ``"transport"`` (outcome unobserved; the helper never
+        # raises).
+        results = rpc_batch_request_classified(chunk_rpc_url, batch_calls) if batch_calls else []
+
+        if any(status == "transport" for _raw, status in results):
+            # Nothing was observed for at least one slot, so nothing is
+            # published for the whole chunk (a >MAX_BATCH_SIZE plan can
+            # split across posts; partially-answered chunks are treated
+            # the same, conservatively): statuses stay as they were,
+            # ``last_polled_at`` is NOT stamped, so these contracts sort
+            # first next pass — retry-first for outages, which self-heal,
+            # unlike per-call reverts which stamp and rotate below.
+            chunks_transport_failed += 1
+            logger.warning(
+                "Poll chunk transport-failed; nothing published, retrying next pass: %s",
+                [mc.address for mc, _ in chunk],
+                extra={"chain": chunk_chain, "calls": len(batch_calls)},
+            )
+            continue
 
         # Decode + apply + stamp + commit as one unit under deadlock isolation.
         # The scanner advances cursors with a bulk UPDATE over the same
@@ -1638,9 +1777,30 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         # side Postgres aborts. Collect the chunk's events locally so a rollback
         # discards exactly the detections that rolled back with it.
         chunk_events: list[MonitoredEvent] = []
+        chunk_entry_errors = 0
+        chunk_entries_no_value = 0
         try:
+            statuses: dict[uuid.UUID, dict[str, str]] = {mc.id: {} for mc, _ in chunk}
             for mc, idx, entry in dispatch:
-                _apply_poll_result(session, mc, entry, results[idx], chunk_events)
+                raw, status = results[idx]
+                field_name = entry.get("field")
+                if status == "error":
+                    chunk_entry_errors += 1
+                    if isinstance(field_name, str) and field_name:
+                        statuses[mc.id][field_name] = "error"
+                    continue
+                decoded = _apply_poll_result(session, mc, entry, raw, chunk_events)
+                if not decoded:
+                    chunk_entries_no_value += 1
+                if isinstance(field_name, str) and field_name:
+                    statuses[mc.id][field_name] = "ok" if decoded else "no_value"
+            # Overwrite wholesale: the chunk dispatches every recognizable
+            # entry of each contract's plan, so this pass's outcomes ARE
+            # the full per-field truth; a field absent from the map was
+            # not polled (unrecognized kind, missing selector, no plan).
+            for mc, _entries in chunk:
+                mc.last_poll_status = statuses[mc.id]
+                flag_modified(mc, "last_poll_status")
             session.execute(
                 update(MonitoredContract).where(MonitoredContract.id.in_(chunk_ids)).values(last_polled_at=func.now())
             )
@@ -1666,7 +1826,10 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         # Chunk is durable. Notify its events now — mirroring the scanner's
         # per-window notify — so a later chunk's failure can't strand
         # already-committed detections. A chunk that rolled back never reaches
-        # here, so its events are never notified.
+        # here, so its events are never notified (and its entry errors were
+        # discarded with it — chunks_failed already marks the pass partial).
+        entry_errors += chunk_entry_errors
+        entries_no_value += chunk_entries_no_value
         _notify_committed_events(session, chunk_events)
         new_events.extend(chunk_events)
 
@@ -1686,11 +1849,21 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         contracts_scanned=len(contracts),
         blocks_scanned=0,
         events_found=len(new_events),
-        partial=chunks_failed > 0,
+        # A pass is partial iff some dispatched entry produced no
+        # observation this tick: the chunk rolled back (deadlock), was
+        # never answered (transport), a call errored, or an answered call
+        # parsed to nothing (``no_value``). An answered conventional-empty
+        # (zero address) counts as ``ok`` upstream and does NOT mark the
+        # pass partial — the basis for ``partial`` is a failure to
+        # observe, never the observed value itself.
+        partial=chunks_failed > 0 or chunks_transport_failed > 0 or entry_errors > 0 or entries_no_value > 0,
         extra_detail={
             "contracts_selected": len(contracts),
             "chunks": len(chunks),
             "chunks_failed": chunks_failed,
+            "chunks_transport_failed": chunks_transport_failed,
+            "entry_errors": entry_errors,
+            "entries_no_value": entries_no_value,
             "oldest_last_polled_age_s": oldest_age_s,
         },
     )

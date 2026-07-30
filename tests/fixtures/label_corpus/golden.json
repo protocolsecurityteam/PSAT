@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 5,
   "description": "Golden effect-labels, Plane-1 claim (claim_id, tier) tuples AND value-flow facts for the frozen fixture corpus, pinned to CURRENT producer behavior. Regenerate with tests/regenerate_label_golden.py only for reviewed, intended changes — and justify each hunk of the diff, since a diff here is a change in what the pipeline publishes about real contracts.",
   "contracts": [
     {
@@ -12,33 +12,61 @@
           "full_name": "allowance(address,address)",
           "selector": "0xdd62ed3e",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.approve",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x095ea7b3"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "pause"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "balanceOf(address)",
           "selector": "0x70a08231",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "mint(address,uint256)",
@@ -46,15 +74,34 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "own_selector",
+                "selector": "0x40c10f19",
+                "supply": "mint"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "pause()",
@@ -62,54 +109,119 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.set",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "paused"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "paused"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "totalSupply()",
           "selector": "0x18160ddd",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0xa9059cbb"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "pause"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x23b872dd"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "pause"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "unpause()",
@@ -117,17 +229,41 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.unset",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "paused"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "paused"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -141,12 +277,17 @@
           "full_name": "owner()",
           "selector": "0x8da5cb5b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OwnableStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OwnableStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "renounceOwnership()",
@@ -154,28 +295,62 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.renounce",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "corroboration": "owner_getter_sibling",
+                "kind": "selector",
+                "selector": "0x715018a6",
+                "standard": "ownable"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OwnableStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setTokenOut(address)",
           "selector": "0xc158910d",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: tokenOut.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "tokenOut"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "transferOwnership(address)",
@@ -183,17 +358,37 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "corroboration": "owner_getter_sibling",
+                "kind": "selector",
+                "selector": "0xf2fde38b",
+                "standard": "ownable"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OwnableStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -207,10 +402,15 @@
           "full_name": "canCall(address,address,bytes4)",
           "selector": "0xb7009613",
           "effect_labels": [],
+          "action_summary": "Performs a contract action.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
-          "effect_targets": []
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "setAuthority(Authority)",
@@ -218,10 +418,20 @@
           "effect_labels": [
             "authority_update"
           ],
+          "action_summary": "Updates the authority contract used for permission checks.",
           "claims": [
             {
               "claim_id": "authority.replace",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "authority_gate_vars": [
+                  "authority"
+                ],
+                "kind": "selector",
+                "selector": "0x7a9e5e4b",
+                "standard": "solmate_auth",
+                "write_target": "authority"
+              }
             }
           ],
           "value_flows": [],
@@ -232,9 +442,24 @@
               "origin": "guard"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "authority"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "OR",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setPublicCapability(address,bytes4,bool)",
@@ -242,10 +467,16 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "selector",
+                "selector": "0xc6b0263e",
+                "standard": "solmate_roles"
+              }
             }
           ],
           "value_flows": [],
@@ -256,9 +487,24 @@
               "origin": "guard"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "isCapabilityPublic"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "OR",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setRoleCapability(uint8,address,bytes4,bool)",
@@ -266,10 +512,16 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "selector",
+                "selector": "0x7d40583d",
+                "standard": "solmate_roles"
+              }
             }
           ],
           "value_flows": [],
@@ -280,9 +532,24 @@
               "origin": "guard"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "getRolesWithCapability"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "OR",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setUserRole(address,uint8,bool)",
@@ -290,10 +557,16 @@
           "effect_labels": [
             "role_management"
           ],
+          "action_summary": "Changes role-based permissions.",
           "claims": [
             {
               "claim_id": "roles.configure",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "selector",
+                "selector": "0x67aff484",
+                "standard": "solmate_roles"
+              }
             }
           ],
           "value_flows": [],
@@ -304,9 +577,24 @@
               "origin": "guard"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "getUserRoles"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "OR",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "transferOwnership(address)",
@@ -314,10 +602,17 @@
           "effect_labels": [
             "ownership_transfer"
           ],
+          "action_summary": "Transfers contract ownership.",
           "claims": [
             {
               "claim_id": "ownership.transfer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "corroboration": "owner_getter_sibling",
+                "kind": "selector",
+                "selector": "0xf2fde38b",
+                "standard": "ownable"
+              }
             }
           ],
           "value_flows": [],
@@ -328,9 +623,24 @@
               "origin": "guard"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "owner"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "OR",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -344,17 +654,26 @@
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance.",
           "claims": [
             {
               "claim_id": "erc20.approve",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x095ea7b3"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "allowance"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "enter(address,uint256)",
@@ -362,18 +681,36 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "total_supply_sign",
+                "supply": "mint"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "totalSupply"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "exit(address,uint256)",
@@ -381,18 +718,36 @@
           "effect_labels": [
             "burn"
           ],
+          "action_summary": "Burns contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.burn",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "total_supply_sign",
+                "supply": "burn"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "totalSupply"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setBeforeTransferHook(address)",
@@ -400,17 +755,40 @@
           "effect_labels": [
             "hook_update"
           ],
+          "action_summary": "Updates hook configuration that can affect later contract behavior.",
           "claims": [
             {
               "claim_id": "callee_pointer.rotate",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "use_link",
+                "links": [
+                  {
+                    "invoked_by": "transfer(address,uint256)",
+                    "pointer": "hook"
+                  }
+                ]
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "hook"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "transfer(address,uint256)",
@@ -418,10 +796,15 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0xa9059cbb"
+              }
             }
           ],
           "value_flows": [],
@@ -432,10 +815,23 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "hook.beforeTransfer"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
@@ -443,10 +839,15 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x23b872dd"
+              }
             }
           ],
           "value_flows": [],
@@ -457,11 +858,24 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "allowance",
             "balanceOf",
             "hook.beforeTransfer"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "delegated_authority"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -475,55 +889,110 @@
           "full_name": "peers(uint32)",
           "selector": "0xbb0b6a53",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OAppStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "setDelegate(address)",
           "selector": "0xca5eb5e1",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [
             {
               "claim_id": "lz_oapp.set_delegate",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "lz_oapp",
+                "op": "set_delegate"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OAppStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setLockBox(address)",
           "selector": "0x2d8c8039",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OAppStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setPeer(uint32,bytes32)",
           "selector": "0x3400288b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: OAppStorageLocation.",
           "claims": [
             {
               "claim_id": "lz_oapp.set_peer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "lz_oapp",
+                "op": "set_peer"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "OAppStorageLocation"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -537,12 +1006,17 @@
           "full_name": "approveSelf(uint256)",
           "selector": "0x9c9457ff",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "pause()",
@@ -550,39 +1024,83 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.set",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "PAUSABLE_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "PAUSABLE_STORAGE_SLOT"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "paused()",
           "selector": "0x5c975abb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: PAUSABLE_STORAGE_SLOT.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "PAUSABLE_STORAGE_SLOT"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "unpause()",
@@ -590,17 +1108,42 @@
           "effect_labels": [
             "pause_toggle"
           ],
+          "action_summary": "Changes the contract pause state.",
           "claims": [
             {
               "claim_id": "pause.unset",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "PAUSABLE_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "PAUSABLE_STORAGE_SLOT"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -616,6 +1159,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -630,10 +1174,23 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "target.call",
             "token.functionCall"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payGateway(IERC20,uint256)",
@@ -641,10 +1198,35 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "value_router",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x5beae096",
+                    "target_kind": {
+                      "kind": "immutable",
+                      "tier": "dispositive_ast"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom",
+                  "payGateway(IERC20,uint256):sink1:external_call:TMP_9.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -662,7 +1244,13 @@
                 "kind": "param",
                 "tier": "dispositive_ast"
               },
-              "amount_param_index": 1
+              "amount_param_index": 1,
+              "router_ops": [
+                {
+                  "selector": "0x5beae096",
+                  "callee": "safeTransferFrom"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -677,10 +1265,25 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_9.call",
             "token.safeTransferFrom"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 4,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool",
+              "unsupported"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "payGatewayDirect(IERC20,address,uint256)",
@@ -688,10 +1291,34 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "value_router",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x23b872dd",
+                    "target_kind": {
+                      "kind": "immutable",
+                      "tier": "dispositive_ast"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payGatewayDirect(IERC20,address,uint256):sink0:external_call:token.transferFrom"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -709,7 +1336,13 @@
                 "kind": "param",
                 "tier": "dispositive_ast"
               },
-              "amount_param_index": 2
+              "amount_param_index": 2,
+              "router_ops": [
+                {
+                  "selector": "0x23b872dd",
+                  "callee": "transferFrom"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -719,9 +1352,13 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "token.transferFrom"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "pull(IERC20,address,uint256)",
@@ -729,10 +1366,35 @@
           "effect_labels": [
             "asset_pull"
           ],
+          "action_summary": "Pulls assets into the contract.",
           "claims": [
             {
               "claim_id": "flow.in",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "in",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x5beae096",
+                    "target_kind": {
+                      "kind": "self",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "pull(IERC20,address,uint256):sink0:external_call:token.safeTransferFrom",
+                  "pull(IERC20,address,uint256):sink1:external_call:TMP_9.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -765,10 +1427,26 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_9.call",
             "token.safeTransferFrom"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 5,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool",
+              "unsupported"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "recoverERC721(IERC721,address,uint256)",
@@ -776,10 +1454,37 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "token_identity",
+                      "tier": "dispositive_ast"
+                    },
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x42842e0e",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "recoverERC721(IERC721,address,uint256):sink0:external_call:collection.safeTransferFrom"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -807,20 +1512,49 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "collection.safeTransferFrom"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "setFeeRecipient(address)",
           "selector": "0xe74b981b",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: feeRecipient.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "feeRecipient"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "splitPay(IERC20,address,uint256,uint256)",
@@ -828,10 +1562,44 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xd0c407e1",
+                    "target_kind": {
+                      "kind": "several",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_kinds": [
+                      {
+                        "kind": "param",
+                        "tier": "dispositive_ast"
+                      },
+                      {
+                        "kind": "storage_setter",
+                        "tier": "dispositive_ast"
+                      }
+                    ]
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "splitPay(IERC20,address,uint256,uint256):sink0:external_call:token.safeTransfer",
+                  "splitPay(IERC20,address,uint256,uint256):sink1:external_call:TMP_2.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -873,10 +1641,26 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_2.call",
             "token.safeTransfer"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 9,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool",
+              "unsupported"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "sweep(IERC20)",
@@ -884,10 +1668,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "indeterminate",
+                      "tier": "static_trace"
+                    },
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xd0c407e1",
+                    "target_kind": {
+                      "kind": "immutable",
+                      "tier": "dispositive_ast"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "sweep(IERC20):sink1:external_call:token.safeTransfer",
+                  "sweep(IERC20):sink2:external_call:TMP_2.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -924,11 +1732,27 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_2.call",
             "token.balanceOf",
             "token.safeTransfer"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 5,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool",
+              "unsupported"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "sweepTo(IERC20,address,uint256)",
@@ -936,10 +1760,39 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xd0c407e1",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "sweepTo(IERC20,address,uint256):sink0:external_call:token.safeTransfer",
+                  "sweepTo(IERC20,address,uint256):sink1:external_call:TMP_2.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -973,10 +1826,26 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_2.call",
             "token.safeTransfer"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 5,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool",
+              "unsupported"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -992,6 +1861,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -1001,9 +1871,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "vault.exit"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "deposit(IERC20,uint256)",
@@ -1011,10 +1894,31 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "value_router",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "caller_supplied",
+                      "tier": "static_trace"
+                    },
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x23b872dd",
+                    "target_kind": {
+                      "kind": "self",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": []
+              }
             }
           ],
           "value_flows": [
@@ -1031,7 +1935,13 @@
               "amount_kind": {
                 "kind": "caller_supplied",
                 "tier": "static_trace"
-              }
+              },
+              "router_ops": [
+                {
+                  "selector": "0x39d6ba32",
+                  "callee": "enter"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1041,9 +1951,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "vault.enter"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "depositFor(IERC20,uint256,address)",
@@ -1051,10 +1974,32 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "value_router",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x23b872dd",
+                    "target_kind": {
+                      "kind": "self",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": []
+              }
             }
           ],
           "value_flows": [
@@ -1072,7 +2017,13 @@
                 "kind": "param",
                 "tier": "static_trace"
               },
-              "amount_param_index": 1
+              "amount_param_index": 1,
+              "router_ops": [
+                {
+                  "selector": "0x39d6ba32",
+                  "callee": "enter"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1082,9 +2033,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "vault.enter"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "redeem(address,IERC20,uint256)",
@@ -1092,10 +2056,35 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [
             {
               "claim_id": "value_router",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "value_router",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param_derived",
+                      "tier": "static_trace"
+                    },
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": []
+              }
             }
           ],
           "value_flows": [
@@ -1113,7 +2102,13 @@
                 "kind": "param_derived",
                 "tier": "static_trace"
               },
-              "target_param_index": 0
+              "target_param_index": 0,
+              "router_ops": [
+                {
+                  "selector": "0x18457e61",
+                  "callee": "exit"
+                }
+              ]
             }
           ],
           "external_calls": [
@@ -1133,11 +2128,24 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "accountant.getRateInQuoteSafe",
             "shareAmount.mulDivDown",
             "vault.exit"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -1153,10 +2161,37 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "bounded_by_storage",
+                      "tier": "static_trace"
+                    },
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "drainToCap(address):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1184,9 +2219,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payDisagree(address,uint256)",
@@ -1194,10 +2242,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "indeterminate",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payDisagree(address,uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1225,9 +2297,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payEcho(address,uint256)",
@@ -1235,10 +2320,37 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_constraint": {
+                      "state": "not_determined"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payEcho(address,uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1266,9 +2378,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payEither(uint256)",
@@ -1276,10 +2401,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "indeterminate",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payEither(uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1307,9 +2456,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payGovernor(uint256)",
@@ -1317,10 +2479,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "storage_setter",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payGovernor(uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1348,9 +2534,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payGovernorTwoHop(uint256)",
@@ -1358,10 +2557,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "storage_setter",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payGovernorTwoHop(uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1389,9 +2612,22 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "payTreasury(uint256)",
@@ -1399,10 +2635,34 @@
           "effect_labels": [
             "asset_send"
           ],
+          "action_summary": "Sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "immutable",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payTreasury(uint256):sink0:external_call:TMP_15.call"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1430,31 +2690,54 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "TMP_15.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
         },
         {
           "full_name": "setCap(uint256)",
           "selector": "0x47786d37",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: cap.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "cap"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "setGovernor(address)",
           "selector": "0xc42cf535",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: governor.",
           "claims": [],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "governor"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         }
       ]
     },
@@ -1470,10 +2753,34 @@
           "effect_labels": [
             "asset_pull"
           ],
+          "action_summary": "Pulls assets into the contract.",
           "claims": [
             {
               "claim_id": "flow.in",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "in",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": false,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0x23b872dd",
+                    "target_kind": {
+                      "kind": "self",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "deposit(uint256):sink1:external_call:token.transferFrom"
+                ]
+              }
             }
           ],
           "value_flows": [
@@ -1506,10 +2813,23 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "reserveAsset.safeTransferFrom",
             "token.transferFrom"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "execBatch(address[],bytes[])",
@@ -1517,10 +2837,26 @@
           "effect_labels": [
             "arbitrary_external_call"
           ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
           "claims": [
             {
               "claim_id": "exec.arbitrary",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "call_destination",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "targets",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "execBatch(address[],bytes[]):sink0:external_call:REF_4.call"
+                ]
+              }
             }
           ],
           "value_flows": [],
@@ -1531,9 +2867,23 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "REF_4.call"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "previewShares(address)",
@@ -1541,6 +2891,7 @@
           "effect_labels": [
             "external_contract_call"
           ],
+          "action_summary": "Calls an external contract from the contract context.",
           "claims": [],
           "value_flows": [],
           "external_calls": [
@@ -1550,9 +2901,2698 @@
               "origin": "body"
             }
           ],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "reserveAsset.shares"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000b0",
+      "chain": "synthetic",
+      "contract": "ConstrainedDestinations",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "payAllowlisted(IERC20,address,uint256)",
+          "selector": "0xbe273769",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "operand",
+                      "guard": "mapping_allowlist",
+                      "leaf_path": [
+                        0
+                      ],
+                      "pins": true,
+                      "state": "constrained"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payAllowlisted(IERC20,address,uint256):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1,
+              "amount_param_index": 2
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "membership"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "payAnyone(IERC20,address,uint256)",
+          "selector": "0x77570726",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payAnyone(IERC20,address,uint256):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1,
+              "amount_param_index": 2
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "payCommitted(IERC20,address,uint256,bytes32)",
+          "selector": "0x0dd9d6a5",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "derived_from",
+                      "guard": "hash_commitment",
+                      "leaf_path": [
+                        0
+                      ],
+                      "pins": null,
+                      "state": "constrained"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payCommitted(IERC20,address,uint256,bytes32):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1,
+              "amount_param_index": 2
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "payTreasuryOnly(IERC20,address,uint256)",
+          "selector": "0x9dcbc70f",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "binding": "operand",
+                      "guard": "equality_vs_storage",
+                      "leaf_path": [
+                        0
+                      ],
+                      "pins": true,
+                      "state": "constrained"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 1
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "payTreasuryOnly(IERC20,address,uint256):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 1,
+              "amount_param_index": 2
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setAllowed(address,bool)",
+          "selector": "0x4697f05d",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: allowedPayee.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "allowedPayee"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setCommitment(bytes32)",
+          "selector": "0xabe20032",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: payoutCommitment.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "payoutCommitment"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setTreasury(address)",
+          "selector": "0xf0f44260",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: treasury.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "treasury"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000c0",
+      "chain": "synthetic",
+      "contract": "DelegatecallRoutes",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "execBothModules(bytes)",
+          "selector": "0x43f73504",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "sites": 2,
+                  "target_kind": "storage_setter",
+                  "variables": [
+                    "module",
+                    "sideModule"
+                  ],
+                  "writer_signatures": [
+                    "setModule(address)",
+                    "setSideModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execBothModules(bytes):sink0:delegatecall:module",
+                  "execBothModules(bytes):sink1:delegatecall:sideModule"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "module",
+              "origin": "body"
+            },
+            {
+              "target": "sideModule",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 3,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "execFixedSlot(bytes)",
+          "selector": "0xc6e07347",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "storage_slot_variable": "FIXED_IMPL_SLOT",
+                  "target_kind": "storage_no_setter"
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execFixedSlot(bytes):sink0:delegatecall:assembly_delegatecall:TMP_28"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "assembly_delegatecall:TMP_28",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "execModule(bytes)",
+          "selector": "0xdfede0aa",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "storage_setter",
+                  "variable": "module",
+                  "writer_signatures": [
+                    "setModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execModule(bytes):sink0:delegatecall:module"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "module",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "execModuleViaLibrary(bytes)",
+          "selector": "0xba7ccc37",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "storage_setter",
+                  "variable": "module",
+                  "writer_signatures": [
+                    "setModule(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execModuleViaLibrary(bytes):sink1:delegatecall:target"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "module.functionDelegateCall",
+              "selector": "0xee33b7e2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [
+            {
+              "target": "target",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "module.functionDelegateCall"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "execUserModule(bytes)",
+          "selector": "0x18fb7353",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "reason": "mapping_or_array_element",
+                  "target_kind": "indeterminate"
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execUserModule(bytes):sink0:delegatecall:REF_5"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "REF_5",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "fallback()",
+          "selector": "",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "storage_slot_variable": "ADMIN_IMPL_SLOT",
+                  "target_kind": "storage_setter",
+                  "writer_signatures": [
+                    "setAdminImpl(address)"
+                  ]
+                },
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "fallback():sink0:delegatecall:assembly_delegatecall:TMP_13"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "assembly_delegatecall:TMP_13",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "setAdminImpl(address)",
+          "selector": "0xfc0cfeee",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: assembly_storage:slot.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "assembly_storage:slot"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setModule(address)",
+          "selector": "0x47f543bc",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: module.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "module"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setSideModule(address)",
+          "selector": "0x5fcce199",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: sideModule.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "sideModule"
+          ],
+          "predicate_tree": {
+            "present": false
+          }
+        },
+        {
+          "full_name": "setUserModule(address)",
+          "selector": "0xe47baf09",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: userModule.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "userModule"
+          ],
+          "predicate_tree": {
+            "present": false
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000d0",
+      "chain": "synthetic",
+      "contract": "ExecBinding",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "branchedParams(address,address,bytes,bool)",
+          "selector": "0x0599ef94",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "branchedParams(address,address,bytes,bool):sink0:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "branchedStateOrParam(address,bytes,bool)",
+          "selector": "0xe567b71c",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "branchedStateOrParam(address,bytes,bool):sink0:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "compose(address,address,bytes,bytes)",
+          "selector": "0x23a2b880",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "to",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "compose(address,address,bytes,bytes):sink0:external_call:to.compose"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "to.compose",
+              "selector": "0xa9803dcc",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "to.compose"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "execThenGuard(address,bytes)",
+          "selector": "0xa8e33be9",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "call_destination",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "execThenGuard(address,bytes):sink0:external_call:target.call",
+                  "execThenGuard(address,bytes):sink1:external_call:fallbackRoute.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "target.call"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "guardThenExec(address,bytes)",
+          "selector": "0xd0e0a0e2",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "call_destination",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "guardThenExec(address,bytes):sink0:external_call:fallbackRoute.exec",
+                  "guardThenExec(address,bytes):sink1:external_call:target.call"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "target.call"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "manageReversed(address,bytes)",
+          "selector": "0x46b86bea",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "library_forwarder",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "manageReversed(address,bytes):sink0:external_call:data.send",
+                  "manageReversed(address,bytes):sink1:external_call:target.call"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "data.send",
+              "selector": "0x202d45d3",
+              "origin": "body"
+            },
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "data.send",
+            "target.call"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "manageViaAssembly(address,bytes)",
+          "selector": "0x96daa5b0",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "library_forwarder",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "not_determined"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "manageViaAssembly(address,bytes):sink0:external_call:target.callContract"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "target.callContract",
+              "selector": "0x24d78c05",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "target.callContract"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "unsupported"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "manageViaLibrary(address,bytes,uint256)",
+          "selector": "0x810da513",
+          "effect_labels": [
+            "arbitrary_external_call",
+            "asset_send"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": "library_forwarder",
+                "calldata_kind": "param",
+                "calldata_param": "data",
+                "destination_basis": "library_forwarder",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "target",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "manageViaLibrary(address,bytes,uint256):sink0:external_call:target.functionCallWithValue",
+                  "manageViaLibrary(address,bytes,uint256):sink1:external_call:target.call"
+                ]
+              }
+            },
+            {
+              "claim_id": "flow.out",
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "amount_param_index": 2,
+                    "from_is_self": true,
+                    "kind": "low_level_value_call",
+                    "selector": null,
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "static_trace"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "manageViaLibrary(address,bytes,uint256):sink1:external_call:target.call"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "low_level_value_call",
+              "selector": null,
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "static_trace"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "static_trace"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 2
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "target.functionCallWithValue",
+              "selector": "0x2a011594",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "target.call",
+            "target.functionCallWithValue"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "manageViaTwoStepLibrary(address,bytes)",
+          "selector": "0x726e8d14",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "not_determined",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "manageViaTwoStepLibrary(address,bytes):sink0:external_call:target.functionCall",
+                  "manageViaTwoStepLibrary(address,bytes):sink1:external_call:target.call"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "target.call",
+              "selector": "",
+              "origin": "body"
+            },
+            {
+              "target": "target.functionCall",
+              "selector": "0xa0b5ffb0",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "target.call",
+            "target.functionCall"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "paramWrittenAfterCall(address,address,bytes)",
+          "selector": "0x17dbc018",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "paramWrittenAfterCall(address,address,bytes):sink0:external_call:a.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "a.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "a.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "reassignedLocal(address,address,bytes)",
+          "selector": "0x1ddc947b",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "reassignedLocal(address,address,bytes):sink0:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "rebalance(address,address,bytes)",
+          "selector": "0x805e09b4",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "action_summary": "Calls an external contract from the contract context.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "swapper.swap",
+              "selector": "0x119943f7",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "swapper.swap"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "singlyAssignedLocal(address,bytes)",
+          "selector": "0xbd0fbb32",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": "call_destination",
+                "destination_constraint": {
+                  "state": "unconstrained_proven"
+                },
+                "destination_kind": "param",
+                "destination_param": "a",
+                "kind": "param_taint",
+                "sink_ids": [
+                  "singlyAssignedLocal(address,bytes):sink0:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "stateVarThenBranched(address,address,bytes,bool)",
+          "selector": "0xed258199",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "stateVarThenBranched(address,address,bytes,bool):sink0:external_call:fallbackRoute.exec",
+                  "stateVarThenBranched(address,address,bytes,bool):sink1:external_call:t.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "t.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "t.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "stateWrittenAfterCall(address,bytes)",
+          "selector": "0x0ebcd6cf",
+          "effect_labels": [
+            "arbitrary_external_call"
+          ],
+          "action_summary": "Executes arbitrary external calldata from the contract.",
+          "claims": [
+            {
+              "claim_id": "exec.arbitrary",
+              "tier": "idiom_structural",
+              "witness": {
+                "calldata_basis": null,
+                "calldata_kind": "call_argument",
+                "calldata_param": null,
+                "destination_basis": null,
+                "destination_kind": "not_determined",
+                "destination_param": null,
+                "kind": "param_taint",
+                "sink_ids": [
+                  "stateWrittenAfterCall(address,bytes):sink0:external_call:fallbackRoute.exec"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute",
+            "fallbackRoute.exec"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "twoStateVarSinks(address,bytes)",
+          "selector": "0x51248e39",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "action_summary": "Calls an external contract from the contract context.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "fallbackRoute.exec",
+              "selector": "0xbe6002c2",
+              "origin": "body"
+            },
+            {
+              "target": "swapper.swap",
+              "selector": "0x119943f7",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "fallbackRoute.exec",
+            "swapper.swap"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "external_bool"
+            ],
+            "references_msg_sender": false
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000e0",
+      "chain": "synthetic",
+      "contract": "TreeAbsentPublics",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "fallback()",
+          "selector": "",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "pokes"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "pokeAll()",
+          "selector": "0x59992dc2",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "pokes"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "pokeTo(uint256)",
+          "selector": "0x5560e628",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: pokes.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "pokes"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "receive()",
+          "selector": "",
+          "effect_labels": [],
+          "action_summary": "Performs a contract action.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawAll()",
+          "selector": "0x853828b6",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: lastAmount.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "lastAmount"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawTo(uint256)",
+          "selector": "0x93bc96fa",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: lastAmount.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "lastAmount"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x00000000000000000000000000000000000000f0",
+      "chain": "synthetic",
+      "contract": "TimedLatch",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "freeze()",
+          "selector": "0x62a5af3b",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "frozen"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "frozen"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "pauseTimed()",
+          "selector": "0x24a3f499",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: pausedUntil.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "pausedUntil"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "transferFreezable(address,uint256)",
+          "selector": "0x6eac583f",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "balanceOf"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "pause"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "transferTimed(address,uint256)",
+          "selector": "0x88897a74",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "balanceOf"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "time"
+            ],
+            "leaf_kinds": [
+              "comparison"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "unfreeze()",
+          "selector": "0x6a28f000",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "frozen"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "frozen"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "unpauseTimed()",
+          "selector": "0xbb912b8b",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: pausedUntil.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "pausedUntil"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000100",
+      "chain": "synthetic",
+      "contract": "PolicyCaller",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "depositTo(uint256)",
+          "selector": "0x514fdff5",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "action_summary": "Calls an external contract from the contract context.",
+          "claims": [
+            {
+              "claim_id": "flow.in",
+              "tier": "policy_derived",
+              "witness": {
+                "callee": "0x00000000000000000000000000000000000000a0",
+                "kind": "cross_contract_join",
+                "selector": "0xb6b55f25",
+                "sink_id": "depositTo(uint256):sink0:external_call:vault.deposit",
+                "source_tier": "standard_exact"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "vault.deposit",
+              "selector": "0xb6b55f25",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "vault.deposit"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "recoverVia(address,address,uint256)",
+          "selector": "0x2085bf75",
+          "effect_labels": [
+            "external_contract_call"
+          ],
+          "action_summary": "Calls an external contract from the contract context.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "policy_derived",
+              "witness": {
+                "callee": "0x0000000000000000000000000000000000000070",
+                "kind": "cross_contract_join",
+                "selector": "0x0aeef8c8",
+                "sink_id": "recoverVia(address,address,uint256):sink0:external_call:recovery.sweepTo",
+                "source_tier": "standard_exact"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "recovery.sweepTo",
+              "selector": "0x0aeef8c8",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "recovery.sweepTo"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setRecovery(address)",
+          "selector": "0xf0d85c89",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: recovery.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "recovery"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "setVault(address)",
+          "selector": "0x6817031b",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: vault.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "vault"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000110",
+      "chain": "synthetic",
+      "contract": "RateLimitedFlow",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "withdrawDecoy(address,uint256)",
+          "selector": "0x58c067c0",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawDecoy(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "decoyLimiter.consume",
+              "selector": "0x483f31ab",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "decoyLimiter.consume",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawLimited(address,uint256)",
+          "selector": "0xc3e74bc9",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawLimited(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            },
+            {
+              "claim_id": "rate_limit.consume",
+              "tier": "idiom_structural",
+              "witness": {
+                "bounds_total_extraction": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "callee_selectors": [
+                  "0xb87a8ecd"
+                ],
+                "capacity": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "config_reader": {
+                  "get_limit_selector": "0xd200f8c2",
+                  "set_capacity_selector": "0x7c162f98",
+                  "set_refill_rate_selector": "0xadc050a3"
+                },
+                "consume_kinds": [
+                  "consume"
+                ],
+                "interpretation": "refill_rate > 0: throughput cap only (does NOT bound total extraction). refill_rate == 0: one-shot total cap. capacity == 0: a freeze — a pause in disguise. not_determined on either: no severity conclusion may be drawn.",
+                "kind": "limiter_consume",
+                "mandatory": {
+                  "state": "proven"
+                },
+                "refill_rate": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "severity_weight": 0,
+                "sink_ids": [
+                  "withdrawLimited(address,uint256):sink0:external_call:limiter.consume"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "limiter.consume",
+              "selector": "0xb87a8ecd",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "limiter.consume",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawTokenLimited(address,uint256)",
+          "selector": "0x6256a93b",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawTokenLimited(address,uint256):sink1:external_call:token.transfer"
+                ]
+              }
+            },
+            {
+              "claim_id": "rate_limit.consume",
+              "tier": "idiom_structural",
+              "witness": {
+                "bounds_total_extraction": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "callee_selectors": [
+                  "0xc0d5f68a"
+                ],
+                "capacity": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "config_reader": {
+                  "get_limit_selector": "0xd200f8c2",
+                  "set_capacity_selector": "0x7c162f98",
+                  "set_refill_rate_selector": "0xadc050a3"
+                },
+                "consume_kinds": [
+                  "consume_token"
+                ],
+                "interpretation": "refill_rate > 0: throughput cap only (does NOT bound total extraction). refill_rate == 0: one-shot total cap. capacity == 0: a freeze — a pause in disguise. not_determined on either: no severity conclusion may be drawn.",
+                "kind": "limiter_consume",
+                "mandatory": {
+                  "state": "proven"
+                },
+                "refill_rate": {
+                  "source": "chain_state",
+                  "state": "not_determined"
+                },
+                "severity_weight": 0,
+                "sink_ids": [
+                  "withdrawTokenLimited(address,uint256):sink0:external_call:limiter.consumeToken"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "limiter.consumeToken",
+              "selector": "0xc0d5f68a",
+              "origin": "body"
+            },
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "limiter.consumeToken",
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality",
+              "external_bool"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "withdrawUnlimited(address,uint256)",
+          "selector": "0xe8425023",
+          "effect_labels": [
+            "asset_send"
+          ],
+          "action_summary": "Sends assets out of the contract.",
+          "claims": [
+            {
+              "claim_id": "flow.out",
+              "tier": "standard_exact",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 1,
+                    "from_is_self": true,
+                    "kind": "callee_erc20_selector",
+                    "selector": "0xa9059cbb",
+                    "target_constraint": {
+                      "state": "unconstrained_proven"
+                    },
+                    "target_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "target_param_index": 0
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": [
+                  "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer"
+                ]
+              }
+            }
+          ],
+          "value_flows": [
+            {
+              "kind": "callee_erc20_selector",
+              "selector": "0xa9059cbb",
+              "direction": "out",
+              "from_is_self": true,
+              "origin": "body",
+              "target_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "amount_kind": {
+                "kind": "param",
+                "tier": "dispositive_ast"
+              },
+              "target_param_index": 0,
+              "amount_param_index": 1
+            }
+          ],
+          "external_calls": [
+            {
+              "target": "token.transfer",
+              "selector": "0xa9059cbb",
+              "origin": "body"
+            }
+          ],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "token.transfer"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     },
@@ -1566,17 +5606,26 @@
           "full_name": "approve(address,uint256)",
           "selector": "0x095ea7b3",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance.",
           "claims": [
             {
               "claim_id": "erc20.approve",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x095ea7b3"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "allowance"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "deposit()",
@@ -1584,75 +5633,133 @@
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "total_supply_sign",
+                "supply": "mint"
+              }
             },
             {
               "claim_id": "weth.deposit",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "weth",
+                "op": "deposit"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "totalSupply"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "receive()",
-          "selector": "0xa3e76c0f",
+          "selector": "",
           "effect_labels": [
             "mint"
           ],
+          "action_summary": "Mints contract balances or shares.",
           "claims": [
             {
               "claim_id": "supply.mint",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "total_supply_sign",
+                "supply": "mint"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "totalSupply"
-          ]
+          ],
+          "predicate_tree": {
+            "present": false
+          }
         },
         {
           "full_name": "transfer(address,uint256)",
           "selector": "0xa9059cbb",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance, balanceOf.",
           "claims": [
             {
               "claim_id": "erc20.transfer",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0xa9059cbb"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "allowance",
             "balanceOf"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "comparison"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "transferFrom(address,address,uint256)",
           "selector": "0x23b872dd",
           "effect_labels": [],
+          "action_summary": "Writes or calls into: allowance, balanceOf.",
           "claims": [
             {
               "claim_id": "erc20.transfer_from",
-              "tier": "standard_exact"
+              "tier": "standard_exact",
+              "witness": {
+                "kind": "erc20_selector",
+                "selector": "0x23b872dd"
+              }
             }
           ],
           "value_flows": [],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "allowance",
             "balanceOf"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "comparison"
+            ],
+            "references_msg_sender": true
+          }
         },
         {
           "full_name": "withdraw(uint256)",
@@ -1661,18 +5768,48 @@
             "asset_send",
             "burn"
           ],
+          "action_summary": "Burns contract balances or shares and sends assets out of the contract.",
           "claims": [
             {
               "claim_id": "flow.out",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "direction": "out",
+                "flows": [
+                  {
+                    "amount_kind": {
+                      "kind": "param",
+                      "tier": "dispositive_ast"
+                    },
+                    "amount_param_index": 0,
+                    "from_is_self": true,
+                    "kind": "native_transfer_send",
+                    "selector": null,
+                    "target_kind": {
+                      "kind": "msg_sender",
+                      "tier": "static_trace"
+                    }
+                  }
+                ],
+                "kind": "value_flow",
+                "sink_ids": []
+              }
             },
             {
               "claim_id": "supply.burn",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "total_supply_sign",
+                "supply": "burn"
+              }
             },
             {
               "claim_id": "weth.withdraw",
-              "tier": "idiom_structural"
+              "tier": "idiom_structural",
+              "witness": {
+                "kind": "weth",
+                "op": "withdraw"
+              }
             }
           ],
           "value_flows": [
@@ -1694,10 +5831,23 @@
             }
           ],
           "external_calls": [],
+          "delegatecall_sinks": [],
           "effect_targets": [
             "balanceOf",
             "totalSupply"
-          ]
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "comparison"
+            ],
+            "references_msg_sender": true
+          }
         }
       ]
     }

@@ -855,12 +855,26 @@ def test_stage3_linked_url_triggers_org_auto_hop(solodit_stub, http_stubs, llm_r
     assert halborn.get("source_repo") == "acme-labs/acme-protocol"
 
 
-def test_sync_skips_entries_missing_required_fields(db_session):
-    """Entries without url / auditor / title are dropped silently — the
-    orchestrator's output sometimes contains placeholder entries that
-    shouldn't pollute the table."""
-    from db.models import AuditReport, Protocol
+def _sync_capturing_degraded(session, protocol_id: int, reports: list[dict]) -> list:
+    """Run the sync with a degraded-error accumulator bound, as a worker does."""
+    from utils.logging import bind_trace_context, degraded_errors_var
     from workers.discovery import _sync_audit_reports_to_db
+
+    accumulator: list = []
+    token = degraded_errors_var.set(accumulator)
+    try:
+        with bind_trace_context(trace_id="t", job_id="j", stage="discovery", worker_id="DiscoveryWorker-1"):
+            _sync_audit_reports_to_db(session, protocol_id, reports)
+    finally:
+        degraded_errors_var.reset(token)
+    return accumulator
+
+
+def test_sync_reports_entries_missing_required_fields(db_session):
+    """Entries without url / auditor / title produce no row — and say so.
+    A silent drop makes the artifact's entry count and the table's row count
+    disagree with nothing to explain the gap."""
+    from db.models import AuditReport, Protocol
 
     name = f"drop-test-{uuid.uuid4().hex[:8]}"
     protocol = Protocol(name=name)
@@ -874,8 +888,61 @@ def test_sync_skips_entries_missing_required_fields(db_session):
         {"url": "https://ok.com/b.pdf", "auditor": "Foo", "title": ""},
         {"url": "https://ok.com/c.pdf", "auditor": "Foo", "title": "Kept"},
     ]
-    _sync_audit_reports_to_db(db_session, protocol_id, reports)
+    degraded = _sync_capturing_degraded(db_session, protocol_id, reports)
 
     rows = db_session.query(AuditReport).filter_by(protocol_id=protocol_id).all()
     assert len(rows) == 1
     assert rows[0].title == "Kept"
+
+    assert len(degraded) == 1
+    assert degraded[0].phase == "audit_report_sync"
+    assert degraded[0].message == "3 of 4 audit entries produced no row"
+    assert degraded[0].context["entries"] == 4
+    assert degraded[0].context["distinct_urls_upserted"] == 1
+    assert [e["missing"] for e in degraded[0].context["incomplete"]] == ["url", "auditor", "title"]
+    assert degraded[0].context["collisions"] == []
+
+
+def test_sync_reports_url_collisions_within_one_batch(db_session):
+    """Two entries claiming one URL collapse to one row (the table is keyed on
+    ``(protocol_id, url)``); the overwritten entry is named, not lost."""
+    from db.models import AuditReport, Protocol
+
+    protocol = Protocol(name=f"collision-test-{uuid.uuid4().hex[:8]}")
+    db_session.add(protocol)
+    db_session.commit()
+
+    shared = "https://raw.githubusercontent.com/acme/contracts/master/audits/2023.05.16%20-%20Omniscia.pdf"
+    reports = [
+        {"url": shared, "auditor": "Omniscia", "title": "Omniscia Audit"},
+        {"url": shared, "auditor": "Nethermind", "title": "Restaking Of stETH Holdings"},
+    ]
+    degraded = _sync_capturing_degraded(db_session, protocol.id, reports)
+
+    rows = db_session.query(AuditReport).filter_by(protocol_id=protocol.id).all()
+    assert len(rows) == 1
+    assert rows[0].auditor == "Nethermind"  # last write wins, unchanged
+
+    assert len(degraded) == 1
+    assert degraded[0].message == "1 of 2 audit entries produced no row"
+    assert degraded[0].context["collisions"] == [
+        {"url": shared, "overwritten_title": "Omniscia Audit", "kept_title": "Restaking Of stETH Holdings"}
+    ]
+
+
+def test_sync_of_a_clean_batch_records_nothing(db_session):
+    """Control: every entry persisting must not report a loss."""
+    from db.models import AuditReport, Protocol
+
+    protocol = Protocol(name=f"clean-test-{uuid.uuid4().hex[:8]}")
+    db_session.add(protocol)
+    db_session.commit()
+
+    reports = [
+        {"url": "https://ok.com/a.pdf", "auditor": "Omniscia", "title": "Omniscia Audit"},
+        {"url": "https://ok.com/b.md", "auditor": "Nethermind", "title": "Restaking Of stETH Holdings"},
+    ]
+    degraded = _sync_capturing_degraded(db_session, protocol.id, reports)
+
+    assert degraded == []
+    assert db_session.query(AuditReport).filter_by(protocol_id=protocol.id).count() == 2

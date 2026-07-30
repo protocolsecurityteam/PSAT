@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { buildAddrToMachine, buildDependencyView } from "./dependencies.js";
+import { buildAddrToMachine, buildDependencyView, fetchDependencyGraphViz } from "./dependencies.js";
 
 const TARGET_IMPL = "0x6bd191582f40012b2f2cdf66bd3d32bde41191f7";
 const TARGET_PROXY = "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0";
@@ -109,5 +109,88 @@ describe("buildDependencyView", () => {
     expect(row.reads).toEqual([]);
     expect(row.writes).toEqual([]);
     expect(row.provenance).toBe("static"); // static-only discovery is now reachable
+  });
+});
+
+describe("fetchDependencyGraphViz — only a proven negative may render as absence", () => {
+  // DependsOnTab renders `null` as "No outbound calls detected" and a throw as
+  // "Couldn't load dependency data". Any id the server did not answer for must
+  // land in the second, even when a sibling id answered with an empty graph —
+  // otherwise an unanswered question is cached and rendered as a fact about the
+  // contract for the rest of the session.
+  //
+  // The mapping under test is deliberately *not* an enumeration of failure
+  // codes: 404 is the only proven negative, everything else is a non-answer.
+  // The three throwing cases below are the three shapes that a 503-only
+  // enumeration silently dropped — a plain 500, an edge 502/504, and a network
+  // failure that arrives with no `status` at all.
+  const MACHINE = { impl_job_id: "job-impl", job_id: "job-proxy", address: "0xabc" };
+  const failWith = (status, message) => () => {
+    const e = new Error(message);
+    if (status !== null) e.status = status;
+    throw e;
+  };
+  const notDetermined = failWith(503, "Artifact state not determined");
+  const graphOf = (addr) => ({
+    nodes: [{ id: "addr:x", address: addr, label: "X", type: "contract", source: [] }],
+    edges: [],
+  });
+
+  it("throws instead of returning an empty graph when any id answered 503", async () => {
+    const fetchFn = async (url) => (url.includes("job-impl") ? notDetermined() : { nodes: [] });
+    await expect(fetchDependencyGraphViz({ ...MACHINE, address: "0xa1" }, fetchFn)).rejects.toThrow(
+      /not determined/i,
+    );
+  });
+
+  // The three below are a reported repro, inverted to pin the fix. Under
+  // the previous `status === 503` mapping every one of them resolved to `null`
+  // — the absence state — and cached it.
+  it.each([
+    ["a 500", 500, "Internal Server Error"],
+    ["an edge 502 while the web machine autostops", 502, "Bad Gateway"],
+    ["a network failure carrying no status", null, "Failed to fetch"],
+  ])("throws when one id hit %s and a sibling returned an empty graph", async (_label, status, message) => {
+    const boom = failWith(status, message);
+    const fetchFn = async (url) => (url.includes("job-impl") ? boom() : { nodes: [] });
+    await expect(
+      fetchDependencyGraphViz({ ...MACHINE, address: `0xa-${status}` }, fetchFn),
+    ).rejects.toThrow(message);
+  });
+
+  it("leaves the cache unset after a non-answer, so a later healthy fetch answers", async () => {
+    // The half of the defect that outlived the request: a `null` derived from a
+    // non-answer was written to the module-level cache, so every later open of
+    // the tab short-circuited to "No outbound calls detected" for the rest of
+    // the session and no healthy fetch could correct it.
+    const machine = { ...MACHINE, address: "0xcache" };
+    const boom = failWith(500, "Internal Server Error");
+    const failing = async (url) => (url.includes("job-impl") ? boom() : { nodes: [] });
+    await expect(fetchDependencyGraphViz(machine, failing)).rejects.toThrow(/Internal Server Error/);
+
+    const graph = graphOf("0xdef");
+    await expect(fetchDependencyGraphViz(machine, async () => graph)).resolves.toBe(graph);
+  });
+
+  it("still returns a confirmed empty when every id simply had nothing", async () => {
+    // NEGATIVE CONTROL: a real "no dependencies" must keep rendering as one.
+    const fetchFn = async () => ({ nodes: [] });
+    await expect(fetchDependencyGraphViz({ ...MACHINE, address: "0xa2" }, fetchFn)).resolves.toBeNull();
+  });
+
+  it("treats a 404 as the proven negative it is: an empty sibling still confirms", async () => {
+    // NEGATIVE CONTROL for the over-correction. Widening the hedge to "any
+    // thrown error" would turn the ordinary case — the graph lives under the
+    // impl job, so the proxy job legitimately 404s — into a permanent
+    // "couldn't load", and the test above could not tell the difference.
+    const missing = failWith(404, "Artifact not found");
+    const fetchFn = async (url) => (url.includes("job-proxy") ? missing() : { nodes: [] });
+    await expect(fetchDependencyGraphViz({ ...MACHINE, address: "0xa4" }, fetchFn)).resolves.toBeNull();
+  });
+
+  it("still prefers a real graph over a sibling's 503", async () => {
+    const graph = graphOf("0xdef");
+    const fetchFn = async (url) => (url.includes("job-impl") ? notDetermined() : graph);
+    await expect(fetchDependencyGraphViz({ ...MACHINE, address: "0xa3" }, fetchFn)).resolves.toBe(graph);
   });
 });

@@ -250,7 +250,6 @@ def _setup_company_with_proxy(db_session, monkeypatch):
         ContractSummary(
             contract_id=contract.id,
             control_model="proxy",
-            risk_level="medium",
             is_upgradeable=True,
         )
     )
@@ -319,7 +318,7 @@ def _setup_company_with_proxy(db_session, monkeypatch):
 def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monkeypatch):
     """After copy_static_cache reassigns the Contract row, the /api/company
     endpoint should still return meaningful data (not null) for the old job's
-    contract fields like control_model, risk_level, is_proxy."""
+    contract fields like control_model, is_proxy."""
     old_job, new_job, protocol = _setup_company_with_proxy(db_session, monkeypatch)
 
     # Complete the new job so both show up as completed
@@ -345,7 +344,7 @@ def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monk
         f"Expected contract {ADDR_A} in company response, got addresses: {[c.get('address') for c in contracts]}"
     )
     assert proxy_contract.get("control_model") is not None, "control_model should not be None — Contract data was lost"
-    assert proxy_contract.get("risk_level") is not None, "risk_level should not be None — ContractSummary data was lost"
+    assert proxy_contract.get("summary_evidence") == "present", "the ContractSummary row was lost"
 
 
 def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, monkeypatch):

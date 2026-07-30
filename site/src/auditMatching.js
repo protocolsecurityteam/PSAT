@@ -44,14 +44,34 @@ export function matchesEra(cov, impl) {
 
   // Block-range constraint from the backend (populated when impl_era
   // match has a window). Hard constraint: overlap required.
+  //
+  // An ABSENT era bound is not a bound value. Folding `block_introduced` to
+  // -Infinity and `block_replaced` to Infinity let a fully block-bounded audit
+  // overlap an era whose window was never determined — a poll-detected impl
+  // publishes `block_introduced: null`, and the fold answers the hard
+  // constraint "yes" from the absence of the data it is meant to test.
+  //
+  // KEY PRESENCE is the successor discriminator, taken from the producer:
+  // `_build_implementation_timeline` writes `block_replaced` from the next upgrade
+  // event unconditionally, so the key is absent only on the current impl (whose
+  // era really does run to now) and present-but-null exactly when a successor
+  // exists whose block was never determined.
+  //
+  // When a bound the constraint needs is not determined, this branch DECLINES —
+  // it falls through to the temporal match below, which has its own evidence and
+  // its own hedges, instead of returning an answer it cannot support.
   const covFrom = cov?.covered_from_block;
   const covTo = cov?.covered_to_block;
   if (covFrom != null || covTo != null) {
-    const eraFrom = impl?.block_introduced ?? -Infinity;
-    const eraTo = impl?.block_replaced ?? Infinity;
-    const cFrom = covFrom ?? -Infinity;
-    const cTo = covTo ?? Infinity;
-    return cFrom < eraTo && cTo > eraFrom;
+    const eraFrom = impl?.block_introduced;
+    const eraToKnown = typeof impl?.block_replaced === "number";
+    const eraHasSuccessor = impl != null && Object.prototype.hasOwnProperty.call(impl, "block_replaced");
+    const eraTo = eraToKnown ? impl.block_replaced : eraHasSuccessor ? null : Infinity;
+    if (typeof eraFrom === "number" && eraTo !== null) {
+      const cFrom = covFrom ?? -Infinity;
+      const cTo = covTo ?? Infinity;
+      return cFrom < eraTo && cTo > eraFrom;
+    }
   }
 
   // Temporal match: audit date vs impl-era timestamps, with 14-day grace
@@ -64,9 +84,31 @@ export function matchesEra(cov, impl) {
     // No audit date → only signal we have is addrMatch.
     return addrMatch;
   }
+  // Same rule as the block branch above, on the sibling field — and it is not
+  // optional here: with the block branch now declining on an undetermined window,
+  // an era whose TIMESTAMPS were also never determined would fall through to this
+  // test and be answered "yes" by the ±Infinity fold, which would make the decline
+  // above cosmetic. An era with no known start cannot be shown to contain an audit
+  // date, so the only signal left is addrMatch.
   const eraFromTs =
-    impl?.timestamp_introduced != null ? impl.timestamp_introduced * 1000 : -Infinity;
+    impl?.timestamp_introduced != null ? impl.timestamp_introduced * 1000 : null;
+  // A successor is proven by EITHER sibling key: the producer writes
+  // block_replaced for every era that has a successor, but timestamp_replaced
+  // only when the successor's log carried a timestamp — so key-presence on the
+  // timestamp alone reads "no successor" for an era that provably has one, and
+  // the Infinity arm would answer the containment question from missing data.
+  const eraHasSuccessor =
+    impl != null &&
+    (Object.prototype.hasOwnProperty.call(impl, "timestamp_replaced") ||
+      Object.prototype.hasOwnProperty.call(impl, "block_replaced"));
   const eraToTs =
-    impl?.timestamp_replaced != null ? impl.timestamp_replaced * 1000 : Infinity;
+    impl?.timestamp_replaced != null
+      ? impl.timestamp_replaced * 1000
+      : eraHasSuccessor
+        ? null
+        : Infinity;
+  if (eraFromTs === null || eraToTs === null) {
+    return addrMatch;
+  }
   return auditTs >= eraFromTs - GRACE_MS && auditTs < eraToTs + GRACE_MS;
 }

@@ -39,7 +39,13 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope
 from db.models import EffectiveFunction, EffectVerdict, FunctionPrincipal
 from services.effects import claims_bridge
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import (
+    capability_role_grants,
+    capability_surface_openness,
+    capability_surface_status,
+    project_capability_surface,
+)
+from services.policy.effective_permissions import MUTABILITY_FIELDS
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 
@@ -110,20 +116,45 @@ def _column_values_for_capability(
         "conditions": conditions or None,
         "status": capability_surface_status(cap_dict, surface),
         "authority_public": surface.authority_public,
+        "authority_openness": capability_surface_openness(cap_dict, surface),
     }
     return out
 
 
-def _selector_key(selector: str | None) -> str:
-    return (selector or "").lower()
+def _authority_roles_for(cap_dict: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """``capability_role_grants`` with the no-capability case spelled out: with
+    no resolved capability nothing was read, so the answer is not-determined
+    (``None``), never the proven-absent ``[]``."""
+    if cap_dict is None:
+        return None
+    return capability_role_grants(cap_dict)
+
+
+def _selector_key(selector: str | None, function_name: str | None = None) -> tuple[str, str]:
+    """Identity for carrying observed-effect state across the row replace.
+
+    Keyed on ``(selector, function_name)``, not selector alone: a
+    selector-less entry point carries the documented ``""`` sentinel, and BOTH
+    ``fallback`` and ``receive`` are selector-less — so a contract declaring both
+    produced two rows under one key and the carry cross-assigned one's observed
+    claims and proven verdicts to the other. A ``None`` selector (the "could not
+    be derived" state) collapses onto the same ``""``, which is a second way in.
+    The function name discriminates without affecting any selector-bearing row,
+    where the pair is as unique as the selector was.
+
+    Armed population: 0 realised on the local corpus (no analysed contract
+    declares both, and every persisted selector-less row predates the ``""``
+    sentinel and still carries a fabricated selector) — structural on the first
+    contract that declares both once the sentinel is in use."""
+    return ((selector or "").lower(), (function_name or "").lower())
 
 
 def _capture_observed_before(
     session: Session,
     contract_id: int,
     deployment_address: str | None,
-) -> dict[str, tuple[list[Any], list[Any]]]:
-    """§5.2 call site 2, capture phase. Read this deployment's *outgoing*
+) -> dict[tuple[str, str], tuple[list[Any], list[Any]]]:
+    """Observed-effect carry, capture phase. Read this deployment's *outgoing*
     observed-effect state BEFORE the wholesale row replace deletes it, keyed by
     selector, so the re-created rows can carry it forward.
 
@@ -133,20 +164,25 @@ def _capture_observed_before(
       the effects stage). These are the durable carrier: without carrying the
       claims themselves, any policy-only re-run (one that does not re-run
       effects) would blank the observed labels, which is exactly the regression
-      §5.2 exists to kill.
+      this carry exists to kill.
     - Proven ``effect_verdicts`` for those rows, re-merged as the authoritative
       source. The verdict rows survive the replace (FK is ``ON DELETE SET
       NULL``) but come out unlinked; the carry phase relinks them to the
       re-created rows so claim witnesses keep resolving.
 
-    Returns ``{selector_key: (carried_observed_claims, proven_verdicts)}``.
+    Returns ``{(selector, function_name): (carried_observed_claims, proven_verdicts)}``.
     """
     # Older/stripped test metadata swaps in an EffectiveFunction model without the
     # claims plane; nothing observed can exist there, so there is nothing to carry.
     if not hasattr(EffectiveFunction, "claims"):
         return {}
     rows = (
-        session.query(EffectiveFunction.id, EffectiveFunction.selector, EffectiveFunction.claims)
+        session.query(
+            EffectiveFunction.id,
+            EffectiveFunction.selector,
+            EffectiveFunction.function_name,
+            EffectiveFunction.claims,
+        )
         .filter(
             EffectiveFunction.contract_id == contract_id,
             deployment_scope(EffectiveFunction.deployment_address, deployment_address),
@@ -155,16 +191,16 @@ def _capture_observed_before(
     )
     if not rows:
         return {}
-    observed_by_selector: dict[str, list[Any]] = {}
-    id_to_selector: dict[int, str] = {}
-    for row_id, selector, claims in rows:
-        key = _selector_key(selector)
+    observed_by_selector: dict[tuple[str, str], list[Any]] = {}
+    id_to_selector: dict[int, tuple[str, str]] = {}
+    for row_id, selector, function_name, claims in rows:
+        key = _selector_key(selector, function_name)
         id_to_selector[row_id] = key
         for claim in claims or []:
             if isinstance(claim, dict) and claim.get("tier") == claims_bridge.OBSERVED_TIER:
                 observed_by_selector.setdefault(key, []).append(claim)
 
-    verdicts_by_selector: dict[str, list[Any]] = {}
+    verdicts_by_selector: dict[tuple[str, str], list[Any]] = {}
     verdicts = (
         session.query(EffectVerdict)
         .filter(
@@ -227,7 +263,7 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
-    # §5.2 call site 2: snapshot the outgoing rows' observed-effect state before
+    # Snapshot the outgoing rows' observed-effect state before
     # the replace destroys it, so the re-created rows carry it forward.
     observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
@@ -250,17 +286,36 @@ def write_effective_function_rows(
 
         cap = capability_by_function.get(fn_signature)
         cap_dict = _to_dict(cap)
+        # The capability the RECORD itself publishes (policy-minted
+        # ``_public_capability`` / ``_unsupported_capability`` shapes travel
+        # here, not in ``capability_by_function`` — that mapping is the
+        # RESOLVER's output). Column answers that are pure projections of the
+        # capability shape are derived from it when no resolver capability
+        # exists, so a row is never published with NULL ("this producer could
+        # not say") next to a capability_expr that says the answer.
+        record_cap = fn.get("capability_expr")
+        if not isinstance(record_cap, dict):
+            record_cap = None
 
         # Column values: prefer resolved capability columns; otherwise use
         # explicit per-function compatibility fields.
         if cap_dict is not None:
             cap_columns = _column_values_for_capability(cap_dict)
         else:
+            openness = fn.get("authority_openness")
+            if openness is None and record_cap is not None:
+                openness = capability_surface_openness(record_cap, project_capability_surface(record_cap))
             cap_columns = {
                 "capability_expr": fn.get("capability_expr"),
                 "conditions": fn.get("conditions"),
                 "status": fn.get("status"),
                 "authority_public": bool(fn.get("authority_public", False)),
+                # NULL only when there is nothing to project from: a record
+                # with neither the key nor a capability_expr ("this writer
+                # could not say"), which is a different fact from
+                # ``not_determined`` ("the resolver looked and could not
+                # decide").
+                "authority_openness": openness,
             }
         # Per-function explicit override applies when the capability
         # itself didn't pin the column. ``conditional_universal``
@@ -272,6 +327,9 @@ def write_effective_function_rows(
             # Per-function explicit True (e.g. policy_check public capability)
             # ORs in even when the cap shape doesn't say public.
             cap_columns["authority_public"] = True
+            # Keep the three-state column in lockstep with the bool it splits:
+            # an OR-ed-in public path is still an earned public path.
+            cap_columns["authority_openness"] = "open"
         if cap_dict is None:
             if fn.get("status") is not None:
                 cap_columns["status"] = fn["status"]
@@ -296,12 +354,36 @@ def write_effective_function_rows(
             "effect_targets": fn.get("effect_targets", []),
             "action_summary": fn.get("action_summary"),
             "authority_public": cap_columns["authority_public"],
-            "authority_roles": fn.get("authority_roles"),
+            # The role half of the (capability, principal) unit. Three
+            # states: a non-empty list is witnessed, ``None`` is role-gated with
+            # the role not determined, ``[]`` is proven not role-gated. A record
+            # that already carries a NON-EMPTY list wins (an upstream caller
+            # resolved it); the historical literal ``[]`` every record ships is
+            # NOT treated as an answer — it is the uninformative constant this
+            # column carried everywhere, so the capability's own verdict wins:
+            # the resolver capability when there is one, otherwise the
+            # capability the record itself publishes (the policy-minted
+            # shapes), so the proven-absent ``[]`` is reachable on the
+            # production path and NULL keeps meaning "no capability at all".
+            "authority_roles": (
+                fn.get("authority_roles")
+                if fn.get("authority_roles")
+                else _authority_roles_for(cap_dict if cap_dict is not None else record_cap)
+            ),
         }
         # Optional columns may be absent in older test metadata.
-        for col_name in ("capability_expr", "conditions", "status"):
+        for col_name in ("capability_expr", "conditions", "status", "authority_openness"):
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = cap_columns.get(col_name)
+        # State-mutability witness. ``fn.get`` with no default on purpose: a
+        # record that never carried the key is not-determined, which is the same
+        # answer ``_mutability_fields`` gives for an uncovered signature — and it
+        # is NOT ``[]``/``False``, which would assert that the effects stage
+        # looked. Every caller that does carry the keys already passed them
+        # through ``_mutability_fields``.
+        for col_name in MUTABILITY_FIELDS:
+            if hasattr(EffectiveFunction, col_name):
+                ef_kwargs[col_name] = fn.get(col_name)
         # Plane-1 claims ride through unchanged alongside the legacy effect_labels.
         if hasattr(EffectiveFunction, "claims"):
             ef_kwargs["claims"] = fn.get("claims", [])
@@ -309,11 +391,11 @@ def write_effective_function_rows(
         session.add(ef)
         session.flush()
 
-        # §5.2 call site 2, carry phase: fold the outgoing row's observed claims
+        # Observed-effect carry phase: fold the outgoing row's observed claims
         # (and any surviving proven verdicts) back onto this re-created row so a
         # policy-only rewrite never blanks observed labels. Only touches rows that
         # had observed state — claim-free functions stay byte-identical.
-        carried = observed_before.get(_selector_key(ef.selector))
+        carried = observed_before.get(_selector_key(ef.selector, ef.function_name))
         if carried:
             carried_claims, proven_verdicts = carried
             merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)

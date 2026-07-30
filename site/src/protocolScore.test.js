@@ -103,6 +103,49 @@ describe("computeProtocolScore", () => {
     expect(axis(computeProtocolScore([contract], [], verifiedCoverage), "audits")).toBe(1);
   });
 
+  it("tells an unverified contract apart from one whose verification was never recorded", () => {
+    // `contract_summaries.source_verified` is nullable and the API serves all three
+    // values. One filter (`!== true`) labelled both the FALSE row and the NULL row
+    // "Source is not marked verified." / "source unverified" — an assertion about a
+    // contract nobody checked. (The producer's own FALSE was itself a Foundry-layout
+    // glob, fixed at services/static/contract_analysis_pipeline/core.py.)
+    const contract = (address, name, verified) => ({
+      address,
+      name,
+      source_verified: verified,
+      is_proxy: false,
+      functions: [{ function: "poke()", controllers: [{ principals: [EOA] }] }],
+    });
+    const score = computeProtocolScore({
+      contracts: [
+        contract("0xverified", "Verified", true),
+        contract("0xunverified", "Unverified", false),
+        contract("0xunknown", "NotRecorded", null),
+      ],
+    }, null);
+    const tooltip = score.axes.find((entry) => entry.key === "data").tooltip;
+    // Every example a contract is named in, not the last one: a filter that catches
+    // both states emits TWO chips for the same contract, and a last-wins lookup would
+    // hide the wrong one.
+    const detailsFor = (address) =>
+      tooltip.negativeExamples.filter((example) => example.contractAddress === address).map((e) => e.detail);
+
+    expect(detailsFor("0xunverified")).toEqual(["Source is not verified."]);
+    expect(detailsFor("0xunknown")).toEqual([
+      "Source verification was not recorded for this contract.",
+    ]);
+    // POSITIVE CONTROL: the verified contract is named by neither sentence, and the
+    // headline count only ever counts a proven true.
+    expect(detailsFor("0xverified")).toEqual([]);
+    expect(tooltip.positive).toContain("1/3 contracts have verified source");
+    expect(
+      tooltip.negativeExamples.find((example) => example.contractAddress === "0xunverified").meta,
+    ).toContain("source unverified");
+    expect(
+      tooltip.negativeExamples.find((example) => example.contractAddress === "0xunknown").meta,
+    ).toContain("verification not recorded");
+  });
+
   it("labels the strict audit axis as audit", () => {
     const score = computeProtocolScore({ contracts: [contractWithUnpause(SAFE_4_OF_7)] }, null);
     const auditAxis = score.axes.find((entry) => entry.key === "audits");
@@ -327,9 +370,9 @@ describe("computeProtocolScore", () => {
     });
   });
 
-  // EFFECTS_RESOLUTION_SPEC §5.2: the effects bridge mints observable labels at
-  // the behavioral_observed tier, but the score must NOT consume verdicts yet
-  // (deferred to SCORING_INVARIANTS.md). The score of any input is byte-identical
+  // The effects bridge mints observable labels at the behavioral_observed tier,
+  // but the score must NOT consume verdicts while their consumption stays
+  // unspecified. The score of any input is byte-identical
   // whether or not behavioral_observed claims (and their re-projected labels) are
   // present.
   describe("behavioral_observed claims are score-inert (scoring deferred)", () => {
@@ -356,7 +399,7 @@ describe("computeProtocolScore", () => {
     });
 
     it("labeling a previously-blank money function does not move the score", () => {
-      // The core Phase-5 case: a blank outflow function gains flow.out + its
+      // The core case: a blank outflow function gains flow.out + its
       // re-projected "asset_send" label. The score must not start counting it.
       const blank = { function: "sweep()", effect_labels: [], claims: [], controllers: [] };
       const labeled = {
@@ -384,7 +427,7 @@ describe("computeProtocolScore", () => {
 });
 
 // A CREATE2 twin — the same address deployed on two of a protocol's chains — is
-// two distinct entities, not one (identity is (chain, address), inv. 13). The
+// two distinct entities, not one (identity is (chain, address)). The
 // stats-plane reductions used to key by bare address while iterating the
 // all-chains contract array, so a twin's per-chain actions/coverage collapsed
 // together. These assert the invariant directly: a same-address-two-chains

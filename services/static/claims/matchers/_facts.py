@@ -10,6 +10,7 @@ instance so a full ``build_claims`` pass computes them once.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from weakref import WeakKeyDictionary
 
@@ -103,6 +104,629 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
             reads |= _mandatory_operands(tree)
     _MANDATORY_READS[ctx] = reads
     return reads
+
+
+# ---------------------------------------------------------------------------
+# Parameter destination constraints
+# ---------------------------------------------------------------------------
+#
+# Answers, per ABI parameter: *does a mandatory revert gate reference this
+# parameter between entry and sink?* — three states:
+#
+#   ``constrained``           a mandatory leaf references the parameter against
+#                             something outside the caller's control, and the
+#                             verdict names which guard and where.
+#   ``unconstrained_proven``  the predicate tree is present, NO mandatory leaf
+#                             pins or opaquely touches the parameter, AND the
+#                             projection was checkable: every mandatory leaf's
+#                             operand account is complete as far as this walk
+#                             can verify. A leaf's SILENCE about a parameter is
+#                             only evidence when the account of what it reads is
+#                             itself trustworthy — the governing rule cuts here
+#                             hardest, because this state is a published proof
+#                             of absence.
+#   ``not_determined``        the analysis did not settle it: no tree, an
+#                             unsupported/opaque mandatory leaf, a
+#                             parameter-referencing leaf whose semantics this
+#                             walk cannot classify, or a leaf whose operand
+#                             projection is demonstrably or possibly incomplete.
+#
+# Three projection-completeness checks guard the ``unconstrained_proven`` state
+# (each one is a real, measured lossiness of the leaf projection — reading its
+# silence as proof demonstrably over-claims on production rows):
+#
+#   * A leaf whose ``expression`` names a declared parameter the leaf's operands
+#     do not account for (CumulativeMerkleDrop.claim's ``! verify(account, …)``
+#     projected only ``expectedMerkleRoot``) blocks that parameter.
+#   * A non-membership leaf reading a keyed collection (mapping/array state var)
+#     with no account of the KEY (EtherFiTimelock's ``isOperationReady(id)``
+#     folds ``_timestamps[id]`` to the bare mapping — ``id`` is parameter-derived
+#     and invisible) blocks every parameter: the dropped key can be any of them.
+#   * A function record with no ``parameter_names`` list cannot be
+#     expression-checked at all, so nothing about it may be called proven.
+#
+# ``confidence`` on the leaf is deliberately NOT consulted: it grades the
+# authority classification, not the operand account — the same lossy
+# ``isOperationReady(id)`` fold carries ``low`` on its business half and
+# ``high`` on its time half, so it cannot discriminate a complete projection
+# from a lossy one in either direction.
+#
+# Standard-gate pre-pass: on a proven OZ TimelockController execute entry every
+# ABI parameter is re-hashed into the operation id a mandatory gate requires
+# scheduled, and on a proven Safe ``execTransaction`` every parameter rides
+# under the owners' signature threshold. Those commitments come from the
+# STANDARD's shape (the same gates ``exec.arbitrary`` uses), not from the tree
+# walk — and routing them through here means the flow witness and the exec
+# witness publish the SAME verdict for the same parameter instead of
+# contradicting each other. Safe's module-exec entries
+# (``execTransactionFromModule*``) are deliberately NOT in the pre-pass: their
+# standard gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
+# CALLER. No signature commits ``to``; an enabled module calls any target with
+# any calldata, so the standard commits nothing about any parameter and the
+# ordinary tree walk answers instead (publishing ``pins: True`` there would be a
+# proof fabricated from the standard's shape).
+#
+# The tightened rule: a mandatory leaf constrains a
+# parameter only if it is NOT the function's own effect sink. The sink's own
+# revert surface mentions its destination argument vacuously —
+# ``safeTransfer(_to, bal)`` reverting on failure is not a constraint on
+# ``_to``, and neither is ``target.call(data)`` reverting on ``!ok`` — so a
+# leaf that IS the revert surface of the call carrying the described effect is
+# transparent. Without it ``sweepDust`` — the positive control — classifies as
+# constrained, which is a false positive.
+#
+# The join is against the FACTS (``value_flows`` selectors and
+# ``_facts.body_sinks``), never against a claim witness's ``sink_ids``, which is
+# empty on ``value_router``. It matches a selector OR the callee's bare name,
+# because a predicate leaf records the DECLARED signature
+# (``exit(address,IERC20,uint256,…)``) whose hash is not the selector the sink
+# recorded — there is no selector to compare on exactly that shape.
+#
+# ``external_call_revert`` leaves are NOT blanket-excluded. Two independent
+# discriminators keep the genuine ones: a **view/pure** callee moves nothing, so
+# its revert surface is a real precondition (``forwardExternalCall``'s
+# ``deployedEtherFiNodes(...)``), and an effectful callee that is NOT one of
+# this function's effect sinks is left unresolved rather than assumed away.
+#
+# ``derived_from`` (the commitment provenance) is consumed but NOT treated as
+# ground truth: it is flow-insensitive, so a local reassignment misbinds the
+# origin — it can OMIT a genuinely committed parameter and PUBLISH one that only
+# reaches the name on another branch. Two bounds follow:
+#   * positive direction: a ``derived_from`` binding may prove ``constrained``
+#     (the guard is real), but never ``pins: True`` — the verdict carries
+#     ``pins: None`` and ``binding: "derived_from"``, because a flow-insensitive
+#     union cannot prove the guard confines THIS parameter on every path, and
+#     ``pins`` is the one field allowed to soften the caller-chosen reading;
+#   * negative direction: a parameter's ABSENCE from every ``derived_from``
+#     proves nothing, so any mandatory leaf carrying a computed operand blocks
+#     ``unconstrained_proven`` for every parameter it does not positively
+#     constrain (they land on ``not_determined``).
+
+_MEMBERSHIP_SET_KINDS = frozenset({"mapping_membership", "array_contains", "external_set"})
+_EXTERNAL_GATE_KINDS = frozenset({"external_call_revert", "try_catch_revert"})
+
+# Whether each guard kind PINS the destination — the three-state answer a
+# ``constrained`` verdict carries as ``pins`` (a consumer must be able to
+# tell proven-pins from proven-does-not-pin from not-determined, because only
+# the first may soften the caller-chosen / theft-shaped reading downstream):
+#
+#   True   the guard confines the parameter to a set the caller did not write
+#          (an allowlist, a hash/signature commitment, equality vs storage).
+#   False  the guard provably does NOT pin: a denylist excludes a set and
+#          leaves the rest of the address space freely chosen; an ordering
+#          bound never confines an identity.
+#   None   the guard is real but its set semantics are another contract's
+#          (``external_call_revert``): a ``nonBlacklisted(addr)`` blacklist and
+#          a ``deployedEtherFiNodes(addr)`` allowlist present the identical
+#          revert-surface shape here, so whether it pins is NOT determined —
+#          and on the local artifacts every ``constrained`` flow row (4/4,
+#          EtherFiRedemptionManager.redeem*) is this kind and is in fact a
+#          blacklist. Publishing those as if they pinned dropped the
+#          caller-chosen signal on all four.
+_GUARD_PINS: dict[str, bool | None] = {
+    "mapping_allowlist": True,
+    "hash_commitment": True,
+    "signature_witness": True,
+    "equality_vs_storage": True,
+    "equality_vs_caller": True,
+    "denylist": False,
+    "numeric_bound": False,
+    "external_call_revert": None,
+}
+
+# An ``unsupported`` leaf publishes ``operands: []`` and ``parameter_indices:
+# []`` unconditionally (``predicates._unsupported_leaf``), so its silence about
+# parameters is a construction artifact and it must normally block the
+# unconstrained proof. Two reason classes are exceptions **because of what the
+# gate's inputs structurally are**, not because they look harmless:
+#
+#   ``solidity_call_abi.decode()…``  gates on a CALL'S RETURNDATA. Its input is
+#       the callee's output; the constraint it expresses is that callee's
+#       revert surface, which the sibling ``external_bool`` leaf already carries
+#       WITH the callee identity and the parameters. (SafeERC20's
+#       ``_callOptionalReturn`` emits exactly this pair.)
+#   ``solidity_call_tload(…)`` / ``solidity_call_sload(…)``  gates on a storage
+#       slot read; its input is a slot literal.
+#
+# Neither can reach an ABI parameter, so neither blocks. Every other reason —
+# ``opaque_try_catch`` above all, whose expression routinely carries parameters
+# (``depositAsset.permit(msg.sender, vault, depositAmount, …)``) — keeps
+# blocking, and an unrecognised reason blocks by default (fail toward
+# ``not_determined``). Census over every mandatory unsupported leaf in the local
+# artifacts: tload 68, opaque_try_catch 60, abi.decode 31 — no other reason
+# exists there, and a new one arriving under-claims rather than over-claims.
+_NON_PARAMETRIC_UNSUPPORTED_PREFIXES = (
+    "solidity_call_abi.decode()",
+    "solidity_call_tload(",
+    "solidity_call_sload(",
+)
+
+
+def _unsupported_leaf_is_parametric(leaf: dict[str, Any]) -> bool:
+    reason = leaf.get("unsupported_reason")
+    if not isinstance(reason, str):
+        return True
+    return not reason.startswith(_NON_PARAMETRIC_UNSUPPORTED_PREFIXES)
+
+
+_PARAM_CONSTRAINTS: WeakKeyDictionary[ClaimContext, dict[tuple[str, str], dict[int, dict[str, Any]]]] = (
+    WeakKeyDictionary()
+)
+_KEYED_COLLECTIONS: WeakKeyDictionary[ClaimContext, frozenset[str]] = WeakKeyDictionary()
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _declared_param_indices(ctx: ClaimContext, function: str) -> dict[str, int] | None:
+    """``{parameter_name: abi_index}`` from the effect record's
+    ``parameter_names``, or ``None`` when the record does not carry the list
+    (every function in the local corpus does — 2,415/2,415 — so ``None`` is the
+    stale-artifact shape). Without it the expression cross-check below cannot
+    run, and an uncheckable projection never supports a proof of absence."""
+    record = ctx.effect_record(function)
+    names = record.get("parameter_names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        return None
+    return {name: index for index, name in enumerate(names) if name}
+
+
+def _unaccounted_param_mentions(leaf: dict[str, Any], name_indices: dict[str, int], accounted: set[int]) -> set[int]:
+    """Parameter indices the leaf's rendered ``expression`` names but its
+    operand account does not carry. The expression is the builder's own record
+    of what the gate textually touches; a parameter present there and absent
+    from the operands is the projection dropping a reference
+    (``! verify(account, …)`` carrying only ``expectedMerkleRoot``), and that
+    silence must not become a proof. Free text in revert strings can collide
+    with a parameter name — that costs an under-claim (``not_determined``),
+    never an over-claim."""
+    expression = leaf.get("expression")
+    if not isinstance(expression, str) or not expression or not name_indices:
+        return set()
+    out: set[int] = set()
+    for token in _IDENTIFIER_RE.findall(expression):
+        index = name_indices.get(token)
+        if index is not None and index not in accounted:
+            out.add(index)
+    return out
+
+
+def keyed_collection_vars(ctx: ClaimContext) -> frozenset[str]:
+    """State variables declared as keyed collections (mappings / arrays),
+    learned from the ``declared_type`` the state-write facts record anywhere in
+    the contract (cached per contract). Used to spot a leaf that folded an
+    ELEMENT read down to the bare collection variable — the key is gone, and
+    with it any account of which parameter selects the gating cell."""
+    cached = _KEYED_COLLECTIONS.get(ctx)
+    if cached is not None:
+        return cached
+    out: set[str] = set()
+    for signature in ctx.function_signatures():
+        for write in state_writes(ctx, signature, body_only=False):
+            var = write.get("var")
+            declared = write.get("declared_type")
+            if (
+                isinstance(var, str)
+                and isinstance(declared, str)
+                and (declared.startswith("mapping(") or declared.endswith("]"))
+            ):
+                out.add(var)
+    frozen = frozenset(out)
+    _KEYED_COLLECTIONS[ctx] = frozen
+    return frozen
+
+
+def _reads_keyed_collection_without_key(leaf: dict[str, Any], collections: frozenset[str]) -> bool:
+    """True when a non-membership leaf carries a mapping/array state variable as
+    a bare operand. Solidity cannot compare a collection itself, so the operand
+    is an element read whose key the projection dropped
+    (``_timestamps[id] > _DONE_TIMESTAMP`` recorded as ``_timestamps`` vs
+    ``_DONE_TIMESTAMP``); the dropped key may be derived from any parameter. A
+    membership leaf accounts its keys in ``set_descriptor.key_sources`` and an
+    array ``length`` read has no element key, so both pass."""
+    if not collections:
+        return False
+    if leaf.get("kind") == "membership" and isinstance(leaf.get("set_descriptor"), dict):
+        return False
+    for operand in leaf.get("operands") or []:
+        if not isinstance(operand, dict) or operand.get("source") != "state_variable":
+            continue
+        if operand.get("state_variable_name") not in collections:
+            continue
+        member_path = operand.get("member_path") or []
+        if member_path and member_path[-1] == "length":
+            continue
+        return True
+    return False
+
+
+def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[str, Any] | None:
+    """The standard-gate constraint verdict covering EVERY ABI parameter of a
+    proven standard exec entry, or ``None`` where the function is not one.
+
+    OZ TimelockController ``execute``/``executeBatch`` re-derive
+    ``hashOperation(target, value, payload, predecessor, salt)`` and require the
+    operation scheduled-and-ready — a hash commitment over the full parameter
+    list. Safe ``execTransaction`` checks the owners' signatures over the
+    transaction — a signature witness over the full parameter list. These are
+    the same contract-shape gates ``exec.arbitrary`` proves its standard tier
+    with; publishing the flow verdict from the same source keeps the two
+    witnesses on one function from ever contradicting each other.
+
+    Safe's module-exec entries (``execTransactionFromModule`` /
+    ``...ReturnData``) get NO commitment here, although they sit in
+    ``SAFE_EXEC_SELECTORS`` and earn ``exec.arbitrary`` at the standard tier:
+    their gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
+    CALLER that says nothing about the destination. An enabled module calls any
+    target with any calldata; the destination answer must come from the
+    mandatory-gate tree walk, which sees exactly that caller-keyed gate."""
+    from ._gates import SAFE_EXEC_TRANSACTION, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
+
+    selector = ctx.canonical_selector(function)
+    if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
+        return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
+    if selector == SAFE_EXEC_TRANSACTION and is_safe_gate(ctx):
+        return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
+    return None
+
+
+def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
+    """``(direct, derived, opaque)`` parameter references of one operand.
+
+    ``direct`` — the operand IS the parameter. ``derived`` — the operand is a
+    computed value whose ``derived_from`` provenance includes the parameter
+    (flow-insensitive). ``opaque`` — the operand can involve a
+    parameter without saying so.
+
+    Every ``computed`` operand is opaque, including one whose ``derived_from``
+    resolves entirely to parameter/state/constant origins. ``derived_from`` is
+    flow-insensitive: it can OMIT an origin that genuinely feeds
+    the value (Teller ``depositAsset``) while publishing one that only reaches
+    the name on another branch. A list that LOOKS complete therefore proves
+    nothing in the negative direction — it contributes positive ``derived``
+    bindings and nothing else."""
+    direct: set[int] = set()
+    derived: set[int] = set()
+    opaque = False
+    if not isinstance(operand, dict):
+        return direct, derived, True
+    source = operand.get("source")
+    if source == "parameter":
+        index = operand.get("parameter_index")
+        if isinstance(index, int):
+            direct.add(index)
+        else:
+            opaque = True
+    elif source == "computed":
+        opaque = True
+        provenance = operand.get("derived_from", None)
+        if isinstance(provenance, list):
+            for origin in provenance:
+                if isinstance(origin, dict) and origin.get("source") == "parameter":
+                    index = origin.get("parameter_index")
+                    if isinstance(index, int):
+                        derived.add(index)
+    elif source == "top":
+        opaque = True
+    return direct, derived, opaque
+
+
+def _leaf_param_refs(leaf: dict[str, Any]) -> tuple[set[int], set[int], bool]:
+    """All parameter references of a leaf: operands, ``set_descriptor``
+    key sources, and the leaf's own ``parameter_indices`` list (which the
+    builder populates from provenance the operand projection may have
+    dropped)."""
+    direct: set[int] = set()
+    derived: set[int] = set()
+    opaque = leaf.get("kind") == "unsupported" and _unsupported_leaf_is_parametric(leaf)
+    operands = [o for o in (leaf.get("operands") or []) if isinstance(o, dict)]
+    descriptor = leaf.get("set_descriptor")
+    if isinstance(descriptor, dict):
+        operands.extend(k for k in (descriptor.get("key_sources") or []) if isinstance(k, dict))
+    for operand in operands:
+        d, dv, op = _operand_param_indices(operand)
+        direct |= d
+        derived |= dv
+        opaque = opaque or op
+    for index in leaf.get("parameter_indices") or []:
+        if isinstance(index, int):
+            direct.add(index)
+    return direct, derived, opaque
+
+
+def _leaf_callee_selector(leaf: dict[str, Any]) -> str | None:
+    selector = leaf.get("callee_selector")
+    if isinstance(selector, str) and selector:
+        return selector
+    return selector_of(leaf.get("callee_signature"))
+
+
+def _leaf_callee_name(leaf: dict[str, Any]) -> str | None:
+    """The bare callee name of a leaf's signature. The selector is preferred
+    wherever it exists; this is the fallback for a DECLARED signature carrying
+    an interface-typed parameter (``exit(address,IERC20,…)``), whose hash is not
+    the selector the sink recorded and so can never join on one."""
+    signature = leaf.get("callee_signature")
+    if not isinstance(signature, str) or "(" not in signature:
+        return None
+    name = signature.split("(", 1)[0].strip()
+    return name or None
+
+
+def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
+    """A leaf whose truth is (or includes) another contract's answer: a
+    result-checked external bool, a signature check, or a statement call whose
+    entire revert surface gates the path."""
+    if leaf.get("kind") in ("external_bool", "signature_auth"):
+        return True
+    if leaf.get("gate_kind") in _EXTERNAL_GATE_KINDS:
+        return True
+    return bool(leaf.get("callee_signature"))
+
+
+def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tuple[set[str], set[str]]:
+    """``(selectors, bare callee names)`` of the calls that CARRY the effect a
+    claim is describing — the transparency set for the tightened rule.
+
+    ``mode="value_flow"`` names the moves in ``value_flows`` plus, on a
+    ``value_router`` flow, its recorded ``router_ops`` — the specific call(s)
+    the producer's walk crossed to find the move. The routed flow's own
+    selector belongs to the CALLEE's inner transfer, so the router call's
+    identity must be carried explicitly; transparency is earned per op, never
+    granted to every body call (a nonview destination guard beside the router —
+    ``guard.checkDestination(to)`` before ``vault.exit(to, …)`` — is NOT the
+    op carrying the move, and its leaf must block the negative proof instead
+    of being swallowed). A routed flow with no recorded ``router_ops`` (an
+    artifact produced before the field existed) makes nothing extra
+    transparent: its router leaf then blocks, i.e. the function falls to
+    ``not_determined`` — the failure direction over-claims nothing and can
+    never mint ``unconstrained_proven``.
+
+    ``mode="external_call"`` names only the body calls whose destination is
+    PROVEN parameter-rooted in IR (:func:`_taint.proven_param_destination_call_identities`).
+    For a claim whose effect IS an external call (``exec.arbitrary``), the
+    described call's own revert surface is vacuous about the caller's choice —
+    but that vacuousness is a property of the call's destination, not of being
+    a body call. A nonview callee with a fixed or unresolved receiver (a
+    Safe/Zodiac transaction guard vetting ``(target, data)``) stays OUTSIDE
+    this set, so its mandatory leaf blocks the negative proof below instead of
+    being swallowed; without it a guarded function and an open one published
+    the same ``unconstrained_proven``. Without a Slither subject nothing is
+    provable and the set is empty — every effectful-callee leaf then blocks,
+    which under-claims and never proves."""
+    if mode == "external_call":
+        from . import _taint
+
+        identities = _taint.proven_param_destination_call_identities(ctx, function)
+        if identities is None:
+            return set(), set()
+        return identities
+    selectors: set[str] = set()
+    names: set[str] = set()
+    for flow in value_flows(ctx, function):
+        selector = flow.get("selector")
+        if isinstance(selector, str) and selector:
+            selectors.add(selector)
+        for op in flow.get("router_ops") or []:
+            if not isinstance(op, dict):
+                continue
+            op_selector = op.get("selector")
+            if isinstance(op_selector, str) and op_selector:
+                selectors.add(op_selector)
+            op_name = op.get("callee")
+            if isinstance(op_name, str) and op_name:
+                names.add(op_name)
+    return selectors, names
+
+
+def _classify_constraining_leaf(leaf: dict[str, Any], via_derived: bool) -> str | None:
+    """The guard kind a mandatory leaf pins a referenced parameter with, or
+    ``None`` when the leaf pins nothing (a zero-address check, a compare whose
+    only other operand is a constant). Callers have already handled the
+    external-callee exclusion, so this only reads the leaf's own structure."""
+    kind = leaf.get("kind")
+    operator = leaf.get("operator")
+    descriptor = leaf.get("set_descriptor")
+    if kind == "membership" and isinstance(descriptor, dict) and descriptor.get("kind") in _MEMBERSHIP_SET_KINDS:
+        # The polarity-folded leaf records the ALLOWED form: truthy membership
+        # is an allowlist; falsy is a denylist — recorded as a guard, but a
+        # denylist excludes a set without pinning the destination, and the
+        # consumer must keep treating it as caller-chosen.
+        return "denylist" if operator in ("falsy", "ne") else "mapping_allowlist"
+    if kind == "signature_auth":
+        return "signature_witness"
+    if _is_external_callee_leaf(leaf):
+        return "external_call_revert"
+    if kind in ("equality", "comparison"):
+        if operator in ("ne", "falsy"):
+            # Allowed form "!= x" excludes one value; it pins nothing.
+            return None
+        if via_derived:
+            return "hash_commitment"
+        operands = [o for o in (leaf.get("operands") or []) if isinstance(o, dict)]
+        if any(o.get("source") == "state_variable" for o in operands):
+            return "equality_vs_storage" if kind == "equality" else "numeric_bound"
+        if any(o.get("source") in ("msg_sender", "tx_origin") for o in operands):
+            return "equality_vs_caller"
+        if any(o.get("source") in ("external_call", "view_call") for o in operands):
+            return "numeric_bound" if kind == "comparison" else "equality_vs_storage"
+        return None
+    return None
+
+
+def _mandatory_leaves_with_paths(tree: Any) -> list[tuple[dict[str, Any], list[int]]]:
+    out: list[tuple[dict[str, Any], list[int]]] = []
+
+    def walk(node: Any, mandatory: bool, path: list[int]) -> None:
+        if not isinstance(node, dict):
+            return
+        op = node.get("op")
+        if op == "LEAF":
+            leaf = node.get("leaf")
+            if mandatory and isinstance(leaf, dict):
+                out.append((leaf, path))
+            return
+        for index, child in enumerate(node.get("children") or []):
+            walk(child, mandatory and op != "OR", path + [index])
+
+    walk(tree, True, [])
+    return out
+
+
+def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_flow") -> dict[int, dict[str, Any]]:
+    """Per-parameter-index constraint verdicts for ``function`` (memoized).
+
+    ``mode`` selects which calls carry the described effect and are therefore
+    transparent — see :func:`effect_sink_identities`.
+
+    Returns ``{parameter_index: verdict}`` where each verdict is a witness
+    fragment ``{"state": ..., "guard": ..., "binding": ..., "leaf_path": ...}``.
+    The pseudo-index ``-1`` carries the function-wide default for indices with
+    no verdict of their own; callers use :func:`param_constraint`, which folds
+    it in (``unconstrained_proven`` under a clean tree, ``not_determined``
+    otherwise)."""
+    memo = _PARAM_CONSTRAINTS.setdefault(ctx, {})
+    cached = memo.get((function, mode))
+    if cached is not None:
+        return cached
+
+    verdicts: dict[int, dict[str, Any]] = {}
+
+    standard = standard_destination_commitment(ctx, function)
+    if standard is not None:
+        # The standard's own gate commits every parameter; the tree walk below
+        # could only re-derive a weaker answer from a lossier projection.
+        verdicts[-1] = standard
+        memo[(function, mode)] = verdicts
+        return verdicts
+
+    tree = ctx.predicate_tree(function)
+    if tree is None:
+        # No tree at all: nothing is settled for any parameter. A missing tree
+        # is NOT proof that no gate exists — reading it as "unconstrained" is
+        # exactly the over-claim this state exists to prevent.
+        verdicts[-1] = {"state": "not_determined"}
+        memo[(function, mode)] = verdicts
+        return verdicts
+
+    effect_selectors, effect_names = effect_sink_identities(ctx, function, mode=mode)
+    name_indices = _declared_param_indices(ctx, function)
+    collections = keyed_collection_vars(ctx)
+
+    blocked: set[int] = set()
+    # A record with no parameter_names list (a pre-enrichment artifact) cannot
+    # be expression-checked, so the completeness of no leaf's account is
+    # verifiable: positives below still mint, but no silence becomes a proof.
+    blocked_all = name_indices is None
+    for leaf, path in _mandatory_leaves_with_paths(tree):
+        direct, derived, opaque = _leaf_param_refs(leaf)
+        mentioned = _unaccounted_param_mentions(leaf, name_indices or {}, direct | derived)
+        keyed_read = _reads_keyed_collection_without_key(leaf, collections)
+        if _is_external_callee_leaf(leaf):
+            mutability = leaf.get("callee_state_mutability")
+            if mutability not in ("view", "pure"):
+                selector = _leaf_callee_selector(leaf)
+                name = _leaf_callee_name(leaf)
+                carries_effect = (selector is not None and selector in effect_selectors) or (
+                    name is not None and name in effect_names
+                )
+                if carries_effect:
+                    # The described effect's own revert surface: mentioning its
+                    # destination argument is vacuous. Fully transparent.
+                    continue
+                # An effectful callee that is NOT proven to be the described
+                # effect's own call: its revert surface may or may not restrict
+                # the referenced parameters, and nothing here can say which.
+                # Same answer whether the mutability was stamped ``nonview`` or
+                # not stamped at all (an older tree) — neither is evaluable.
+                blocked |= direct | derived | mentioned
+                if opaque or keyed_read:
+                    blocked_all = True
+                continue
+            # view/pure callee: it moves nothing, so its revert surface is a
+            # genuine precondition — falls through to classification below.
+        # Projection-completeness blocks (see the module comment above): a
+        # parameter the expression names without an operand, and a keyed
+        # collection read whose key the fold dropped, are both the leaf
+        # touching something its account does not carry.
+        blocked |= mentioned
+        if opaque or keyed_read:
+            # An unsupported leaf / undetermined computed provenance / dropped
+            # collection key may reference any parameter without saying so: it
+            # can never prove a constraint, and it blocks the unconstrained
+            # proof for everyone.
+            blocked_all = True
+        for index in sorted(direct | derived):
+            via_derived = index in derived and index not in direct
+            guard = _classify_constraining_leaf(leaf, via_derived=via_derived)
+            if guard is None:
+                continue
+            incumbent = verdicts.get(index)
+            if incumbent is not None and incumbent.get("guard") != "denylist":
+                continue
+            binding = "derived_from" if via_derived else "operand"
+            verdict: dict[str, Any] = {
+                "state": "constrained",
+                "guard": guard,
+                # Three-state by construction: an unmapped guard kind must not
+                # read as pinning, so absence from the map is None, not False.
+                # A ``derived_from`` binding caps ``pins`` at None regardless of
+                # the guard: the binding is flow-insensitive, so the
+                # guard's set semantics are proven but WHICH parameter it
+                # confines is not — only a proven pin may soften the
+                # caller-chosen reading downstream.
+                "pins": None if binding == "derived_from" else _GUARD_PINS.get(guard),
+                "binding": binding,
+                "leaf_path": list(path),
+            }
+            verdicts[index] = verdict
+
+    for index in sorted(blocked):
+        verdicts.setdefault(index, {"state": "not_determined"})
+    if blocked_all:
+        verdicts[-1] = {"state": "not_determined"}
+    memo[(function, mode)] = verdicts
+    return verdicts
+
+
+def param_constraint(
+    ctx: ClaimContext, function: str, index: int | None, *, mode: str = "value_flow"
+) -> dict[str, Any]:
+    """The three-state constraint verdict for one parameter index.
+
+    ``index=None`` (the caller could not resolve which parameter) is
+    ``not_determined`` by construction. An index with no recorded verdict
+    inherits the function-wide default: ``unconstrained_proven`` when the tree
+    was present and free of opaque mandatory leaves, else ``not_determined``."""
+    if index is None or not isinstance(index, int):
+        return {"state": "not_determined"}
+    verdicts = param_constraints(ctx, function, mode=mode)
+    verdict = verdicts.get(index)
+    if verdict is not None:
+        return dict(verdict)
+    default = verdicts.get(-1)
+    if default is not None:
+        return dict(default)
+    return {"state": "unconstrained_proven"}
 
 
 # ---------------------------------------------------------------------------

@@ -235,8 +235,25 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
     #       here either just because their coverage row is
     #       ``reviewed_commit/high``.
     has_proven = any(r.equivalence_status == "proven" and r.proof_kind != "cited_only" for r in current_cov)
+    # ``covered_to_block is None`` alone is NOT "this row covers the currently-open
+    # impl window" — it is also what a row whose upper bound was never
+    # determined looks like, and this module's own ImplWindow docstring declares
+    # that inference invalid ("``to_block=None`` alone does NOT mean 'still
+    # current' — ``successor`` is what says that"). ``AuditContractCoverage``
+    # carries no ``successor``-equivalent column, so the only evidence available
+    # here is the LOWER bound: a row with a determined ``covered_from_block`` and
+    # no upper bound is open-ended, while a row with neither bound was never
+    # windowed at all and cannot earn the badge on the strength of a missing
+    # number.
+    #
+    # Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
+    # realised badge changes today 0, because such a row does not currently land in
+    # ``current_cov`` — the 2 high-confidence rows that DO are
+    # ``covered_from_block`` set / ``covered_to_block`` NULL, i.e. genuinely
+    # open-ended, and they keep the badge.
     has_temporal_high = any(
         r.match_confidence == "high"
+        and r.covered_from_block is not None
         and r.covered_to_block is None
         and not (r.equivalence_status == "proven" and r.proof_kind == "cited_only")
         for r in current_cov

@@ -112,7 +112,9 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
             <p className="company-hero-eyebrow">Protocol</p>
             <h1 className="company-hero-title">{companyName}</h1>
             <p className="company-hero-subtitle">
-              {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? 0} reports on file
+              {/* "—" while coverage is unloaded: 0 would assert "no reports
+                  on file" before the fetch has answered. */}
+              {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
           </div>
         </div>

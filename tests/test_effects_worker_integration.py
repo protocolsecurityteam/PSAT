@@ -1,16 +1,16 @@
-"""Effects worker end-to-end orchestration (EFFECTS_RESOLUTION_SPEC Phase 3).
+"""Effects worker end-to-end orchestration.
 
-Drives the whole stage against STUBBED seams with recorded transcripts (inv. 8):
-selection → preflight → cache lookup (kernel vs projection, inv. 3) → probes →
-self-audit (§7) → verdict persistence → §9 routing. No live RPC; the
+Drives the whole stage against STUBBED seams with recorded transcripts:
+selection → preflight → cache lookup (kernel vs projection) → probes →
+self-audit → verdict persistence → discrepancy routing. No live RPC; the
 zero-candidate path is asserted to touch no wire.
 
-Covers the Phase-3 required tests:
+Covers:
   - flag-on end-to-end with stubbed seams ⇒ persisted verdicts + transcripts
   - kernel transfers across a twin fixture ⇒ cache hit, no re-sim
   - projection does NOT transfer across different surfaces
   - self-audit catches an injected hash collision (disagreeing kernels ⇒ withhold)
-  - both §9 directions (static-pos/sim-neg → warning+discrepancy;
+  - both discrepancy directions (static-pos/sim-neg → warning+discrepancy;
     static-silent/sim-pos → witness + idiom candidate)
   - zero-candidate ⇒ no wire, no rows
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -27,6 +28,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from db import effect_cache  # noqa: E402
 from db.models import (  # noqa: E402
     Contract,
     EffectBehaviorCache,
@@ -128,9 +130,8 @@ def _candidate(address: str, function_id: int, contract_id: int = 0) -> Candidat
         selector="0x40c10f19",
         function_name="f",
         authority_public=False,
-        effect_targets=("slot0",),
         principal_addresses=(PRINCIPAL,),
-        value_at_stake_usd=1.0,
+        value_at_stake_usd=Decimal("1"),
     )
 
 
@@ -268,7 +269,7 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     assert verdict.verdict == VERDICT_PROVEN
     assert verdict.behavior_hash == "kernel_hash_A"
 
-    # §5.2 call site 1: the proven verdict is minted onto the function row as an
+    # Claims-bridge call site 1: the proven verdict is minted onto the function row as an
     # observable claim + legacy label (behavioral_observed tier). A mint supply
     # delta ⇒ supply.mint / "mint".
     ef_row = session.query(EffectiveFunction).filter(EffectiveFunction.id == fns[CONTRACT_A]).one()
@@ -340,7 +341,7 @@ def _twin_jobs(session, monkeypatch, addresses):
 @requires_postgres
 def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
     """Three deployments (three jobs) share one kernel hash. The first writes
-    (miss); the second re-simulates ONCE for the §7 self-audit; the third is a
+    (miss); the second re-simulates ONCE for the self-audit; the third is a
     free, trusted hit with NO probe."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
@@ -374,7 +375,7 @@ def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 3b. Tier-0 (historical) verdicts NEVER transfer across bytecode twins — each
-#     deployment's current-state check must run (inv. 13 / §7 state-plane).
+#     deployment's current-state check must run.
 # ---------------------------------------------------------------------------
 
 
@@ -494,7 +495,7 @@ def test_tier2_folds_anvil_rss_into_peak(clean_effects, monkeypatch):
     _errors, metrics = _run(worker, session, job)
 
     assert metrics["peak_anvil_rss_mb"] == 137
-    assert fake.closed  # fork still closed on the normal exit path (inv. 16)
+    assert fake.closed  # fork still closed on the normal exit path
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +539,7 @@ def test_self_audit_catches_hash_collision(clean_effects, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 6. §9 direction 1 — static-positive / sim-negative → warning + discrepancy
+# 6. Discrepancy direction 1 — static-positive / sim-negative → warning + discrepancy
 # ---------------------------------------------------------------------------
 
 
@@ -572,7 +573,7 @@ def test_section9_static_pos_sim_neg_routes_to_warning(clean_effects, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# 7. §9 direction 2 — static-silent / sim-positive → witness + idiom candidate
+# 7. Discrepancy direction 2 — static-silent / sim-positive → witness + idiom candidate
 # ---------------------------------------------------------------------------
 
 
@@ -748,3 +749,121 @@ def test_a_cached_reason_is_served_to_the_twin_that_hits_it(clean_effects, monke
     assert session.query(EffectBehaviorCache).one().details["reason"] == "no_supply_delta"
     witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
     assert witnesses[fns[CONTRACT_C]]["reason"] == "no_supply_delta"
+
+
+def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monkeypatch):
+    """SELF-AUDIT FLOOR. ``authority_change`` — 49 of 150 local cache rows — carries
+    no structural signature key at all, so the audit compared ``('unknown', None x5)``
+    with itself and passed unconditionally. A hit like that is no longer trusted on the
+    signature: the re-probe must agree on the row's actual assertion (verdict + reason).
+
+    B agrees, so the row is stamped audited and C free-hits it. The twin that DISAGREES
+    (below) publishes its own verdict instead of inheriting one.
+    """
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
+    hashes = {fns[a]: ("K0", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B, CONTRACT_C)}
+
+    def factory(c, ctx):
+        # No structural key — the shape of every authority_change row.
+        return unknown(
+            EFFECT_CLASS_SUPPLY,
+            reason="no_supply_delta",
+            details={"observation": "executed"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+
+    # A wrote it; B re-probed to corroborate it (the floor); C hit it for free once the
+    # corroboration stamped it.
+    assert fns[CONTRACT_A] in prober.runs and fns[CONTRACT_B] in prober.runs
+    assert fns[CONTRACT_C] not in prober.runs
+    row = session.query(EffectBehaviorCache).one()
+    assert row.audit_status == "passed"
+
+
+def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, monkeypatch):
+    """The discriminating half: with no structural key to compare, a DIFFERENT reason is
+    the only signal there is. The hitting deployment publishes what it re-simulated, and
+    the row is left UNAUDITED rather than AUDIT_FAILED — a reason legitimately varies
+    between two sightings of one behaviour, so poisoning the key would withhold from
+    every future sighting on the strength of a difference that proves nothing."""
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
+    hashes = {fns[a]: ("K1", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}
+    reasons = {fns[CONTRACT_A]: "no_supply_delta", fns[CONTRACT_B]: "no_value_observed"}
+
+    def factory(c, ctx):
+        return unknown(
+            EFFECT_CLASS_SUPPLY,
+            reason=reasons[c.function_id],
+            details={"observation": "executed"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+
+    row = session.query(EffectBehaviorCache).one()
+    assert row.audit_status is None  # not trusted, and not poisoned either
+    witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
+    # B published ITS OWN reason, not A's.
+    assert witnesses[fns[CONTRACT_B]]["reason"] == "no_value_observed"
+    assert witnesses[fns[CONTRACT_A]]["reason"] == "no_supply_delta"
+
+
+def test_two_identical_runs_differ_only_in_the_declared_non_identity_columns(clean_effects, monkeypatch):
+    """Pinned rather than papered over. This cache is written on READ
+    (``bump_hit`` / ``mark_audited``), so two identical runs over an unchanged chain do
+    NOT leave the DB byte-identical — replay determinism holds for this table only MODULO
+    ``REPLAY_IDENTITY_EXCLUDED_COLUMNS``.
+
+    The test states the exact size of that gap: every other column is unchanged across a
+    second run, and the mutation is confined to the declared set. A new mutating column
+    added without declaring it turns this red."""
+    session = clean_effects
+    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
+    hashes = {fns[a]: ("KIDENT", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}
+
+    def factory(c, ctx):
+        return proven(
+            EFFECT_CLASS_SUPPLY,
+            reason="supply_delta",
+            details={"observation": "executed", "supply_delta_sign": "mint"},
+        )
+
+    prober = _Prober(factory)
+    worker = EffectsWorker(
+        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
+    )
+    for job in jobs:
+        _run(worker, session, job)
+    session.expire_all()
+
+    tracked = [
+        c.name
+        for c in EffectBehaviorCache.__table__.columns
+        if c.name not in effect_cache.REPLAY_IDENTITY_EXCLUDED_COLUMNS
+    ]
+    row = session.query(EffectBehaviorCache).one()
+    before = {name: getattr(row, name) for name in tracked}
+    before_hits = row.hit_count
+
+    # Re-run the SAME job set over the SAME state: the "no-op re-analysis" case.
+    for job in jobs:
+        _run(worker, session, job)
+    session.expire_all()
+    row = session.query(EffectBehaviorCache).one()
+    after = {name: getattr(row, name) for name in tracked}
+
+    assert after == before, "a re-run changed a column that is NOT declared non-identity"
+    # ...and the mutation really happens, so the exclusion is not vacuous.
+    assert row.hit_count > before_hits

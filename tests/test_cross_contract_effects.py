@@ -371,3 +371,72 @@ def test_derivations_merge_per_function():
     )
     assert out["sweep(address)"][0]["claim_id"] == "flow.out"
     assert out["allowFrom(address)"][0]["claim_id"] == TRANSFER_POLICY_CONFIGURE
+
+
+# ---------------------------------------------------------------------------
+# The join meets through the canonical ``abi_selector`` when the callee's
+# declared signature is not the ABI form (interface/enum/struct params).
+# ---------------------------------------------------------------------------
+
+# keccak("sweepTo(IERC20,address,uint256)")[:4] — the DECLARED form the callee
+# record keys today; NOT a dispatchable selector.
+DECLARED_SWEEP_TO = _selector("sweepTo(IERC20,address,uint256)")
+# keccak("sweepTo(address,address,uint256)")[:4] — the canonical ABI form the
+# caller's sink records.
+CANONICAL_SWEEP_TO = _selector("sweepTo(address,address,uint256)")
+
+
+def _interface_param_callee(claims: list[dict], *, stamped: bool) -> dict:
+    record: dict = {"selector": DECLARED_SWEEP_TO, "claims": claims}
+    if stamped:
+        record["abi_selector"] = CANONICAL_SWEEP_TO
+    return {"functions": {"sweepTo(IERC20,address,uint256)": record}}
+
+
+def test_interface_param_callee_joins_via_the_canonical_key():
+    """The realised pair: AssetRecovery's record says 0x38541c00, the
+    caller's sink says 0x0aeef8c8; with the canonical stamp the join meets and
+    the caller inherits flow.out at policy_derived — its OWN rank, not the
+    callee's standard_exact (the tier lattice scores it as the weakest tier)."""
+    callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=True)})
+    assert CANONICAL_SWEEP_TO in callee_map[TOKEN]
+    target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
+    out = derive_cross_contract_claims(target, {"state_variable:recovery": {"value": TOKEN}}, callee_map)
+    claim = out["recoverVia(address,address,uint256)"][0]
+    assert claim["claim_id"] == "flow.out"
+    assert claim["tier"] == "policy_derived"
+    assert claim["witness"]["selector"] == CANONICAL_SWEEP_TO
+
+
+def test_unstamped_interface_param_callee_still_misses_honestly():
+    """An artifact minted before the stamp existed carries no canonical key.
+    Absence is not-determined: the join must NOT guess a lowering, so the
+    pre-fix miss is preserved rather than a claim being manufactured."""
+    callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=False)})
+    assert CANONICAL_SWEEP_TO not in callee_map[TOKEN]
+    target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
+    assert derive_cross_contract_claims(target, {"state_variable:recovery": {"value": TOKEN}}, callee_map) == {}
+
+
+def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
+    """Negative control: the canonical key widens the JOIN, not the
+    propagation rule. A weak-tier claim and a control-plane claim on the same
+    stamped callee still derive nothing."""
+    weak = {"claim_id": "exec.arbitrary", "tier": "idiom_structural", "witness": {}}
+    control = _std("authority.replace")
+    callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([weak, control], stamped=True)})
+    assert callee_map == {}
+    target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
+    assert derive_cross_contract_claims(target, {"state_variable:recovery": {"value": TOKEN}}, callee_map) == {}
+
+
+def test_elementary_callee_is_not_double_counted_by_the_two_keys():
+    """When canonical == declared the two keys collapse to one map entry, so a
+    caller inherits the claim exactly once."""
+    record = {"selector": TRANSFER_SELECTOR, "abi_selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}
+    callee_map = build_callee_claim_map({TOKEN: {"functions": {"transfer(address,uint256)": record}}})
+    assert list(callee_map[TOKEN]) == [TRANSFER_SELECTOR]
+    assert len(callee_map[TOKEN][TRANSFER_SELECTOR]) == 1
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
+    out = derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map)
+    assert len(out["sweep(address)"]) == 1

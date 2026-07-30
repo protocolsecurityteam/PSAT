@@ -1,6 +1,6 @@
 """Tests for ``RevertDetector``.
 
-Covers each of the 8 revert-pattern cases from v4 plan round-2 #8.
+Covers each of the 8 revert-pattern cases.
 For each, we compile a tiny Solidity contract and assert RevertDetector
 finds exactly the expected RevertGate(s) with the correct kind +
 polarity. The condition_value identity isn't pinned (Slither-version
@@ -651,7 +651,98 @@ def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Expression-text memo: instance-scoped (mirrors ``_container_reads``), so it's
+# Forwarders: the result is RETURNED, never branched on. Nothing lifts it, so
+# the recursion is the only path to the callee's gate (G3 class F).
+# ---------------------------------------------------------------------------
+
+
+def test_returned_helper_result_still_recurses_for_the_gate(tmp_path):
+    """``return gatedCallee(...)`` — the RETURN reads the result, so the
+    read-anywhere test suppressed the recursion, and the callee's require was
+    never walked: the forwarder resolved unguarded."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            mapping(address => uint256) public bal;
+            function _gated(uint256 amt) internal returns (uint256) {
+                require(msg.sender == owner, "not owner");
+                bal[msg.sender] += amt;
+                return amt;
+            }
+            function forward(uint256 amt) external returns (uint256) {
+                return _gated(amt);
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "forward")
+    gates = RevertDetector(fn).run()
+    assert _gate_kinds(gates) == ["require"], f"the forwarded callee's require must be lifted, got {_gate_kinds(gates)}"
+    assert "owner" in (gates[0].expression_text or "")
+
+
+def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
+    """R4 positive case: the recovered gate must reach the evaluator as an
+    authority constraint, not merely exist as a ``RevertGate``."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            uint256 public total;
+            function _gated(uint256 amt) internal returns (uint256) {
+                require(msg.sender == owner, "not owner");
+                total += amt;
+                return amt;
+            }
+            function forward(uint256 amt) external returns (uint256) {
+                return _gated(amt);
+            }
+            function open(uint256 amt) external { total += amt; }
+        }
+    """,
+    )
+    gated = _cap_for(sl, "forward(uint256)")
+    ungated = _cap_for(sl, "open(uint256)")
+    # Before the fix both answered ``conditional_universal`` — the forwarder was
+    # indistinguishable from the genuinely open function next to it.
+    assert gated.kind == "finite_set", f"forwarder must resolve to the owner set, got {gated.kind}"
+    assert ungated.kind == "conditional_universal", f"the ungated control must stay open, got {ungated.kind}"
+
+
+def test_result_reaching_a_condition_transitively_is_not_double_walked(tmp_path):
+    """``bool ok = _check(); bool z = ok && other; require(z);`` — the result
+    reaches the require only through an intermediate, so the already-lifted
+    test has to be a transitive closure, not a one-hop check."""
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => bool) public allowed;
+            bool public other;
+            function _check(address who) internal view returns (bool) {
+                return allowed[who];
+            }
+            function f() external view {
+                bool ok = _check(msg.sender);
+                bool z = ok && other;
+                require(z, "no");
+            }
+        }
+    """,
+    )
+    fn = _function(sl, "f")
+    gates = RevertDetector(fn).run()
+    assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"
+
+
+# ---------------------------------------------------------------------------
+# Expression-text memo: instance-scoped (mirrors ``_container_condition_reads``), so it's
 # GC'd with the per-function detector and never keys ``id(expr)`` across the
 # lifetime of a different Slither parse.
 # ---------------------------------------------------------------------------
@@ -987,3 +1078,88 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
     assert any(g.kind in ("if_revert", "custom_revert") for g in gates), _gate_kinds(gates)
     cap = _cap_for(sl, "setRole(address,uint256,bool)")
     assert cap.kind == "external_check_only", f"Solady owner-gated setRole must fail closed, got {cap.kind}"
+
+
+# ---------------------------------------------------------------------------
+# A modifier on an INTERNAL callee is a real gate of the entry function.
+# EigenLayer StrategyManager routes both deposit entries through
+# ``_depositIntoStrategy(...) internal onlyStrategiesWhitelistedForDeposit(strategy)``
+# whose body is a mapping-allowlist require on parameter 0; the entry's result
+# is assigned/returned, never branched on, so the cross-function recursion is
+# the ONLY path to the gate. Commit a96b2ca3 restored that recursion; these
+# arms pin the class so it cannot silently regress (the published verdict was a
+# false ``unconstrained_proven`` — a positive proof of absence over a gate that
+# exists).
+# ---------------------------------------------------------------------------
+
+_L38_SOURCE = """
+    pragma solidity ^0.8.19;
+    contract C {
+        mapping(address => bool) public strategyWhitelist;
+        uint256 public totalShares;
+        modifier onlyWhitelisted(address strategy) {
+            require(strategyWhitelist[strategy], "strategy not whitelisted");
+            _;
+        }
+        function deposit(address strategy, uint256 amount) external returns (uint256 shares) {
+            shares = _deposit(strategy, amount);
+        }
+        // Negative control (the sweepDust discipline): same topology, a real
+        // tree (the amount guard), and NO gate on ``strategy``. The fix must
+        // not manufacture a constraint here.
+        function sweep(address strategy, uint256 amount) external returns (uint256 shares) {
+            require(amount > 0, "zero amount");
+            shares = _sweepInner(strategy, amount);
+        }
+        function _deposit(address strategy, uint256 amount) internal onlyWhitelisted(strategy) returns (uint256) {
+            totalShares += amount;
+            return amount;
+        }
+        function _sweepInner(address strategy, uint256 amount) internal returns (uint256) {
+            totalShares += amount;
+            return amount;
+        }
+    }
+"""
+
+
+def test_internal_callee_modifier_gate_is_lifted(tmp_path):
+    """Detector arm: the whitelist require inside the internal callee's
+    modifier is found from the entry function."""
+    sl = _compile(tmp_path, _L38_SOURCE)
+    gates = RevertDetector(_function(sl, "deposit")).run()
+    requires = [g for g in gates if g.kind == "require" and "strategyWhitelist" in (g.expression_text or "")]
+    assert requires, f"internal-callee-modifier gate must be lifted, got {_gate_kinds(gates)}"
+    control_gates = RevertDetector(_function(sl, "sweep")).run()
+    assert not any("strategyWhitelist" in (g.expression_text or "") for g in control_gates), (
+        "the ungated sibling must not inherit the gate"
+    )
+
+
+def test_internal_callee_modifier_gate_reaches_param_constraints(tmp_path):
+    """Claims arm: the published verdict for the gated entry's parameter 0 is
+    ``constrained``/``mapping_allowlist`` (this exact row published
+    ``{'state': 'unconstrained_proven'}`` on the two StrategyManager deposit
+    entries in the local DB — the false adverse), while the ungated
+    sibling KEEPS its honest ``unconstrained_proven``."""
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers import _facts
+
+    sl = _compile(tmp_path, _L38_SOURCE)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    trees = {fn.full_name: build_predicate_tree(fn) for fn in contract.functions if not fn.is_constructor}
+    effects = {
+        "contract_name": "C",
+        "functions": {
+            sig: {"sinks": [], "value_flows": [], "parameter_names": ["strategy", "amount"]}
+            for sig in ("deposit(address,uint256)", "sweep(address,uint256)")
+        },
+    }
+    ctx = ClaimContext(None, effects, {"trees": trees})
+    gated = _facts.param_constraint(ctx, "deposit(address,uint256)", 0)
+    assert gated["state"] == "constrained", f"expected constrained, got {gated}"
+    assert gated.get("guard") == "mapping_allowlist", f"expected mapping_allowlist, got {gated}"
+    control = _facts.param_constraint(ctx, "sweep(address,uint256)", 0)
+    assert control == {"state": "unconstrained_proven"}, (
+        f"the ungated sibling must keep its proven-unconstrained state, got {control}"
+    )

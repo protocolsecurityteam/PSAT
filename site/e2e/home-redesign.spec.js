@@ -41,9 +41,9 @@ test.describe("home redesign", () => {
           status: 200,
           contentType: "application/json",
           body: JSON.stringify([
-            { job_id: "a", company: "etherfi", address: "0x1111111111111111111111111111111111111111", contract_name: "Weeth", risk_level: "low", is_proxy: true, upgrade_count: 2 },
-            { job_id: "b", company: "etherfi", address: "0x2222222222222222222222222222222222222222", contract_name: "LiquidityPool", risk_level: "medium", upgrade_count: 0 },
-            { job_id: "c", company: "lido", address: "0x3333333333333333333333333333333333333333", contract_name: "stETH", risk_level: "low" },
+            { job_id: "a", company: "etherfi", address: "0x1111111111111111111111111111111111111111", contract_name: "Weeth", is_proxy: true, upgrade_count: 2 },
+            { job_id: "b", company: "etherfi", address: "0x2222222222222222222222222222222222222222", contract_name: "LiquidityPool", upgrade_count: 0 },
+            { job_id: "c", company: "lido", address: "0x3333333333333333333333333333333333333333", contract_name: "stETH" },
           ]),
         });
       }
@@ -66,8 +66,8 @@ test.describe("home redesign", () => {
           contentType: "application/json",
           body: JSON.stringify({
             contracts: [
-              { address: "0x1111111111111111111111111111111111111111", name: "Weeth", risk_level: "low", is_proxy: true, proxy_type: "ERC1967", upgrade_count: 2, control_model: "timelock", controllers: { owner: "0xMultiSig" } },
-              { address: "0x2222222222222222222222222222222222222222", name: "LiquidityPool", risk_level: "medium", upgrade_count: 0, controllers: {} },
+              { address: "0x1111111111111111111111111111111111111111", name: "Weeth", is_proxy: true, proxy_type: "ERC1967", upgrade_count: 2, control_model: "timelock", controllers: { owner: "0xMultiSig" } },
+              { address: "0x2222222222222222222222222222222222222222", name: "LiquidityPool", upgrade_count: 0, controllers: {} },
             ],
             ownership_hierarchy: [
               { owner: "0x9999999999999999999999999999999999999999", owner_name: "Treasury", owner_is_contract: true, contracts: [

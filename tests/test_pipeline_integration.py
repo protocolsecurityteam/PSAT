@@ -1215,6 +1215,9 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
         source_file_count=1,
         remappings=[],
         is_proxy=False,
+        # The fetch's verification fact, which ``process`` carries into
+        # ``contract_meta.json`` for the static pipeline to publish.
+        source_verified=True,
     )
     session.execute.return_value.scalar_one_or_none.return_value = contract_row
     session.refresh = MagicMock()
@@ -1427,6 +1430,9 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
         source_file_count=1,
         remappings=[],
         is_proxy=True,
+        # The fetch's verification fact, which ``process`` carries into
+        # ``contract_meta.json`` for the static pipeline to publish.
+        source_verified=True,
     )
     session.execute.return_value.scalar_one_or_none.return_value = contract_row
     session.refresh = MagicMock()
@@ -1463,7 +1469,7 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
 def test_worker_stage_chain_is_complete(monkeypatch):
     """The pipeline stage chain must connect end to end so no job gets stuck.
     ``PolicyWorker.next_stage`` is flag-dynamic (``PSAT_EFFECTS_STAGE`` gates the
-    policy->effects transition itself, §3a.4): off -> straight to coverage, on ->
+    policy->effects transition itself): off -> straight to coverage, on ->
     through the effects stage."""
     from db.models import JobStage
     from workers.coverage_worker import CoverageWorker

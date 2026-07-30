@@ -1,7 +1,7 @@
 """``upgrade.implementation`` — changes which code executes behind a deployment.
 
-Standard-gated only (§5 disposition: the never-fired same-contract dataflow
-detectors are retired). Recovers UUPS (EETH-class ``upgradeToAndCall``), 1967
+Standard-gated only: the never-fired same-contract dataflow detectors are
+retired. Recovers UUPS (EETH-class ``upgradeToAndCall``), 1967
 ``Upgraded``-marker impls, and delegatecall-fallback proxy shells (wBETH-class
 ``upgradeTo``) — all invisible to the legacy detector, which emitted 0 of 2,182.
 The near-miss guard: a bespoke ``upgradeTo(address)`` that merely rotates a
@@ -29,7 +29,7 @@ def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | 
         return None
     # Record the delegatecall sink(s) this claim explains so the projection
     # layer can suppress the standalone delegatecall_execution emphasis on the
-    # same entry (Cleanup-agent handoff).
+    # same entry.
     explained = ctx.sink_ids(function, "delegatecall")
     return ClaimEvidence(
         tier="standard_exact",

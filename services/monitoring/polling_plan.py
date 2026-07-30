@@ -210,36 +210,50 @@ _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
 def selector_for(target_name: str) -> str:
     """Return the 4-byte selector for a no-arg getter named *target_name*.
 
-    All ``read_spec``-derived poll entries are getters compiled from
-    public state vars (Solidity auto-generates a no-arg getter) or
-    discovered no-parameter view functions (the static pipeline's
-    ``_build_getter_index`` only keeps functions with empty
-    parameters). So ``keccak(name + "()")[:4]`` is correct for every
-    entry the analyzer emits.
+    ``read_spec``-derived poll entries are admitted only for
+    ``strategy == "getter_call"`` specs (``_is_poll_decodable``), whose
+    target the analyzer resolved to a compiled getter: a public state
+    var's auto-getter or a discovered no-parameter view function
+    (``_build_getter_index`` only keeps parameterless functions). A var
+    with no getter carries ``strategy == "unknown"`` and never reaches
+    here. ``keccak(name + "()")[:4]`` is therefore the selector of a
+    real function for every entry built from a current-schema plan;
+    plans persisted before the ``unknown`` strategy existed may still
+    name a private var as a getter target, and the poll loop surfaces
+    those as per-entry ``error`` (revert) or ``no_value`` (empty return
+    from a permissive fallback) status rather than silence.
     """
     return "0x" + keccak(text=f"{target_name}()").hex()[:8]
 
 
-def decode_poll_value(raw: str | None, type_kind: str | None, type_str: str | None) -> object | None:
-    """Decode a raw RPC return value for a polling entry.
+def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | None) -> tuple[object | None, bool]:
+    """Decode a raw answered-RPC return for a polling entry.
 
-    Returns ``None`` for absent / short / zero-32-byte responses so the
-    poll loop's "old_value=None means first observation" rule still
-    distinguishes "didn't read anything useful" from "read False".
+    Returns ``(value, parsed)``. ``parsed`` is True iff the response body
+    parsed as the entry's declared type — the wire yielded an observation.
+    ``value`` is what the value plane stores; it is ``None`` either when
+    nothing parsed (``parsed=False``: absent / empty ``0x`` / short body /
+    undecodable type) or when the parse produced the type's conventional
+    empty — the zero address — which the poll loop's "old_value=None means
+    first observation" rule keeps out of ``last_known_state`` by
+    convention. An answered zero address is therefore ``(None, True)``, an
+    observed outcome, never conflated with an unparseable answer's
+    ``(None, False)``.
 
     Shapes handled:
-      * ``address`` / ``contract`` — right-20-byte address; zero-address
-        returns ``None`` (matches ``parse_address_result``).
+      * ``address`` / ``contract`` — right-20-byte address; the zero
+        address parses (``parsed=True``) but yields ``value=None``
+        (matches ``parse_address_result``'s storage convention).
       * ``primitive`` + ``type="bool"`` — non-zero word → True, zero
-        word → False.
+        word → False (both parse and both store).
       * ``primitive`` + ``type`` starting with ``uint`` / ``int`` —
-        decode as integer.
+        decode as integer (zero stores as 0).
     """
     if raw is None:
-        return None
+        return None, False
     raw_str = raw if isinstance(raw, str) else ""
     if not raw_str or raw_str == "0x":
-        return None
+        return None, False
 
     kind = (type_kind or "").lower()
     if kind in ("address", "contract"):
@@ -247,28 +261,28 @@ def decode_poll_value(raw: str | None, type_kind: str | None, type_str: str | No
         # tiny — inlined here to keep this module decoupled.
         body = raw_str[2:] if raw_str.startswith("0x") else raw_str
         if len(body) < 40:
-            return None
+            return None, False
         addr = "0x" + body[-40:]
         if addr == "0x" + "0" * 40:
-            return None
-        return addr.lower()
+            return None, True
+        return addr.lower(), True
 
     if kind == "primitive":
         t = (type_str or "").lower().strip()
         body = raw_str[2:] if raw_str.startswith("0x") else raw_str
         if t == "bool":
             if not body:
-                return None
+                return None, False
             # bool encodes as 32-byte word — non-zero anywhere in the
             # word means True. Match the existing poller semantics.
-            return any(c != "0" for c in body)
+            return any(c != "0" for c in body), True
         if t.startswith("uint") or t.startswith("int"):
             try:
-                return int(raw_str, 16)
+                return int(raw_str, 16), True
             except (ValueError, TypeError):
-                return None
+                return None, False
 
-    return None
+    return None, False
 
 
 # ---------------------------------------------------------------------------

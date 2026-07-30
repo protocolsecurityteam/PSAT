@@ -462,13 +462,15 @@ def test_artifact_not_found(mock_session_cls, mock_get_artifact):
 
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
-def test_artifact_storage_error_returns_404_not_500(mock_session_cls, mock_get_artifact):
-    """Storage backend failures degrade to 404 instead of leaking a 500.
+def test_artifact_storage_error_returns_503_not_404(mock_session_cls, mock_get_artifact):
+    """INVERTED (was ``test_artifact_storage_error_returns_404_not_500``, which
+    asserted 404 and called it "degrading cleanly").
 
-    The artifact rows can outlive the underlying storage object (e.g. MinIO
-    volume wiped, Tigris credential rotation, transient network blip). The
-    route should answer cleanly so callers' .catch() paths fire — not raise
-    an opaque server error.
+    That assertion pinned the defect at the published boundary: an unconfigured
+    or unreachable backend answered with the same bytes as an artifact the job
+    never produced, and the SPA's ``.catch()`` path draws that as an absence.
+    Not-500 was the right instinct and still holds — it is now 503, which is a
+    third answer rather than the second one repeated.
     """
     client = _make_client()
     fake_job = _fake_job(name="test_job")
@@ -482,7 +484,35 @@ def test_artifact_storage_error_returns_404_not_500(mock_session_cls, mock_get_a
     mock_get_artifact.side_effect = RuntimeError("storage_key set but storage not configured")
 
     response = client.get("/api/analyses/test_job/artifact/dependencies")
+    assert response.status_code == 503
+    assert response.headers.get("X-PSAT-Artifact-State") == "not_determined"
+    assert response.json()["artifact"] == "dependencies"
+
+
+@patch("routers.deps.get_artifact")
+@patch("routers.deps.SessionLocal")
+def test_artifact_proven_absent_body_still_returns_404(mock_session_cls, mock_get_artifact):
+    """Negative control for the test above: the bucket answering "no object at
+    any candidate" is a determined negative and must stay a 404. A fix that
+    turned every storage exception into 503 would erase the distinction it was
+    written to make."""
+    from db.storage import StorageKeyMissing
+
+    client = _make_client()
+    fake_job = _fake_job(name="test_job")
+
+    mock_session = MagicMock()
+    _mock_session_ctx(mock_session_cls, mock_session)
+    mock_exec = MagicMock()
+    mock_exec.scalar_one_or_none.return_value = fake_job
+    mock_session.execute.return_value = mock_exec
+
+    mock_get_artifact.side_effect = StorageKeyMissing("artifacts/j/dependencies")
+
+    response = client.get("/api/analyses/test_job/artifact/dependencies")
     assert response.status_code == 404
+    assert response.json() == {"detail": "Artifact not found"}
+    assert "X-PSAT-Artifact-State" not in response.headers
 
 
 @patch("services.discovery.upgrade_history.synthesize_from_events")
@@ -1126,7 +1156,6 @@ def test_company_overview_basic(db_session, api_client):
             is_upgradeable=False,
             is_pausable=True,
             has_timelock=False,
-            risk_level="medium",
             is_factory=False,
             standards=["ERC20"],
             source_verified=True,
@@ -1205,6 +1234,9 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
         def scalar_one_or_none(self):
             return self._scalar
 
+        def scalar_one(self):
+            return self._scalar
+
         def scalars(self):
             return self
 
@@ -1214,6 +1246,7 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
     mock_session.execute.side_effect = [
         Result(scalar=protocol),
         Result(scalars=[target_contract]),
+        Result(scalar=0),  # unfiltered protocol-wide report count
         Result(scalars=[]),
         Result(scalars=[]),
         Result(
@@ -1230,6 +1263,7 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
     body = response.json()
 
     assert body["audit_count"] == 0
+    assert body["scoped_audit_count"] == 0
     vault = body["coverage"][0]
     assert vault["contract_name"] == "Vault"
     assert vault["audit_count"] == 1
@@ -1481,7 +1515,6 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
     impl_contract.summary.is_upgradeable = True
     impl_contract.summary.is_pausable = False
     impl_contract.summary.has_timelock = False
-    impl_contract.summary.risk_level = "high"
     impl_contract.summary.standards = ["ERC20"]
 
     ef = MagicMock()
@@ -1711,7 +1744,6 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
             is_upgradeable=True,
             is_pausable=True,
             has_timelock=True,
-            risk_level="high",
             is_factory=False,
             standards=[],
             source_verified=True,
@@ -1845,7 +1877,7 @@ def test_analyses_chain_populated_from_contracts_table(mock_session_cls):
     company_job.status = JobStatus.completed
     child_job.status = JobStatus.completed
     # The job and its Contract row must agree on chain for the listing to pair
-    # them (inv. 12): an arbitrum contract belongs to an arbitrum job.
+    # them: an arbitrum contract belongs to an arbitrum job.
     child_job.chain_id = 42161
 
     mock_session = MagicMock()
@@ -2031,3 +2063,67 @@ def test_analyses_proxy_uses_impl_analysis_when_proxy_has_none(mock_session_cls)
     proxy_entry = next((e for e in entries if e.get("job_id") == str(proxy_job_id)), None)
     if proxy_entry is not None:
         assert proxy_entry.get("contract_name") == "ImplName"
+
+
+# ============================================================================
+# 13. /audit_coverage top-level counts — unfiltered vs scoped
+# ============================================================================
+
+
+def test_audit_coverage_count_is_unfiltered_reports_on_file(api_client, db_session):
+    """The top-level ``audit_count`` on /audit_coverage counts every report on
+    file — it must equal /audits' count (the hero stat renders one, a click
+    opens the modal rendering the other) and the chat plane's protocol_brief.
+    The scope-extraction filter lives only on ``scoped_audit_count``.
+    """
+    from db.models import AuditReport, Protocol
+    from services.chat.data import protocol_brief
+
+    name = f"covcount-{uuid.uuid4().hex[:8]}"
+    proto = Protocol(name=name)
+    db_session.add(proto)
+    db_session.commit()
+    db_session.add_all(
+        [
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/scoped.pdf",
+                auditor="FirmA",
+                title="Scoped report",
+                scope_extraction_status="success",
+            ),
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/skipped.pdf",
+                auditor="FirmB",
+                title="Report on file, scope extraction skipped",
+                scope_extraction_status="skipped",
+            ),
+            AuditReport(
+                protocol_id=proto.id,
+                url="https://example.com/pending.pdf",
+                auditor="FirmC",
+                title="Report on file, scope extraction not attempted",
+                scope_extraction_status=None,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    cov = api_client.get(f"/api/company/{name}/audit_coverage").json()
+    aud = api_client.get(f"/api/company/{name}/audits").json()
+
+    assert aud["audit_count"] == 3
+    assert cov["audit_count"] == 3, (
+        "top-level audit_count must be the unfiltered reports-on-file total; "
+        "a scope-extraction-filtered value under this name renders a hero "
+        "number that contradicts the modal one click away"
+    )
+    assert cov["audit_count"] == aud["audit_count"]
+    assert cov["scoped_audit_count"] == 1
+    assert protocol_brief(db_session, name)["audit_count"] == 3
+
+    # audit_reports.protocol_id is ON DELETE CASCADE; dropping the protocol
+    # removes the seeded reports with it.
+    db_session.execute(text("DELETE FROM protocols WHERE id = :p"), {"p": proto.id})
+    db_session.commit()

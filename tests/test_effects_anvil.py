@@ -1,7 +1,7 @@
-"""Tier-2 fork recipe tests (EFFECTS_RESOLUTION_SPEC §4.1, §8.7, §8.8).
+"""Tier-2 fork recipe tests for the pause recipe.
 
 The pause recipe is exercised two ways: against a stubbed ``AnvilTransport``
-(hermetic, always runs) for the revert-set-diff logic and the §8 rules, and
+(hermetic, always runs) for the revert-set-diff logic and the transcript rules, and
 against a real LOCAL NON-FORKING anvil with a checked-in fixture (gated behind an
 anvil-availability probe — auto-skips on a clone without foundry). A forking
 anvil / real RPC is NEVER used here (that is the user's preview step).
@@ -72,6 +72,7 @@ class StubAnvil:
         self.log: list[str] = []
         self.balances: dict[str, str] = {}
         self.storage: dict[tuple[str, str], str] = {}
+        self.warped = 0
 
     def hardfork(self) -> str:
         return self._hf
@@ -110,6 +111,9 @@ class StubAnvil:
 
     def increase_time(self, seconds: int) -> None:
         self.time += seconds
+        # Counted, not just applied: "the recipe did not warp at all" is a distinct
+        # assertion from "it warped and nothing expired" (A7's two None states).
+        self.warped += 1
 
     def mine(self) -> None:
         pass
@@ -148,6 +152,7 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
         entry_points=_entry_points(),
         predicted_guard_set=["foo"],
         max_pause_duration=3600,
+        duration_bound_source="guard_constant",
     )
     assert eff.verdict == VERDICT_PROVEN
     assert eff.scope == SCOPE_PROJECTION
@@ -156,6 +161,8 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     assert eff.details["latch_flip"] is True
     assert eff.details["auto_expiry"] is True
     assert eff.details["duration_bound_seconds"] == 3600
+    # A7: the bound never travels without saying where it came from.
+    assert eff.details["duration_bound_source"] == "guard_constant"
     # Snapshot was reverted; principal impersonation was scoped + released.
     assert transport.paused is False
     assert transport.impersonated == [PRINCIPAL]
@@ -163,6 +170,59 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     tr = store.stored[-1]
     assert tr["hardfork"] == "prague"
     assert tr["anvil_version"] == "anvil 1.5.1-stable"
+
+
+def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window():
+    """A7 / R1. ``duration_bound_seconds: None`` is TWO facts and the proven row
+    must carry which one it is.
+
+    The severe reading (indefinite latch, no self-recovery) is a claim about the
+    contract and may only ship when static PROVED the latch is read beside no clock
+    (``no_time_reference``). The etherfi shape — a ``pauseUntil`` timestamp latch
+    whose window lives in storage — yields ``not_determined``, and while both
+    published a bare ``None`` the inspector rendered the severe sentence for all
+    four proven verdicts in the corpus.
+    """
+    for source in ("no_time_reference", "not_determined"):
+        transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+        eff = pause_recipe(
+            transport=transport,
+            store=RecordingStore(),
+            ctx=CTX,
+            contract_address=CONTRACT,
+            principal=PRINCIPAL,
+            pause_calldata=PAUSE,
+            entry_points=_entry_points(),
+            predicted_guard_set=["foo"],
+            max_pause_duration=None,
+            duration_bound_source=source,
+        )
+        assert eff.verdict == VERDICT_PROVEN
+        assert eff.details["duration_bound_seconds"] is None
+        assert eff.details["duration_bound_source"] == source
+        # No bound ⇒ no warp, in BOTH states: an unread window must not be probed
+        # as though it were known, and a proven-indefinite latch has nothing to warp
+        # past. ``auto_expiry`` stays the not-probed ``None``.
+        assert eff.details["auto_expiry"] is None
+        assert transport.warped == 0
+
+
+def test_pause_recipe_defaults_the_bound_source_to_not_determined():
+    """A caller that passes no source can never assert the severe reading by
+    omission — the default is the unknown state, not the indefinite one."""
+    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
+    eff = pause_recipe(
+        transport=transport,
+        store=RecordingStore(),
+        ctx=CTX,
+        contract_address=CONTRACT,
+        principal=PRINCIPAL,
+        pause_calldata=PAUSE,
+        entry_points=_entry_points(),
+        predicted_guard_set=["foo"],
+        max_pause_duration=None,
+    )
+    assert eff.details["duration_bound_source"] == "not_determined"
 
 
 def test_pause_recipe_no_blast_radius_is_unknown():

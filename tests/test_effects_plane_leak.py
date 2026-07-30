@@ -1,4 +1,4 @@
-"""inv. 3 plane separation, asserted against real rows.
+"""Code-plane / state-plane separation, asserted against real rows.
 
 ``effect_behavior_cache`` is keyed on code alone (behavior hash + class + scope +
 surface + gate ref), so every row in it is re-published verbatim to EVERY other
@@ -6,7 +6,7 @@ deployment of that bytecode — across protocols, chains and runs. Anything
 per-deployment that reaches ``details`` therefore stops being an observation of
 the contract it came from.
 
-The §5b downstream value-reach fields were exactly that: holder ADDRESSES and a
+The downstream value-reach fields were exactly that: holder ADDRESSES and a
 USD figure, written into a proven ``value_out`` verdict's ``details``, cached,
 and copied back out on the next hit as a different deployment's witness. These
 tests drive the real worker against real Postgres rows — a mock cannot show a
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,7 +40,7 @@ from services.effects.anvil import EntryPoint  # noqa: E402
 from services.effects.config import EFFECT_CLASS_VALUE_OUT, SCOPE_KERNEL, VERDICT_PROVEN  # noqa: E402
 from services.effects.harness import SimContext  # noqa: E402
 from services.effects.orchestrator import ProbePlan  # noqa: E402
-from services.effects.selection import Candidate  # noqa: E402
+from services.effects.selection import AssetHolding, Candidate  # noqa: E402
 from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
 from tests.test_effects_harness import RecordingStore, ok, transfer_log  # noqa: E402
@@ -105,9 +106,8 @@ def _candidate(address: str, function_id: int, contract_id: int) -> Candidate:
         selector=SELECTOR,
         function_name="withdraw",
         authority_public=False,
-        effect_targets=("slot0",),
         principal_addresses=(PRINCIPAL,),
-        value_at_stake_usd=1.0,
+        value_at_stake_usd=Decimal("1"),
     )
 
 
@@ -137,7 +137,7 @@ def _run(worker, session, job) -> dict:
 
 
 def _real_value_out_plan(address: str):
-    """A plan running the REAL §4.2 recipe against a scripted outflow, so the
+    """A plan running the REAL value-out recipe against a scripted outflow, so the
     reach fields come from production code rather than a hand-built dict."""
 
     def run():
@@ -165,7 +165,7 @@ def _real_value_out_plan(address: str):
             principal=PRINCIPAL,
             calldata="0x2e1a7d4d",
             simulate_supported=True,
-            value_holders=((HOLDER, REACH_USD),),
+            value_holders=(AssetHolding(HOLDER, TOKEN, REACH_USD),),
             acting_balance_usd=1.0,
         )
 
@@ -283,7 +283,7 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         simulate_supported=True,
         sentinel_address="0x" + "ee" * 20,
         sentinel_calldata="0x2e1a7d4d" + "ee" * 32,
-        value_holders=((HOLDER, REACH_USD),),
+        value_holders=(AssetHolding(HOLDER, TOKEN, REACH_USD),),
         acting_balance_usd=1.0,
     )
 
@@ -320,7 +320,7 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         impl_before="0x" + "dd" * 20,
     )
 
-    # §4.4 authority-change: two randoms rejected, then all accepted.
+    # Authority-change: two randoms rejected, then all accepted.
     rejected = SimCallResult(False, "0x", "0xdeadbeef", ())
     randoms = ["0x" + "31" * 20, "0x" + "32" * 20]
     a = recipes.authority_change(
@@ -334,7 +334,7 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         randoms=randoms,
     )
 
-    # §4.1 freeze/pause on the fork tier — the class with the richest ``details``.
+    # Freeze/pause on the fork tier — the class with the richest ``details``.
     from tests.test_effects_anvil import GUARDED, PAUSE, StubAnvil
 
     p = anvil.pause_recipe(
@@ -384,6 +384,14 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert row.observed_residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
+        # The reach-determined discriminator and the asset list ride the STATE plane with the figures
+        # they qualify: both are answers about this deployment's observation, not
+        # about the code.
+        "reach_determined": True,
+        "observed_reach_assets": [TOKEN.lower()],
+        # The TVL ceiling's outcome travels with the figure it qualifies; this stub
+        # protocol has no snapshot, so the honest answer is "not checked".
+        "reach_tvl_check": "skipped_no_tvl",
     }
 
 

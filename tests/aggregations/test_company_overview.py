@@ -21,6 +21,7 @@ from sqlalchemy import select  # noqa: E402
 from db.models import (  # noqa: E402
     Contract,
     ContractBalance,
+    ContractSummary,
     ControlGraphEdge,
     ControlGraphNode,
     ControllerValue,
@@ -29,6 +30,7 @@ from db.models import (  # noqa: E402
     Job,
     JobStage,
     JobStatus,
+    PrincipalLabel,
     Protocol,
     UpgradeEvent,
 )
@@ -889,6 +891,10 @@ def _normalize_prefetch(result: dict) -> dict:
         "balances": {cid: sorted(bal_key(b) for b in rows) for cid, rows in result["balances"].items()},
         "cgn": {cid: sorted(cgn_key(n) for n in rows) for cid, rows in result["cgn"].items()},
         "cge": {cid: sorted(cge_key(e) for e in rows) for cid, rows in result["cge"].items()},
+        # Keyed by ADDRESS, not contract_id — the terminal walk is a fact about the
+        # address (see ``_terminal_walk``). Included so a parallel-only divergence
+        # in the newest stage is caught by the same parity check as its siblings.
+        "terminal_walk": {addr: tuple(sorted(record.items())) for addr, record in result["terminal_walk"].items()},
     }
 
 
@@ -1045,6 +1051,16 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
         authority_roles=[],
     )
     db_session.add(ef_b)
+    db_session.add(
+        PrincipalLabel(
+            contract_id=contract_a.id,
+            address=safe_addr,
+            label="Parity Safe",
+            display_name="Parity Safe",
+            resolved_type="safe",
+            details={"terminal_principal": {"status": "unknown_unfetched", "terminal": False, "address": None}},
+        )
+    )
     db_session.commit()
 
     contract_ids = {contract_a.id, contract_b.id}
@@ -1054,6 +1070,7 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     assert _normalize_prefetch(parallel) == _normalize_prefetch(sequential), (
         "parallel fan-out diverged from the sequential reference"
     )
+    assert _normalize_prefetch(parallel)["terminal_walk"], "terminal_walk missing its seeded record"
 
     # Sanity: every dict key has content from the seed so the equality
     # check above wasn't trivially {} == {}.
@@ -1849,3 +1866,727 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
         "the Safe must have one controls_detail row per governed twin, each tagged with its own "
         f"chain; got rows={rows_for_vault}"
     )
+
+
+def test_summary_flags_are_three_state_through_the_payload(db_session):
+    """Row ABSENCE is not a proven negative.
+
+    62 of 147 company-overview entries on the local corpus have no
+    ContractSummary row at all, and every one of them used to publish
+    ``is_pausable: false`` / ``has_timelock: false`` / ``is_factory: false`` —
+    three proven negatives derived from never having looked. The three shapes
+    below are the three states, and the payload has to keep them apart.
+    """
+    p = _add_protocol(db_session, f"e2e-3state-{uuid.uuid4().hex[:8]}")
+
+    # 1. No summary row at all — nobody answered, and the reason is row absence.
+    a_absent = _addr("3sA")
+    job_a = _add_job(db_session, address=a_absent, protocol_id=p.id, name="NoSummary")
+    _add_contract(db_session, address=a_absent, job=job_a, protocol_id=p.id, contract_name="NoSummary")
+
+    # 2. Summary row present, every flag NULL — the detectors ran and declined.
+    a_null = _addr("3sB")
+    job_b = _add_job(db_session, address=a_null, protocol_id=p.id, name="NullFlags")
+    c_null = _add_contract(db_session, address=a_null, job=job_b, protocol_id=p.id, contract_name="NullFlags")
+    db_session.add(ContractSummary(contract_id=c_null.id, is_pausable=None, has_timelock=None, is_factory=None))
+
+    # 3. Summary row present, every flag proven False — a real negative.
+    a_false = _addr("3sC")
+    job_c = _add_job(db_session, address=a_false, protocol_id=p.id, name="ProvenPlain")
+    c_false = _add_contract(db_session, address=a_false, job=job_c, protocol_id=p.id, contract_name="ProvenPlain")
+    db_session.add(ContractSummary(contract_id=c_false.id, is_pausable=False, has_timelock=False, is_factory=False))
+
+    # 4. Summary row present, proven pausable + proven timelock — the positive
+    #    control for every hedge above.
+    a_true = _addr("3sD")
+    job_d = _add_job(db_session, address=a_true, protocol_id=p.id, name="ProvenPausable")
+    c_true = _add_contract(db_session, address=a_true, job=job_d, protocol_id=p.id, contract_name="ProvenPausable")
+    db_session.add(ContractSummary(contract_id=c_true.id, is_pausable=True, has_timelock=True, is_factory=True))
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    by_addr = {c["address"]: c for c in payload["contracts"]}
+
+    absent = by_addr[a_absent]
+    assert absent["is_pausable"] is None
+    assert absent["has_timelock"] is None
+    assert absent["is_factory"] is None
+    assert absent["summary_evidence"] == "absent"
+    # The derived fields must not launder the absence into a positive claim.
+    assert "pause" not in absent["capabilities"]
+    assert absent["role_evidence"] == "not_determined"
+
+    nulls = by_addr[a_null]
+    assert nulls["is_pausable"] is None
+    assert nulls["has_timelock"] is None
+    assert nulls["is_factory"] is None
+    # Same answer about the contract, different answer about why — a consumer
+    # deciding whether to re-run the stage or fix the detector needs both.
+    assert nulls["summary_evidence"] == "present"
+    assert "pause" not in nulls["capabilities"]
+    assert nulls["role_evidence"] == "not_determined"
+
+    proven_false = by_addr[a_false]
+    assert proven_false["is_pausable"] is False
+    assert proven_false["has_timelock"] is False
+    assert proven_false["is_factory"] is False
+    assert proven_false["summary_evidence"] == "present"
+    # POSITIVE CONTROL for role_evidence: a role derived from ANSWERED flags is
+    # evidence even when the answer is "no" and the role lands on ``utility``.
+    assert proven_false["role"] == "utility"
+    assert proven_false["role_evidence"] == "witnessed"
+
+    proven_true = by_addr[a_true]
+    assert proven_true["is_pausable"] is True
+    assert proven_true["has_timelock"] is True
+    assert proven_true["is_factory"] is True
+    # POSITIVE CONTROL: the pause chip and the governance role still fire on a
+    # proven flag — the ``is True`` narrowing must not have removed them.
+    assert "pause" in proven_true["capabilities"]
+    assert proven_true["role"] == "governance"
+    assert proven_true["role_evidence"] == "witnessed"
+
+
+def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
+    """``_build_principal_lookup`` types a contract ``timelock`` only on a proven
+    flag: ``timelock`` is a SETTLED key (priority 3) for the terminal-controller
+    renderer, and a NULL flag must leave the address a non-terminal way-point."""
+    p = _add_protocol(db_session, f"e2e-pltl-{uuid.uuid4().hex[:8]}")
+    proven_addr = _addr("pltlA")
+    unknown_addr = _addr("pltlB")
+    job_p = _add_job(db_session, address=proven_addr, protocol_id=p.id, name="Timelock")
+    job_u = _add_job(db_session, address=unknown_addr, protocol_id=p.id, name="Unknown")
+    c_p = _add_contract(db_session, address=proven_addr, job=job_p, protocol_id=p.id, contract_name="Timelock")
+    c_u = _add_contract(db_session, address=unknown_addr, job=job_u, protocol_id=p.id, contract_name="Unknown")
+    db_session.add(ContractSummary(contract_id=c_p.id, has_timelock=True))
+    db_session.add(ContractSummary(contract_id=c_u.id, has_timelock=None))
+    db_session.commit()
+
+    lookup = _build_principal_lookup({job_p.id: c_p, job_u.id: c_u}, {}, {})
+    assert lookup[proven_addr.lower()]["resolved_type"] == "timelock"
+    assert lookup[unknown_addr.lower()]["resolved_type"] == "contract"
+
+
+def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
+    """``usd_value: null`` and ``usd_value: 0`` mean opposite things and are one
+    truthiness test apart in the renderer.
+
+    Also pins the holdings-coverage disclosure: at-the-page-cap is the only
+    positive statement available about completeness, and the other arm is
+    not-determined — never "whole".
+    """
+    p = _add_protocol(db_session, f"e2e-bal-{uuid.uuid4().hex[:8]}")
+    addr = _addr("bal1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add_all(
+        [
+            # Priced and worth real money.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt1"),
+                token_symbol="BIG",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=5000,
+                price_usd=5000,
+            ),
+            # Priced and worth nothing — a MEASUREMENT.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt2"),
+                token_symbol="DUST",
+                decimals=18,
+                raw_balance="1",
+                usd_value=0,
+                price_usd=0,
+            ),
+            # Never valued. The producer writes price_usd=0 for "no price known",
+            # so price_usd alone reads this as worthless; usd_value is the honest
+            # discriminator and the payload must publish the state explicitly.
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr("bt3"),
+                token_symbol="UNK",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=None,
+                price_usd=0,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    by_symbol = {b["token_symbol"]: b for b in entry["balances"]}
+
+    assert by_symbol["BIG"]["usd_value_state"] == "measured"
+    assert by_symbol["DUST"]["usd_value"] == 0
+    assert by_symbol["DUST"]["usd_value_state"] == "measured"
+    assert by_symbol["UNK"]["usd_value"] is None
+    assert by_symbol["UNK"]["usd_value_state"] == "not_determined"
+
+    cov = entry["holdings_coverage"]
+    assert cov["rows"] == 3
+    assert cov["unvalued_rows"] == 1
+    # Three stored rows cannot prove a short page: the state is not-determined,
+    # and "complete" is not a member of the vocabulary at all.
+    assert cov["state"] == "not_determined"
+    assert cov["page_cap"] == 100
+    # The total skips the unvalued row, so it is a lower bound — which is exactly
+    # what ``unvalued_rows`` lets a consumer say.
+    assert entry["total_usd"] == 5000.0
+
+
+def test_holdings_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session):
+    """POSITIVE CONTROL for the coverage state: 7 local contracts sit exactly at
+    the 100-row cap (one holding $8.6B) and nothing could say so."""
+    from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
+
+    p = _add_protocol(db_session, f"e2e-cap-{uuid.uuid4().hex[:8]}")
+    addr = _addr("cap1")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Whale")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Whale")
+    db_session.add_all(
+        [
+            ContractBalance(
+                contract_id=c.id,
+                token_address=_addr(f"cap{i}"),
+                token_symbol=f"T{i}",
+                decimals=18,
+                raw_balance="1000000000000000000",
+                usd_value=100,
+                price_usd=100,
+            )
+            for i in range(TOKEN_BALANCE_PAGE_SIZE)
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["holdings_coverage"]["rows"] == TOKEN_BALANCE_PAGE_SIZE
+    assert entry["holdings_coverage"]["state"] == "may_be_incomplete"
+
+
+def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
+    """The terminal-controller walk is persisted ONLY on ``principal_labels.details``,
+    and ``_build_principal_lookup`` never joined the table — so
+    ``claimsVocab.terminalControllerNote``, the one consumer that handles all six of
+    its statuses, could never receive the data.
+
+    Measured after wiring: 229 control-graph node payloads and 6 function-principal
+    payloads on the real corpus carry the record (0 before).
+    """
+    p = _add_protocol(db_session, f"e2e-tp-{uuid.uuid4().hex[:8]}")
+    addr = _addr("tp1")
+    controller = _addr("tp2")
+    settled = _addr("tp3")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=c.id,
+            address=controller,
+            resolved_type="contract",
+            label="AuthorityContract",
+            details={},
+        )
+    )
+    # A walk that TERMINATED — the status the fall-through cannot express, and the
+    # one that renders "ultimate key: 0x… · safe" instead of "unresolved".
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=controller,
+            label="AuthorityContract",
+            display_name="AuthorityContract",
+            resolved_type="contract",
+            details={
+                "terminal": False,
+                "terminal_principal": {
+                    "status": "terminated",
+                    "terminal": True,
+                    "address": settled,
+                    "resolved_type": "safe",
+                    "chain": [controller, settled],
+                },
+            },
+        )
+    )
+    # A principal_labels row for an address the lookup does NOT carry: annotating it
+    # would widen the published principal set, which is a different change.
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=_addr("tp4"),
+            label="Stranger",
+            display_name="Stranger",
+            resolved_type="contract",
+            details={"terminal_principal": {"status": "cycle", "terminal": False, "address": None}},
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
+    record = nodes[controller.lower()]["details"]["terminal_principal"]
+    assert record["status"] == "terminated"
+    assert record["address"] == settled
+    assert record["resolved_type"] == "safe"
+    # NEGATIVE CONTROL: the stranger address is not published as a node.
+    assert _addr("tp4").lower() not in nodes
+
+    # The forwarding is narrow on purpose: ``terminal`` would let one plane's typing
+    # publish a SETTLED key beside another plane's ``resolved_type: contract``, and
+    # the attribution facts have their own hedged copy and their own review.
+    forwarded = nodes[controller.lower()]["details"]
+    assert "terminal" not in forwarded
+    assert "signer_overlap" not in forwarded
+    assert "shared_deployer" not in forwarded
+
+
+def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_session):
+    """``setdefault``: this pass adds the fact where it is missing, never replaces
+    one a ControlGraphNode's own ``details`` already carried."""
+    p = _add_protocol(db_session, f"e2e-tpo-{uuid.uuid4().hex[:8]}")
+    addr = _addr("tpo1")
+    controller = _addr("tpo2")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=c.id,
+            address=controller,
+            resolved_type="contract",
+            label="AuthorityContract",
+            details={"terminal_principal": {"status": "multi_plane", "planes": []}},
+        )
+    )
+    db_session.add(
+        PrincipalLabel(
+            contract_id=c.id,
+            address=controller,
+            label="AuthorityContract",
+            display_name="AuthorityContract",
+            resolved_type="contract",
+            details={"terminal_principal": {"status": "unknown_unfetched", "terminal": False, "address": None}},
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    nodes = {n["address"].lower(): n for n in entry["control_graph"]["nodes"]}
+    assert nodes[controller.lower()]["details"]["terminal_principal"]["status"] == "multi_plane"
+
+
+def test_principal_label_payload_narrows_confidence_and_the_duplicate_label(db_session):
+    """``principal_labels.confidence`` carries no epistemic content: it is a
+    naming-branch label, two-valued in practice (high 1,376 / medium 180 / low 0
+    — ``low`` needs ``resolved_type == "unknown"`` and no such row exists), ~97%
+    a restatement of ``resolved_type``, and cannot say "I did not
+    determine this". ``label`` is byte-identical to ``display_name`` on 1,556/1,556
+    rows, so a consumer reading both believed there were two facts.
+    """
+    from db.models import PrincipalLabel
+    from services.aggregations.analysis_detail import _principal_label_payload
+
+    identical = PrincipalLabel(
+        contract_id=1,
+        address=_addr("plc1"),
+        label="EtherFi admin Safe",
+        display_name="EtherFi admin Safe",
+        resolved_type="safe",
+        labels=["etherfi_admin"],
+        confidence="high",
+        details={},
+        graph_context=[],
+    )
+    out = _principal_label_payload(identical)
+    assert out["naming_rule"] == "high"
+    assert "confidence" not in out
+    # One fact, published once.
+    assert "label" not in out
+    assert out["display_name"] == "EtherFi admin Safe"
+
+    # POSITIVE CONTROL: when the two really differ, both ship.
+    differing = PrincipalLabel(
+        contract_id=1,
+        address=_addr("plc2"),
+        label="raw-label",
+        display_name="Pretty Name",
+        resolved_type="contract",
+        labels=[],
+        confidence="medium",
+        details={},
+        graph_context=[],
+    )
+    out = _principal_label_payload(differing)
+    assert out["label"] == "raw-label"
+    assert out["display_name"] == "Pretty Name"
+    assert out["naming_rule"] == "medium"
+
+
+def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
+    """``covered_to_block is None`` alone is not "this row covers the
+    currently-open impl window" — it is also what a row whose upper bound was never
+    determined looks like, and this module's own ImplWindow docstring calls that
+    inference invalid. ``AuditContractCoverage`` carries no ``successor`` column, so
+    the lower bound is the only evidence available here.
+
+    Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
+    realised badge changes today 0 — the 2 high-confidence rows that do land on a
+    current impl are ``covered_from_block`` set / ``covered_to_block`` NULL and keep
+    the badge (the positive control below).
+    """
+    from types import SimpleNamespace
+
+    from services.aggregations.contract_audit_timeline import _current_status
+
+    p = _add_protocol(db_session, f"e2e-l21-{uuid.uuid4().hex[:8]}")
+    impl_addr = _addr("l21i")
+    proxy_addr = _addr("l21p")
+    impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="Impl")
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, name="Proxy")
+    impl = _add_contract(db_session, address=impl_addr, job=impl_job, protocol_id=p.id, contract_name="Impl")
+    proxy = _add_contract(
+        db_session,
+        address=proxy_addr,
+        job=proxy_job,
+        protocol_id=p.id,
+        is_proxy=True,
+        implementation=impl_addr,
+        contract_name="Proxy",
+    )
+
+    # ``_current_status`` reads the coverage rows it is handed and only queries for
+    # the impl Contract, so the rows are built in memory — the table's
+    # (report, contract) unique key would otherwise force one AuditReport per shape
+    # for no gain in what is being tested.
+    def _cov(**kwargs):
+        base = {
+            "contract_id": impl.id,
+            "match_type": "impl_era",
+            "match_confidence": "high",
+            "equivalence_status": "pending",
+            "proof_kind": None,
+            "covered_from_block": None,
+            "covered_to_block": None,
+        }
+        base.update(kwargs)
+        return SimpleNamespace(**base)
+
+    # POSITIVE CONTROL: bounded start, no end — genuinely open-ended, keeps "audited".
+    open_ended = _cov(covered_from_block=100)
+    assert _current_status(db_session, proxy, [open_ended]) == "audited"
+
+    # Neither bound determined: never windowed at all, so it cannot earn the badge
+    # on the strength of a missing number.
+    unbounded = _cov()
+    assert _current_status(db_session, proxy, [unbounded]) == "unaudited_since_upgrade"
+
+    # NEGATIVE CONTROL: a cryptographic proof still overrides everything, so the
+    # narrowing cannot have removed the strongest evidence path.
+    proven = _cov(match_confidence="low", equivalence_status="proven", proof_kind="bytecode_match")
+    assert _current_status(db_session, proxy, [unbounded, proven]) == "audited"
+
+
+def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
+    """``upgrade_count`` renders as literal "N upgrades" text, so its unit is
+    exercises of upgrade authority. A within-tx swap-and-restore emits two
+    ``Upgraded`` logs in ONE transaction — it must count once. A poll-detected
+    row (NULL ``tx_hash``) is its own observed upgrade and must still count.
+    """
+    p = _add_protocol(db_session, f"upgcount-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgc")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    swap_tx = "0x" + "a" * 64
+    genuine_tx = "0x" + "b" * 64
+    events = [
+        # Genuine upgrade, its own tx.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=100,
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            tx_hash=genuine_tx,
+            source="backfill",
+        ),
+        # Swap-and-restore: two Upgraded logs, one transaction.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i2"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i1"),
+            block_number=200,
+            timestamp=datetime(2024, 6, 1, tzinfo=timezone.utc),
+            tx_hash=swap_tx,
+            source="backfill",
+        ),
+        # Poll-detected: no tx known, still one observed upgrade.
+        UpgradeEvent(
+            contract_id=c.id,
+            proxy_address=addr,
+            new_impl=_addr("i3"),
+            block_number=None,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            tx_hash=None,
+            source="poll",
+        ),
+    ]
+    db_session.add_all(events)
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 3, (
+        "4 Upgraded rows across 2 transactions + 1 poll detection must "
+        f"publish 3 upgrades, got {entry['upgrade_count']}"
+    )
+
+
+def test_last_upgrade_pair_comes_from_one_event(db_session):
+    """``last_upgrade_block`` / ``last_upgrade_timestamp`` describe THE last
+    upgrade, so both halves must come from the same row. With a poll-detected
+    row (NULL block by design) newer than a block-carrying one, two
+    independent MAX aggregates would pair the OLD row's block with the poll
+    row's timestamp — a composite describing no event that happened.
+    """
+    p = _add_protocol(db_session, f"upglast-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgl")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j1"),
+                block_number=500,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "c" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("j2"),
+                block_number=None,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+                tx_hash=None,
+                source="poll",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["last_upgrade_timestamp"] == "2025-06-01T00:00:00+00:00"
+    assert entry["last_upgrade_block"] is None, (
+        "the newest upgrade is poll-detected (block not determined); pairing "
+        "the older event's block 500 with the poll timestamp fabricates a "
+        f"composite event, got block {entry['last_upgrade_block']}"
+    )
+
+
+def test_last_upgrade_pair_block_carrying_control(db_session):
+    """Positive control for the pair-coherence fix: when the newest event
+    carries a block, both halves publish from it unchanged."""
+    p = _add_protocol(db_session, f"upgctl-{uuid.uuid4().hex[:8]}")
+    addr = _addr("upgx")
+    job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
+    c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, is_proxy=True, contract_name="Proxy")
+
+    db_session.add_all(
+        [
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k1"),
+                block_number=700,
+                timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "d" * 64,
+                source="backfill",
+            ),
+            UpgradeEvent(
+                contract_id=c.id,
+                proxy_address=addr,
+                new_impl=_addr("k2"),
+                block_number=900,
+                timestamp=datetime(2024, 9, 1, tzinfo=timezone.utc),
+                tx_hash="0x" + "e" * 64,
+                source="backfill",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    entry = next(e for e in payload["contracts"] if e["address"] == addr)
+    assert entry["upgrade_count"] == 2
+    assert entry["last_upgrade_block"] == 900
+    assert entry["last_upgrade_timestamp"] == "2024-09-01T00:00:00+00:00"
+
+
+def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type=None):
+    ef = EffectiveFunction(
+        contract_id=contract.id,
+        function_name=fname,
+        selector=selector,
+        abi_signature=f"{fname}()",
+        effect_labels=labels,
+        effect_targets=[],
+        action_summary=fname,
+        authority_public=False,
+        authority_roles=[],
+    )
+    session.add(ef)
+    session.commit()
+    session.refresh(ef)
+    session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=fp_addr,
+            resolved_type=fp_type,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+    session.commit()
+    return ef
+
+
+def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
+    """``fund_flows[].capabilities`` states what the edge's SOURCE can do to
+    the target — never the target's own capability union. Two sources with
+    disjoint witnessed rights on one target must publish disjoint edge
+    capabilities, and neither may carry the target-shell ``upgradeable`` flag.
+    """
+    p = _add_protocol(db_session, f"edgecaps-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tgt")
+    a_addr = _addr("srca")
+    b_addr = _addr("srcb")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
+    a_job = _add_job(db_session, address=a_addr, protocol_id=p.id, name="Pauser")
+    b_job = _add_job(db_session, address=b_addr, protocol_id=p.id, name="Upgrader")
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
+    _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Pauser")
+    _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Upgrader")
+
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], a_addr.lower())
+    _add_ef_with_fp(db_session, t, "upgradeTo", "0x3659cfe6", ["implementation_update"], b_addr.lower())
+
+    payload = build_company_overview(db_session, p.name)
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    # The target's OWN union carries both function caps plus the proxy-shell
+    # flag — the pre-fix value every inbound edge copied.
+    assert set(target_entry["capabilities"]) == {"pause", "upgrade", "upgradeable"}
+
+    flows = {(f["from"], f["to"]): f for f in payload["fund_flows"]}
+    a_flow = flows.get((a_addr.lower(), t_addr.lower()))
+    b_flow = flows.get((b_addr.lower(), t_addr.lower()))
+    assert a_flow is not None and b_flow is not None, (
+        f"expected principal flows from both FP sources, got {list(flows)}"
+    )
+    assert a_flow["capabilities"] == ["pause"], (
+        f"edge capabilities must be the source's witnessed rights on the target, got {a_flow['capabilities']}"
+    )
+    assert b_flow["capabilities"] == ["upgrade"], (
+        f"edge capabilities must be the source's witnessed rights on the target, got {b_flow['capabilities']}"
+    )
+    for f in (a_flow, b_flow):
+        assert "upgradeable" not in f["capabilities"], (
+            "the proxy-shell flag is a property of the target node, not of any inbound relationship"
+        )
+
+
+def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_session):
+    """A source whose only witnessed right maps to no capability chip
+    publishes ``[]`` on its edge — not the target's union. The edge itself
+    (its ``type``) still states the relationship; the empty list just makes
+    no positive capability claim.
+    """
+    p = _add_protocol(db_session, f"edgeempty-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tg2")
+    a_addr = _addr("plain")
+    b_addr = _addr("pausr")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault")
+    a_job = _add_job(db_session, address=a_addr, protocol_id=p.id, name="Plain")
+    b_job = _add_job(db_session, address=b_addr, protocol_id=p.id, name="Pauser")
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, contract_name="Vault")
+    _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Plain")
+    _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Pauser")
+
+    # A's right: a function with no capability-mapped effect label.
+    _add_ef_with_fp(db_session, t, "poke", "0xdeadbe01", [], a_addr.lower())
+    # B's right gives the TARGET a non-empty union A must not inherit.
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower())
+
+    payload = build_company_overview(db_session, p.name)
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    assert "pause" in target_entry["capabilities"]
+
+    flows = {(f["from"], f["to"]): f for f in payload["fund_flows"]}
+    a_flow = flows.get((a_addr.lower(), t_addr.lower()))
+    assert a_flow is not None
+    assert a_flow["capabilities"] == [], (
+        "a source with zero witnessed capability on the target must publish "
+        f"an empty edge list, got {a_flow['capabilities']}"
+    )
+
+
+def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
+    """For a principal-source edge, the edge chip and the principal's own
+    ``controls_detail`` row for the same target must state the same
+    capabilities — they are two renderings of one witnessed relationship.
+    """
+    p = _add_protocol(db_session, f"edgecd-{uuid.uuid4().hex[:8]}")
+    t_addr = _addr("tg3")
+    safe_addr = _addr("safe")
+
+    t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
+    t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
+
+    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], safe_addr.lower(), fp_type="safe")
+    db_session.add(
+        ControlGraphNode(
+            contract_id=t.id,
+            address=safe_addr.lower(),
+            resolved_type="safe",
+            depth=1,
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    principal = next(pr for pr in payload["principals"] if pr["address"] == safe_addr.lower())
+    cd_by_addr = {row["address"]: row["capabilities"] for row in principal["controls_detail"]}
+    flow = next(f for f in payload["fund_flows"] if f["from"] == safe_addr.lower() and f["to"] == t_addr.lower())
+    assert flow["capabilities"] == cd_by_addr.get(t_addr.lower()), (
+        "edge capabilities and controls_detail disagree about the same "
+        f"(source, target) pair: {flow['capabilities']} vs {cd_by_addr}"
+    )
+    assert flow["capabilities"] == ["pause"]
+    # The target's union additionally carries the proxy-shell flag; the
+    # edge must not.
+    target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
+    assert "upgradeable" in target_entry["capabilities"]
+    assert "upgradeable" not in flow["capabilities"]

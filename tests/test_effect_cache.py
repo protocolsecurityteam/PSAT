@@ -1,5 +1,5 @@
 """Effect-verdict cache: kernel-vs-projection scope, self-audit, state-plane
-residue, version invalidation (EFFECTS_RESOLUTION_SPEC §7 / inv. 3, 12).
+residue, version invalidation.
 
 DB-backed (real Postgres), offline-safe. Mirrors the materialization-cache test
 conventions."""
@@ -44,7 +44,7 @@ def clean_effects(db_session):
 
 
 # ---------------------------------------------------------------------------
-# kernel vs projection scoping (inv. 3)
+# kernel vs projection scoping
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +127,7 @@ def test_kernel_transfers_across_surfaces_one_row(clean_effects):
 
 
 # ---------------------------------------------------------------------------
-# self-audit (§7)
+# self-audit
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +296,7 @@ def test_stale_function_id_does_not_poison_sibling_verdicts(clean_effects):
 # ---------------------------------------------------------------------------
 # State-plane residue survives observation-less rewrites (the cache-HIT shape).
 #
-# The code-plane cache structurally carries no concrete values (inv. 3), so every
+# The code-plane cache structurally carries no concrete values, so every
 # cache-HIT resolution re-writes its verdict row with ``concrete_destination=None``.
 # An unconditional SET erased the cold first-sighting observation on every hit.
 # ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ def test_downgraded_verdict_drops_the_residue_that_justified_it(clean_effects):
 @requires_postgres
 def test_observed_residue_merges_key_wise_across_observation_less_rewrites(clean_effects):
     """``observed_residue`` is a bag of independent residue facts written by
-    different paths (§5b reach on a cold probe, re-probe bookkeeping on a hit), so
+    different paths (downstream value-reach on a cold probe, re-probe bookkeeping on a hit), so
     a write carrying only some keys must leave the others standing."""
     session = clean_effects
     _write(session, observed_residue={"observed_reach_value_usd": 42.0, "observed_reach_holders": ["0xaa"]})
@@ -494,3 +494,241 @@ def test_function_id_link_survives_an_unresolved_rewrite(clean_effects):
     session.commit()
     session.expire_all()
     assert session.query(EffectVerdict).one().function_id == fn_id
+
+
+# ---------------------------------------------------------------------------
+# The code/deployment plane split, and the self-audit floor
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_a_cache_row_never_stores_a_per_deployment_observation(clean_effects):
+    """Cache scope enforced at the WRITE. Every key in ``DEPLOYMENT_PLANE_KEYS`` is an
+    observation of ONE deployment's fork state, and this row is served to every other
+    deployment sharing the bytecode — so a hit used to hand deployment B deployment A's
+    blast radius, A's pre-pause succeeding set and A's seeding qualifiers as B's own
+    witness. Measured before the split: 74 of 150 local cache rows carried at least one
+    (29 freeze_pause, 21 supply, 20 value_out, 4 more).
+
+    They are ABSENT on the served row — absent, not ``null`` and not ``false`` — so a
+    consumer reads "no observation of my own" instead of another contract's number."""
+    session = clean_effects
+    row = effect_cache.upsert_cached_verdict(
+        session,
+        behavior_hash="bh_plane",
+        effect_class="freeze_pause",
+        scope="projection",
+        contract_surface_hash="surface_x",
+        verdict="proven",
+        tier="tier2",
+        details={
+            "latch_flip": True,
+            "observation": "executed",
+            "duration_bound_seconds": 2592000,
+            "duration_bound_source": "guard_constant",
+            # per-deployment — must not survive the write
+            "observed_blast_radius": ["transfer(address,uint256)"],
+            "pre_pause_succeeding": ["transfer(address,uint256)"],
+            "scored_denominator": ["transfer(address,uint256)"],
+            "input_seeded": True,
+            "contract_balance_seeded": True,
+            "backing": {"inflow_observed": True},
+            "pause_effective": True,
+            "auto_expiry": True,
+        },
+    )
+    stored = row.details or {}
+    for key in effect_cache.DEPLOYMENT_PLANE_KEYS:
+        assert key not in stored, key
+    # ...and the code-plane witness the cache exists to carry is intact.
+    assert stored["latch_flip"] is True
+    assert stored["duration_bound_seconds"] == 2592000
+    assert stored["duration_bound_source"] == "guard_constant"
+    assert stored["observation"] == "executed"
+
+
+def test_a_zero_key_signature_is_not_comparable():
+    """49 of 150 cache rows are ``authority_change`` with ``verdict='unknown'`` and none
+    of the five allowlisted structural keys, so their signature is
+    ``('unknown', None, None, None, None, None)`` on both sides and ``kernel_verdicts_
+    agree`` returns True unconditionally. Agreement there is the string ``unknown``
+    compared with itself."""
+    thin = {"observation": "executed", "reason": "no_authorization_delta_observed"}
+    assert effect_cache.kernel_verdicts_agree("unknown", thin, "unknown", thin) is True
+    assert effect_cache.kernel_signature_is_comparable(thin) is False
+    assert effect_cache.kernel_signature_is_comparable(None) is False
+    assert effect_cache.kernel_signature_is_comparable({}) is False
+    # One structural key is the floor, and each of the five clears it on its own.
+    for key in ("latch_flip", "gate_mutation", "upgradeable", "supply_delta_sign", "destination_shape"):
+        assert effect_cache.kernel_signature_is_comparable({**thin, key: None}) is True, key
+
+
+# ---------------------------------------------------------------------------
+# Cache-served witness rewrites (``witness_from_cache``): a self-hit must not
+# erase the producing write's deployment-plane qualifiers.
+#
+# The realized shape (PR-161 effect_verdicts id 146): a proven ``supply_burn``
+# whose transcript records ``input_seeded: true`` was rewritten by its own cache
+# hit with the code-plane payload, and absence of ``input_seeded`` contractually
+# means "no seeding was needed" — the published claim asserted an unseeded live
+# burn its own transcript refutes.
+# ---------------------------------------------------------------------------
+
+FULL_WITNESS: dict[str, Any] = {
+    "reason": "supply_burn",
+    "observation": "executed",
+    "supply_delta_sign": "burn",
+    "input_seeded": True,
+    "contract_balance_seeded": True,
+    "backing": {"inflow_observed": False, "minted": False, "input_seeded": True, "contract_balance_seeded": False},
+}
+# What the cache serves for the same behavior: the code-plane projection.
+STRIPPED_WITNESS = {k: v for k, v in FULL_WITNESS.items() if k not in effect_cache.DEPLOYMENT_PLANE_KEYS}
+
+
+def _write_burn(session, **kw):
+    base: dict[str, Any] = {
+        "chain_id": 1,
+        "contract_address": "0x" + "77" * 20,
+        "selector": "0xee7a7c04",
+        "effect_class": "supply",
+        "behavior_hash": "bh_selfhit",
+        "verdict": "proven",
+        "tier": "tier1",
+    }
+    base.update(kw)
+    record_effect_verdict(session, **base)
+    session.commit()
+    session.expire_all()
+    return session.query(EffectVerdict).one()
+
+
+@requires_postgres
+def test_cache_served_rewrite_preserves_deployment_plane_witness(clean_effects):
+    """The verdict-146 shape: producing write carries the seed qualifiers, the
+    self-hit rewrite carries the stripped cache payload — every deployment-plane
+    key must survive, and the code-plane keys still track the newest write."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(session, witness=dict(STRIPPED_WITNESS), witness_from_cache=True)
+    assert row.witness["input_seeded"] is True
+    assert row.witness["contract_balance_seeded"] is True
+    assert row.witness["backing"] == FULL_WITNESS["backing"]
+    assert row.witness["supply_delta_sign"] == "burn"
+    assert row.witness["observation"] == "executed"
+
+
+@requires_postgres
+def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
+    """The companion evidence-destruction shape (PR-161 ids 14/16/22/26/206/207):
+    an unknown freeze_pause row loses ``pre_pause_succeeding`` /
+    ``observed_blast_radius`` / ``scored_denominator`` to its own self-hit."""
+    session = clean_effects
+    full = {
+        "reason": "no_blast_radius_observed",
+        "observation": "executed",
+        "pause_effective": True,
+        "pre_pause_succeeding": ["transfer(address,uint256)"],
+        "observed_blast_radius": [],
+        "scored_denominator": ["transfer(address,uint256)"],
+        # The realized null shape on deployed rows is a PROVEN verdict whose
+        # max_pause_duration is None (duration_bound_seconds JSON null,
+        # duration_bound_source not_determined); the empty-blast branch emits
+        # no auto_expiry key at all. This fixture pins the MECHANISM — a
+        # stored JSON null ("not probed") must survive the self-hit as null,
+        # not become absent — on a synthetic row, not a recipe-produced one.
+        "auto_expiry": None,
+    }
+    stripped = {k: v for k, v in full.items() if k not in effect_cache.DEPLOYMENT_PLANE_KEYS}
+    _write_burn(session, effect_class="freeze_pause", verdict="unknown", witness=full)
+    row = _write_burn(
+        session, effect_class="freeze_pause", verdict="unknown", witness=stripped, witness_from_cache=True
+    )
+    for key in (
+        "pre_pause_succeeding",
+        "observed_blast_radius",
+        "scored_denominator",
+        "pause_effective",
+        "auto_expiry",
+    ):
+        assert row.witness[key] == full[key], key
+
+
+@requires_postgres
+def test_cache_served_rewrite_lets_a_present_incoming_key_win(clean_effects):
+    """Incoming keys win where present — DEFENSIVE semantics with no live
+    caller: every production path that sets ``witness_from_cache=True`` passes
+    a payload laundered through ``code_plane_details`` (deployment-plane keys
+    stripped), and the audited-hit paths pass ``witness_from_cache=False``.
+    Pinned so a future caller that does carry such a key gets override, not
+    shadowing, without anyone re-deriving the merge order."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(session, witness={**STRIPPED_WITNESS, "input_seeded": False}, witness_from_cache=True)
+    assert row.witness["input_seeded"] is False
+    # Keys the incoming payload does not carry still survive.
+    assert row.witness["contract_balance_seeded"] is True
+
+
+@requires_postgres
+def test_cache_served_rewrite_never_resurrects_across_a_verdict_change(clean_effects):
+    """The adverse branch: evidence moves with the verdict. A downgrade served from
+    the cache must not carry the proven write's qualifiers forward."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(
+        session,
+        verdict="unknown",
+        witness={"reason": "no_supply_delta", "observation": "executed"},
+        witness_from_cache=True,
+    )
+    assert "input_seeded" not in row.witness
+    assert "backing" not in row.witness
+    assert row.witness["reason"] == "no_supply_delta"
+
+
+@requires_postgres
+def test_cache_served_rewrite_never_resurrects_across_a_code_change(clean_effects):
+    """Same lifecycle as residue: a changed behavior hash means different code, and
+    the old deployment-plane observation does not describe it."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(session, behavior_hash="bh_upgraded", witness=dict(STRIPPED_WITNESS), witness_from_cache=True)
+    assert "input_seeded" not in row.witness
+    assert "contract_balance_seeded" not in row.witness
+    assert "backing" not in row.witness
+
+
+@requires_postgres
+def test_cache_served_null_payload_keeps_the_stored_witness(clean_effects):
+    """A hit served from a NULL-details cache row asserts the same verdict of the
+    same code and nothing else — the stored evidence still describes it."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(session, witness=None, witness_from_cache=True)
+    assert row.witness == FULL_WITNESS
+
+
+@requires_postgres
+def test_absence_of_seeding_survives_a_hit_rewrite_as_absence(clean_effects):
+    """The earned negative stays earned: a verdict whose producing probe needed no
+    seeding publishes ABSENT qualifiers, and a self-hit must not fabricate any."""
+    session = clean_effects
+    unseeded = {"reason": "supply_burn", "observation": "executed", "supply_delta_sign": "burn"}
+    _write_burn(session, witness=dict(unseeded))
+    row = _write_burn(session, witness=dict(unseeded), witness_from_cache=True)
+    assert row.witness == unseeded
+    for key in effect_cache.DEPLOYMENT_PLANE_KEYS:
+        assert key not in row.witness, key
+
+
+@requires_postgres
+def test_fresh_probe_rewrite_still_overwrites_unconditionally(clean_effects):
+    """The default (fresh-probe) path is untouched: there an absent key IS the
+    current measurement — a re-probe that needed no seeding must publish that."""
+    session = clean_effects
+    _write_burn(session, witness=dict(FULL_WITNESS))
+    row = _write_burn(session, witness=dict(STRIPPED_WITNESS))
+    assert "input_seeded" not in row.witness
+    assert "contract_balance_seeded" not in row.witness
+    assert "backing" not in row.witness

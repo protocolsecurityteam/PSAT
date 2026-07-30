@@ -191,6 +191,17 @@ class EventIndexedAdapter:
                 "unresolved_event_key",
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
+            if result.confidence == "partial" and result.partial_reason == "ambiguous_event_direction":
+                # An add/remove conflict the fold could not decide from the
+                # event payload: no member set exists, not even a lower bound —
+                # settle to the gated external check, never a finite_set. A
+                # caller-keyed gate additionally carries the caller-gate basis
+                # tag so the earned-public projection keeps the function gated
+                # (an undecidable allowlist is still an allowlist).
+                basis = ["ambiguous_event_direction"]
+                if _descriptor_is_caller_keyed(descriptor):
+                    basis.append("caller_keyed_membership_allowlist")
+                return self._external_check(descriptor, first_hint, ctx, basis)
             if result.confidence == "partial" and result.partial_reason == "no_index_cursor":
                 # A cold durable index (no backfill_complete cursor) defers to
                 # external_check_only tagged ``deferred_pending_index`` rather

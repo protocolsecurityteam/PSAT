@@ -17,6 +17,9 @@ from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, Track
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
 from utils.rpc import (
+    eth_call_batch as _eth_call_batch,
+)
+from utils.rpc import (
     normalize_hex as _normalize_hex,
 )
 from utils.rpc import (
@@ -44,9 +47,10 @@ _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
 _CLASSIFY_CACHE_MUTABLE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_MUTABLE_TTL_S", "60"))
 
-# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay) — a
-# 'latest' classification carrying any of them is served only briefly.
-_MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay"})
+# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay,
+# a proxy's ERC-1967 implementation) — a 'latest' classification carrying any
+# of them is served only briefly.
+_MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay", "erc1967_implementation"})
 
 # Single-batch classify probes (default ON); falls back to sequential on whole-batch failure. Toggle
 # PSAT_CLASSIFY_BATCH=0 to force sequential.
@@ -177,10 +181,22 @@ def _eth_call_raw(
     return raw
 
 
+# Single-word ABI returns must be EXACTLY one 32-byte word. ``eth_abi.decode``
+# reads the first word and silently ignores trailing bytes, so a catch-all
+# fallback (or a struct/tuple getter) answering with a longer blob would still
+# "decode" as a plausible uint256/address — returndata-length discipline is the
+# cheap half of the duck-typing defence (the negative-control probe is the
+# other). ``address`` padding-byte validation is already strict in eth_abi
+# (NonEmptyPaddingBytes); the length check closes the trailing-bytes hole.
+_EXACT_WORD_ABI_TYPES = frozenset({"address", "uint256", "bytes32"})
+
+
 def _decode_abi_value(raw_value: str, abi_type: str):
     data = bytes.fromhex(_normalize_hex(raw_value)[2:])
     if not data:
         raise RuntimeError("Empty ABI data")
+    if abi_type in _EXACT_WORD_ABI_TYPES and len(data) != 32:
+        raise RuntimeError(f"{abi_type} return must be exactly 32 bytes, got {len(data)}")
     value = decode([abi_type], data)[0]
     if abi_type == "address":
         return str(value).lower()
@@ -272,7 +288,7 @@ def classify_resolved_address(
 # plain ``contract`` principal. ``classify_resolved_address`` only reads
 # ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
 # generic Ownable/AccessManaged contract falls through untyped — this fills that
-# gap for the contract-principal terminal walk (SCORING plan §4). Each is a
+# gap for the contract-principal terminal walk. Each is a
 # caller-independent view getter returning a single address.
 _CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
 
@@ -286,13 +302,13 @@ def read_contract_controllers(
     not dispositively complete.
 
     Returns the FULL set, not just the first hit: Solmate/Solady ``Auth`` (the
-    §4 motivating world — a BoringVault manager is a ``RolesAuthority``, itself
+    motivating world — a BoringVault manager is a ``RolesAuthority``, itself
     an ``Auth``) exposes ``owner`` AND ``authority`` as PARALLEL live control
     planes (``requiresAuth`` accepts either). Naming one as THE key would
     over-claim a settled controller while a second live plane also governs, so
     the caller must see the whole set and fail closed on ambiguity.
 
-    **Probe-completeness (Register #3).** All three getters are probed every call
+    **Probe-completeness.** All three getters are probed every call
     (no early return). A clean ``eth_call`` that reverts / returns absent / zero
     means "this getter is genuinely not a control plane" — skipped, not an error.
     But a transient ``_PROBE_ERROR`` on ANY getter means the plane set is NOT
@@ -300,20 +316,58 @@ def read_contract_controllers(
     erroring getter, so proceeding on the getters that answered would risk a
     false single-plane terminal. In that case return ``None`` (retryable next
     run) rather than a partial set. Bounded, read-only, caller-independent, through
-    the same ``rpc_request`` wire the offline suite stubs. ``[]`` when every getter
-    cleanly yields no controller.
+    the same ``rpc_request`` wire the offline suite stubs.
+
+    ``[]`` means exactly "every canonical getter answered cleanly and named
+    nothing" — probe-set SILENCE. It is NOT proof that the contract has no
+    controller: this probe set is finite, and contracts governed through
+    non-canonical getters (``unpauser()``, ``kernel()``, Curve's ``*_admin()``
+    family) or the ERC-1967 admin slot return the same ``[]`` while
+    demonstrably controlled. The walk publishes it as
+    ``controllers_not_determined`` (basis recorded); see
+    ``services.governance.principals`` for the status vocabulary.
     """
     controllers: list[str] = []
     seen: set[str] = set()
     had_probe_error = False
-    for signature in _CONTROLLER_GETTER_SIGS:
-        result = _try_eth_call_decoded(rpc_url, address, signature, "address", block_tag, chain_id=chain_id)
-        if result is _PROBE_ERROR:
+    # The last call is the negative control (same batch — no extra round trip):
+    # an address that ANSWERS a selector nothing implements answers everything,
+    # so its getter "answers" are not evidence of a control plane. See
+    # _negative_control_probe for the same discipline on the classifier.
+    calls = [{"to": address, "data": _selector(signature)} for signature in _CONTROLLER_GETTER_SIGS]
+    calls.append({"to": address, "data": _selector(_NEGATIVE_CONTROL_SIG)})
+    try:
+        results = _eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
+    except Exception:
+        return None
+    if len(results) != len(calls):
+        return None
+    control = results[-1]
+    if control.success and _normalize_hex(control.return_data) not in {"0x", "0x0"}:
+        # Catch-all fallback: the canonical getters cannot be dispositively
+        # read on this address — not determined, never a plane set.
+        return None
+    if not control.success and not _is_definitive_revert(control):
+        # The control itself could not be established — incomplete witness.
+        had_probe_error = True
+    for outcome in results[: len(_CONTROLLER_GETTER_SIGS)]:
+        if not outcome.success:
+            if _is_definitive_revert(outcome):
+                # The getter is genuinely not a control plane on this contract.
+                continue
             had_probe_error = True
             continue
-        if result is None:
+        raw = outcome.return_data
+        if _normalize_hex(raw) in {"0x", "0x0"}:
+            # A clean empty return: no such getter / no value. Not an error.
             continue
-        owner = str(result).lower()
+        try:
+            decoded = _decode_abi_value(raw, "address")
+        except Exception:
+            # A value that will not decode as an address is not a control plane
+            # and not a transport failure — the read succeeded.
+            continue
+        owner = str(decoded).lower()
         if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"} and owner not in seen:
             seen.add(owner)
             controllers.append(owner)
@@ -323,13 +377,188 @@ def read_contract_controllers(
     return controllers
 
 
+# A node's message for a contract-level revert. ``eth_call_batch`` preserves the
+# revert payload, so a revert WITH data is unambiguous; a bare
+# ``"execution reverted"`` carries no data but is still a definitive answer from
+# the EVM, unlike a transport/OOG failure.
+_REVERT_MESSAGE_MARKERS = ("execution reverted", "revert")
+
+
+def _is_definitive_revert(outcome: Any) -> bool:
+    """Did the EVM answer (a revert), or did the read fail to happen?
+
+    This is the discriminator ``read_contract_controllers``' contract has always
+    claimed and never had: every failure came back as the single
+    ``_PROBE_ERROR``, so a contract with NO ``authority()`` — which is most of
+    them — tripped the incomplete-witness guard and the whole plane set came back
+    ``None``. Measured consequence: ``terminal_principal.status`` is
+    ``unknown_unfetched`` on 180/180 armed rows with the rest of the status
+    vocabulary never firing. Verified against mainnet (see the commit message): both the
+    ownerless Beacon DepositContract AND a contract that demonstrably HAS an
+    owner returned ``None`` before this split.
+
+    A revert with data is definitive. A bare ``execution reverted`` with no data
+    is also the EVM answering — it is how a missing function selector fails —
+    whereas a transport error, timeout or OOG produces neither. Anything
+    unrecognised stays indeterminate (fail closed).
+    """
+    if getattr(outcome, "revert_data", None) is not None:
+        return True
+    message = str(getattr(outcome, "error_message", "") or "").lower()
+    return any(marker in message for marker in _REVERT_MESSAGE_MARKERS)
+
+
+# A signature no real contract implements (name chosen for selector-collision
+# improbability; selector 0xaa2fed30). Its ONLY use is as a negative control:
+# an address that ANSWERS it answers every selector (an unverified catch-all
+# fallback), so none of its per-selector answers is evidence of an interface.
+_NEGATIVE_CONTROL_SIG = "psatNegativeControlProbeW62()"
+
+
+def _eth_call_tristate(
+    rpc_url: str, address: str, signature: str, block_tag: str, *, chain_id: int | None = None
+) -> tuple[str | None, str]:
+    """One lazy ``eth_call`` with the revert/transport discriminator single
+    probes otherwise lack: ``(raw, "answered")`` on a non-empty return,
+    ``(None, "silent")`` on an empty return or a definitive revert (the EVM
+    answered: the selector is not implemented), ``(None, "error")`` when the
+    read did not dispositively happen (transport/OOG — retryable)."""
+    try:
+        raw = _eth_call_raw(rpc_url, address, signature, block_tag, chain_id=chain_id)
+    except Exception as exc:
+        message = str(exc).lower()
+        if any(marker in message for marker in _REVERT_MESSAGE_MARKERS):
+            return None, "silent"
+        return None, "error"
+    if _normalize_hex(raw) in {"0x", "0x0"}:
+        return None, "silent"
+    return raw, "answered"
+
+
+def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> str:
+    """Fire the negative control. ``"passed"`` — the address reverts on (or
+    returns nothing for) a selector nothing implements, so its positive probe
+    answers select real interfaces; ``"failed"`` — it ANSWERS the nonsense
+    selector, so every duck-typed match is worthless (catch-all fallback);
+    ``"error"`` — the control could not be established (not determined:
+    concrete types are withheld and the classification is not cached).
+
+    Invoked lazily, at most once per classification, and only when a
+    duck-typed arm (safe/timelock/UPGRADE_INTERFACE_VERSION) has already
+    matched — the common eoa/plain-contract classifications never pay for it.
+    """
+    raw, state = _eth_call_tristate(rpc_url, address, _NEGATIVE_CONTROL_SIG, block_tag, chain_id=chain_id)
+    del raw
+    if state == "silent":
+        return "passed"
+    if state == "answered":
+        return "failed"
+    return "error"
+
+
+# ERC-1967 implementation slot (keccak256("eip1967.proxy.implementation") - 1).
+_ERC1967_IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+
+
+def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None) -> str:
+    """Raw ``eth_getStorageAt``; raises on transport/malformed response.
+    Module-level (like ``_get_code``) so tests can stub the wire."""
+    raw = _rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block_tag], chain_id=chain_id)
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        raise RuntimeError(f"Unexpected eth_getStorageAt result: {raw!r}")
+    return raw
+
+
+def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
+    """The ERC-1967 implementation slot: an implementation address when the
+    slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
+    ``_PROBE_ERROR`` when the read did not dispositively happen."""
+    try:
+        raw = _get_storage_at(rpc_url, address, _ERC1967_IMPLEMENTATION_SLOT, block_tag, chain_id=chain_id)
+    except Exception:
+        return _PROBE_ERROR
+    word = raw[2:].lower().rjust(64, "0")
+    if len(word) != 64 or set(word) - set("0123456789abcdef"):
+        return _PROBE_ERROR
+    if set(word) == {"0"}:
+        return None
+    return "0x" + word[-40:]
+
+
+def _resolve_uiv_shape(
+    rpc_url: str,
+    normalized: str,
+    block_tag: str,
+    upgrade_interface_version: object,
+    owner: object | None,
+    *,
+    chain_id: int | None = None,
+) -> tuple[str, dict[str, object], bool]:
+    """Type an address whose ``UPGRADE_INTERFACE_VERSION()`` answered.
+
+    A successful UIV read selects the OZ-v5 UPGRADE MACHINERY, not a proxy
+    admin: the constant is compiled into ``UUPSUpgradeable`` — so it is
+    answered THROUGH every OZ-v5 UUPS proxy via delegatecall and by every bare
+    UUPS implementation — and into the v5 ``ProxyAdmin`` alike, while the v4
+    ``ProxyAdmin`` (the corpus's genuine one) does not implement it at all.
+    Publishing ``proxy_admin`` off UIV alone therefore typed PROXIES as proxy
+    admins (chain-verified: 5/5 published proxy_admin nodes carried a nonzero
+    ERC-1967 implementation slot; the genuine ProxyAdmin reverts on UIV).
+
+    Discriminators, each earned per read:
+      * ERC-1967 implementation slot nonzero → the address IS a proxy →
+        ``contract`` (NON-terminal: the terminal-principal walk continues
+        through the proxy — its owner()/authority()/admin() delegatecall to the
+        implementation — to the real upgrade authority), details carry the
+        witnessed ``erc1967_implementation``.
+      * slot zero + ``proxiableUUID()`` answers → a bare UUPS implementation →
+        ``contract`` with ``details.uups_implementation``.
+      * slot zero + no ``proxiableUUID()`` + ``owner()`` answered → the OZ-v5
+        ``ProxyAdmin`` shape → ``proxy_admin``, earned.
+      * any discriminator read failing (transport) → ``contract`` with
+        ``had_error`` so the not-determined classification is never cached.
+
+    Returns ``(kind, details, had_probe_error)``.
+    """
+    details: dict[str, object] = {
+        "address": normalized,
+        "upgrade_interface_version": str(upgrade_interface_version),
+    }
+    if owner is not None:
+        details["owner"] = owner
+    impl = _read_erc1967_implementation(rpc_url, normalized, block_tag, chain_id=chain_id)
+    if impl is _PROBE_ERROR:
+        return "contract", details, True
+    if impl is not None:
+        details["erc1967_implementation"] = impl
+        return "contract", details, False
+    raw, state = _eth_call_tristate(rpc_url, normalized, "proxiableUUID()", block_tag, chain_id=chain_id)
+    if state == "error":
+        return "contract", details, True
+    if state == "answered" and raw is not None:
+        try:
+            decoded = _decode_abi_value(raw, "bytes32")
+        except Exception:
+            decoded = None
+        if decoded is not None:
+            details["uups_implementation"] = True
+            return "contract", details, False
+        # Answered but not a bytes32 word — not the UUPS shape, and not the
+        # ProxyAdmin shape either (a v5 ProxyAdmin has no proxiableUUID at
+        # all). Stay a plain contract.
+        return "contract", details, False
+    if owner is not None:
+        return "proxy_admin", details, False
+    return "contract", details, False
+
+
 # Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
 _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
     ("getOwners()", "address[]"),  # 0: Safe
     ("getThreshold()", "uint256"),  # 1: Safe
     ("getMinDelay()", "uint256"),  # 2: Timelock primary
     ("delay()", "uint256"),  # 3: Timelock fallback
-    ("UPGRADE_INTERFACE_VERSION()", "string"),  # 4: ProxyAdmin
+    ("UPGRADE_INTERFACE_VERSION()", "string"),  # 4: OZ-v5 upgrade machinery (see _resolve_uiv_shape)
     ("owner()", "address"),  # 5: Timelock + ProxyAdmin secondary
 )
 
@@ -434,9 +663,19 @@ def _classify_uncached_batched(
         return v
 
     had_error = any(p is _PROBE_ERROR for p in probes)
+    # Negative control (lazy, at most one extra eth_call): a concrete duck-typed
+    # kind is published only when the address does NOT answer a selector nothing
+    # implements. See _negative_control_probe.
+    control_state: list[str | None] = [None]
+
+    def _duck_type_permitted() -> bool:
+        if control_state[0] is None:
+            control_state[0] = _negative_control_probe(rpc_url, normalized, block_tag, chain_id=chain_id)
+        return control_state[0] == "passed"
+
     safe_owners = _ok(safe_owners_raw)
     safe_threshold = _ok(safe_threshold_raw)
-    if safe_owners is not None and safe_threshold is not None:
+    if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
         return (
             "safe",
             {
@@ -450,7 +689,7 @@ def _classify_uncached_batched(
     min_delay = _ok(min_delay_a)
     if min_delay is None:
         min_delay = _ok(min_delay_b)
-    if min_delay is not None:
+    if min_delay is not None and _duck_type_permitted():
         owner = _ok(owner_raw)
         details: dict[str, object] = {"address": normalized, "delay": _coerce_int(min_delay)}
         if owner is not None:
@@ -458,20 +697,23 @@ def _classify_uncached_batched(
         return "timelock", details, had_error
 
     upgrade_interface_version = _ok(upgrade_iv)
-    if upgrade_interface_version is not None:
-        owner = _ok(owner_raw)
-        details = {
-            "address": normalized,
-            "upgrade_interface_version": str(upgrade_interface_version),
-        }
-        if owner is not None:
-            details["owner"] = owner
-        return "proxy_admin", details, had_error
+    if upgrade_interface_version is not None and _duck_type_permitted():
+        kind, details, uiv_err = _resolve_uiv_shape(
+            rpc_url, normalized, block_tag, upgrade_interface_version, _ok(owner_raw), chain_id=chain_id
+        )
+        return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
+        had_error = True
+    if control_state[0] == "failed":
+        # A definitive observation, published so a consumer can tell "plain
+        # contract" from "answers every selector, duck typing withheld".
+        details["duck_type_negative_control"] = "failed"
+    elif control_state[0] == "error":
+        # The control could not be established — not determined, uncached.
         had_error = True
     return "contract", details, had_error
 
@@ -521,9 +763,18 @@ def _classify_uncached(
             return None
         return result
 
+    # Same lazy negative-control gate as the batched path (see
+    # _negative_control_probe): no duck-typed concrete kind without it.
+    control_state: list[str | None] = [None]
+
+    def _duck_type_permitted() -> bool:
+        if control_state[0] is None:
+            control_state[0] = _negative_control_probe(rpc_url, normalized, block_tag, chain_id=chain_id)
+        return control_state[0] == "passed"
+
     safe_owners = _probe("getOwners()", "address[]")
     safe_threshold = _probe("getThreshold()", "uint256")
-    if safe_owners is not None and safe_threshold is not None:
+    if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
         return (
             "safe",
             {
@@ -537,7 +788,7 @@ def _classify_uncached(
     min_delay = _probe("getMinDelay()", "uint256")
     if min_delay is None:
         min_delay = _probe("delay()", "uint256")
-    if min_delay is not None:
+    if min_delay is not None and _duck_type_permitted():
         owner = _probe("owner()", "address")
         details: dict[str, object] = {"address": normalized, "delay": _coerce_int(min_delay)}
         if owner is not None:
@@ -545,20 +796,21 @@ def _classify_uncached(
         return "timelock", details, had_error
 
     upgrade_interface_version = _probe("UPGRADE_INTERFACE_VERSION()", "string")
-    if upgrade_interface_version is not None:
+    if upgrade_interface_version is not None and _duck_type_permitted():
         owner = _probe("owner()", "address")
-        details = {
-            "address": normalized,
-            "upgrade_interface_version": str(upgrade_interface_version),
-        }
-        if owner is not None:
-            details["owner"] = owner
-        return "proxy_admin", details, had_error
+        kind, details, uiv_err = _resolve_uiv_shape(
+            rpc_url, normalized, block_tag, upgrade_interface_version, owner, chain_id=chain_id
+        )
+        return kind, details, had_error or uiv_err
 
     details = {"address": normalized}
     try:
         details.update(type_authority_contract(rpc_url, normalized, block_tag, chain_id=chain_id))
     except Exception:
+        had_error = True
+    if control_state[0] == "failed":
+        details["duck_type_negative_control"] = "failed"
+    elif control_state[0] == "error":
         had_error = True
     return "contract", details, had_error
 
@@ -823,6 +1075,13 @@ def build_control_snapshot(
         cid, entry = outcome
         if entry is None:
             continue
+        # Carry the static provenance onto the resolved value. Every branch of
+        # ``_compute_controller`` (including the eth_call_error one) gets it:
+        # whether the address gates the caller is a static fact and does not
+        # depend on whether the read succeeded.
+        provenance = _controller.get("authority_provenance") if isinstance(_controller, dict) else None
+        if provenance:
+            entry["authority_provenance"] = provenance
         controller_values[cid] = entry
 
     if beacon_address:

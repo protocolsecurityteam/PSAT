@@ -20,7 +20,8 @@ Branches covered (each tested in batched and sequential mode):
 3. Safe → ("safe", {owners, threshold}, ...).
 4. Timelock via getMinDelay → ("timelock", {delay, optional owner}, ...).
 5. Timelock via fallback delay() → same shape.
-6. ProxyAdmin via UPGRADE_INTERFACE_VERSION → ("proxy_admin", {...}, ...).
+6. OZ-v5 ProxyAdmin shape (UIV + zero 1967 slot + no proxiableUUID +
+   owner) → ("proxy_admin", {...}, ...).
 7. Generic contract (every probe absent) → ("contract", {address, ...}, ...).
 8. Generic contract WITH per-probe RPC error → had_error=True (cacheable=False).
 9. Whole-batch RPC failure → had_error=True (matches sequential where
@@ -106,6 +107,10 @@ def _probe_responses_for(scenario: str) -> dict[str, str]:
             "owner()": _abi_encode_address(ADDR_OWNER),
         }
     if scenario == "proxy_admin":
+        # The OZ-v5 ProxyAdmin shape: UIV answers, the ERC-1967 implementation
+        # slot is zero (default "storage"), proxiableUUID() is absent, owner()
+        # answers. A UIV answer with a NONZERO slot is a UUPS proxy, not a
+        # proxy admin — covered in test_classify_uiv_shape.py.
         return {
             "UPGRADE_INTERFACE_VERSION()": _abi_encode_string("5.0.0"),
             "owner()": _abi_encode_address(ADDR_OWNER),
@@ -127,6 +132,8 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
 
     def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         raw = probe_map.get(signature, "0x")
+        if raw == "revert":
+            raise RuntimeError("execution reverted")
         return raw
 
     def _fake_type_authority(*_a, **_kw):
@@ -136,6 +143,9 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
 
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
+    # ERC-1967 slot read (the UIV-arm discriminator): zero word unless the
+    # scenario provides one under the "storage" key.
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
@@ -170,8 +180,17 @@ def _mock_batched(
             raise RuntimeError("type_authority blew up")
         return {}
 
+    # The lazy negative-control probe rides _eth_call_raw on every path.
+    def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
+        raw = probe_map.get(signature, "0x")
+        if raw == "revert":
+            raise RuntimeError("execution reverted")
+        return raw
+
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)
+    monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
 
@@ -324,6 +343,8 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
 
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch)
+    # Negative control (lazy _eth_call_raw): empty return → control passes.
+    monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
     kind, details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
     assert kind == "safe"
@@ -530,8 +551,19 @@ def _run_multicall(
             out.append((True, raw_bytes))
         return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
 
+    # The lazy negative-control probe goes through _eth_call_raw (module-bound
+    # _rpc_request, not the utils.rpc attribute patched above) — stub it at the
+    # same probe_map layer so control behavior is scenario-driven.
+    def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
+        raw = probe_map.get(signature, "0x")
+        if raw == "revert":
+            raise RuntimeError("execution reverted")
+        return raw
+
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
+    monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(rpc_mod, "rpc_request", _fake_rpc_request)
     return _classify_uncached_batched("https://rpc.example", "0x" + "ab" * 20, "latest")
@@ -581,6 +613,8 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
+    # Negative control (lazy _eth_call_raw): empty return → control passes.
+    monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))
 
     def _safe_batch(_rpc_url, _calls, chain_id=None):

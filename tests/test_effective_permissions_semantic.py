@@ -1,10 +1,10 @@
-"""Wave 3 Track B.1 — per-kind row representation tests for the semantic
+"""Per-kind row representation tests for the semantic
 ``build_effective_permissions`` + ``write_effective_function_rows``
 pipeline.
 
 Each test fabricates a ``CapabilityExpr`` directly and asserts the
 resulting ``EffectiveFunction`` columns and ``FunctionPrincipal`` row
-counts match the Option A table:
+counts match the table below:
 
 | kind                          | EF columns                       | FP rows |
 |-------------------------------|----------------------------------|---------|
@@ -92,10 +92,12 @@ class _TEffectiveFunction(_TestBase):
     effect_targets = Column(JSON)
     action_summary = Column(Text)
     authority_public = Column(Boolean, default=False)
+    authority_openness = Column(String(20))
     authority_roles = Column(JSON)
     capability_expr = Column(JSON)
     conditions = Column(JSON)
     status = Column(String(50))
+    claims = Column(JSON)
     principals = relationship(
         "_TFunctionPrincipal",
         backref="function",
@@ -778,3 +780,162 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
     )
     db_session.commit()
     assert _ef_row(db_session).abi_signature == "doThing()"
+
+
+# ---------------------------------------------------------------------------
+# authority_openness — the three-state split of the authority_public bool
+# ``authority_public=False`` reported a WITNESSED caller
+# restriction and "the authority could not be determined" with one value.
+# ---------------------------------------------------------------------------
+
+
+def _openness(session) -> str | None:
+    return _ef_row(session).authority_openness
+
+
+def test_openness_open_on_conditional_universal(db_session) -> None:
+    cap = CapabilityExpr.conditional_universal(Condition(kind="time", description="after cooldown"))
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_public is True
+    assert row.authority_openness == "open"
+
+
+def test_openness_restricted_on_resolved_finite_set(db_session) -> None:
+    cap = CapabilityExpr.finite_set(["0x" + "a" * 40])
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_public is False
+    assert row.authority_openness == "restricted"
+
+
+def test_openness_restricted_on_witnessed_empty_set(db_session) -> None:
+    # ``resolved_empty`` is a WITNESSED restriction (a complete enumeration that
+    # admits nobody) — the same bucket as a populated set, not not-determined.
+    cap = CapabilityExpr.finite_set([], quality="exact")
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.status == "resolved_empty"
+    assert row.authority_openness == "restricted"
+
+
+def test_openness_not_determined_on_unsupported(db_session) -> None:
+    cap = CapabilityExpr.unsupported("guard_extraction_uncertain")
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_public is False
+    assert row.status == "unsupported"
+    assert row.authority_openness == "not_determined"
+
+
+def test_openness_not_determined_on_external_check_only(db_session) -> None:
+    # The exact collapse the bool caused: a probe interface with no enumeration
+    # got the same ``False`` a fully-resolved gated function gets.
+    from services.resolution.capabilities import ExternalCheck
+
+    cap = CapabilityExpr.external_check_only(
+        ExternalCheck(target_address="0x" + "b" * 40, target_call_selector="0xdeadbeef")
+    )
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_public is False
+    assert row.authority_openness == "not_determined"
+
+
+def test_openness_null_when_no_producer_said(db_session) -> None:
+    # A record from a caller that does not carry the key leaves the column NULL:
+    # "this producer could not say" is a FOURTH state and must not be folded
+    # into the resolver's own 'not_determined'.
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function=None,
+    )
+    assert _ef_row(db_session).authority_openness is None
+
+
+def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
+    """The column stops being the literal [] — a single-role
+    Solmate capability persists a real (role, principals) grant."""
+    cap = {
+        "kind": "finite_set",
+        "members": ["0x" + "a" * 40],
+        "membership_quality": "exact",
+        "confidence": "enumerable",
+        "trace": [{"step": "solmate_roles_authority", "roles": [8], "authority": "0x" + "1" * 40}],
+    }
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    row = _ef_row(db_session)
+    assert row.authority_roles is not None
+    assert [g["role"] for g in row.authority_roles] == [8]
+    assert [p["address"] for g in row.authority_roles for p in g["principals"]] == ["0x" + "a" * 40]
+
+
+def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
+    """Role-gated with the role NOT determined must persist NULL, not [] —
+    ``[]`` is the proven-absent answer and would erase the middle state."""
+    cap = {
+        "kind": "finite_set",
+        "members": ["0x" + "a" * 40],
+        "membership_quality": "exact",
+        "trace": [{"step": "enumerable_role_store", "authority": "0x" + "1" * 40}],
+    }
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    assert _ef_row(db_session).authority_roles is None
+
+
+def test_authority_roles_empty_when_proven_not_role_gated(db_session) -> None:
+    cap = CapabilityExpr.finite_set(["0x" + "a" * 40])
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function={"f()": cap},
+    )
+    assert _ef_row(db_session).authority_roles == []
+
+
+def test_authority_roles_null_when_no_capability_resolved(db_session) -> None:
+    write_effective_function_rows(
+        db_session,
+        contract_id=1,
+        function_records=[_fn_record("f()")],
+        capability_by_function=None,
+    )
+    assert _ef_row(db_session).authority_roles is None

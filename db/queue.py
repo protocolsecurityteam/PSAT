@@ -34,8 +34,10 @@ from .models import (
 )
 from .storage import (
     StorageError,
+    StorageKeyAbsent,
     StorageKeyMissing,
     artifact_key,
+    content_shortfall,
     deserialize_artifact,
     get_storage_client,
     serialize_artifact,
@@ -104,7 +106,7 @@ def record_heartbeat(process: str, *, status: str = "running", detail: dict[str,
         logger.debug("heartbeat write failed for process=%s", process, exc_info=True)
 
 
-# Default lifetime of a daemon-pass lease. Chosen (per design §2.4) to exceed
+# Default lifetime of a daemon-pass lease. Chosen to exceed
 # ~3× the worst scan window and the RPC client timeout, so a stalled getLogs
 # rarely outlives the lease and lets a competitor steal it mid-pass.
 DEFAULT_DAEMON_LEASE_TTL_S = int(os.getenv("PSAT_DAEMON_LEASE_TTL_S", "120"))
@@ -304,7 +306,7 @@ def _job_chain_name(job: Job) -> str:
     """Canonical chain name of *job*, from the first-class ``chain_id`` column
     (falling back to the request chain; mainnet when underivable). Used to
     chain-qualify Contract lookups tied to a specific job so a same-address
-    deployment on another chain can never stand in (inv. 12)."""
+    deployment on another chain can never stand in."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         try:
@@ -316,7 +318,7 @@ def _job_chain_name(job: Job) -> str:
 
 
 def _mainnet_coalesced_chain(chain: str | None) -> str:
-    """Mainnet-coalesced dedup key (invariants 1/6/12).
+    """Mainnet-coalesced dedup key.
 
     Legacy rows persisted ``chain=NULL`` for mainnet, so coalescing
     ``NULL``→``'ethereum'`` lets a mainnet write dedup against them while a
@@ -348,9 +350,9 @@ def bulk_upsert_discovered_contracts(
     *default_chain* is the job's chain (derived from ``Job.chain_id`` via the
     registry): an entry that carries no evidence chain of its own inherits it
     so no writer persists ``chain=NULL`` and mints a duplicate against a sibling
-    writer's ``'ethereum'`` stub (NULL ≠ NULL defeats ``uq_contract_address_chain``
-    — invariants 1/6/12). The ``'unknown'`` resolve-later sentinel is a real
-    chain bucket, not absent evidence, so it is preserved, never coerced.
+    writer's ``'ethereum'`` stub (NULL ≠ NULL defeats ``uq_contract_address_chain``).
+    The ``'unknown'`` resolve-later sentinel is a real chain bucket, not absent
+    evidence, so it is preserved, never coerced.
 
     Commit is the caller's responsibility — typical use is one bulk call
     per discovery source followed by a single commit.
@@ -464,7 +466,7 @@ def upsert_discovered_contract(
     registry); an entry carrying no evidence chain inherits it so no writer
     persists ``chain=NULL`` and mints a duplicate against a sibling writer's
     ``'ethereum'`` stub. Shares the mainnet-coalesced dedup key with
-    :func:`bulk_upsert_discovered_contracts` (invariants 1/6/12).
+    :func:`bulk_upsert_discovered_contracts`.
 
     Commit is the caller's responsibility — callers usually batch many
     upserts into one transaction.
@@ -1124,7 +1126,16 @@ def count_analysis_children(session: Session, root_job_id: str) -> int:
 
 
 def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
-    """Resolve an Artifact row to its decoded payload (handles inline + storage)."""
+    """Resolve an Artifact row to its decoded payload (handles inline + storage).
+
+    Three outcomes, deliberately distinguishable:
+      * a value — the body was read;
+      * ``StorageKeyMissing`` — the row names a key and no object exists at any
+        candidate for it (proven-absent);
+      * ``StorageKeyAbsent`` — the row names no key and holds no inline body, so
+        whether a body exists is not determined.
+    ``None`` is returned only when the row genuinely stores a null payload.
+    """
     if artifact.storage_key:
         client = get_storage_client()
         if client is None:
@@ -1135,7 +1146,9 @@ def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
         return deserialize_artifact(body, artifact.content_type)
     if artifact.data is not None:
         return artifact.data
-    return artifact.text_data
+    if artifact.text_data is not None:
+        return artifact.text_data
+    raise StorageKeyAbsent(f"Artifact {artifact.name} on job {artifact.job_id} has no storage_key and no inline body")
 
 
 def _mirror_contract_flags_to_job(session: Session, job_id: Any, name: str, data: Any) -> None:
@@ -1151,7 +1164,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
     """Upsert an artifact for a job (unique on job_id + name).
 
     When ``ARTIFACT_STORAGE_*`` env vars are set, the body is written to object
-    storage and only metadata (storage_key, size_bytes, content_type) is stored
+    storage and only metadata (storage_key, stored_object_size_bytes, content_type) is stored
     in Postgres. Otherwise, the body lives inline in ``data`` / ``text_data``.
 
     If the storage put succeeds but the DB write fails, the storage object is
@@ -1174,7 +1187,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
             data=None,
             text_data=None,
             storage_key=key,
-            size_bytes=len(body),
+            stored_object_size_bytes=len(body),
             content_type=content_type,
         )
         stmt = stmt.on_conflict_do_update(
@@ -1183,7 +1196,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
                 "data": None,
                 "text_data": None,
                 "storage_key": stmt.excluded.storage_key,
-                "size_bytes": stmt.excluded.size_bytes,
+                "stored_object_size_bytes": stmt.excluded.stored_object_size_bytes,
                 "content_type": stmt.excluded.content_type,
             },
         )
@@ -1213,7 +1226,7 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
             "data": stmt.excluded.data,
             "text_data": stmt.excluded.text_data,
             "storage_key": None,
-            "size_bytes": None,
+            "stored_object_size_bytes": None,
             "content_type": None,
         },
     )
@@ -1262,15 +1275,38 @@ def backfill_job_is_proxy_from_storage(session: Session) -> int:
 def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     """Read all artifacts for a job. Returns {name: data_or_text}.
 
-    Storage-backed bodies are fetched in parallel via ``StorageClient.get_many``
-    so a job with N storage artifacts pays one HTTP round-trip's worth of
-    latency instead of N. Missing keys are skipped (mirrors the prior
-    ``StorageKeyMissing`` behavior).
+    Storage-backed bodies are fetched in parallel via
+    ``StorageClient.get_many_results`` so a job with N storage artifacts pays
+    one HTTP round-trip's worth of latency instead of N.
+
+    **Fails closed.** If any row's body could not be read this raises rather
+    than returning a short dict. A short dict is byte-identical to "this job
+    produced fewer artifacts", so a bucket outage rendered as *"this analysis
+    has no effective_permissions"* — the substitution of an unanswered question
+    for a proven negative.
+
+    That includes the keyless row — a row with no ``storage_key`` and no inline
+    body, which ``_artifact_row_to_value`` raises ``StorageKeyAbsent`` for on
+    the single-row path. It is the *third* state (nothing was ever addressed,
+    so whether a body exists is not determined), and this function used to drop
+    it from the returned dict with no exception and no shortfall entry — a
+    silence one call away from ``/api/analyses/{id}``, which publishes exactly
+    these two maps.
+
+    Which exception says *why*, and the type is load-bearing because it is all
+    ``workers.retry_policy`` gets to see: ``StorageContentAbsent`` (every
+    shortfall proven absent at every candidate — determined, terminal) or
+    ``StorageContentNotDetermined`` (at least one body we could not ask about —
+    transient). Both carry ``values`` (what did read) plus the two shortfall
+    maps, so a caller that may legitimately degrade opts in explicitly and
+    publishes them beside it; see ``services/aggregations/analysis_detail``.
     """
     stmt = select(Artifact).where(Artifact.job_id == job_id)
     artifacts = session.execute(stmt).scalars().all()
     result: dict[str, Any] = {}
     storage_lookups: dict[str, tuple[str, str | None]] = {}
+    proven_absent: dict[str, str] = {}
+    not_determined: dict[str, str] = {}
     for artifact in artifacts:
         if artifact.storage_key:
             storage_lookups[artifact.name] = (artifact.storage_key, artifact.content_type)
@@ -1278,19 +1314,55 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
             result[artifact.name] = artifact.data
         elif artifact.text_data is not None:
             result[artifact.name] = artifact.text_data
+        else:
+            # No key and no inline body: the same row shape ``_artifact_row_to_value``
+            # raises ``StorageKeyAbsent`` for. Not determined, never absent —
+            # dropping it here made a row that exists and a name the job never
+            # emitted the same answer.
+            not_determined[artifact.name] = (
+                "row records no storage_key and holds no inline body — whether a body exists is not determined"
+            )
 
     if storage_lookups:
         client = get_storage_client()
         if client is None:
             raise RuntimeError(f"job {job_id} has artifacts with storage_key but storage is not configured")
-        bodies = client.get_many([key for key, _ in storage_lookups.values()])
+        reads = client.get_many_results([key for key, _ in storage_lookups.values()])
         for name, (key, content_type) in storage_lookups.items():
-            body = bodies.get(key)
-            if body is None:
+            read = reads.get(key)
+            if read is None or not read.read:
+                # ``BlobRead`` already separated "the bucket answered, and holds
+                # no such object" from "the bucket could not be asked". Keep them
+                # in separate maps: which one it is decides both what the API may
+                # publish and whether the job is worth retrying.
+                if read is not None and read.proven_absent:
+                    proven_absent[name] = f"no object at any candidate for {key}"
+                else:
+                    not_determined[name] = f"could not read {key}: {read.error if read is not None else 'not fetched'}"
                 continue
-            value = deserialize_artifact(body, content_type)
+            assert read.body is not None
+            value = deserialize_artifact(read.body, content_type)
             if value is not None:
                 result[name] = value
+
+    short = {**proven_absent, **not_determined}
+    if short:
+        logger.error(
+            "get_all_artifacts: job %s has %d/%d artifact bodies unread (%d proven absent, %d not determined): %s",
+            job_id,
+            len(short),
+            len(artifacts),
+            len(proven_absent),
+            len(not_determined),
+            ", ".join(sorted(short)),
+        )
+        raise content_shortfall(
+            f"job {job_id}: {len(short)}/{len(artifacts)} artifact bodies could not be read "
+            f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
+            values=result,
+            proven_absent=proven_absent,
+            not_determined=not_determined,
+        )
 
     return result
 
@@ -1370,13 +1442,31 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
 
 
 def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
-    """Returns {relative_path: file_content} for all source files of a job."""
+    """Returns {relative_path: file_content} for all source files of a job.
+
+    **Fails closed** on an unreadable body, raising ``StorageContentAbsent``
+    (every unread body proven absent at every candidate — determined, terminal)
+    or ``StorageContentNotDetermined`` (at least one we could not ask about —
+    transient), each carrying ``values`` (the files that did read) plus the
+    ``proven_absent`` / ``not_determined`` maps of path → why.
+
+    A row recording neither a key nor inline content is counted as
+    ``not_determined`` for the same reason: the row is evidence the path
+    belongs to the contract, and nothing was ever addressed for it.
+
+    Silently returning the short dict made "this contract has no source" and
+    "every body failed to load" the same answer, and the consumers act on it:
+    ``workers.static_worker`` compiles whatever it is handed, so a partial read
+    became a static analysis over a partial contract with no record that
+    anything was missing.
+    """
     stmt = select(SourceFile).where(SourceFile.job_id == job_id)
     rows = session.execute(stmt).scalars().all()
     out: dict[str, str] = {}
     client = get_storage_client()
 
     storage_rows: list[tuple[str, str]] = []
+    keyless: dict[str, str] = {}
     for row in rows:
         if row.storage_key:
             if client is None:
@@ -1386,8 +1476,30 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
             storage_rows.append((row.path, row.storage_key))
         elif row.content is not None:
             out[row.path] = row.content
+        else:
+            # Neither a key nor a body: the row exists, so this path is part of
+            # the contract, but nothing was ever addressed for it. Not
+            # determined. Dropping it handed the static worker a source tree
+            # that silently omits a file — the same shape as the storage
+            # shortfall below, one branch earlier.
+            keyless[row.path] = "row records no storage_key and holds no inline content — content is not determined"
 
     if not storage_rows:
+        if keyless:
+            logger.error(
+                "get_source_files: job %s read %d/%d source files; %d rows record neither key nor content",
+                job_id,
+                len(out),
+                len(rows),
+                len(keyless),
+            )
+            raise content_shortfall(
+                f"job {job_id}: {len(keyless)}/{len(rows)} source bodies could not be read "
+                f"(0 proven absent, {len(keyless)} not determined)",
+                values=out,
+                proven_absent=None,
+                not_determined=keyless,
+            )
         return out
 
     # Fan out the storage GETs the same way ``store_source_files`` fans out
@@ -1400,20 +1512,50 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
     storage_client = client
     assert storage_client is not None
 
-    def _fetch(item: tuple[str, str]) -> tuple[str, str | None]:
+    def _fetch(item: tuple[str, str]) -> tuple[str, str | StorageError]:
+        # Returns the body, or the storage error itself — the caller sorts by
+        # error type. Flattening a lost object and an unreachable bucket into
+        # one "unreadable" here is what made the whole read report as transient
+        # while the same key read directly reported terminal.
         path, key = item
         try:
             return path, storage_client.get(key).decode("utf-8")
-        except StorageKeyMissing:
-            return path, None
+        except StorageError as exc:
+            logger.error("get_source_files: job %s path %s unreadable: %s", job_id, path, exc)
+            return path, exc
 
     fetch_results = parallel_map(_fetch, storage_rows)
-    for _item, outcome in fetch_results:
+    proven_absent: dict[str, str] = {}
+    not_determined: dict[str, str] = dict(keyless)
+    for item, outcome in fetch_results:
         if isinstance(outcome, BaseException):
             raise outcome
         path, content = outcome  # type: ignore[misc]
-        if content is not None:
-            out[path] = content
+        if isinstance(content, StorageKeyMissing):
+            proven_absent[path] = f"no object at any candidate for {item[1]}"
+            continue
+        if isinstance(content, StorageError):
+            not_determined[path] = f"could not read {item[1]}: {content}"
+            continue
+        out[path] = content
+    short = {**proven_absent, **not_determined}
+    if short:
+        logger.error(
+            "get_source_files: job %s read %d/%d source files; %d bodies unread (%d proven absent, %d not determined)",
+            job_id,
+            len(out),
+            len(rows),
+            len(short),
+            len(proven_absent),
+            len(not_determined),
+        )
+        raise content_shortfall(
+            f"job {job_id}: {len(short)}/{len(rows)} source bodies could not be read "
+            f"({len(proven_absent)} proven absent, {len(not_determined)} not determined)",
+            values=out,
+            proven_absent=proven_absent,
+            not_determined=not_determined,
+        )
     return out
 
 
@@ -1552,7 +1694,7 @@ def find_completed_static_cache(
         )
         if chain is not None:
             # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain
-            # rows; a non-mainnet lookup stays isolated (invariants 1/6/12).
+            # rows; a non-mainnet lookup stays isolated.
             contract_stmt = contract_stmt.where(
                 func.lower(func.coalesce(Contract.chain, "ethereum"))
                 == _mainnet_coalesced_chain(canonical_chain(chain))
@@ -1630,7 +1772,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         # static tables landed; contract_analysis proves the analysis (not a
         # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
         # another chain can carry different source, so the donor job must pair
-        # with its own chain's row (inv. 12).
+        # with its own chain's row.
         donor_contract = session.execute(
             select(Contract)
             .join(ContractSummary, ContractSummary.contract_id == Contract.id)
@@ -1719,7 +1861,7 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
     )
     if chain is not None:
         # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        # a non-mainnet lookup stays isolated.
         stmt = stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(canonical_chain(chain))
         )
@@ -1768,7 +1910,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     )
     if src_chain is not None:
         # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated (invariants 1/6/12).
+        # a non-mainnet lookup stays isolated.
         src_contract_stmt = src_contract_stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum"))
             == _mainnet_coalesced_chain(canonical_chain(src_chain))
@@ -1831,7 +1973,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
                 data=None,
                 text_data=None,
                 storage_key=new_key,
-                size_bytes=art.size_bytes,
+                stored_object_size_bytes=art.stored_object_size_bytes,
                 content_type=art.content_type,
             )
             stmt = stmt.on_conflict_do_update(
@@ -1840,7 +1982,7 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
                     "data": None,
                     "text_data": None,
                     "storage_key": stmt.excluded.storage_key,
-                    "size_bytes": stmt.excluded.size_bytes,
+                    "stored_object_size_bytes": stmt.excluded.stored_object_size_bytes,
                     "content_type": stmt.excluded.content_type,
                 },
             )
@@ -1900,7 +2042,7 @@ def copy_static_cache_cross_chain(
 
     # Chain-qualified on the donor job's own chain: a CREATE2 same-address
     # deployment on another chain can carry different source, and its
-    # summary/roles must never be the ones copied (inv. 12).
+    # summary/roles must never be the ones copied.
     donor_contract = session.execute(
         select(Contract)
         .join(ContractSummary, ContractSummary.contract_id == Contract.id)

@@ -216,6 +216,15 @@ class PostgresEventLogRepo:
         if not hints_by_topic:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
+        # Same-topic0 add/remove conflicts fold from the event payload; a
+        # conflict with no payload position poisons the whole var's fold (any
+        # such event may have removed a member another topic added), so it
+        # fails closed rather than folding a hint-order artifact.
+        fold_modes, ambiguous = _topic_fold_modes(hints_by_topic)
+        if ambiguous:
+            _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="postgres")
+            return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
+
         topic0s = sorted(hints_by_topic)
         cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         # Fold rows up to the HIGHEST per-topic index frontier (every topic's rows
@@ -239,12 +248,23 @@ class PostgresEventLogRepo:
             q = q.where(IndexedEventLog.block_number <= row_ceiling)
 
         state: dict[str, bool] = {}
+        undecidable_row = False
         for row in self.session.execute(q).scalars():
             topic0 = str(row.topic0).lower()
-            for hint in hints_by_topic.get(topic0, []):
+            mode = fold_modes.get(topic0)
+            if mode is None:
+                continue
+            mode_kind, value_hint = mode
+            topics = row.topics or []
+            data_words = row.data_words or []
+            # Payload mode reads ONE hint (the conflicted hints describe the
+            # same event; the value word decides). Uniform mode keeps the
+            # historical union over every hint's key extraction.
+            row_hints = [value_hint] if mode_kind == "payload" else hints_by_topic.get(topic0, [])
+            for hint in row_hints:
                 event_keys = _event_keys(
-                    row.topics or [],
-                    row.data_words or [],
+                    topics,
+                    data_words,
                     hint.get("topics_to_keys") or {},
                     hint.get("data_to_keys") or {},
                 )
@@ -253,7 +273,22 @@ class PostgresEventLogRepo:
                 member = _word_to_address(event_keys.get(member_key))
                 if member is None:
                     continue
-                state[member] = hint["direction"] == "add"
+                if mode_kind == "payload":
+                    present = _payload_membership(topics, data_words, hint)
+                    if present is None:
+                        # A conflicted event whose payload word cannot be read
+                        # on this row leaves that member's state — and
+                        # therefore the var's member set — undetermined.
+                        undecidable_row = True
+                        break
+                else:
+                    present = hint["direction"] == "add"
+                state[member] = present
+            if undecidable_row:
+                break
+        if undecidable_row:
+            _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="postgres")
+            return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
         # As in fold_event_writes: a topic counts as indexed only when its
         # backfill is complete, not merely because its cursor advanced past 0.
@@ -508,6 +543,62 @@ def _event_hints_by_topic(event_hints: list[dict[str, Any]]) -> dict[str, list[d
             continue
         out.setdefault(topic0, []).append(hint)
     return out
+
+
+def _topic_fold_modes(
+    hints_by_topic: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, tuple[str, dict[str, Any]]], bool]:
+    """Per-topic membership-fold decision for an add/remove event fold.
+
+    A topic0 whose hints all agree on ``direction`` folds from the hint
+    (``("hint", first_hint)``). A topic0 carrying BOTH directions is one event
+    emitted by both the grant and the revoke writer — direction is then a
+    property of the EVENT PAYLOAD, not of whichever hint a list ordered last:
+    fold from the assigned-value word at the hint's own ``value_position``
+    (``("payload", value_hint)``).
+
+    A conflicted topic0 with no usable ``value_position`` is undecidable: no
+    row of that event supports any membership conclusion, and because every
+    hint here writes the same storage var, membership of the WHOLE var is
+    undetermined. Returns ``ambiguous=True`` so the caller fails the fold
+    closed (``partial`` / ``ambiguous_event_direction``) instead of publishing
+    a hint-order artifact as a member set.
+    """
+    modes: dict[str, tuple[str, dict[str, Any]]] = {}
+    ambiguous = False
+    for topic0, hints in hints_by_topic.items():
+        directions = {h.get("direction") for h in hints}
+        if len(directions) <= 1:
+            modes[topic0] = ("hint", hints[0])
+            continue
+        value_hint = next((h for h in hints if h.get("value_position") is not None), None)
+        if value_hint is None:
+            ambiguous = True
+            continue
+        modes[topic0] = ("payload", value_hint)
+    return modes, ambiguous
+
+
+def _payload_membership(
+    topics: list[str],
+    data_words: list[str],
+    value_hint: dict[str, Any],
+) -> bool | None:
+    """Membership boolean carried in the event's own payload: the assigned
+    value word at ``value_position`` (nonzero == present). ``None`` when the
+    word cannot be read from this row — the caller must treat that row as
+    undecidable, never default a direction."""
+    try:
+        position = int(value_hint["value_position"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    word = _word_at_event_arg(topics, data_words, position, value_hint)
+    if word is None:
+        return None
+    try:
+        return int(word, 16) != 0
+    except ValueError:
+        return None
 
 
 def _value_hints_by_topic(value_hints: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

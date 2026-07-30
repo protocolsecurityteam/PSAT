@@ -12,18 +12,14 @@ from schemas.contract_analysis import (
     ContractClassification,
     ControlModel,
     PausabilityAnalysis,
-    RiskLevel,
     RoleDefinition,
     SemanticControlAnalysis,
-    SlitherFinding,
-    SlitherSummary,
     TimelockAnalysis,
     TrackingHint,
     UpgradeabilityAnalysis,
 )
 
 from .constants import (
-    SEVERITY_ORDER,
     STANDARD_EVENTS,
     STANDARD_SIGNATURES,
 )
@@ -672,9 +668,24 @@ def _detect_contract_classification(
     functions_by_signature = {
         getattr(function, "full_name", function.name): function for function in _entry_points(contract)
     }
+    # ``is_factory`` is the only field here that is NOT derived from the IR: it
+    # is read off the effects artifact's ``contract_creation`` sinks. When that
+    # artifact is degraded (``core`` substitutes ``{"schema_version", "error"}``
+    # if ``build_effects`` raises) there is no sink list to be empty, and
+    # ``false`` would assert that a contract deploys nothing on the strength of
+    # never having looked.
+    #
+    # The other fields ARE IR-derived -- ``contract.ercs()` plus a
+    # signature/event match -- and run on every parse regardless of the Slither
+    # DETECTOR pass, which has never run in this pipeline. So ``standards: []``
+    # is a measured absence, not a silent one: it is non-empty on 31 of the 88
+    # local contracts and covers every real token among them (EETH, WeETH,
+    # Lido, FiatTokenV2_2, WithdrawRequestNFT...). Nulling it would suppress a
+    # true negative, so it stays a list.
+    effects_available = isinstance(effects, Mapping) and isinstance(effects.get("functions"), Mapping)
     factory_functions = []
     evidence = []
-    if isinstance(effects, dict):
+    if effects_available and effects is not None:
         for signature, info in (effects.get("functions") or {}).items():
             if not isinstance(signature, str) or not isinstance(info, dict):
                 continue
@@ -695,8 +706,8 @@ def _detect_contract_classification(
         "is_erc721": "ERC721" in standards,
         "is_erc1155": "ERC1155" in standards,
         "is_nft": "ERC721" in standards or "ERC1155" in standards,
-        "is_factory": bool(factory_functions),
-        "factory_functions": sorted(factory_functions),
+        "is_factory": bool(factory_functions) if effects_available else None,
+        "factory_functions": sorted(factory_functions) if effects_available else None,
         "evidence": evidence,
     }
 
@@ -858,12 +869,130 @@ def _detect_upgradeability(
     }
 
 
+def _claims_plane_ran(effects: Mapping[str, Any] | None) -> bool:
+    """Did the Plane-1 claims matcher complete and write onto this artifact?
+
+    ``core`` runs the two planes under **separate** ``try``/``except`` blocks —
+    ``build_effects`` at ``core.py:225-235`` and
+    ``build_claims``/``attach_claims_to_effects``/``project_effect_labels`` at
+    ``core.py:243-253``, the latter with its own ``record_degraded(phase=
+    "claims")``. So a fully populated ``functions`` map proves the **effects**
+    plane ran and says nothing about the claims plane: when only the second
+    block raises, every record is present and every record is claim-free.
+
+    The discriminator is the ``claims`` KEY, not its contents.
+    ``attach_claims_to_effects`` sets ``record["claims"]`` on every function
+    record — to ``[]`` where the function earned no claim — and
+    ``build_effects`` never emits the key, so its presence is exactly "the
+    claims matcher completed". Its *absence* is why a detector that can only
+    see a latch/timelock through claims must answer not-determined rather than
+    ``false``.
+
+    An artifact with no externally-observable functions at all is likewise
+    not-determined: there is no record to carry the key, so nothing here can
+    tell a clean claims run from a missing one.
+
+    **Scope of what this proves.** The key proves the matcher *completed*; it
+    does not prove the matcher could *see* anything, because its own inputs
+    come from a third plane ``core`` degrades separately
+    (:func:`_predicate_trees_plane_ran`). A detector whose evidence is only
+    reachable through the trees must test that plane too."""
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return False
+    return any(isinstance(record, Mapping) and "claims" in record for record in functions.values())
+
+
+def _predicate_trees_plane_ran(predicate_trees: Mapping[str, Any] | None) -> bool:
+    """Did the Plane-0 predicate-tree stage complete?
+
+    ``core`` degrades **three** planes under separate ``try``/``except``, not
+    two: ``predicate_trees`` (``core.py:206-221``,
+    ``record_degraded(phase="predicate_trees_emit")``), ``effects``
+    (``:225-235``) and ``claims`` (``:243-253``). The first is an *input* to
+    ``build_claims``, and its degradation is invisible on the output side:
+    ``attach_claims_to_effects``
+    (``services/static/claims/builder.py:79-81``) writes ``record["claims"]``
+    on **every** record, so a matcher that ran blind on the degraded stub is
+    indistinguishable, by the ``claims`` key alone, from one that ran on real
+    trees. The same stage also owns ``apply_reentrancy_pause_pass``
+    (``predicate_artifacts.py:383``), so on that path the structural pause
+    detector and the claims pause detector go blind *together* and every
+    pausable contract reads ``is_pausable`` false.
+
+    Discriminator: the ``trees`` KEY. The real builder always emits it
+    (``predicate_artifacts.py:404-407``; ``{}`` for a contract with no guards
+    is a legitimate ran-and-found-nothing), and ``core``'s degraded stub —
+    ``{"schema_version": "semantic", "error": <str>}`` — never does. The
+    ``error`` key is rejected independently so a stub that later grows a
+    ``trees`` key still cannot pass as a completed run.
+
+    ``None`` (nobody threaded the artifact in) is not-determined, not ran: an
+    omitted argument must never be able to manufacture a proven absence."""
+    if not isinstance(predicate_trees, Mapping):
+        return False
+    if "error" in predicate_trees:
+        return False
+    return isinstance(predicate_trees.get("trees"), Mapping)
+
+
+_PAUSE_CLAIM_POLARITY = {"pause.set": "pause", "pause.unset": "unpause"}
+
+
+def _pause_claims(effects: Mapping[str, Any] | None) -> tuple[set[str], set[str], set[str]]:
+    """``(pause_functions, unpause_functions, flag_paths)`` from the Plane-1
+    ``pause.set`` / ``pause.unset`` claims carried on the effects artifact.
+
+    ``PauseAnalyzer`` (Plane-0) only ever sees a flag that is a top-level
+    scalar state variable, which is why ``is_pausable`` was false on 33 of the
+    46 local contracts that publish ``pause*`` entry points: the Veda family
+    keeps its latch in a struct member (``accountantState.isPaused``) and the
+    EtherFi / OZ-v5 family keeps it behind an ERC-7201 namespaced slot, and
+    neither reaches ``contract.state_variables``. The claims matcher resolves
+    both through member-path facts and is strictly the better-evidenced
+    detector, so the summary reads it rather than re-deriving it.
+
+    It is also what keeps the EigenLayer bitmap family OUT: ``pause(uint256)``
+    assigns the new bitmap from a *parameter*, so the matcher's toggle polarity
+    is not a definite constant bool and it fails closed. Measured: 0 of the 8
+    bitmap contracts mint a ``pause.*`` claim."""
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return set(), set(), set()
+    pause_functions: set[str] = set()
+    unpause_functions: set[str] = set()
+    flags: set[str] = set()
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if not isinstance(claim, Mapping):
+                continue
+            polarity = _PAUSE_CLAIM_POLARITY.get(str(claim.get("claim_id")))
+            if polarity is None:
+                continue
+            (pause_functions if polarity == "pause" else unpause_functions).add(signature)
+            witness = claim.get("witness")
+            for flag in (witness or {}).get("flags") or [] if isinstance(witness, Mapping) else []:
+                if not isinstance(flag, Mapping):
+                    continue
+                variable = flag.get("var")
+                if not isinstance(variable, str) or not variable:
+                    continue
+                member = flag.get("member")
+                flags.add(f"{variable}.{member}" if isinstance(member, str) and member else variable)
+    return pause_functions, unpause_functions, flags
+
+
 def _detect_pausability(
     contract,
     project_dir: Path,
     pause_info: Mapping[str, Any] | None = None,
+    effects: Mapping[str, Any] | None = None,
+    predicate_trees: Mapping[str, Any] | None = None,
 ) -> PausabilityAnalysis:
-    """Detect pausability structurally from the semantic ``PauseInfo`` export.
+    """Detect pausability from the semantic ``PauseInfo`` export **and** the
+    Plane-1 pause claims.
 
     ``pause_info`` (returned by ``apply_reentrancy_pause_pass``) carries
     the structural pause-state-var set and toggle-function list.
@@ -874,6 +1003,24 @@ def _detect_pausability(
     function writes (true = pause, false = unpause); when the structural
     classification can't disambiguate, every toggle function is listed in
     both pause and unpause.
+
+    ``is_pausable`` is three-state, and ``False`` is published only when the
+    structural pass found nothing *and* both planes that could have found a
+    latch demonstrably ran:
+
+    * :func:`_claims_plane_ran` — the claims matcher is the only detector that
+      resolves a struct-member or ERC-7201-namespaced latch, and ``core``
+      degrades it independently of the effects plane (``core.py:243-253`` vs
+      ``:225-235``), leaving a fully populated claim-free ``functions`` map.
+    * :func:`_predicate_trees_plane_ran` — the trees stage (``core.py:206-221``)
+      is the *input* to the claims matcher and also owns
+      ``apply_reentrancy_pause_pass``, so its degradation blinds BOTH detectors
+      at once while still producing a written ``claims`` key on every record.
+      Without this second test the verdict is ``false`` on 100% of pausable
+      contracts whenever that one stage raises.
+
+    Anything else is ``None`` — *not determined*, which is a different fact
+    from both detectors running and finding no latch.
     """
     info = pause_info or {}
     pause_state_vars: list[str] = list(info.get("pause_state_vars") or [])
@@ -906,22 +1053,46 @@ def _detect_pausability(
                 pause_functions.add(full_name)
                 unpause_functions.add(full_name)
 
+    claim_pause, claim_unpause, claim_flags = _pause_claims(effects)
+    pause_functions |= claim_pause
+    unpause_functions |= claim_unpause
+
     modifiers = _all_modifiers(contract)
     gating_modifiers: list[str] = []
     evidence = []
-    if pause_var_set:
+    # A claim flag may be a dotted path (``accountantState.isPaused``); a
+    # modifier reads the BASE variable, so match on that.
+    gate_var_set = pause_var_set | {path.split(".", 1)[0] for path in claim_flags}
+    if gate_var_set:
         for modifier in modifiers:
             read_names = {getattr(v, "name", "") for v in getattr(modifier, "state_variables_read", []) or []}
-            if read_names & pause_var_set:
+            if read_names & gate_var_set:
                 gating_modifiers.append(modifier.name)
                 evidence.append(_source_evidence(modifier, project_dir))
 
+    if pause_functions or unpause_functions or gating_modifiers or pause_state_vars:
+        is_pausable: bool | None = True
+    elif _claims_plane_ran(effects) and _predicate_trees_plane_ran(predicate_trees):
+        is_pausable = False
+    else:
+        # Both tests are load-bearing and neither implies the other. Without
+        # the claims test, ``false`` asserts the absence of a struct-member or
+        # namespaced latch no surviving detector could have found — 22 of the
+        # 33 local contracts that demonstrably have one. Without the trees
+        # test, a single raise in ``core.py:206-221`` empties ``pause_info``
+        # AND feeds the claims matcher a stub, so ``false`` is published on
+        # every pausable contract while the ``claims`` key still says the
+        # matcher completed.
+        is_pausable = None
+
     return {
-        "is_pausable": bool(pause_functions or unpause_functions or gating_modifiers or pause_state_vars),
+        "is_pausable": is_pausable,
         "pause_functions": sorted(pause_functions),
         "unpause_functions": sorted(unpause_functions),
         "gating_modifiers": sorted(gating_modifiers),
-        "pause_variables": sorted(pause_state_vars),
+        # Structural flags stay as bare names; claim flags carry their member
+        # path, which is the only handle on WHICH struct member is the latch.
+        "pause_variables": sorted(set(pause_state_vars) | claim_flags),
         "authorized_roles": [],
         "evidence": evidence,
     }
@@ -963,59 +1134,411 @@ def _classify_pause_toggle_polarity(function, pause_vars: set[str]) -> str:
     return ""
 
 
-def _detect_timelock(contract, project_dir: Path, role_definitions: list[RoleDefinition]) -> TimelockAnalysis:
-    del contract, project_dir, role_definitions
-    return {
-        "has_timelock": False,
-        "pattern": "none",
-        "delay_variables": [],
-        "queue_execute_functions": [],
-        "authorized_roles": [],
-        "evidence": [],
-    }
+# ---------------------------------------------------------------------------
+# Timelock detection (STATIC half only -- see _detect_timelock)
+# ---------------------------------------------------------------------------
+
+_TIMELOCK_QUEUE_CLAIMS = frozenset({"timelock.schedule"})
+_TIMELOCK_EXECUTE_CLAIMS = frozenset({"timelock.execute"})
+_TIMELOCK_CLAIMS = frozenset({"timelock.schedule", "timelock.execute", "timelock.cancel", "timelock.set_delay"})
+
+# Slither renders these as SolidityVariableComposed; ``now`` is the pre-0.7 spelling.
+_TIME_SOURCE_NAMES = frozenset({"block.timestamp", "now", "block.number"})
+
+# How far the queue/maturity walks chase internal helpers. OZ needs 3
+# (`execute` -> `_beforeCall` -> `isOperationReady`); the cap bounds the walk on
+# contracts with deep internal call graphs.
+_TIMELOCK_CALL_DEPTH = 4
 
 
-def _summarize_slither(slither_output: dict) -> SlitherSummary:
-    detectors = slither_output.get("results", {}).get("detectors", [])
-    counts = {impact: 0 for impact in SEVERITY_ORDER}
-    for detector in detectors:
-        impact = detector.get("impact", "Informational")
-        counts.setdefault(impact, 0)
-        counts[impact] += 1
+def _timelock_claim_functions(effects: Mapping[str, Any] | None) -> dict[str, set[str]]:
+    """``claim_id -> {signature}`` for the ``timelock.*`` claims on the effects
+    artifact. The claims matcher recognises the published OZ
+    ``TimelockController`` ABI (``getMinDelay`` + ``hashOperation`` + schedule +
+    execute), which is the standard-exact half of this detector."""
+    out: dict[str, set[str]] = {}
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return out
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if not isinstance(claim, Mapping):
+                continue
+            claim_id = str(claim.get("claim_id"))
+            if claim_id in _TIMELOCK_CLAIMS:
+                out.setdefault(claim_id, set()).add(signature)
+    return out
 
-    key_findings: list[SlitherFinding] = []
-    for detector in sorted(detectors, key=lambda item: SEVERITY_ORDER.get(item.get("impact", ""), 99))[:10]:
-        description = str(detector.get("description", "")).strip().split("\n")[0]
-        key_findings.append(
-            {
-                "check": detector.get("check", "unknown"),
-                "impact": detector.get("impact", "Unknown"),
-                "confidence": detector.get("confidence", "Unknown"),
-                "description": description,
+
+def _arbitrary_execution_functions(effects: Mapping[str, Any] | None) -> set[str]:
+    """Signatures carrying the ``exec.arbitrary`` claim -- a call whose target
+    AND calldata come from the caller. It is the discriminator between a
+    timelock (queue an arbitrary action, execute it once matured) and a
+    cooldown (one hard-coded operation, delayed)."""
+    out: set[str] = set()
+    functions = (effects or {}).get("functions")
+    if not isinstance(functions, Mapping):
+        return out
+    for signature, info in functions.items():
+        if not isinstance(signature, str) or not isinstance(info, Mapping):
+            continue
+        for claim in info.get("claims") or []:
+            if isinstance(claim, Mapping) and str(claim.get("claim_id")) == "exec.arbitrary":
+                out.add(signature)
+    return out
+
+
+def _ir_reads(ir: Any) -> set[str]:
+    return {str(value) for value in (getattr(ir, "read", []) or [])}
+
+
+def _transitive_irs(function: Any, depth: int = _TIMELOCK_CALL_DEPTH) -> list[Any]:
+    """Every IR in ``function``'s body plus, recursively, its internal/library
+    callees' and applied modifiers'. Cycle-safe, depth-bounded.
+
+    The timelock invariant is split across helpers in every real
+    implementation (OZ puts the write in ``_schedule`` and the maturity check
+    two frames below ``execute``), so a body-only walk sees neither half."""
+    seen: set[int] = set()
+    out: list[Any] = []
+
+    def walk(container: Any, remaining: int) -> None:
+        if container is None or remaining < 0 or id(container) in seen:
+            return
+        seen.add(id(container))
+        for node in getattr(container, "nodes", []) or []:
+            for ir in list(getattr(node, "irs_ssa", None) or []) + list(getattr(node, "irs", []) or []):
+                out.append(ir)
+                callee = getattr(ir, "function", None)
+                if callee is not None and type(ir).__name__ in ("InternalCall", "LibraryCall"):
+                    walk(callee, remaining - 1)
+        for modifier in getattr(container, "modifiers", []) or []:
+            walk(modifier, remaining - 1)
+
+    walk(function, depth)
+    return out
+
+
+def _derivation_closure(irs: list[Any], seeds: set[str]) -> set[str]:
+    """Every value name that ``seeds`` flow FORWARD into, over ``lvalue`` edges."""
+    reached = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for ir in irs:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None:
+                continue
+            name = str(lvalue)
+            if name in reached:
+                continue
+            if _ir_reads(ir) & reached:
+                reached.add(name)
+                changed = True
+    return reached
+
+
+def _state_var_names(contract) -> dict[str, Any]:
+    return {getattr(v, "name", ""): v for v in _all_state_variables(contract)}
+
+
+def _timestamp_registry_writes(contract) -> dict[str, set[str]]:
+    """``registry_var -> {other state vars in its derivation}``.
+
+    A *registry* is a state variable assigned a value that a
+    ``block.timestamp`` / ``block.number`` read flows into: the "this operation
+    matures at T" write that is the queue half of every timelock. The
+    accompanying set is the state variables that also flow into that value --
+    the delay, when the delay is stored rather than passed."""
+    state_vars = _state_var_names(contract)
+    registries: dict[str, set[str]] = {}
+    for function in getattr(contract, "functions", []) or []:
+        if getattr(function, "is_constructor", False):
+            continue
+        irs = _transitive_irs(function)
+        time_seeds = {name for ir in irs for name in _ir_reads(ir) if name in _TIME_SOURCE_NAMES}
+        if not time_seeds:
+            continue
+        derived = _derivation_closure(irs, time_seeds)
+        for ir in irs:
+            if type(ir).__name__ != "Assignment":
+                continue
+            if not (_ir_reads(ir) & derived):
+                continue
+            target = _base_written_state_var(ir, state_vars)
+            if target is None:
+                continue
+            contributors = {
+                name
+                for ir2 in irs
+                if str(getattr(ir2, "lvalue", "")) in derived
+                for name in _ir_reads(ir2)
+                if name in state_vars and name != target
             }
-        )
+            registries.setdefault(target, set()).update(contributors)
+    return registries
+
+
+def _base_written_state_var(ir: Any, state_vars: Mapping[str, Any]) -> str | None:
+    """The contract state variable an Assignment writes, through a mapping/
+    struct reference if need be. ``None`` when the write is to a local."""
+    lvalue = getattr(ir, "lvalue", None)
+    for candidate in (lvalue, getattr(lvalue, "points_to_origin", None), getattr(lvalue, "points_to", None)):
+        name = getattr(candidate, "name", None)
+        if isinstance(name, str) and name in state_vars:
+            return name
+    return None
+
+
+def _maturity_gate_functions(contract, registries: set[str]) -> dict[str, set[str]]:
+    """``registry_var -> {signature}`` for entry points that revert unless a
+    registry value has matured against the clock.
+
+    The require and the comparison do not have to sit in the same node: they
+    routinely sit in different helpers (OZ's ``_beforeCall`` requires what
+    ``isOperationReady`` computes), and the transitive walk's scope is what
+    bounds "this revert reads this registry" -- the same relaxation
+    ``ReentrancyAnalyzer._search_revert_reading_var`` already makes."""
+    out: dict[str, set[str]] = {}
+    for function in _entry_points(contract):
+        if getattr(function, "is_constructor", False):
+            continue
+        irs = _transitive_irs(function)
+        if not any(_ir_is_require_or_revert_like(ir) for ir in irs):
+            continue
+        reads_clock = any(_ir_reads(ir) & _TIME_SOURCE_NAMES for ir in irs)
+        if not reads_clock:
+            continue
+        for ir in irs:
+            if type(ir).__name__ != "Binary":
+                continue
+            names = _ir_reads(ir)
+            if not (names & _TIME_SOURCE_NAMES) and not _binary_compares_clock(ir, irs):
+                continue
+            for registry in registries:
+                if registry in _registry_sources(irs, names):
+                    out.setdefault(registry, set()).add(
+                        getattr(function, "full_name", None) or getattr(function, "name", "")
+                    )
+    return out
+
+
+def _binary_compares_clock(ir: Any, irs: list[Any]) -> bool:
+    """The clock may reach the comparison through one temporary."""
+    sources = _backward_sources(irs, _ir_reads(ir))
+    return bool(sources & _TIME_SOURCE_NAMES)
+
+
+def _registry_sources(irs: list[Any], names: set[str]) -> set[str]:
+    return _backward_sources(irs, names)
+
+
+def _backward_sources(irs: list[Any], names: set[str]) -> set[str]:
+    """Every value name that flows INTO ``names``, over ``lvalue -> read`` edges."""
+    defs: dict[str, set[str]] = {}
+    for ir in irs:
+        lvalue = getattr(ir, "lvalue", None)
+        if lvalue is None:
+            continue
+        defs.setdefault(str(lvalue), set()).update(_ir_reads(ir))
+    reached = set(names)
+    work = list(names)
+    while work:
+        current = work.pop()
+        for source in defs.get(current, ()):
+            if source not in reached:
+                reached.add(source)
+                work.append(source)
+    return reached
+
+
+def _ir_is_require_or_revert_like(ir: Any) -> bool:
+    if type(ir).__name__ != "SolidityCall":
+        return False
+    function = getattr(ir, "function", None)
+    name = getattr(function, "name", None) or str(function or "")
+    return name.startswith("require(") or name.startswith("revert") or name == "assert(bool)"
+
+
+def _timelock_delay_variables(contract, registries: Mapping[str, set[str]], queue_functions: set[str]) -> set[str]:
+    """Where the delay VALUE lives -- the storage the live half would read.
+
+    Two sources: a state variable that flows into the maturity write (a stored
+    delay), and a mutable integer state variable the queue path reads (OZ's
+    ``require(delay >= getMinDelay())`` bottoms out in ``_minDelay``; the
+    per-operation delay is a parameter and only its floor is on chain).
+
+    The second rule is deliberately recall-generous -- it names every mutable
+    integer the queue path touches, not only the one arithmetic proves is the
+    delay. It is a POINTER for the live half, not a claim about the value, and
+    the value itself is never published from here (see ``_detect_timelock``).
+    Constants and mappings are excluded: neither is a configurable delay."""
+    state_vars = _state_var_names(contract)
+
+    def is_delay_shaped(name: str) -> bool:
+        variable = state_vars.get(name)
+        if variable is None or getattr(variable, "is_constant", False) or getattr(variable, "is_immutable", False):
+            return False
+        return str(getattr(variable, "type", "")).startswith(("uint", "int"))
+
+    out = {name for contributors in registries.values() for name in contributors if is_delay_shaped(name)}
+    for function in getattr(contract, "functions", []) or []:
+        full_name = getattr(function, "full_name", None) or getattr(function, "name", "")
+        if full_name not in queue_functions:
+            continue
+        for ir in _transitive_irs(function):
+            out |= {name for name in _ir_reads(ir) if is_delay_shaped(name)}
+    return out
+
+
+def _detect_timelock(
+    contract,
+    project_dir: Path,
+    role_definitions: list[RoleDefinition],
+    effects: Mapping[str, Any] | None = None,
+) -> TimelockAnalysis:
+    """Prove, from source alone, that THIS CONTRACT IS A TIMELOCK.
+
+    The invariant is structural and chain-free: some state variable is written
+    with a value the clock (``block.timestamp`` / ``block.number``) flows into
+    -- the queue half -- and some other entry point reverts unless that same
+    variable has matured against the clock -- the execute half. Both halves
+    live in internal helpers in every real implementation, so both walks are
+    transitive.
+
+    **That pair alone is NOT sufficient, and asserting it was would be an
+    over-claim.** Measured on the 88 local contracts, the bare structural pair
+    fires on 19 and only 3 are timelocks: it also matches a Teller's per-user
+    ``shareLockPeriod`` transfer cooldown (6 contracts), a blacklist expiry, an
+    EigenLayer withdrawal/activation delay and several rate-limiter refill
+    windows. What separates a governance timelock from a cooldown is WHAT
+    matures: a timelock delays an action chosen by the caller AT QUEUE TIME,
+    a cooldown delays one specific hard-coded operation. So the structural half
+    additionally requires the maturity-gated function to carry an
+    ``exec.arbitrary`` claim -- caller-supplied target and calldata. With that
+    requirement the structural half fires on exactly the 3, and would have
+    credited 16 contracts with a protective delay they do not have without it.
+
+    ``pattern`` is ``oz_timelock`` when the claims plane recognises the
+    published ``TimelockController`` ABI, ``custom`` when only the structure
+    (including the arbitrary-execution requirement) is there.
+
+    **THE DELAY VALUE IS NOT READ HERE, AND MUST NOT BE DEFAULTED.** The delay
+    is the credit-bearing scoring input (EtherFiTimelock's is 10 days), and
+    reading it needs ``getMinDelay()`` on chain. This module has no chain, no
+    ``chain_id`` and no RPC handle, and inventing one -- or defaulting the
+    delay -- would fabricate a protective credit, which is a worse failure than
+    a false adverse. So ``delay`` is ``None`` and ``delay_source`` is
+    ``"not_read"`` until a chain is threaded here. ``delay_variables`` names
+    WHERE the value lives, which is the part source can prove.
+
+    ``has_timelock`` is three-state, and ``False`` is only published when BOTH
+    determinants had their inputs. Both of them live on the claims plane: the
+    structural half is gated on ``exec.arbitrary`` and the standard half on
+    ``timelock.schedule``/``timelock.execute``, so an effects artifact the
+    claims matcher never wrote to makes both empty for a reason that has
+    nothing to do with the contract. ``None`` therefore covers two cases —
+    no IR to walk, and no claims plane (:func:`_claims_plane_ran`, which
+    ``core`` can degrade independently of the effects plane; ``core.py:225-235``
+    vs ``:243-253``). Publishing ``False`` on either is asserting an absence
+    nothing looked for, and ``_determine_control_model`` would then drop
+    ``governance`` off the back of it.
+    """
+    functions = list(getattr(contract, "functions", []) or [])
+
+    if not functions or not _claims_plane_ran(effects):
+        return {
+            "has_timelock": None,
+            "pattern": "unknown",
+            "delay": None,
+            "delay_source": "not_read",
+            "delay_variables": [],
+            "queue_execute_functions": [],
+            "authorized_roles": [],
+            "evidence": [],
+        }
+
+    claims = _timelock_claim_functions(effects)
+    registries = _timestamp_registry_writes(contract)
+    maturity = _maturity_gate_functions(contract, set(registries))
+    proven_registries = {name for name in registries if maturity.get(name)}
+
+    queue_functions: set[str] = set()
+    execute_functions: set[str] = set()
+    for registry in proven_registries:
+        execute_functions |= maturity.get(registry, set())
+    for function in _entry_points(contract):
+        full_name = getattr(function, "full_name", None) or getattr(function, "name", "")
+        if full_name in execute_functions:
+            continue
+        state_vars = _state_var_names(contract)
+        irs = _transitive_irs(function)
+        for ir in irs:
+            if type(ir).__name__ != "Assignment":
+                continue
+            target = _base_written_state_var(ir, state_vars)
+            if target in proven_registries:
+                queue_functions.add(full_name)
+                break
+    # What matures has to be an action the CALLER chose, not a hard-coded one:
+    # otherwise every per-user cooldown, blacklist expiry and rate-limit refill
+    # window in the corpus reads as a governance timelock (measured: 19 hits,
+    # 3 real). ``exec.arbitrary`` is the claims plane's proof of a
+    # caller-supplied target + calldata.
+    arbitrary_executors = _arbitrary_execution_functions(effects)
+    structural = bool(proven_registries and queue_functions and (execute_functions & arbitrary_executors))
+
+    queue_functions |= claims.get("timelock.schedule", set())
+    execute_functions |= claims.get("timelock.execute", set())
+
+    standard = bool(claims.get("timelock.schedule") and claims.get("timelock.execute"))
+    has_timelock = structural or standard
+
+    if not has_timelock:
+        pattern: Any = "none"
+    elif standard:
+        pattern = "oz_timelock"
+    else:
+        pattern = "custom"
+
+    evidence = []
+    if has_timelock:
+        by_full_name = {getattr(f, "full_name", getattr(f, "name", "")): f for f in functions}
+        for signature in sorted(queue_functions | execute_functions):
+            function = by_full_name.get(signature)
+            if function is not None:
+                evidence.append(_source_evidence(function, project_dir))
 
     return {
-        "detector_counts": counts,
-        "key_findings": key_findings,
+        "has_timelock": has_timelock,
+        "pattern": pattern,
+        "delay": None,
+        "delay_source": "not_read",
+        "delay_variables": sorted(_timelock_delay_variables(contract, registries, queue_functions))
+        if has_timelock
+        else [],
+        # Gated on the verdict like every sibling below. These sets are the
+        # bare structural pair, which fires on 19 of the 88 local contracts of
+        # which 3 are timelocks; publishing them next to
+        # ``has_timelock: false, pattern: "none"`` restates as a quotable list
+        # exactly the over-claim the ``exec.arbitrary`` requirement removed from
+        # the verdict (a Teller's ``deposit``/``beforeTransfer`` share-lock
+        # cooldown, EigenLayer's withdrawal-delay VIEW getters).
+        "queue_execute_functions": sorted(queue_functions | execute_functions) if has_timelock else [],
+        "authorized_roles": sorted({role["role"] for role in role_definitions}) if has_timelock else [],
+        "evidence": evidence,
     }
-
-
-def _derive_static_risk_level(detector_counts: dict[str, int]) -> RiskLevel:
-    if detector_counts.get("High", 0) > 0:
-        return "high"
-    if detector_counts.get("Medium", 0) > 0:
-        return "medium"
-    if sum(detector_counts.values()) > 0:
-        return "low"
-    return "unknown"
 
 
 def _determine_control_model(
     contract, semantic_control: SemanticControlAnalysis, timelock: TimelockAnalysis
 ) -> ControlModel:
     del contract
-    if timelock["has_timelock"]:
+    # ``is True``, not truthiness: ``None`` is not-determined and must not be
+    # read as a proven absence of governance either.
+    if timelock["has_timelock"] is True:
         return "governance"
     return semantic_control["pattern"]
 

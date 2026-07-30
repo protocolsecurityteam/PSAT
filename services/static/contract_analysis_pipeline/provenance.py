@@ -118,6 +118,25 @@ class Source:
     # keccak256("LRTSquare.pending.governor")). Carried so resolution can read
     # the live value via ``eth_getStorageAt``; ``None`` for everything else.
     storage_slot: str | None = None
+    # Which origins reached a ``computed`` value through its *arguments*. A
+    # ``keccak256``/``abi.encode`` collapses its inputs into one opaque value;
+    # without this the parameter a hash-commitment guard commits is gone by the
+    # time a leaf is built. Three states, and consumers must tell them apart:
+    #   ``None``        — not determined; nothing populated it for this Source
+    #   ``frozenset()`` — determined: only constants reached the computation
+    #   non-empty       — determined: exactly these origins reached it
+    # Members are themselves ``Source`` records with ``derived_from=None``, which
+    # bounds the nesting at one level: ``arg_origins`` splices an argument's own
+    # (already flattened) origins in rather than nesting them, so the projection
+    # is transitively complete without making the dataclass recursive.
+    #
+    # Also populated on ``view_call`` / ``external_call`` Sources:
+    # the call collapses its arguments into ``callee_args_digest`` — an opaque
+    # hash — so without this the fact that a gate's un-lowerable role read
+    # CONSUMED THE CALLER was unrepresentable by the time a leaf was built,
+    # and ``leaf_is_caller_tainted`` could not fire (RoleRegistry.upgradeTo
+    # published public over a caller gate). Same three states as above.
+    derived_from: frozenset["Source"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in SOURCE_KINDS:
@@ -142,6 +161,7 @@ class Source:
             or self.block_context_kind is not None
             or self.member_path
             or self.storage_slot is not None
+            or self.derived_from is not None
         ):
             raise ValueError("Source(kind='top') must be the bare sentinel — no metadata fields")
 
@@ -173,6 +193,30 @@ def union(a: SourceSet, b: SourceSet) -> SourceSet:
     if is_top(a) or is_top(b):
         return TOP
     return a | b
+
+
+def arg_origins(args_union: SourceSet) -> frozenset[Source]:
+    """The ``Source.derived_from`` projection of an argument source set.
+
+    Flat by construction: an argument that is itself a ``computed`` value with
+    its own ``derived_from`` contributes both itself (stripped, so the
+    derivation shape survives) and its already-flattened origins, so
+    ``keccak256(abi.encode(receiver))`` still names ``receiver``. Constants are
+    dropped — they carry no origin — which is what makes the empty set mean
+    "determined: only constants reached this".
+
+    Every member is stored with ``derived_from=None``. That is a *stripped*
+    marker, not a claim of "not determined" about the member: the member's own
+    origins have already been spliced into this same set.
+    """
+    origins: set[Source] = set()
+    for source in args_union:
+        if source.kind == "constant":
+            continue
+        if source.derived_from is not None:
+            origins.update(source.derived_from)
+        origins.add(replace(source, derived_from=None))
+    return frozenset(origins)
 
 
 def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
@@ -499,14 +543,42 @@ class ProvenanceEngine:
         # Phi joins all incoming SSA versions with set union. Also
         # unions with the lvalue's existing source set so caller-
         # bound parameters seeded before the IR walk aren't
-        # clobbered. Slither's parameter-Phi at function entry
-        # represents the caller's binding via incoming SSA values
-        # the engine can't resolve in the callee's scope; the
-        # binding lives in the seeded source set.
+        # clobbered.
+        #
+        # The ENTRYPOINT Phi of a formal parameter is excluded outright.
+        # Slither's interprocedural SSA makes its rvalues the arguments of
+        # EVERY internal call site of this function in the contract, and its
+        # lvalue carries the parameter's BASE name — the exact key
+        # ``_seed_parameters`` wrote. Unioning it therefore imports other
+        # frames into this one: ``guarded() { onlyA(msg.sender); }`` made
+        # ``account`` msg_sender-tainted inside ``onlyA``'s OWN frame (where it
+        # is an arbitrary argument, not the caller), and a helper called with a
+        # different constant per call site accumulated every sibling's
+        # constants. The parameter's truth for THIS frame is what seeding
+        # already wrote: ``parameter`` in the function's own frame, the
+        # call-chain binding in a bound frame.
+        if self._is_entry_parameter_phi(ir):
+            return False
         result: SourceSet = self.provenance.get(self._var_name(ir.lvalue))
         for incoming in ir.rvalues:
             result = union(result, self._sources_for_value(incoming))
         return self.provenance.set(self._var_name(ir.lvalue), result)
+
+    def _is_entry_parameter_phi(self, ir: Any) -> bool:
+        """True for the function-entry Phi of one of THIS function's formal
+        parameters — the only Phi whose rvalues live in other functions'
+        frames (they are the call-site arguments). State-variable Phis at the
+        entry node keep normal handling: their rvalues classify
+        frame-independently as ``state_variable``, which is correct here."""
+        node = getattr(ir, "node", None)
+        node_type = getattr(getattr(node, "type", None), "name", "")
+        if node_type != "ENTRYPOINT":
+            return False
+        name = self._var_name(getattr(ir, "lvalue", None))
+        if not name:
+            return False
+        base = _strip_ssa_suffix(name)
+        return any(self._var_name(param) in (name, base) for param in getattr(self.function, "parameters", ()) or ())
 
     def _handle_binary(self, ir: Any) -> bool:
         # The result of a binary op is ``computed`` with the union of
@@ -545,6 +617,12 @@ class ProvenanceEngine:
                         kind="computed",
                         computed_kind=str(getattr(ir, "type", "unary")),
                         callee_args_digest=_digest(operand_sources),
+                        # The negated value's own origins: a
+                        # ``!hasRole(msg.sender, …)`` gate renders as this
+                        # computed tag (it sorts first in the operand pick),
+                        # and without the readable origins the caller-taint
+                        # default cannot see the caller through the negation.
+                        derived_from=arg_origins(operand_sources),
                     )
                 }
             )
@@ -639,7 +717,12 @@ class ProvenanceEngine:
                 }
             )
             return self.provenance.set(self._var_name(ir.lvalue), result)
-        # Other Solidity built-ins: hash family → computed.
+        # Other Solidity built-ins: hash family → computed. The arguments'
+        # origins ride along on ``derived_from`` — a hash-commitment gate
+        # (``publicDepositHistory[nonce] != keccak256(abi.encode(receiver, …))``)
+        # otherwise reaches the leaf builder with every parameter it commits
+        # already collapsed into an opaque digest, so the leaf can be *captured*
+        # without ever being *bound* to what it constrains.
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         if is_top(args_union):
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
@@ -649,6 +732,7 @@ class ProvenanceEngine:
                     kind="computed",
                     computed_kind=callee_name or "solidity_call",
                     callee_args_digest=_digest(args_union),
+                    derived_from=arg_origins(args_union),
                 )
             }
         )
@@ -660,7 +744,10 @@ class ProvenanceEngine:
         builder can route on it."""
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
+        # Same Constant-not-str hazard as the low-level arm: when the callee
+        # symbol is unresolved the fallback ``function_name`` is a Constant.
+        raw_callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
+        callee_name = str(raw_callee_name) if raw_callee_name is not None else None
         callee_signature = _callee_signature(ir)
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         result = frozenset(
@@ -671,6 +758,10 @@ class ProvenanceEngine:
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
                     callee_selector=_selector_for_signature(callee_signature),
+                    # The caller-visible argument provenance: the
+                    # digest above is an opaque hash, so this is the only
+                    # readable record that e.g. msg.sender was consumed.
+                    derived_from=arg_origins(args_union),
                 )
             }
         )
@@ -696,7 +787,11 @@ class ProvenanceEngine:
         """
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        kind = getattr(ir, "function_name", None) or "low_level_call"
+        # ``LowLevelCall.function_name`` is a Slither ``Constant``, not a str;
+        # it flows into ``Source.callee`` and from there into the published
+        # ``derived_from`` operands, where a raw Constant crashed the
+        # ``predicate_trees.json`` write on 4 real contracts.
+        kind = str(getattr(ir, "function_name", None) or "low_level_call")
         dest_sources = self._sources_for_value(getattr(ir, "destination", None))
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         # delegatecall is special — we tag it as external_call (it's still
@@ -745,30 +840,22 @@ class ProvenanceEngine:
         # Slot a getter-less address accessor sload()s, so resolution can read
         # the live value even though the accessor has no public getter.
         accessor_slot = _constant_storage_slot_for_accessor(callee)
-        # Cycle / depth guard.
+        args_union = self._union_of_args(getattr(ir, "arguments", ()))
+        # Cycle / depth guard. ``derived_from`` carries the readable argument
+        # provenance next to the opaque digest: the un-lowerable
+        # assembly-backed role read consumed the caller, and without this the
+        # fact was gone by the time a leaf was built.
         call_tag = Source(
             kind="view_call",
             callee=callee_name,
             callee_signature=callee_name,
             callee_selector=_selector_for_signature(callee_name),
-            callee_args_digest=_digest(self._union_of_args(getattr(ir, "arguments", ()))),
+            callee_args_digest=_digest(args_union),
             storage_slot=accessor_slot,
+            derived_from=arg_origins(args_union),
         )
         if callee is None or len(self._call_stack) >= self.internal_call_depth or callee_name in self._call_stack:
-            args_union = self._union_of_args(getattr(ir, "arguments", ()))
-            tag = frozenset(
-                {
-                    Source(
-                        kind="view_call",
-                        callee=callee_name,
-                        callee_args_digest=_digest(args_union),
-                        callee_signature=callee_name,
-                        callee_selector=_selector_for_signature(callee_name),
-                        storage_slot=accessor_slot,
-                    )
-                }
-            )
-            return self.provenance.set(self._var_name(ir.lvalue), tag)
+            return self.provenance.set(self._var_name(ir.lvalue), frozenset({call_tag}))
         # Recurse into callee's IR with bindings.
         bindings: dict[str, SourceSet] = {}
         for param, arg in zip(callee.parameters, getattr(ir, "arguments", ())):
@@ -996,10 +1083,83 @@ def _selector_for_signature(signature: str | None) -> str | None:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
+def _canonical_source_key(source: "Source") -> str:
+    """Deterministic, content-complete string for one ``Source`` record.
+
+    Every field participates — including ``callee_args_digest`` (already a
+    content-stable string by the time a Source carrying one is a member of
+    another Source's argument set: digests are computed bottom-up) and
+    ``derived_from``, folded by its members' content tokens (each member is
+    stored with ``derived_from=None``, bounding the recursion at one level).
+    """
+    return "\x1f".join(
+        str(part)
+        for part in (
+            source.kind,
+            source.parameter_index,
+            source.parameter_name,
+            source.state_variable_name,
+            source.callee,
+            source.callee_args_digest,
+            source.callee_signature,
+            source.callee_selector,
+            source.constant_value,
+            source.value_type,
+            source.computed_kind,
+            source.block_context_kind,
+            "/".join(source.member_path or ()),
+            source.storage_slot,
+            "None"
+            if source.derived_from is None
+            else "|".join(f"{_source_token(origin):016x}" for origin in sorted_tokens(source.derived_from)),
+        )
+    )
+
+
+def sorted_tokens(members: "frozenset[Source]") -> "list[Source]":
+    """Members ordered by their content tokens — a total order that never
+    consults the seed-dependent set iteration order."""
+    return sorted(members, key=_source_token)
+
+
+def _source_token(source: "Source") -> int:
+    """Content-stable 64-bit token for one Source: keccak of its canonical
+    key, cached ON THE INSTANCE. A structurally-keyed cache (``lru_cache``)
+    is the wrong tool here: every lookup deep-compares dataclass keys, and
+    the ``derived_from`` frozensets made that an ``__eq__`` storm (134M calls
+    on one 44-function unit). The lazy per-instance slot costs one key build
+    + one keccak per Source OBJECT and no structural comparisons; equal
+    instances independently compute the same seed-free value, so the digest
+    stays content-stable."""
+    token = source.__dict__.get("_content_token")
+    if token is None:
+        token = int.from_bytes(keccak(text=_canonical_source_key(source))[:8], "big")
+        # Frozen dataclass: bypass the immutability guard for the cache slot.
+        # Not a declared field, so repr/eq/hash never see it; a concurrent
+        # race recomputes the identical value.
+        object.__setattr__(source, "_content_token", token)
+    return token
+
+
 def _digest(s: SourceSet) -> str:
     """Stable digest of a SourceSet for nesting via ``callee_args_digest``.
 
-    Source is frozen so ``hash(s)`` is stable; we hex it for the JSON
-    serializer's benefit (artifacts are JSON, ints aren't).
+    Content-derived — XOR of the members' canonical-key keccak tokens — so
+    the same argument sources produce the same digest in EVERY process, and
+    the fold is order-independent without sorting. The previous
+    ``hash()``-of-frozenset form was PYTHONHASHSEED-dependent, and
+    ``predicates._source_sort_key`` orders competing sources by this string
+    BEFORE ``computed_kind`` — so which of two otherwise-tied computed
+    sources became the published operand flickered run to run (e.g. a
+    Teller deposit operand flipping between
+    ``call(uint256,...)`` and ``UnaryType.BANG``). Same 8-hex width as
+    before; the value is never published, only compared and ordered.
+
+    Performance note: this runs per NEW union inside the fixed point, so the
+    per-set work must stay O(members) with cheap ops. A frozenset holds no
+    duplicates, so the XOR never cancels a member against itself.
     """
-    return f"{abs(hash(s)) & 0xFFFFFFFF:08x}"
+    acc = 0
+    for member in s:
+        acc ^= _source_token(member)
+    return f"{acc & 0xFFFFFFFF:08x}"

@@ -65,7 +65,7 @@ class JobStage(str, enum.Enum):
     static = "static"
     resolution = "resolution"
     policy = "policy"
-    # Effect simulation (EFFECTS_RESOLUTION_SPEC §3a). Inserted between policy
+    # Behavioral effect simulation. Inserted between policy
     # and coverage; source order IS the progression, so this position makes
     # ``_satisfy_dependencies`` (relative enum order) route it correctly. The
     # policy->effects transition is feature-flagged (PSAT_EFFECTS_STAGE); with
@@ -328,7 +328,17 @@ class Artifact(Base):
     data: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     text_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Size of the object in the bucket, not of anything stored in this row.
+    # It is nonzero on all 5,770 rows while ``data``/``text_data`` are null on
+    # all of them; the old name ``size_bytes`` read as "this row holds N bytes".
+    stored_object_size_bytes: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment=(
+            "Byte length of the object at storage_key in the bucket. Says nothing "
+            "about data/text_data, which are null whenever this is set."
+        ),
+    )
     content_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -693,7 +703,6 @@ class ContractSummary(Base):
     is_upgradeable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_pausable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     has_timelock: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_factory: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_nft: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     standards: Mapped[list[str] | None] = mapped_column(ARRAY(String(50)), nullable=True)
@@ -728,8 +737,23 @@ class ControllerValue(Base):
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    # ``none_as_null=True``: a Python ``None`` here means "not determined" and
+    # must reach the database as SQL NULL. SQLAlchemy's default renders it as
+    # the jsonb scalar ``null``, which is a DIFFERENT state that no ``IS NULL``
+    # test can see (db/jsonb.py). The watcher clears this field on a
+    # controller rotation, so the distinction is load-bearing.
+    details: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # How the current value was observed: 'eth_call' / 'eth_call_impl_fallback'
+    # / 'eth_call_error' / 'beacon_owner' from the resolution snapshot, or
+    # 'event_log' / 'storage_poll' when the watcher rotated it.
     observed_via: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 'caller_gate' | 'call_target' | NULL. NULL is a third state — the static
+    # stage did not determine why this address is attached — and is NOT a
+    # synonym for either value. Before this column the analyzer unioned "the
+    # caller is checked against this address" with "this address gets called",
+    # so a callee (eETH, lido, liquidityPool) was indistinguishable from an
+    # authority registry on the persisted row. See ``ControllerProvenance``.
+    authority_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="controller_values")
 
@@ -748,7 +772,23 @@ class ControlGraphNode(Base):
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Kept for compatibility; ``False`` on it is four different populations at
+    # once. ``analysis_state`` is what a consumer must read.
     analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 'analyzed' | 'not_analyzable' | 'attempt_failed' | 'beyond_depth_horizon'
+    # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
+    # walk, not about the address, and is the one the bool could never express:
+    # without ``graph_max_depth`` below it was not even derivable from the row.
+    # Two writers: the resolution walk's stamp, and
+    # ``services.governance.control_graph_types.reconcile_control_graph_types``,
+    # which fills NULL (only NULL) with the walk's own derivation after a type
+    # fold determines analyzability the walk could not.
+    # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
+    analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The ``max_depth`` of the walk that produced this row. NULL = not
+    # determined. Without it ``depth`` alone cannot say whether an unanalysed
+    # contract was skipped by the horizon or by something else.
+    graph_max_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="control_graph_nodes")
@@ -774,6 +814,61 @@ class ControlGraphEdge(Base):
     __table_args__ = (Index("ix_control_graph_edges_contract_id", "contract_id"),)
 
 
+# ``ControlGraphEdge.relation`` vocabulary.
+#
+# ``controller_value`` and the owner/principal relations are *control* claims:
+# reversed, they say the to-node has authority over the from-node.
+# ``external_call_target`` is not — it says the from-node calls the to-node,
+# which is a proven fact about the code but carries no authority: being called
+# by X confers nothing over X. Until this split both were written as
+# ``controller_value``, and 66 directed edge pairs asserted "A controls B" and
+# "B controls A" at once.
+EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
+EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
+# The third state. ``controller_value`` asserts "the to-node has authority over
+# the from-node"; ``external_call_target`` asserts the opposite positive fact
+# ("merely called, confers nothing"). A tracked controller whose
+# ``authority_provenance`` is ABSENT supports NEITHER: the static stage answered
+# neither question, so the address appeared in a lowered predicate tree without
+# ever being shown to gate a caller or to be a call destination. Writing it
+# ``controller_value`` makes an authority claim nothing proved (widening the
+# lowered tree minted 37 such targets at once, incl. pure constants like
+# HUNDRED_PERCENT_IN_BPS and non-authority mappings like _balances); writing it
+# ``external_call_target`` asserts the other unproven fact. This relation keeps
+# the edge VISIBLE and out of ``CONTROL_EDGE_RELATIONS``, so it moves no
+# authority and no value through the closure.
+EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
+
+# Allowlist, not a denylist: a relation this set does not name contributes no
+# authority. A new relation therefore has to be classified deliberately before
+# it can move value through the authority closure, instead of being folded in
+# by default the way ``external_call_target`` would have been.
+CONTROL_EDGE_RELATIONS = frozenset(
+    {
+        EDGE_RELATION_CONTROLLER_VALUE,
+        "safe_owner",
+        "timelock_owner",
+        "proxy_admin_owner",
+        "role_principal",
+        "mapping_member",
+    }
+)
+
+
+# ``ControllerValue.observed_via`` values written by the monitoring watcher.
+# The resolution snapshot's own vocabulary ('eth_call', 'eth_call_error',
+# 'eth_call_impl_fallback', 'beacon_owner') lives in services/resolution.
+CONTROLLER_OBSERVED_VIA_EVENT_LOG = "event_log"
+CONTROLLER_OBSERVED_VIA_STORAGE_POLL = "storage_poll"
+
+
+# ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the
+# fourth state ("writer unknown") and belongs to rows written before the column.
+UPGRADE_SOURCE_BACKFILL = "backfill"
+UPGRADE_SOURCE_EVENT_SCAN = "event_scan"
+UPGRADE_SOURCE_POLL = "poll"
+
+
 class UpgradeEvent(Base):
     __tablename__ = "upgrade_events"
     __table_args__ = (Index("ix_upgrade_events_contract_id", "contract_id"),)
@@ -781,11 +876,27 @@ class UpgradeEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     proxy_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # NULL means "this writer does not record the predecessor", not "there was
+    # no predecessor". ``source`` is what tells the two apart: the backfiller
+    # projects an artifact that never carried old_impl, the watcher reads the
+    # slot's previous value. Without the discriminator both are NULL.
     old_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
     new_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # NULL = the block was not determined by the writer. Never 0: every
+    # consumer orders by this column with ``nullslast()``, and 0 sorts ahead
+    # of the genuine genesis deployment, which shifts every impl-era window.
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # For ``source='backfill'`` / ``'event_scan'`` this is the on-chain block
+    # timestamp. For ``source='poll'`` no block is known, so it carries the
+    # detection time — an upper bound within one poll interval of the change.
+    # ``source`` is the only thing that distinguishes the two readings.
     timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # Which writer produced this row: 'backfill' (upgrade-history artifact
+    # projection), 'event_scan' (log-derived), 'poll' (storage-slot poll).
+    # NULL = written before this column existed; the writer is unknown, which
+    # is a third state and not a synonym for either value.
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="upgrade_events")
 
@@ -802,14 +913,104 @@ class EffectiveFunction(Base):
     effect_labels: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
     effect_targets: Mapped[list[str] | None] = mapped_column(ARRAY(String(255)), nullable=True)
     action_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    authority_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    authority_roles: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    authority_public: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment=(
+            "TWO states over a three-state fact: true = a public path was earned; "
+            "false merges 'a caller restriction was witnessed' with 'the authority "
+            "could not be determined at all'. Read authority_openness for the split "
+            "-- this column alone cannot tell a gated function from an unread one."
+        ),
+    )
+    # Three-state counterpart to ``authority_public`` (whose ``False`` merges a
+    # witnessed caller restriction with "we could not determine the authority"):
+    # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
+    # this row predates the column and cannot be read as any of the three.
+    authority_openness: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment=(
+            "Three-state authority verdict: 'open' (a public path was earned), "
+            "'restricted' (a caller restriction was witnessed), 'not_determined' "
+            "(no public path and no witnessed caller set). NULL = written before "
+            "this column existed; never read it as any of the three."
+        ),
+    )
+    authority_roles: Mapped[Any | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment=(
+            "Three states, and [] is the NEGATION of null, not a coarsening of it: a "
+            "non-empty list is a witnessed (role, principals) requirement; null is "
+            "role-gated with the role NOT determined; [] is proven not role-gated. "
+            "The null is the JSONB SCALAR null, not SQL NULL -- 'WHERE authority_roles "
+            "IS NULL' matches 0 of the 379 undetermined rows; test "
+            "jsonb_typeof(authority_roles) = 'null' (see db/jsonb.py)."
+        ),
+    )
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Plane-1 claims: list of {claim_id, tier, witness}, dual-written alongside
     # the legacy effect_labels. NULL/[] on rows written before the claims plane.
     claims: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+
+    # State-mutability witness, carried from the effects stage's ``EffectInfo``.
+    # Before these columns the only way to ask "does this function write state"
+    # was ``effect_targets``, which concatenates state-write variable names with
+    # dotted external-call heads: 501 of its 1642 populated rows carry only call
+    # heads, so a populated value asserted a write that was never proven.
+    #
+    # All four are nullable BECAUSE SQL NULL is a distinct fact here — "not
+    # determined", i.e. no effects record covered this signature, or the record
+    # contradicted itself (see ``_mutability_fields``). ``[]`` / ``false`` mean
+    # the effects stage looked and proved none. A consumer that cannot tell those
+    # apart re-creates the defect these columns exist to remove.
+    #
+    # ``none_as_null=True`` on the JSONB pair is load-bearing: SQLAlchemy's
+    # default renders a Python ``None`` as the jsonb scalar ``null``, which is a
+    # DIFFERENT state from SQL NULL and is why ``conditions`` above is unusable
+    # in a null test on 780 of its 1773 rows (see ``db/jsonb.py``).
+    state_changing: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment=(
+            "ABI mutability of a selector-bearing external/public entry point: true when "
+            "non-view and non-pure. SQL NULL = not determined and is NOT the same fact as "
+            "false; fallback/receive are always NULL here because they have no selector, "
+            "which is a different reason from being proven non-mutating."
+        ),
+    )
+    state_writes: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Proven state writes, richer than the state_write sinks (member path, "
+            "granularity, hygiene class). SQL NULL = not determined; [] = the effects "
+            "stage looked and proved none."
+        ),
+    )
+    sinks: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Kind-tagged sinks (state_write | external_call | delegatecall | "
+            "contract_creation | selfdestruct) with body/guard origin. Kept alongside "
+            "state_writes because a function can be a proven actor with zero state "
+            "writes -- EtherFiRedemptionManager.sweepDust moves tokens under a role gate "
+            "with state_writes=[]. SQL NULL = not determined; [] = proven none."
+        ),
+    )
+    writer_selectors: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(10)),
+        nullable=True,
+        comment=(
+            "Selectors to replay when attributing the state writes of this function; empty "
+            "when it writes no state. SQL NULL = not determined."
+        ),
+    )
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="effective_functions")
     principals: Mapped[list["FunctionPrincipal"]] = relationship(
@@ -970,6 +1171,22 @@ class MonitoredContract(Base):
     last_known_state: Mapped[dict[str, Any] | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
+    # Per polling-plan ``field``: how that entry's most recent ANSWERED
+    # poll call ended — "ok" (result parsed as the entry's declared type,
+    # including the type's conventional empty such as the zero address;
+    # only non-empty values reach last_known_state), "error" (the node
+    # answered this call with a per-call JSON-RPC error, e.g. a revert),
+    # or "no_value" (answered without error but returned nothing that
+    # parses as the declared type — empty 0x from a codeless address /
+    # permissive fallback, short body). Absent field =
+    # not polled; NULL = no completed poll pass since the column landed.
+    # Written only from batches the node actually answered: a wholesale
+    # transport failure publishes nothing and leaves last_polled_at
+    # unstamped, so this map never reports liveness the poller did not
+    # observe. Overwritten wholesale each answered poll pass.
+    last_poll_status: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=True
+    )
     last_scanned_block: Mapped[int] = mapped_column(BigInteger, default=0)
     # Stable block at which monitoring began for this contract — seeded once at
     # enrollment and never advanced (unlike last_scanned_block, which tracks the
@@ -1011,7 +1228,7 @@ class MonitoredEvent(Base):
     # On-chain log index — the scan path populates it so identity is
     # (contract, tx_hash, log_index, event_type). NULL for poll-path
     # ``state_changed_poll`` rows (tx_hash='' / block 0), which are outside the
-    # partial identity index below by design (design §2.4 Layer 2).
+    # partial identity index below by design.
     log_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     data: Mapped[dict[str, Any] | None] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -1220,7 +1437,7 @@ class DaemonLease(Base):
 
 
 class MonitoringEnrollmentQueue(Base):
-    """Dirty-flag queue driving the enrollment reconciler (design §2.3).
+    """Dirty-flag queue driving the enrollment reconciler.
 
     One row per protocol that needs its ``monitored_contracts`` (and
     controllers) reconciled. Write sites call
@@ -1338,7 +1555,14 @@ class MappingEnumerationCache(Base):
     produces a fresh row instead of silently returning a stale enumeration.
     Truncated and errored results are cached too — re-running them within
     the TTL would just hit the same bound — and the caller sees the
-    ``status`` field to decide whether to act on partial data.
+    ``status`` field to decide whether to act on partial data. That
+    promise is only kept while every status the enumerator can emit fits
+    ``status``: an oversized one turns the upsert into a no-op that
+    leaves whatever row was already there, so a stale ``complete`` would
+    keep being served in place of the honest truncated verdict. The
+    column is sized well past the longest current member and
+    ``tests/test_mapping_enumeration_status_vocabulary.py`` round-trips
+    the whole vocabulary to keep it that way.
     """
 
     __tablename__ = "mapping_enumeration_cache"
@@ -1347,7 +1571,7 @@ class MappingEnumerationCache(Base):
     address: Mapped[str] = mapped_column(String(42), primary_key=True)
     specs_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     principals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
     pages_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_block_scanned: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1381,13 +1605,12 @@ class BytecodeCache(Base):
 
 
 class EffectBehaviorCache(Base):
-    """Persistent, cross-job behavioral-verdict cache (EFFECTS_RESOLUTION_SPEC
-    §7 / inv. 11-12). Shared across jobs AND cross-chain twins — the 11
-    ``PausableUntil`` sharers are separate jobs, so a sibling (or a twin on
-    another chain, or a prior run) that already witnessed a behavior yields a
-    free, *trusted* hit.
+    """Persistent, cross-job behavioral-verdict cache. Shared across jobs AND
+    cross-chain twins — the 11 ``PausableUntil`` sharers are separate jobs, so a
+    sibling (or a twin on another chain, or a prior run) that already witnessed
+    a behavior yields a free, *trusted* hit.
 
-    Two verdict scopes (inv. 3):
+    Two verdict scopes:
 
     - ``scope='kernel'`` — function-local (latch-flip, gate-mutation, code-
       change, supply-delta sign, destination *shape*). Key = (``behavior_hash``,
@@ -1397,21 +1620,32 @@ class EffectBehaviorCache(Base):
       stripped whole-contract bytecode hash) because the same mixin kernel
       yields different blast radii on different surfaces.
 
-    The row is **code-plane only** (inv. 11): no concrete values ever enter the
-    key. Verdicts are **gate-relative** (inv. 12): ``gate_ref`` names the gate
-    *structure*, never a concrete address; principal binding happens at read
+    The row is **code-plane only**: no concrete values ever enter the key.
+    Verdicts are **gate-relative**: ``gate_ref`` names the gate *structure*,
+    never a concrete address; principal binding happens at read
     time by joining ``function_principals``. The concrete state-plane residue
     (destination address, exact impl, current-check result) lives in
     ``effect_verdicts``, never here.
 
-    ``transcript_ptr`` is an artifact-store key (§8.5), never an inline JSONB
-    blob. ``analysis_schema_version`` invalidates the row on a pipeline bump,
+    ``transcript_ptr`` is an artifact-store key, never an inline JSONB blob.
+    ``analysis_schema_version`` invalidates the row on a pipeline bump,
     mirroring ``ContractMaterialization``.
 
-    Self-audit (§7): the first time two functions share a behavioral hash, both
+    Self-audit: the first time two functions share a behavioral hash, both
     are simulated once and the *kernel* verdicts asserted equal before the cache
     is trusted; ``audit_status`` / ``audit_peer_hash`` / ``audited_at`` record
     that, and ``hit_count`` supports the optional every-Nth re-audit.
+
+    **This table is written on READ, and five of its columns are therefore NOT part of
+    its replay identity**: ``hit_count``, ``audit_status``, ``audit_peer_hash``,
+    ``audited_at``, ``updated_at`` (the authoritative list is
+    ``db.effect_cache.REPLAY_IDENTITY_EXCLUDED_COLUMNS``, which explains why each is
+    excluded). ``bump_hit`` / ``mark_audited`` run from the hit path, so two identical
+    pipeline runs over an unchanged chain leave DIFFERENT values in them — the guarantees
+    that recomputation is byte-identical and that re-analysis without an on-chain change
+    is a no-op hold for this table only modulo those five. ``hit_count`` counts times the
+    row was SERVED (``0`` = never served); a lookup that MISSED matches no row at all and
+    is counted per job as the ``cache_misses`` stage metric instead.
     """
 
     __tablename__ = "effect_behavior_cache"
@@ -1424,17 +1658,17 @@ class EffectBehaviorCache(Base):
     # A sentinel rather than NULL keeps the identity UniqueConstraint portable
     # (no NULLS-NOT-DISTINCT dependency).
     contract_surface_hash: Mapped[str] = mapped_column(String(80), nullable=False, server_default="")
-    # Gate *structure* descriptor (inv. 12) — never an address.
+    # Gate *structure* descriptor — never an address.
     gate_ref: Mapped[str] = mapped_column(String(255), nullable=False, server_default="")
     verdict: Mapped[str] = mapped_column(String(20), nullable=False)
     tier: Mapped[str] = mapped_column(String(20), nullable=False)
-    # Artifact-store key (§8.5) — never inline JSONB.
+    # Artifact-store key — never inline JSONB.
     transcript_ptr: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Small, code-plane structural witness (e.g. supply-delta sign, source-read
     # duration bound). NO concrete/state-plane values.
     details: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    # Self-audit bookkeeping (§7).
+    # Self-audit bookkeeping.
     audit_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     audit_peer_hash: Mapped[str | None] = mapped_column(String(80), nullable=True)
     audited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1456,8 +1690,8 @@ class EffectBehaviorCache(Base):
 
 
 class EffectVerdict(Base):
-    """Per contract-function **state-plane** residue (EFFECTS_RESOLUTION_SPEC §3a
-    / inv. 3). This is where the per-deployment concrete values live — the exact
+    """Per contract-function **state-plane** residue from effect simulation.
+    This is where the per-deployment concrete values live — the exact
     destination address, the exact target impl, the Tier-0 current-state check
     result — never the ``effect_behavior_cache``.
 
@@ -1483,7 +1717,7 @@ class EffectVerdict(Base):
     # State-plane concrete values — the reason this row is not the cache.
     concrete_destination: Mapped[str | None] = mapped_column(String(42), nullable=True)
     current_check_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    # The state-plane residue with no column of its own: §5b downstream value
+    # The state-plane residue with no column of its own: downstream value
     # reach (holder ADDRESSES + their USD) and the bookkeeping that bounds the
     # hit-path residue re-probe. Deliberately NOT ``witness`` — witness carries
     # the code-plane structural details a cache hit re-publishes verbatim, so

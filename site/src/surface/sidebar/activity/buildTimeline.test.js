@@ -88,3 +88,84 @@ describe("buildTimeline — null enrollment_block (legacy row)", () => {
     expect(out.above.every((r) => !r.backfill)).toBe(true);
   });
 });
+
+// `synthesize_from_events` emits `block_number: null` for a poll-detected upgrade,
+// so an impl era can carry an unknown boundary. Folding it to 0 / Infinity is the
+// same ±infinity spread that was removed server-side.
+describe("buildTimeline — an unknown era boundary is not a boundary value", () => {
+  const POLL_PROXY = {
+    current_implementation: CUR,
+    implementations: [
+      // A poll-detected first impl: introduced block unknown, and its successor's
+      // block is known, so `block_replaced` is present and set.
+      { address: I1, block_introduced: null, block_replaced: 200, timestamp_introduced: 1000 },
+      { address: I2, block_introduced: 200, block_replaced: 300, timestamp_introduced: 2000 },
+      { address: CUR, block_introduced: 300, timestamp_introduced: 3000 },
+    ],
+  };
+
+  it("does not attribute an early event to an era whose start is unknown", () => {
+    // `from` folded to 0 made this era start at genesis and claim every event
+    // before block 200 — including one that predates the impl entirely.
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 50, {})],
+      proxy: POLL_PROXY,
+      enrollmentBlock: null,
+      isProxy: true,
+    });
+    const row = out.above.find((r) => r.key === "ev:e-role");
+    expect(row.implAttr).toBeNull();
+  });
+
+  it("still attributes an event inside a fully-known era", () => {
+    // POSITIVE CONTROL: skipping every era would erase impl attribution wholesale.
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 250, {})],
+      proxy: POLL_PROXY,
+      enrollmentBlock: null,
+      isProxy: true,
+    });
+    expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBe(shortenAddress(I2));
+  });
+
+  it("distinguishes a missing block_replaced KEY from a null one", () => {
+    // The producer writes `block_replaced` from the NEXT event unconditionally, so
+    // key-absent means "current era, runs to now" and present-but-null means "a
+    // successor exists whose block was never determined". Only the first may run
+    // to infinity.
+    const openEnded = {
+      current_implementation: CUR,
+      implementations: [{ address: CUR, block_introduced: 300, timestamp_introduced: 3000 }],
+    };
+    const unknownEnd = {
+      current_implementation: CUR,
+      implementations: [
+        { address: I1, block_introduced: 300, block_replaced: null, timestamp_introduced: 3000 },
+        { address: CUR, block_introduced: null, timestamp_introduced: 4000 },
+      ],
+    };
+    const later = [ev("e-role", "role_granted", 900, {})];
+    expect(
+      buildTimeline({ events: later, proxy: openEnded, enrollmentBlock: null, isProxy: true })
+        .above.find((r) => r.key === "ev:e-role").implAttr,
+    ).toBe(shortenAddress(CUR));
+    expect(
+      buildTimeline({ events: later, proxy: unknownEnd, enrollmentBlock: null, isProxy: true })
+        .above.find((r) => r.key === "ev:e-role").implAttr,
+    ).toBeNull();
+  });
+
+  it("attributes every block to a proxy that has only ever had one impl", () => {
+    // `_build_implementation_timeline` returns a bare `{address}` when there are no
+    // upgrade events. Any block is under it — a fact about the LIST, not a guessed
+    // introduction block, and the one case an unknown `from` is still answerable.
+    const single = { current_implementation: CUR, implementations: [{ address: CUR }] };
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 7, {})],
+      proxy: single,
+      enrollmentBlock: null,
+      isProxy: true,
+    });
+    expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBe(shortenAddress(CUR));
+  });
+});

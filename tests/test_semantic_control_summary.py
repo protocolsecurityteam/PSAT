@@ -1,4 +1,4 @@
-"""Wave 3 Track 2 A.3: ``_build_semantic_control_summary`` semantic signal.
+"""``_build_semantic_control_summary`` semantic signal.
 
 Validates the structural inclusion rule: a function is in
 ``semantic_functions`` iff EITHER:
