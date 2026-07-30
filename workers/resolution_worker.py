@@ -418,11 +418,11 @@ class ResolutionWorker(BaseWorker):
             wei=eth_wei, pinned=native_block is not None, failed=native_failed and native_block is None
         )
 
-        # The fetch row is written BEFORE any early return, so a failure leaves a
-        # persisted trace of the same shape the TVL writer leaves. This is what
-        # the earlier early-return could not do: it returned before touching the
-        # DB, so ``record_degraded`` was the only evidence and the balance plane
-        # showed a plain absence.
+        # The fetch row is written even when a half failed, so a failure leaves a
+        # persisted trace of the same shape the TVL writer leaves. The earlier
+        # early-return could not do that: it returned before touching the DB, so
+        # ``record_degraded`` was the only evidence and the balance plane showed
+        # a plain absence.
         fetch = ContractBalanceFetch(
             contract_id=contract_row.id,
             chain_id=chain_id,
@@ -436,17 +436,28 @@ class ResolutionWorker(BaseWorker):
         session.add(fetch)
         session.flush()
 
-        if native_failed or tokens_failed:
-            # Nothing observed for the failed class, so nothing is written for
-            # it — and, because the writer is insert-only, nothing prior is
-            # destroyed either. The view keeps publishing the last non-failed
-            # fetch for each class.
-            prune_balance_fetches(session, contract_row.id, target_address)
-            session.commit()
-            return
-
-        # No DELETE: insert-only, with ``contract_balances_latest`` deciding what
-        # is current per row class.
+        # THE HALVES FAIL INDEPENDENTLY, SO EACH IS PERSISTED INDEPENDENTLY.
+        # There is no early return here, and reinstating one would be a
+        # correctness bug rather than a shortcut: the fetch row's two statuses
+        # are per class, so returning on ``native_failed or tokens_failed``
+        # writes a row saying ``returned_assets`` (or ``proven_nonzero``) for the
+        # half that SUCCEEDED while persisting none of its rows. That row-less
+        # non-failed class then wins ``contract_balances_latest`` and withdraws
+        # every prior holding of it — an absence manufactured by the writer, and
+        # invisible to ``contracts_missing_current_rows``, which reads the status.
+        #
+        # The invariant every reader depends on: A NON-FAILED CLASS STATUS IS A
+        # PROMISE THAT THAT CLASS'S ROW SET WAS WRITTEN — possibly empty, when
+        # empty is what was observed (``proven_zero``, ``returned_empty``, or a
+        # page whose every entry was zero-balance), but never merely skipped.
+        #
+        # Note the pinned word is already in hand above, so a native read that
+        # succeeded on the pinned path and raised on the Etherscan path still has
+        # a quantity to persist; dropping it because the OTHER half raised would
+        # discard a witness we hold.
+        #
+        # No DELETE either: insert-only, with ``contract_balances_latest``
+        # deciding what is current per row class.
 
         # Native gas balance, valued in this chain's OWN native coin:
         # the symbol/name are the registry's native_asset, and the USD quote is

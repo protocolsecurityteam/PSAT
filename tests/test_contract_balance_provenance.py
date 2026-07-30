@@ -19,6 +19,7 @@ from tests.conftest import requires_postgres
 from tests.support.balance_stubs import failed_page, page
 from utils.balance_status import (
     ASSET_SET_STATUS_FETCH_FAILED,
+    ASSET_SET_STATUS_RETURNED_ASSETS,
     ASSET_SET_STATUS_RETURNED_EMPTY,
     BALANCE_WRITER_TVL,
     NATIVE_STATUS_FETCH_FAILED,
@@ -579,3 +580,108 @@ class TestSoldAssetDisappears:
         assert _view(db_session, c.id) == []
         # ...but the history is still there. Insert-only means nothing is lost.
         assert len(_rows(db_session, c.id)) == 1
+
+
+@requires_postgres
+class TestHalvesFailIndependently:
+    """R1 / the F-1 defect — a class status must not outrun its rows.
+
+    The resolution worker fans out three Etherscan calls and the halves fail
+    independently. It used to return early on ``native_failed or tokens_failed``
+    AFTER writing the fetch row, so a fetch where only ONE half failed persisted
+    a row saying ``returned_assets`` (or ``proven_nonzero``) for the half that
+    SUCCEEDED, with none of that half's rows written.
+
+    That row-less non-failed class then wins ``contract_balances_latest`` — the
+    view keys on the status — and withdraws every prior holding of it, while
+    ``contracts_missing_current_rows`` reads the same non-failed status and
+    leaves ``partial`` False. Before the migration this path returned before the
+    DELETE, so nothing was lost; the new read surface is what made the absence
+    reachable.
+    """
+
+    def _worker_fetch(self, db_session, monkeypatch, contract, *, native_raises, pinned):
+        from types import SimpleNamespace
+        from typing import Any, cast
+
+        from workers.resolution_worker import ResolutionWorker
+
+        tok = {
+            "token_address": "0x" + "f1" * 20,
+            "token_name": "T",
+            "token_symbol": "T",
+            "decimals": 18,
+            "balance": 42,
+            "price_usd": 1.0,
+            "usd_value": 42.0,
+        }
+        if pinned:
+            _stub_pinned(monkeypatch, {contract.address: 6})
+        else:
+            _stub_unpinned(monkeypatch)
+        _stub_etherscan(
+            monkeypatch,
+            wei=RuntimeError("eth down") if native_raises else 0,
+            token_page=page([tok]),
+        )
+        monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
+        worker = ResolutionWorker()
+        job = SimpleNamespace(id="j1", address=contract.address, request={}, chain_id=1)
+        cast(Any, worker)._fetch_balances(db_session, job, contract, chain_id=1)
+
+    def test_token_half_succeeding_persists_its_rows(self, db_session, monkeypatch):
+        """ACCEPTANCE: pinned native OK + get_eth_balance raises + token page OK."""
+        proto = _protocol(db_session, "prov-f1")
+        addr = _addr("d1")
+        c = _contract(db_session, proto.id, addr)
+        db_session.commit()
+
+        # A prior good fetch establishes holdings the defect would withdraw.
+        self._worker_fetch(db_session, monkeypatch, c, native_raises=False, pinned=True)
+        prior_view = _view(db_session, c.id)
+        assert {r.token_address for r in prior_view} == {None, "0x" + "f1" * 20}
+
+        # F-1: the native Etherscan half raises while the pinned word is in hand
+        # and the token page succeeds.
+        self._worker_fetch(db_session, monkeypatch, c, native_raises=True, pinned=True)
+
+        fetch = _fetches(db_session, c.id)[-1]
+        view = _view(db_session, c.id)
+        by_class = {r.token_address: r for r in view}
+
+        # Every non-failed class on the new fetch persisted its rows, so no class
+        # is published from a row set that was never written.
+        for row_class, status in (
+            (None, fetch.native_status),
+            ("0x" + "f1" * 20, fetch.asset_set_status),
+        ):
+            if status != "fetch_failed":
+                assert row_class in by_class, f"{status} promised rows for {row_class} and wrote none"
+                assert by_class[row_class].fetch_id == fetch.id
+
+        # And nothing was withdrawn: both classes are still published.
+        assert {r.token_address for r in view} == {None, "0x" + "f1" * 20}
+        assert by_class[None].raw_balance == "6"
+        assert by_class[None].block_number == BLOCK
+
+    def test_native_half_failing_outright_leaves_the_prior_native_holding(self, db_session, monkeypatch):
+        """The genuinely-failed class falls back, it does not publish an absence."""
+        proto = _protocol(db_session, "prov-f1-nofallback")
+        addr = _addr("d2")
+        c = _contract(db_session, proto.id, addr)
+        db_session.commit()
+
+        self._worker_fetch(db_session, monkeypatch, c, native_raises=False, pinned=True)
+        first_native = [r for r in _view(db_session, c.id) if r.token_address is None]
+        assert len(first_native) == 1
+
+        # No pin available AND the unpinned read raises: the native class is
+        # genuinely not known this cycle.
+        self._worker_fetch(db_session, monkeypatch, c, native_raises=True, pinned=False)
+
+        fetch = _fetches(db_session, c.id)[-1]
+        assert fetch.native_status == NATIVE_STATUS_FETCH_FAILED
+        assert fetch.asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
+        view_native = [r for r in _view(db_session, c.id) if r.token_address is None]
+        # The last thing actually observed is still published.
+        assert [r.id for r in view_native] == [r.id for r in first_native]

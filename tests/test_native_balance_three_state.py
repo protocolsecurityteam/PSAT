@@ -533,3 +533,94 @@ class TestAbsentNativeRowIsNeverZero:
         assert concrete == {}
         assert "observed_reach_value_usd" not in concrete
         assert "reach_determined" not in concrete
+
+
+@requires_postgres
+class TestRowlessNonFailedFetchIsAnIntegrityViolation:
+    """R3 — a class status that outruns its rows must flip ``partial``.
+
+    The writers can no longer produce this shape (a non-failed class status is a
+    promise its row set was written), so it is constructed directly here. If it
+    ever appears again the view will publish the class from a row set nobody
+    wrote, and the snapshot must refuse to call that a measurement.
+    """
+
+    def test_proven_nonzero_with_no_native_row_is_missing(self, db_session):
+        proto = _protocol(db_session, "3s-rowless")
+        c = _contract(db_session, proto.id, _addr("c1"))
+        good = _fetch(db_session, c)
+        _row(db_session, c, token=None, usd=99.0, fetch=good)
+        # A later fetch claiming a positive native quantity, with no row.
+        _fetch(db_session, c, native=NATIVE_STATUS_PROVEN_NONZERO, assets=ASSET_SET_STATUS_RETURNED_EMPTY)
+        db_session.commit()
+
+        assert contracts_missing_current_rows(db_session, [c.id]) == {c.id}
+        _breakdown, partial = _read_existing_balances(db_session, proto.id)
+        assert partial is True
+
+    def test_proven_zero_with_no_native_row_is_NOT_missing(self, db_session):
+        """The empty row set IS the observation here — no violation."""
+        proto = _protocol(db_session, "3s-rowless-zero")
+        c = _contract(db_session, proto.id, _addr("c2"))
+        _fetch(
+            db_session,
+            c,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=25643300,
+            assets=ASSET_SET_STATUS_RETURNED_EMPTY,
+        )
+        db_session.commit()
+        assert contracts_missing_current_rows(db_session, [c.id]) == set()
+
+    def test_returned_assets_with_no_rows_is_NOT_missing(self, db_session):
+        """A page whose every entry was zero-balance is a real observation.
+
+        ``get_token_balances_page`` drops those entries, so ``returned_assets``
+        with zero persisted rows is reachable without any integrity break — which
+        is why there is no asset-class analogue of the native rule.
+        """
+        proto = _protocol(db_session, "3s-rowless-assets")
+        c = _contract(db_session, proto.id, _addr("c3"))
+        _fetch(
+            db_session,
+            c,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=25643300,
+            assets=ASSET_SET_STATUS_RETURNED_ASSETS,
+            page_length=5,
+        )
+        db_session.commit()
+        assert contracts_missing_current_rows(db_session, [c.id]) == set()
+
+
+@requires_postgres
+class TestViewCurrencyIsPerContractNotPerObservedAddress:
+    """R4 — documented semantics, pinned.
+
+    The view resolves currency per ``contract_id`` and IGNORES
+    ``observed_address``: a contract fetched at two different addresses publishes
+    whichever writer wrote LAST. That is deliberate — it preserves the
+    pre-migration last-writer-wins DELETE semantics, and per-address currency
+    would publish both address' rows at once, double-counting the proxy/impl
+    pairs in ``build_authority_graph``'s per-contract sum.
+    """
+
+    def test_last_writer_wins_across_two_observed_addresses(self, db_session):
+        proto = _protocol(db_session, "3s-two-addrs")
+        c = _contract(db_session, proto.id, _addr("d1"))
+        proxy = _addr("d2")
+
+        at_self = _fetch(db_session, c, observed=c.address)
+        self_row = _row(db_session, c, token=None, usd=10.0, fetch=at_self)
+        at_proxy = _fetch(db_session, c, observed=proxy)
+        proxy_row = _row(db_session, c, token=None, usd=999.0, fetch=at_proxy)
+        db_session.commit()
+
+        # Exactly ONE native row is current, and it is the later write — not the
+        # union of both addresses.
+        assert _view_ids(db_session, c.id) == {proxy_row.id}
+        assert self_row.id not in _view_ids(db_session, c.id)
+
+        # And the per-contract sum is that one row, never 10 + 999.
+        graph = build_authority_graph(db_session, proto.id)
+        assert str(graph.balance[c.address.lower()]) == "999.00"

@@ -1776,6 +1776,27 @@ which is an absence-as-witness defect if dropped:
    exists** for that contract and class — a first fetch that fails must not delete
    1,617 rows of history from the view.
 
+**The writer-side invariant the view depends on:** *a non-failed class status is a
+promise that that class's row set was written.* Possibly EMPTY, where empty is
+what was observed (`proven_zero`, `returned_empty`, or a page whose every entry
+was zero-balance) — but never merely skipped. The view keys on the status, so a
+fetch row carrying `proven_nonzero` or `returned_assets` with none of that
+class's rows persisted wins the class and **withdraws every prior holding of it**.
+The resolution worker used to do exactly that: its halves fail independently, and
+an early return on `native_failed or tokens_failed` stamped the SUCCEEDING half's
+status while persisting none of its rows. It now persists each half that
+succeeded, with no early return. This is **not** fixable in the view — an
+EXISTS-guard on the rows would resurrect sold assets (an empty observed set is a
+real observation) and would defeat `proven_zero` outright.
+
+**View currency is per `contract_id` and IGNORES `observed_address`.** A contract
+fetched at two different addresses publishes whichever writer wrote LAST, not the
+union. This is deliberate: it preserves the pre-migration last-writer-wins DELETE
+semantics, and per-address currency would publish both addresses' rows at once,
+double-counting the 5 proxy/impl pairs inside `build_authority_graph`'s
+per-contract sum. The consequence is visible rather than hidden — each row carries
+its own `observed_address`.
+
 Retention (`PSAT_BALANCE_HISTORY_DEPTH`, default 10, **rejects < 1**) bounds
 insert-only growth by fetch, never by row, and **excludes the latest non-failed
 fetch per row class from pruning**. Without that exclusion, `depth` consecutive
@@ -1786,23 +1807,68 @@ a contract with no current row produces **no** `deployment_balance` key. That is
 load-bearing — `recipes.py::_add_reach` publishes
 `graph.deployment_balance.get(acting, _ZERO_USD)` as `observed_reach_floor_usd`,
 so a `0` entry manufactured by a failed fetch would become a published **$0.00**
-floor on a function that may move millions. For the same reason
+floor on a function that may move millions.
+
+**The INNER join defends only the NO-ROW case, and that limit must be stated.**
+`coalesce(sum(usd_value), 0)` still yields a `$0.00` `balance` /
+`deployment_balance` entry for a contract whose current rows exist but are ALL
+unpriced — **22 of the 60 balance keys on this corpus**, `contracts.id 563`
+among them. Such a key is indistinguishable, at the consumer, from a contract
+proven to hold nothing, and `observed_reach_floor_usd` will publish it as a
+floor. Not repaired here: the fix is to carry the priced/unpriced three-state
+through the aggregate rather than to collapse it in SQL, which changes
+`build_authority_graph`'s published shape and belongs with the consumer work. For the same reason
 `tvl.py::_read_existing_balances` now **omits** a contract with no non-failed
 fetch rather than emitting `total_usd: 0.0`, and derives `partial=True` instead of
 hardcoding `False`: that zero would otherwise enter `TvlSnapshot.total_usd` as a
 measurement.
 
-**Entity misattribution (M7/16a), unrepairable rows.** Re-verified independently
-at block **25643300**: `contracts.id 544` (AuctionManager `0x3311c72a…0162b`) holds
-**0 wei**, while its stored native row — `19059300000000000000` wei / **$35,904.67** —
-is exactly the balance of `jobs.request->>'proxy_address'` `0x00c452af…c4cb9`. That
-figure is **withdrawn**, not re-keyed: no protocol-1 proxy names 544 as its
-implementation, and guessing the key is precisely the inference this register
-forbids. `contracts.id 563` (StakingManager) is the second unrepairable row and
-carries **no native row at all**; its three ERC-20 rows are spam-token airdrops
-with `usd_value` NULL, so **$0.00** of USD is withdrawn there. *Population 2 —
-B14 bars calibrating anything on it; each row was decided on its own on-chain
-evidence.*
+**Entity misattribution (M7/16a) — an OPEN defect, not a withdrawal.** Re-verified
+independently at block **25643300**: `contracts.id 544` (AuctionManager
+`0x3311c72a…0162b`) holds **0 wei**, while its stored native row —
+`19059300000000000000` wei / **$35,904.67** — is exactly the balance of
+`jobs.request->>'proxy_address'` `0x00c452af…c4cb9`.
+
+**That figure is still published today.** This unit does not withdraw it, and an
+earlier draft of this section claiming otherwise was false:
+`graph.balance['0x3311c72a…'] = 35904.67` on the branch, because row `id 2336` is
+a legacy row (`fetch_id IS NULL`) and the view's legacy arm serves it. The row is
+neither deleted nor re-keyed — no protocol-1 proxy names 544 as its
+implementation, and guessing the key is precisely the inference §7 forbids.
+
+**Retirement mechanism, stated rather than assumed.** The new plane supersedes it
+on the first production NON-FAILED fetch for contract 544: the legacy arm stops
+serving a class as soon as a non-failed fetch exists for it, and the TVL loop
+reads 544 at `contracts.address` (never `request['proxy_address']`), where the
+pinned read returns 0 wei — `proven_zero`, writing no native row. The $35,904.67
+disappears from the published sheet at that point, and the fetch plane records
+*why*. Until then the misattribution stands and must be read as one.
+
+`contracts.id 563` (StakingManager) is the second such row and carries **no native
+row at all**; its three ERC-20 rows are spam-token airdrops with `usd_value` NULL,
+so there is **$0.00** of USD to withdraw there. *Population 2 — B14 bars
+calibrating anything on it; each row was decided on its own on-chain evidence.*
+
+**Deferrals carried by this unit, stated with cause.**
+
+* **ERC-20 quantities remain UNPINNED (Q1).** Only the native read moves to the
+  pinned `Multicall3` path, so `contract_balances.block_number` is populated on
+  native rows only and every ERC-20 row keeps `block_number NULL =
+  not_determined`. Cause: re-sourcing token quantities changes 571 published
+  money figures per cycle (**15.8%** of stored ERC-20 quantities do not reproduce
+  at 25643300), needs its own per-sub-call three-state, and forces `usd_value` to
+  be recomputed as pinned-quantity × unpinned-price. Honesty is preserved either
+  way — the height is `not_determined`, not guessed — so this is a capability
+  deferral, not an epistemic one. The schema is a superset; adding it later needs
+  no migration.
+* **`tvl.py:348` / `:429` truthiness (Q4).** Both the reader and the refresh loop
+  accumulate with `if usd:`, so a genuine PRICED `usd_value == 0` is dropped from
+  `contract_total` exactly as an unpriced NULL is — the same null/zero conflation
+  `company_overview.py` documents and avoids. Pre-existing, and NOT repaired here:
+  it is a defect in the USD accumulation, orthogonal to provenance, and fixing it
+  inside this change would move published `total_usd` figures for reasons
+  unrelated to the balance three-state. Recorded so the next reader of that
+  function does not mistake it for intended behaviour.
 
 **What the reader differential proves, and what it does not.** All three migrated
 `selection.py` readers produce **byte-identical** output before and after

@@ -1405,9 +1405,11 @@ class ContractBalanceLatest(Base):
       exists for that contract and class. A first fetch that fails must not
       delete history from the view.
 
-    Not autogenerate-visible: ``alembic/env.py`` filters it out by name, because
-    Alembic cannot tell a mapped view from a mapped table and would emit a
-    ``CREATE TABLE`` for it.
+    Not autogenerate-visible: :func:`include_object` (in this module, wired into
+    ``alembic/env.py``) filters it out on the ``info={"is_view": True}`` marker
+    below — not by name — because Alembic cannot tell a mapped view from a mapped
+    table and would otherwise emit a ``CREATE TABLE`` shadowing it.
+    ``tests/test_alembic_chain.py`` asserts the filtered diff is empty.
     """
 
     __tablename__ = "contract_balances_latest"

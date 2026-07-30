@@ -26,7 +26,7 @@ import os
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import ContractBalanceFetch
+from db.models import ContractBalance, ContractBalanceFetch
 from utils.balance_status import (
     NATIVE_STATUS_FETCH_FAILED,
     NATIVE_STATUS_NOT_DETERMINED,
@@ -51,16 +51,6 @@ PINNED_FINALITY_MARGIN = 12
 # mint a ``proven_zero`` out of an empty return: a default standing in for a
 # witness.
 _WORD_HEX_LEN = 66
-
-
-def _multicall3_supported(chain_id: int) -> bool:
-    """Multicall3 is deployed at the same address on every chain in the registry.
-
-    Kept as a named predicate so the pinned path has one place to become
-    conditional if a chain without it is ever enabled, rather than failing with a
-    decode error that would look like a transport problem.
-    """
-    return True
 
 
 def pinned_native_balances(
@@ -89,7 +79,10 @@ def pinned_native_balances(
     if not addresses:
         return None, {}
     url = rpc_url or rpc_url_for_chain_id(chain_id)
-    if not url or not _multicall3_supported(chain_id):
+    # Multicall3 is deployed at the same address on every chain in the registry;
+    # a chain without it would surface here as an undecodable result and take the
+    # unpinned fallback, which is the safe direction.
+    if not url:
         return None, {}
     try:
         head = int(rpc_request(url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
@@ -227,45 +220,85 @@ def prune_balance_fetches(session: Session, contract_id: int, observed_address: 
 
 
 def contracts_missing_current_rows(session: Session, contract_ids: list[int]) -> set[int]:
-    """Contracts with no NON-FAILED fetch for at least one row class.
+    """Contracts whose current holdings the view cannot publish for some row class.
 
-    Exactly the set whose current holdings the view cannot publish, so a total
-    built over them is not a measurement of anything. A contract that has never
-    been fetched at all is NOT in this set — its legacy rows are still the best
-    available observation and the view still shows them.
+    A total built over such a contract is not a measurement of anything, so the
+    caller omits it and flags the cycle partial rather than emitting a ``0.0``
+    that would enter a headline money figure.
+
+    Two grounds, and the second is an INTEGRITY check rather than an observation:
+
+    1. **No non-failed fetch for a class.** Nothing current is known about it.
+    2. **A winning fetch whose ``proven_nonzero`` native class persisted no
+       row.** That combination is impossible by construction — the writer only
+       stamps ``proven_nonzero`` for a quantity above zero, and writes the row
+       in the same transaction — so its presence means the row set was never
+       written and the class's status is over-promising. The view keys on the
+       status, so without this the row-less fetch would win the class and
+       silently withdraw the prior holding while the cycle reported itself
+       complete.
+
+    There is deliberately NO analogous asset-class rule. ``returned_assets`` with
+    zero persisted rows is legitimately reachable — a page whose every entry is
+    zero-balance is dropped by ``get_token_balances_page``'s ``raw_balance > 0``
+    filter — so treating it as a violation would flag a real observation. The
+    asset class is defended at the writer instead (see ``_fetch_balances``: a
+    non-failed class status is a promise its row set was written).
+
+    A contract that has never been fetched at all is NOT in this set: its legacy
+    rows are still the best available observation and the view still shows them.
     """
     if not contract_ids:
         return set()
-    fetched = set(
-        session.execute(
-            select(ContractBalanceFetch.contract_id).where(ContractBalanceFetch.contract_id.in_(contract_ids))
+    fetches = session.execute(
+        select(
+            ContractBalanceFetch.id,
+            ContractBalanceFetch.contract_id,
+            ContractBalanceFetch.native_status,
+            ContractBalanceFetch.asset_set_status,
         )
-        .scalars()
-        .all()
-    )
-    if not fetched:
+        .where(ContractBalanceFetch.contract_id.in_(contract_ids))
+        .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
+    ).all()
+    if not fetches:
         return set()
-    ok_native = set(
-        session.execute(
-            select(ContractBalanceFetch.contract_id).where(
-                ContractBalanceFetch.contract_id.in_(contract_ids),
-                ContractBalanceFetch.native_status != STATUS_FETCH_FAILED,
+
+    # The winning fetch per (contract, class) — the same rule the view applies.
+    native_winner: dict[int, tuple[int, str]] = {}
+    asset_winner: dict[int, int] = {}
+    fetched: set[int] = set()
+    for fetch_id, contract_id, native_status, asset_status in fetches:
+        fetched.add(contract_id)
+        if native_status != STATUS_FETCH_FAILED and contract_id not in native_winner:
+            native_winner[contract_id] = (fetch_id, native_status)
+        if asset_status != STATUS_FETCH_FAILED and contract_id not in asset_winner:
+            asset_winner[contract_id] = fetch_id
+
+    promising = [fid for fid, status in native_winner.values() if status == NATIVE_STATUS_PROVEN_NONZERO]
+    with_native_row: set[int] = set()
+    if promising:
+        with_native_row = {
+            fid
+            for fid in session.execute(
+                select(ContractBalance.fetch_id).where(
+                    ContractBalance.fetch_id.in_(promising),
+                    ContractBalance.token_address.is_(None),
+                )
             )
-        )
-        .scalars()
-        .all()
-    )
-    ok_assets = set(
-        session.execute(
-            select(ContractBalanceFetch.contract_id).where(
-                ContractBalanceFetch.contract_id.in_(contract_ids),
-                ContractBalanceFetch.asset_set_status != STATUS_FETCH_FAILED,
-            )
-        )
-        .scalars()
-        .all()
-    )
-    return {cid for cid in fetched if cid not in ok_native or cid not in ok_assets}
+            .scalars()
+            .all()
+            if fid is not None
+        }
+
+    missing: set[int] = set()
+    for contract_id in fetched:
+        if contract_id not in native_winner or contract_id not in asset_winner:
+            missing.add(contract_id)
+            continue
+        fetch_id, status = native_winner[contract_id]
+        if status == NATIVE_STATUS_PROVEN_NONZERO and fetch_id not in with_native_row:
+            missing.add(contract_id)
+    return missing
 
 
 def positive_raw_balance(raw_balance: object) -> bool:
