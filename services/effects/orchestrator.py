@@ -40,6 +40,7 @@ from services.effects import calldata as calldata_synth
 from services.effects import recipes
 from services.effects.anvil import AnvilTransport, pause_recipe, timelock_execute_recipe
 from services.effects.config import (
+    BLOCK_SOURCE_INVOCATION_PIN,
     EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_FREEZE_PAUSE,
@@ -85,7 +86,16 @@ class ProbeContext:
     _seeder_cache: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     def sim_context(self) -> SimContext:
-        return SimContext(chain_id=self.chain_id, block=self.block, hardfork=self.hardfork)
+        return SimContext(
+            chain_id=self.chain_id,
+            block=self.block,
+            hardfork=self.hardfork,
+            # The preflight pins ONE ``eth_blockNumber`` per stage invocation and
+            # every Tier-1 probe simulates at exactly it, so the scope of the pin
+            # is the invocation. A head that could not be pinned is ``0`` (Tier 1
+            # is then disabled) and names no scope, so nothing is published.
+            block_source=BLOCK_SOURCE_INVOCATION_PIN if self.block > 0 else None,
+        )
 
     def effective_seeder(self) -> Seeder | None:
         """The seeder Tier-1 probes retry through, or ``None`` (⇒ no seeding, the

@@ -455,6 +455,11 @@ class EffectsWorker(BaseWorker):
         # Tier-2 plan and closed in ``process()``'s finally.
         self._anvil: Any = None
         self._anvil_error: Exception | None = None
+        # The preflight height the job's fork is spawned at. Set in
+        # ``_probe_context`` rather than ``_make_seams`` because the factory is
+        # BUILT before the head is pinned and only CALLED after — and cleared with
+        # the fork, so one job's pin can never spawn the next job's.
+        self._fork_block_pin: int | None = None
         # Per-job input-asset seeder, rebuilt in ``_probe_context`` so its budget
         # counters start at zero for every job.
         self._seeder: SimulateSeeder | None = None
@@ -539,6 +544,11 @@ class EffectsWorker(BaseWorker):
                     hardfork_name=hardfork,
                     fork_url=rpc_url,
                     fork_headers=rpc_headers(rpc_url),
+                    # Pin the fork to the SAME height Tier 1 simulated at.
+                    # Unpinned, anvil forks at the upstream's head at spawn — a
+                    # height nothing records, so a Tier-2 witness could not say
+                    # what state it observed and could not be replayed.
+                    fork_block_number=self._fork_block_pin,
                 )
             except Exception as exc:
                 self._anvil_error = exc if isinstance(exc, AnvilSpawnError) else AnvilSpawnError(str(exc))
@@ -554,6 +564,7 @@ class EffectsWorker(BaseWorker):
         anvil = self._anvil
         self._anvil = None
         self._anvil_error = None
+        self._fork_block_pin = None
         if anvil is None:
             return
         try:
@@ -734,6 +745,10 @@ class EffectsWorker(BaseWorker):
         self._seeder = None
         if supported and input_seeding_enabled():
             self._seeder = SimulateSeeder(seams.simulate, chain_id=seams.chain_id)
+
+        # A non-positive block is the preflight's failure sentinel (it would fork
+        # at genesis), so the fork is left unpinned and publishes no height.
+        self._fork_block_pin = block if block > 0 else None
 
         return ProbeContext(
             chain_id=seams.chain_id,

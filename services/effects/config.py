@@ -167,6 +167,26 @@ TIER_HISTORICAL = "tier0"
 TIER_CALL = "tier1"
 TIER_FORK = "tier2"
 
+# Provenance of the height an observation was taken at
+# (``effect_verdicts.witness.block_source``, beside ``witness.block_number``). The
+# value names the SCOPE the pin is shared across, which is the only thing that
+# tells a consumer whether two verdicts describe the same world state: the stage
+# pins ONE ``eth_blockNumber`` per stage INVOCATION today
+# (``effects_worker._preflight``), so verdicts from two invocations of one job can
+# sit at different heights (measured: 51 distinct heights spanning 495 blocks in a
+# single run, 7 jobs carrying two). ``job_pin`` and ``run_pin`` are the wider
+# scopes this vocabulary reserves — nothing emits them, and a per-run pin needs a
+# run/batch column ``jobs`` does not have.
+#
+# Both keys are ABSENT when the height is not proven: an unpinnable head, a fork
+# spawned without ``--fork-block-number``, or a Tier-0 index read that has no
+# single height. Absence is the not_determined state; ``0`` is the preflight's
+# FAILURE sentinel and reads as genesis, so it is never published as a height.
+BLOCK_SOURCE_INVOCATION_PIN = "invocation_pin"
+BLOCK_SOURCE_JOB_PIN = "job_pin"
+BLOCK_SOURCE_RUN_PIN = "run_pin"
+BLOCK_SOURCES = (BLOCK_SOURCE_INVOCATION_PIN, BLOCK_SOURCE_JOB_PIN, BLOCK_SOURCE_RUN_PIN)
+
 # Scoring-framework tiers (the vocabulary the eventual scorer/consumers read).
 # Kept distinct from the ``tierN`` strings above precisely so nothing round-trips
 # through the colliding raw string. Observed = grade-admissible (a proven positive
