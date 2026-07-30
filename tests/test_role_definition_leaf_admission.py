@@ -6,17 +6,28 @@
 ``bytes32 constant`` operand of a caller-authority leaf. Both are ERC-7201
 storage-layout pointers.
 
-The fix is structural: admit only from a keyed-set membership leaf — a
-``membership``/``external_bool`` leaf carrying a ``mapping_membership`` or
-``external_set`` descriptor — whose operand has an empty ``member_path``, i.e.
-the constant is the set KEY. Nothing here reads an identifier.
+The fix is structural, in two arms, and neither reads an identifier:
+
+* **mapping** — ``kind="membership"`` + ``mapping_membership`` descriptor.
+* **external** — ``kind="external_bool"`` + ``external_set`` descriptor whose
+  callee is exactly ``hasRole(bytes32,address)`` and whose argument POSITIONS
+  witness which operand is the role and which is the subject.
+
+Both require an empty ``member_path``.
+
+A first attempt admitted **any** ``external_set`` descriptor. That is a defaulted
+witness: ``_build_external_bool_leaf`` fills ``key_sources`` from every call
+argument, so "is an argument of a gate-shaped view call" stood in for key-ness.
+``TestExternalArmHostileShapes`` compiles the three counter-examples that
+produced through the real pipeline — a slot constant, a merkle root and a CREATE2
+salt, all minted as roles — and pins them at zero.
 
 Every leaf below marked REAL is verbatim from the persisted predicate_trees
 blobs of the PR-161 run (MinIO ``pr-161/artifacts/<job>/predicate_trees``):
 contract 454 CumulativeMerkleDrop, 623 EtherfiL1SyncPoolETH, 599
 WithdrawalQueueERC721.
 
-The two HOSTILE fixtures are the ones the name-suffix guard
+The two suffix HOSTILE fixtures are the ones the name-suffix guard
 ``tracking._is_storage_layout_constant`` gets wrong in BOTH directions; it is
 banned as the fix for exactly that reason, and ``test_name_suffix_guard_*``
 below pins the misclassification so the ban stays evidence-backed.
@@ -25,11 +36,15 @@ below pins the misclassification so the ban stays evidence-backed.
 from __future__ import annotations
 
 import sys
+import textwrap
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+    _HAS_ROLE_SELECTOR,
     _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
@@ -230,12 +245,57 @@ REAL_EXTERNAL_REGISTRY_ROLE_LEAF = {
 
 
 def test_external_registry_role_leaf_is_admitted():
-    """A delegated ``hasRole`` gate names a real role. The set is external, not an
-    in-contract mapping, but the constant is still a key of the tested set —
-    narrowing admission to ``mapping_membership`` alone would silently withdraw
-    every cross-contract role the pipeline publishes today."""
+    """A delegated ``hasRole`` gate names a real role. Admitted on the SELECTOR
+    (exactly ``hasRole(bytes32,address)``) plus the argument POSITIONS — the
+    constant in arg 0, a caller-tainted operand in arg 1 — never on "the leaf has
+    an external_set descriptor"."""
+    assert REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"]["callee_selector"] == _HAS_ROLE_SELECTOR
     trees = {"trees": {"mint()": _leaf(REAL_EXTERNAL_REGISTRY_ROLE_LEAF)}}
     assert _role_names_from_predicate_trees(trees, _vars("MINTER_ROLE")) == {"MINTER_ROLE"}
+
+
+def test_external_arm_rejects_a_non_hasrole_selector():
+    """Same descriptor kind, same key positions, different callee ⇒ nothing. The
+    ABI is what makes argument 0 a role identifier."""
+    descriptor = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"], "callee_selector": "0xdeadbeef"}
+    leaf = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF, "set_descriptor": descriptor}
+    assert _role_names_from_tree(_leaf(leaf), _vars("MINTER_ROLE")) == set()
+
+
+def test_external_arm_rejects_a_missing_selector():
+    descriptor = {k: v for k, v in REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"].items() if k != "callee_selector"}
+    leaf = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF, "set_descriptor": descriptor}
+    assert _role_names_from_tree(_leaf(leaf), _vars("MINTER_ROLE")) == set()
+
+
+def test_external_arm_rejects_the_constant_outside_the_role_position():
+    """The bytes32 constant sitting in the ACCOUNT argument is not a role, even
+    under the right selector."""
+    swapped = list(reversed(REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"]["key_sources"]))
+    descriptor = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"], "key_sources": swapped}
+    leaf = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF, "set_descriptor": descriptor}
+    assert _role_names_from_tree(_leaf(leaf), _vars("MINTER_ROLE")) == set()
+
+
+def test_external_arm_rejects_an_uncaller_tainted_account_argument():
+    """``registry.hasRole(ROLE, someStoredAddress)`` does not gate on the caller,
+    so the constant is not witnessed as gating THIS function's caller."""
+    keys = [
+        REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"]["key_sources"][0],
+        {"source": "state_variable", "state_variable_name": "treasury"},
+    ]
+    descriptor = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"], "key_sources": keys}
+    leaf = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF, "set_descriptor": descriptor}
+    assert _role_names_from_tree(_leaf(leaf), _vars("MINTER_ROLE")) == set()
+
+
+def test_external_arm_rejects_a_single_argument_callee():
+    descriptor = {
+        **REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"],
+        "key_sources": REAL_EXTERNAL_REGISTRY_ROLE_LEAF["set_descriptor"]["key_sources"][:1],
+    }
+    leaf = {**REAL_EXTERNAL_REGISTRY_ROLE_LEAF, "set_descriptor": descriptor}
+    assert _role_names_from_tree(_leaf(leaf), _vars("MINTER_ROLE")) == set()
 
 
 def test_real_slot_constant_leaves_are_rejected():
@@ -437,3 +497,127 @@ def test_slot_route_leafless_call_is_unchanged():
     assert _canonical_authority_selector_for_slot("OwnableStorageLocation") is not None
     assert _canonical_authority_selector_for_slot("PAUSER_ROLE") is None
     assert _canonical_authority_selector_for_slot(None) is None
+
+
+# --- external arm: the three hostile shapes, through the REAL pipeline --------
+#
+# Compiled with Slither and run through build_predicate_artifacts →
+# build_effects → _build_semantic_control_summary, i.e. the production static
+# path, not a hand-built leaf. Under the rejected "any external_set descriptor"
+# rule each of these minted a role name; each must now mint nothing.
+
+slither = pytest.importorskip("slither")
+from slither import Slither  # noqa: E402
+
+from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
+    build_predicate_artifacts,
+)
+from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
+    _build_semantic_control_summary,
+)
+
+
+def _role_names_from_source(tmp_path: Path, source: str) -> list[str]:
+    path = tmp_path / "C.sol"
+    path.write_text(textwrap.dedent(source).strip() + "\n")
+    contract = next(c for c in Slither(str(path)).contracts if c.name == "C")
+    predicate_trees = build_predicate_artifacts(contract)
+    effects = build_effects(contract)
+    semantic = _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
+    return [r.get("role") for r in semantic.get("role_definitions", [])]
+
+
+class TestExternalArmHostileShapes:
+    """Three gate-shaped external view calls that take a ``bytes32 constant``
+    which is NOT a role. All three reach an ``external_set`` descriptor with the
+    constant among ``key_sources``; none carries the ``hasRole`` selector."""
+
+    def test_erc7201_slot_constant_through_a_slot_lens(self, tmp_path):
+        """The D6 defect class itself, re-entering through the external arm: an
+        ERC-7201 pointer handed to ``readBool(address,bytes32)``."""
+        roles = _role_names_from_source(
+            tmp_path,
+            """
+            pragma solidity ^0.8.19;
+            interface ISlotLens { function readBool(address target, bytes32 slot) external view returns (bool); }
+            contract C {
+                ISlotLens public lens;
+                bytes32 public constant PausedStorageLocation =
+                    0xcd5ed15c6e187e77e9aee88184c21f4f2182ab5827cb3b7e07fbedcd63f03300;
+                uint256 public value;
+                constructor(ISlotLens l) { lens = l; }
+                function unpause() external {
+                    require(lens.readBool(msg.sender, PausedStorageLocation), "no");
+                    value = 1;
+                }
+            }
+            """,
+        )
+        assert roles == []
+
+    def test_merkle_root_in_a_membership_proof(self, tmp_path):
+        """``isInTree(bytes32,address)`` has hasRole's exact argument ORDER and is
+        still not a role check — which is why the selector gate is load-bearing."""
+        roles = _role_names_from_source(
+            tmp_path,
+            """
+            pragma solidity ^0.8.19;
+            interface ITree { function isInTree(bytes32 root, address account) external view returns (bool); }
+            contract C {
+                ITree public tree;
+                bytes32 public constant AIRDROP_ROOT = keccak256("AIRDROP");
+                uint256 public value;
+                constructor(ITree t) { tree = t; }
+                function claim() external {
+                    require(tree.isInTree(AIRDROP_ROOT, msg.sender), "no");
+                    value = 1;
+                }
+            }
+            """,
+        )
+        assert roles == []
+
+    def test_create2_salt_in_a_factory_authorisation(self, tmp_path):
+        roles = _role_names_from_source(
+            tmp_path,
+            """
+            pragma solidity ^0.8.19;
+            interface IFactory { function isAuthorized(address account, bytes32 salt) external view returns (bool); }
+            contract C {
+                IFactory public factory;
+                bytes32 public constant DEPLOY_SALT = keccak256("SALT");
+                uint256 public value;
+                constructor(IFactory f) { factory = f; }
+                function deploy() external {
+                    require(factory.isAuthorized(msg.sender, DEPLOY_SALT), "no");
+                    value = 1;
+                }
+            }
+            """,
+        )
+        assert roles == []
+
+    def test_a_genuine_hasrole_gate_still_mints(self, tmp_path):
+        """The positive control, same pipeline: the surviving external arm is not
+        vacuous."""
+        roles = _role_names_from_source(
+            tmp_path,
+            """
+            pragma solidity ^0.8.19;
+            interface IRoleRegistry {
+                function hasRole(bytes32 role, address account) external view returns (bool);
+            }
+            contract C {
+                IRoleRegistry public roleRegistry;
+                bytes32 public constant MINTER_ROLE = keccak256("MINTER");
+                uint256 public value;
+                constructor(IRoleRegistry rr) { roleRegistry = rr; }
+                function mint() external {
+                    require(roleRegistry.hasRole(MINTER_ROLE, msg.sender), "no");
+                    value = 1;
+                }
+            }
+            """,
+        )
+        assert roles == ["MINTER_ROLE"]

@@ -643,16 +643,24 @@ credit over 36 capabilities / 30 contracts. **B13 lists this mechanism under
 9 Safes at 25643300, `getModulesPaginated` returns `[]` with the sentinel and the
 guard slot is zero, so k/n is currently exact, not an upper bound.~~
 **↳ RETRACTED (2026-07-30, Unit 7A / C1). The Safe-principal population is 19, not
-9, and B10.1's caveat is NOT empty.** No plane yields 9 (`function_principals`
-`resolved_type='safe'` 19 distinct, `control_graph_nodes` 18, `principal_labels`
-20, protocol-1-scoped 11, `monitored_contracts` 11). Re-probed independently on
-all 19 at 25643300 via `utils/rpc`: `modules[SENTINEL_MODULES]`
+9, and B10.1's caveat is NOT empty.** No plane yields 9:
+`select count(distinct lower(address)) from function_principals where
+resolved_type='safe'` → **19**; `control_graph_nodes` → 18; protocol-1-scoped
+(join `contracts` on `protocol_id=1`) → 11; `monitored_contracts`
+`contract_type='safe'` → 11. (An earlier draft cited "`principal_labels` 20"
+without stating its query; a re-measure gave 14 by address-join and 80 by
+label-match, so the figure is withdrawn — the point stands on the four above.)
+Re-probed independently on all 19 at 25643300 via `utils/rpc`:
+`modules[SENTINEL_MODULES]`
 (`0xcc69885f…792f`) holds the sentinel on **18** and
 `0x…2e1b5a40edc922bce489668b11749b8eabd67f6b` on
 **`0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca`** (VERSION `1.1.1`, threshold 4) —
 **one enabled module**, so **k/n is an upper bound on protection for 1 of 19**.
 Guard slot `0x4a204f62…34c8` is zero on **19/19** and the 1.5.0 module-guard slot
-`0xb104e0b9…9947` is zero on 19/19. Versions: `1.4.1` ×10, `1.3.0` ×8, `1.1.1` ×1.
+`0xb104e0b9…9947` is zero on 19/19. Versions: **`1.4.1` ×9, `1.3.0` ×9, `1.1.1`
+×1** — measured twice at 25643300, and the slot-0 singleton agrees with `VERSION()`
+on **19/19** against the canonical deployments (`0x41675c09…` 1.4.1 ×9,
+`0xd9db270c…` 1.3.0 ×9, `0x34cfac64…` 1.1.1 ×1).
 A zero guard word is `proven_zero` only on 1.3.0/1.4.1; on 1.1.1 the slot is
 unused storage, so it is `feature_absent`. The corpus-level "k/n is exact" claim
 was a negative published from a 9-row subset without the observation block — the
@@ -1484,18 +1492,42 @@ Three decisions this enables:
 | `role_name` | `role_definitions.role_name`; artifact `semantic_control.role_definitions[].role` | 19 rows total, 11 protocol-1 | **CONFIDENCE** (a declared role name, not a holder set) | present = the constant is **proven** to be a key of a set the contract tests membership in / **row absent** = not determined | a leaf the lowering could not classify, a `bytes32` constant whose set descriptor is missing, or a state var not in scope ⇒ **no row**. Absence is never "this contract has no roles" |
 
 **Admission rule (structural, no identifier is read).** A `bytes32 constant`
-operand mints a role name only when the leaf is a **keyed-set membership test** —
-leaf `kind ∈ {membership, external_bool}` carrying a `set_descriptor` of kind
-`mapping_membership` (in-contract `_roles[ROLE][account]`) or `external_set`
-(cross-contract `registry.hasRole(ROLE, account)`) — **and** the operand's
-`member_path` is empty, i.e. the constant is the set KEY rather than a struct
-base being dereferenced. Measured on the persisted predicate trees of contracts
-454 / 599 / 623: 8 real roles all match, and the 2 ERC-7201 pointers
+operand mints a role name only when it is witnessed as a **KEY** of the set the
+leaf tests, on one of two arms, and in both its `member_path` must be empty (a
+dereferenced constant is a struct base, which is what a storage pointer is):
+
+1. **Mapping arm** — leaf `kind == "membership"` with a `set_descriptor` of kind
+   `mapping_membership`: the in-contract AccessControl read
+   `_roles[ROLE][account]`.
+2. **External arm** — leaf `kind == "external_bool"` with an `external_set`
+   descriptor whose `callee_selector` is **exactly**
+   `keccak("hasRole(bytes32,address)")[:4] = 0x91d14854`, **and** whose
+   `key_sources` put the constant in the **role** argument (index 0) and a
+   caller-tainted operand (`msg_sender` / `tx_origin` / `root_caller` /
+   `signature_recovery`) in the **account** argument (index 1).
+
+**The external arm's selector-and-position gate is load-bearing, not decoration.**
+`predicates.py::_build_external_bool_leaf` fills `key_sources` from *every* call
+argument, so admitting on "the descriptor is `external_set`" makes "is an argument
+of a gate-shaped view call" stand in for key-ness — a defaulted witness. Three
+shapes compiled through the production static path each minted a non-role
+constant under that wider rule: an ERC-7201 pointer passed to
+`lens.readBool(address,bytes32)` (**the D6 defect class re-entering**), a merkle
+root in `tree.isInTree(bytes32,address)` — which has `hasRole`'s exact argument
+*order* — and a CREATE2 salt in `factory.isAuthorized(address,bytes32)`. The ABI
+named by the selector is what makes argument 0 a role identifier.
+
+Measured on the persisted predicate trees of contracts 454 / 599 / 623: 8 real
+roles all match the mapping arm, and the 2 ERC-7201 pointers
 (`AccessControlDefaultAdminRulesStorageLocation` with `member_path ["_pendingDefaultAdmin"]`,
-`OwnableStorageLocation` with `["_owner"]`) match none — they are `equality`
-leaves with no set descriptor at all. The same refusal gates
-`predicate_evaluator._canonical_authority_selector_for_slot`, so a role key can
-never be re-read as an `owner()`/`governor()` slot locator.
+`OwnableStorageLocation` with `["_owner"]`) match neither — they are `equality`
+leaves with no set descriptor at all.
+
+`predicate_evaluator._canonical_authority_selector_for_slot` carries the same
+refusal so a role key can never be re-read as an `owner()`/`governor()` slot
+locator. It is deliberately **wider** there (leaf kind + descriptor kind only, no
+selector/position check): that predicate WITHHOLDS a reroute, so over-matching
+costs a resolution, never publishes a wrong address.
 
 **Banned as the fix:** the name-suffix guard `_is_storage_layout_constant`
 (inv.2 — it classifies on `endswith("_slot")` / `"storagelocation"` and is wrong
@@ -1521,6 +1553,9 @@ re-inserts from the fresh analysis, so a re-analysis is the whole deletion
 vehicle) and the cross-chain code-plane copier (`db/queue.py:2073-2082`, which
 only fills a target that has none). The artifact field is read in-process by
 `contract_analysis_pipeline/tracking.py:1103` to build controller tracking hints.
+**Residual:** until a donor contract is re-analyzed its pre-fix rows persist, and
+`db/queue.py:2073`'s copier will replicate them — including the two ERC-7201
+pointer rows — into a never-analyzed target's table on the next cross-chain reuse.
 
 **Small populations (B14 — none may calibrate):** mis-parsed rows **2**;
 protocol-1 role-event emitters **3**; the `OPERATING_ADMIN_ROLE` holder set **1**
@@ -1661,7 +1696,7 @@ obligation).
 | field | JSON path | pop. | status | three-state | failure path |
 |---|---|--:|---|---|---|
 | `probe_block` | `details->'safe_protection'->>'probe_block'` | 19 applicable | **REQUIRED** | integer height every other key was read at / `"not_determined"` | head read failed or the caller passed an unrecognised block tag ⇒ `"not_determined"` **and the probe is suppressed entirely** — no other key can be positive |
-| `safe_version` | `…->>'safe_version'` | 19 applicable | **GATE** | the `VERSION()` string / `"not_determined"` | call reverted, returned nothing, or failed to decode ⇒ `"not_determined"`. Required to read the guard word; nothing else depends on it |
+| `safe_version` | `…->>'safe_version'` | 19 applicable | **GATE** | the probed contract's **self-reported** `VERSION()` string / `"not_determined"` | call reverted, returned nothing, or failed to decode ⇒ `"not_determined"`. Required to read the guard word; nothing else depends on it. **Self-reported, not proven** — a lookalike could return any string; on this corpus it is corroborated by slot-0 singleton identity matching the canonical Safe deployments at 25643300 on **19/19**, which the probe does not itself read |
 | `modules_head` | `…->>'modules_head'` | 19 applicable | **REQUIRED** | the raw 32-byte word at `keccak256(abi.encode(address(0x1), uint256(1)))` / `"not_determined"` | read raised ⇒ `"not_determined"`. **Cite, never enumerate from** |
 | `module_set` | `…->'module_set'` | 19 applicable | **REQUIRED**, three-state | `[]` = **proven empty at `probe_block`** (head == sentinel) / `"not_determined"` | any non-sentinel head — including a zero word (mapping entry never written) and a word that is not a left-padded address — and any read failure ⇒ `"not_determined"`. **A non-empty enumerated array is NEVER published here**; it is admissible only from a list walked to the sentinel or a paginated `eth_call` that returned `next == sentinel`, neither of which this probe performs |
 | `module_set_basis` | `…->>'module_set_basis'` | 19 applicable | **REQUIRED** (cite) | `"storage_linked_list_terminated"` / `"not_determined"` | not_determined whenever `module_set` is |
@@ -1677,7 +1712,9 @@ key means the scorer may neither credit nor charge that dimension.
 
 **Small populations (B14 — may gate/cite/three-state, may never calibrate):**
 module-bearing Safes **1**; its reach **4** rows on 1 contract, `protocol_id IS
-NULL`. Version populations 1.4.1 ×10 / 1.3.0 ×8 / **1.1.1 ×1**.
+NULL`. Version populations 1.4.1 ×9 / 1.3.0 ×9 / **1.1.1 ×1** — and the 1.1.1
+population, the only one on which `guard: feature_absent` is ever reached, is a
+single address.
 
 **Monitor half.** `EnabledModule` / `DisabledModule` / `ChangedGuard` are
 registered in `GOVERNANCE_EVENT_TOPICS` (so `_scan_topics_union` enrolls every

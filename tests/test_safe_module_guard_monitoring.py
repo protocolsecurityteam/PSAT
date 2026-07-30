@@ -86,7 +86,7 @@ def _parsed(log: dict) -> dict[str, Any]:
 
 
 def test_enabled_module_decodes_on_both_indexing_conventions():
-    """A topics-only decoder returns nothing on a 1.3.0 Safe, and 1.3.0 is 8 of
+    """A topics-only decoder returns nothing on a 1.3.0 Safe, and 1.3.0 is 9 of
     the 19 Safe principals on this corpus."""
     for indexed in (True, False):
         parsed = _parsed(_log(ENABLED_MODULE_TOPIC0, indexed=indexed))

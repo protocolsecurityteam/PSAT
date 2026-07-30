@@ -1025,10 +1025,16 @@ def _oz_v5_namespaced_authority_selector(signature: str | None) -> str | None:
 
 def _leaf_is_keyed_set_membership(leaf: Mapping[str, Any] | None) -> bool:
     """True iff the leaf tests membership of a keyed set — the shape in which a
-    ``bytes32`` constant operand is a set KEY (an AccessControl role), not a
-    storage-layout pointer. Mirrors
-    ``services.static.contract_analysis_pipeline.summaries._leaf_is_keyed_set_membership``;
-    the two planes must agree on which constants are roles."""
+    ``bytes32`` constant operand may be a set KEY rather than a storage-layout
+    pointer.
+
+    Deliberately WIDER than the static plane's admission rule
+    (``summaries._operand_is_role_key``, which additionally requires the exact
+    ``hasRole(bytes32,address)`` selector and the argument POSITIONS on the
+    external arm). Only the direction matters, and it is safe in this direction:
+    here the predicate WITHHOLDS a slot-locator reroute, so over-matching costs a
+    resolution that would have been published, never a wrong address. The static
+    plane MINTS a fact, so it must be strict."""
     if not isinstance(leaf, Mapping):
         return False
     if leaf.get("kind") not in ("membership", "external_bool"):

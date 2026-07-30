@@ -372,7 +372,7 @@ def parse_governance_log(log: dict) -> dict | None:
         # EnabledModule/DisabledModule/ChangedGuard(address). Indexed from Safe
         # 1.4.1, non-indexed on 1.1.1/1.3.0 — same topic0 either way. Read
         # topics[1] when the emitter indexed it, else the single data word;
-        # topics-only would decode 1.3.0 as "no address" and 1.3.0 is 8 of the
+        # topics-only would decode 1.3.0 as "no address" and 1.3.0 is 9 of the
         # 19 Safes on this corpus.
         key = "guard" if event_type == "safe_guard_changed" else "module"
         if len(topics) >= 2 and topics[1]:
