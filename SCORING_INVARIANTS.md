@@ -1712,7 +1712,7 @@ denominator systematically flatters the grade.
 | `equivalence_reason` | 209/209 | **REQUIRED** (warnings) | separates three epistemic states the scorer collapses into one: **our-side data gap 162** (`candidate_path_missing` 117 — names the precise repo path whose rename would fix it; `commit_not_found_in_repo` 45), **deployed source provably differs 10** (`hash_mismatch`), **infrastructure 1**. This is inv.6's promote-or-clear requirement, satisfied by an existing column. |
 | `covered_from_block` / `covered_to_block` | 151/209 and **8/209** | **REQUIRED** | the only deterministic staleness bound on an audit credit — stops a 2023 audit crediting 2026 code. *Low population: 8 rows.* |
 | `matched_commit_sha` | 36/209 (exactly the proven rows) | **REQUIRED** | the sha printed verbatim in the PDF. |
-| `upgrade_events` | **120 rows / 24 proxies** on protocol 1; `block_number`/`timestamp`/`tx_hash` **120/120** | **REQUIRED** | deterministic Etherscan `getLogs` scan of `Upgraded`/`AdminChanged`/`BeaconUpgraded` (`upgrade_history.py`). EtherFiNodesManager **18 upgrades** (2023-05-02 → 2026-07-14), LiquidityPool 17, Liquifier 8, EETH 6; **11 proxies upgraded on 2026-07-14**, 15 days before the snapshot. `tx_hash` is the handle to resolve **who actually sent** each upgrade — the direct empirical test of inv.5's *"a timelock in front of a 1/1 Safe earns nothing if the Safe can act directly"*, which nothing else in the corpus can answer. |
+| `upgrade_events` | **120 rows / 24 proxies** on protocol 1; `block_number`/`timestamp`/`tx_hash` **120/120**. **96 of the 120 are upgrades; 24 are deployments** (§B16), across **68 distinct transactions** | **REQUIRED** | deterministic Etherscan `getLogs` scan of `Upgraded`/`AdminChanged`/`BeaconUpgraded` (`upgrade_history.py`). **Every count below was corrected downward on 2026-07-30** — a proxy's own creation emits `Upgraded`, and every one of the 24 proxies has exactly one such row (basis per figure: the receipt rule `to IS NULL AND contractAddress == proxy` proves 18; the two-witness creation pair — Etherscan `getcontractcreation` naming the same tx AND `eth_getCode` at the event block −1 returning `0x` — proves the other 6, all deployed through factory `0x356d1b83…`). **every one of the 24 per-proxy counts drops by exactly one**: **EtherFiNodesManager 18→17** (2023-05-02 → 2026-07-14), **LiquidityPool 17→16**, **Liquifier `0x9ffdf407` 8→7**, **EETH `0x35fa1647` 6→5**, and the three single-row proxies **`0x2b90103c`**, **`0x4a84ba0b`** and **`0x5585996e`** go **1→0**, leaving **96 real upgrades across 21 proxies**. Re-measured independently against all 68 receipts: the two arms agree everywhere they overlap — arm 2 proves all 24, arm 1 proves the 18 whose creation was EOA-sent, and no proxy is proven by one arm and refuted by the other. The day figure was also wrong: the single transaction `0xc9c80e5b…` at block 25533308 on 2026-07-14 touched **19** protocol-1 proxies (21 table-wide), **not 11** — and it is **ONE governance action**, so counting it per event inflates it 19×. `tx_hash` is the handle to **who executed** each upgrade; §B16 resolves that and states plainly that **who *authorised* it stays `not_determined` on every row**. |
 | **18 contracts with audit rows and zero `proven`** (11 from ≥2 firms, 1 from 4); and `max(proven)` per contract is **1 firm for every contract** while `all_firms` reaches **7** | — | CONFIDENCE | exactly inv.1's audit corollary: these must read *unknown*, not 0. The plan's "18/36 score identically whether never-audited or 5-firm-audited" phenomenon is reproduced on this snapshot. Firm identity is LLM-assisted (`audit_reports_llm.py`) → confidence only. |
 | `audit_reports.classified_commits` | 60/67, 102 entries | **BANNED from grade** | the inv.2(b) LLM labels. Note `findings` and `scope_entries` are **0/67** — no audit-findings data exists on this corpus at all. |
 
@@ -2104,3 +2104,92 @@ version, never a measured strength.
   scheduling fact this unit does not control and did not measure. Until a row is
   re-resolved it keeps the 5-key shape and must be read as the weakest branch,
   which is the same obligation as any absent witness.
+
+### B16. Upgrade executor fold — who executed, and the deployments that were never upgrades (C4 / Unit 8)
+
+`upgrade_events` carries no sender, no receipt and no trace, so before this the
+corpus could not answer "who executed this upgrade" *or* "how many upgrade
+actions were there". The fold adds the transaction's own receipt as a second
+instrument, one `eth_getTransactionReceipt` per **distinct** `tx_hash` (68 for
+protocol 1, 107 table-wide, one-time — a mined receipt is immutable).
+
+**Tables:** `upgrade_transactions` keyed `(chain_id, tx_hash)` — which IS the
+`governance_action_id` — and `contract_creation_witnesses` keyed
+`(chain_id, address)`. `upgrade_events` gains a nullable `chain_id` as the link
+half of a composite MATCH SIMPLE foreign key. **Row existence is the coverage
+discriminator:** a row means a receipt was read and decoded; no row means never
+read or read failed. Nullable columns on `upgrade_events` were rejected for
+exactly this reason — `executor_kind IS NULL` would conflate "not fetched" with
+"fetched and undetermined", which is a defaulted witness.
+
+**Producer:** `services/discovery/upgrade_history.py::fold_upgrade_transactions`,
+called from `workers/static_worker.py` after `project_to_events` in its own
+failure domain. **Readers:** `upgrade_action_counts` /
+`governance_actions_for` / `event_is_deployment` / `top_level_msg_sender` /
+`executor_call_targeted_proxy` (same module); the published payload is
+`company_overview` `contracts[].upgrade_count` + `.upgrade_count_basis`.
+
+| field | JSON / column path | pop. (PR-161 replica) | status | three-state | failure path |
+|---|---|--:|---|---|---|
+| `governance_action_id` | `upgrade_transactions.tx_hash` | 68 tx / 120 events | **REQ** (arithmetic) | present = this action's id · — · absent row = no receipt fact | no row |
+| `executor_kind` | `.executor_kind` | 3-valued, never NULL | **REQ** (gate + cite) | `timelock_routed` / `safe_direct` are each proven · there is no proven-absent polarity · `not_determined` carries every other case | **`not_determined`** on: receipt unfetchable · `status=0x0` · neither marker · marker emitter unclassified · planes disagreeing · two distinct marker emitters · log set not provably complete |
+| `executor_address` | `.executor_address` | populated iff kind positive | **REQ** (cite) | the marker's emitter · — · NULL | NULL |
+| `executor_classification_source` / `executor_classified_type` | `.executor_classification_*` | populated iff kind positive | **GATE** | which persisted plane typed the emitter, and as what · — · NULL | NULL. A CHECK constraint makes the gate **inseparable** from the payload |
+| `executor_classification_block` | `.executor_classification_block` | **0 rows today** | **REQ** (three-state) | the height the classifier probed at · — · NULL = not determined | NULL. Populated going forward by B10.1a's `safe_protection.probe_block` |
+| `executor_call_targets` | `.executor_call_targets` (JSONB) | gated on `timelock_routed` | **REQ** (cite) | the `target` word of each `CallExecuted` · — · SQL NULL | NULL — and `executor_call_targeted_proxy()` returns `not_determined`, never `false`, for a `safe_direct` tx |
+| `receipt_log_set_complete_for_tx` | `.receipt_log_set_complete_for_tx` | computed per row | **GATE** | `true` = the receipt carries every stored `Upgraded` for this tx AND its `logsBloom` agrees with the log array about `CallExecuted` · `false` = it does not · — | `false` withdraws every marker-**absence** inference, which is the entire basis of `safe_direct` |
+| `is_contract_creation` / `created_contract_address` / `receipt_to` / `receipt_from` | `.` same | 68/68 | **GATE** | verbatim receipt facts; `receipt_to IS NULL` is the FACT "contract creation", told apart from "unknown" by the row existing | absent row |
+| `block_number` / `block_hash` | `.` same | 68/68 | **GATE** (cite) | the observation coordinates | — |
+| **derived** `is_deployment` | `event_is_deployment(...)` per (tx, proxy) | **24 of 120** | **REQ** (arithmetic + cite) | proven by **either** arm — receipt (`to IS NULL AND contractAddress == proxy`, 18) or the **two-witness** creation pair (`creation_tx_hash == tx_hash` AND `code_absent_at_probe` at `event_block − 1`, 6) · — · anything less | **`false`, and the event stays COUNTED.** Neither witness alone is admitted; disagreement is not determined. A (tx, proxy) pair with **more than one** event is never excluded (a within-tx swap-and-restore is not a plain creation) |
+| **derived** `top_level_msg_sender` | `top_level_msg_sender(...)` | 4 tx | **CONF** | `receipt.from`, published **only** where `receipt.to == proxy`; the claim is "was msg.sender in the TOP-LEVEL frame" and nothing more · — · every other tx | `None`. **Never** consumed as "who authorised" |
+| **derived** `direct_upgrade_witnessed_at_block` | basis `.direct_upgrade_witnessed_at_block` | per proxy | **CONF** (cite) | "a direct-Safe path WAS exercised, at block B" · — · no `safe_direct` tx | `None`. Licenses no claim about the path being open now |
+| `upgrade_count` | `contracts[].upgrade_count` | per contract | **REQ** (arithmetic) | an **UPPER BOUND** on real upgrades — proven deployments removed, unproven events kept · — · **`None`, including post-exclusion zero** | `None`. See the zero rule below |
+| `upgrade_count_basis` | `contracts[].upgrade_count_basis` | per contract | **GATE** (cite) | `events_total` / `tx_facts_present` / `events_unlinked` / `events_without_tx_hash` / `deployments_excluded` / `executor_kinds` | — |
+| `authorising_eoa` | `upgrade_count_basis.authorising_eoa` | **0/68 ever** | **BAN** | never proven · never disproven · **always `not_determined`** | the literal string is published so the refusal reaches the consumer instead of being an omission it could fill in |
+| `timelock_is_decoy` | `upgrade_count_basis.timelock_is_decoy` | **0/24 ever** | **BAN** | — · — · **always `not_determined`** | no column, no computation |
+| `recorded_event_coverage` | `upgrade_count_basis.recorded_event_coverage` | per contract | **GATE** | — · — · **always `not_determined`** | only the ERC-1967 topics are folded and `old_impl` is NULL 191/191, so "no event" never licenses "no upgrade" |
+
+**The zero rule (why `upgrade_count` is `None`, not `0`).** The number is
+RENDERED as literal "N upgrades" (`site/src/surface/canvas/ContractNode.jsx:78`
+and `:87`, `site/src/surface/lanes/EntityCard.jsx:151`), so a published `0` reads
+as an earned negative. After excluding proven deployments, three proxies reach
+zero — and zero there means only *"no non-deployment event was recorded"*, over a
+recording surface that is itself unwitnessed. The aggregation therefore publishes
+`None`; the reader renders nothing.
+
+**Two bans, restated because both have a populated field sitting right next to
+them.** (1) `authorising_eoa` from `tx.from`: six different senders were measured
+relaying for one Safe, so `tx.from` names the submitter, never the signer set —
+including the 4 transactions where `receipt.to == proxy`, where the narrower
+`top_level_msg_sender` is published instead and an `eoa_one_hop` executor kind is
+**not** (a top-level frame is not the upgrade site, and the guard's operand is an
+AST fact no receipt can reach). (2) `timelock_is_decoy` from the observation that
+zero direct upgrades follow each proxy's first timelock-routed one: that is an
+absence of observed bypass, not proof that no bypass exists.
+
+**The 68-transaction partition, re-measured from the receipts (2026-07-30):**
+18 contract-creation receipts · 23 carrying `CallExecuted` · 15 carrying
+`ExecutionSuccess` with no `CallExecuted` · 4 with neither and `receipt.to ==
+the proxy` · 8 with neither and `receipt.to` an intermediary (`0x356d1b83…` 6,
+`0xdbf6be12…` 2 — the first six are the factory deployments arm 2 catches, the
+last two stay `not_determined`). The 15 `ExecutionSuccess` emitters are
+`0xf155a263…` ×11 (**unclassified on every plane ⇒ `not_determined`**),
+`0xf46d3734…` ×3 and `0xa000244b…` ×1.
+
+**Small populations (B14 — may gate / cite / three-state, never calibrate a
+weight):** 4 one-hop transactions · 2 mediating intermediaries (6 tx + 2 tx) ·
+3 `safe_direct` transactions by `0xf46d3734` and 1 by `0xa000244b` · 8 dual-class
+proxies · 3 within-tx swap-and-restore pairs. Corpus-bound even where above 5:
+24 deployments, 23 timelock-routed, 15 `ExecutionSuccess`-bearing, 24 proxies,
+1 protocol, 1 chain.
+
+**Stated limitations.** (a) `eth_getTransactionReceipt` takes no block parameter,
+so unlike every other chain read here it **cannot be pinned by parameter**; the
+observed heights (10743414–25533308) are final beyond any plausible reorg depth
+and `block_hash` is stored so a reorg is *detectable* rather than merely trusted.
+(b) The classification plane carries no height on any current row, so
+`executor_kind` asserts "the emitter is typed a Safe/timelock **by our
+classifier**", **not** "…and it was one at the upgrade's block" — proving that
+would need an archive `eth_getCode` at 2023-2026 blocks, which is out of scope
+here. (c) `contracts.chain` is `'ethereum'` on every row in this replica, so the
+`upgrade_events.chain_id` backfill exercises no NULL arm on this corpus.

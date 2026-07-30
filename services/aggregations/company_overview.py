@@ -719,32 +719,32 @@ def _prefetch_child_tables(
             )
         return local, rows
 
-    def _upgrade_count(s: Session) -> tuple[dict[int, int], int]:
-        """Upgrade TRANSACTIONS per contract, not Upgraded logs.
+    def _upgrade_count(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
+        """Upgrade ACTIONS per contract, not Upgraded logs — with the basis.
 
         The payload's ``upgrade_count`` renders as literal "N upgrades" text,
-        so the unit must be exercises of upgrade authority. One transaction can
-        emit several ``Upgraded`` logs against the same proxy (a within-tx
-        swap-and-restore emits two), and a per-log count published "7 upgrades"
-        over 5 transactions. Distinct ``tx_hash`` is the honest cardinality
-        that the persisted rows can actually support — counting distinct
-        *resting-implementation changes* would need old→new impl continuity,
-        and ``old_impl`` is NULL on every backfill-written row. Rows with NULL
-        ``tx_hash`` (the poll writer detects a slot change without a tx) are
-        each their own observed upgrade: they cannot be grouped by
-        transaction, and folding them together would undercount.
+        so the unit must be exercises of upgrade authority. Distinct
+        ``tx_hash`` is the honest cardinality the persisted rows can support:
+        one transaction can emit several ``Upgraded`` logs against the same
+        proxy (a within-tx swap-and-restore emits two), and counting distinct
+        *resting-implementation changes* instead would need old→new impl
+        continuity, which ``old_impl`` (NULL on every backfill-written row)
+        cannot give. Rows with NULL ``tx_hash`` (the poll writer detects a slot
+        change without a tx) are each their own observed upgrade: they cannot
+        be grouped by transaction, and folding them together would undercount.
+
+        What the distinct-tx count still could not see is that **a proxy's own
+        deployment emits ``Upgraded``**, so its creation was published as an
+        upgrade. ``upgrade_action_counts`` excludes an event only where the
+        deployment is PROVEN (see ``services/discovery/upgrade_history.py``),
+        leaves every unproven one counted, and refuses to publish a
+        post-exclusion zero as a proven zero. The sidecar carries the basis so
+        a consumer can see the coverage behind the number rather than reading
+        it as complete.
         """
-        local: dict[int, int] = {}
-        for cid, distinct_tx, null_tx in s.execute(
-            select(
-                UpgradeEvent.contract_id,
-                func.count(func.distinct(UpgradeEvent.tx_hash)),
-                func.count(UpgradeEvent.id).filter(UpgradeEvent.tx_hash.is_(None)),
-            )
-            .where(UpgradeEvent.contract_id.in_(id_list))
-            .group_by(UpgradeEvent.contract_id)
-        ).all():
-            local[cid] = distinct_tx + null_tx
+        from services.discovery.upgrade_history import upgrade_action_counts
+
+        local: dict[int, dict[str, Any]] = upgrade_action_counts(s, id_list)
         return local, len(local)
 
     def _upgrade_last(s: Session) -> tuple[dict[int, dict[str, Any]], int]:
@@ -1253,7 +1253,7 @@ def build_governance_view(
     controller_values_by_cid: dict[int, list[ControllerValue]] = children["controller_values"]
     ef_effects_by_cid: dict[int, list[dict[str, list[str]]]] = children["ef_effects"]
     fp_governance_by_cid: dict[int, list[dict[str, Any]]] = children["fp_governance_rows"]
-    upgrade_events_count_by_cid: dict[int, int] = children["upgrade_events_count"]
+    upgrade_events_count_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_count"]
     last_upgrade_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_last"]
     balances_by_cid: dict[int, list[Any]] = children["balances"]
     cgn_by_cid: dict[int, list[ControlGraphNode]] = children["cgn"]
@@ -1353,7 +1353,12 @@ def build_governance_view(
                 if _is_active_owner_controller(cv.controller_id) and cv.value and cv.value.startswith("0x"):
                     owner = cv.value.lower()
 
-        upgrade_count = upgrade_events_count_by_cid.get(contract_row.id) if contract_row else None
+        upgrade_entry = (upgrade_events_count_by_cid.get(contract_row.id) if contract_row else None) or {}
+        # ``count`` is None whenever the rows support no PROVEN upgrade action —
+        # including the post-exclusion zero, which the UI would otherwise render
+        # as the earned negative "0 upgrades".
+        upgrade_count = upgrade_entry.get("count")
+        upgrade_count_basis = upgrade_entry.get("basis")
         last_upgrade_entry = (last_upgrade_by_cid.get(contract_row.id) if contract_row else None) or {}
         last_upgrade_block = last_upgrade_entry.get("block")
         last_ts = last_upgrade_entry.get("timestamp")
@@ -1530,6 +1535,13 @@ def build_governance_view(
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
             "upgrade_count": upgrade_count,
+            # Never a proven-complete count: it is an upper bound whose coverage
+            # (how many of the events carry a receipt fact, how many proven
+            # deployments were removed) is stated rather than implied, together
+            # with the three refusals — signer set, decoy verdict, and whether
+            # the recording surface saw everything — that this plane cannot
+            # answer at all.
+            "upgrade_count_basis": upgrade_count_basis,
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
             "role": role,

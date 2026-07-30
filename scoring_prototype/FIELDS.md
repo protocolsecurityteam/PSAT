@@ -97,7 +97,7 @@ Under `claims[].witness.flows[]`. **`direction` is on the WITNESS, not on the fl
 | `control_graph_edges.relation` | 5,030 | REQ, **whitelist** | admit `controller_value`, `role_principal`, `mapping_member`. **Exclude** `safe_owner` (one owner does not satisfy k-of-n) and `controller_value_unattributed` (CONF, not zero) |
 | `control_graph_nodes.analysis_state` | 39 failed / 29 depth-horizon | CONF | only those 68 can improve; `not_analyzable` (1299) is terminal and must not count as improvable |
 | **timelock ⊂ proposer collapse** | — | REQ | the proposer Safe is the sole PROPOSER and sole EXECUTOR, so upgrade-by-timelock ⊂ exec-by-proposer. Collapse in the **aggregation key**, severity = **max**. Two rows otherwise charge the same $4.06B twice |
-| **inv.5 direct-path discount** | — | gap | the 4/7 Safe directly gates all 16 contracts the 2-day timelock gates. The delay's protective value must be discounted against the undelayed path. **Not constructible locally** — `upgrade_events` has no sender column, and 120 events span 68 tx hashes |
+| **inv.5 direct-path discount** | — | **partly closed 2026-07-30 (C4 / Unit 8)** | the 4/7 Safe directly gates all 16 contracts the 2-day timelock gates. Who **executed** each upgrade is now witnessed per transaction (`upgrade_transactions.executor_kind`, §13) and a direct-Safe path is published where it was exercised (`direct_upgrade_witnessed_at_block`). What stays a **gap**: who *authorised* it — `authorising_eoa` is `not_determined` on all 68 transactions, `tx.from` being the submitter (6 relayers measured for one Safe) — and whether the direct path is open *now*, which history cannot show. `timelock_is_decoy` therefore stays `not_determined` on all 24 proxies and the delay is neither credited nor discounted on this evidence |
 
 ## 5. Freeze
 
@@ -210,7 +210,7 @@ measurable here.**
 | `covered_from_block` / `covered_to_block` | 150 / **12** | GATE, withhold-only | usable closed interval is **8 rows / 4 contracts sharing one block value**. Only ever withholds a credit |
 | `audit_reports.classified_commits` | 60/67, 183 entries | **BAN** | LLM commit-role labels |
 | **`proof_kind`** | 36 populated, 3 of 4 values n=1 | **BAN, all four values** | `clean` and `pre_fix_unpatched` are opposite branches of one `if` over the same LLM labels, and the sha compare is a fuzzy 7-char prefix. Only `unclassified` is LLM-free and it carries no information |
-| `upgrade_events` | 120 / 24 proxies | REQ | deterministic `getLogs` of `Upgraded`/`AdminChanged`/`BeaconUpgraded`. `old_impl` is NULL 120/120 **by construction** — derive predecessors by ordering on `block_number`, never by diffing the column |
+| `upgrade_events` | 120 rows / 24 proxies — **96 upgrades + 24 deployments**, over **68 transactions** | REQ | deterministic `getLogs` of `Upgraded`/`AdminChanged`/`BeaconUpgraded`. `old_impl` is NULL 120/120 **by construction** — derive predecessors by ordering on `block_number`, never by diffing the column. **Two counting corrections (2026-07-30, C4 / Unit 8):** a proxy's own creation emits `Upgraded`, and all 24 proxies carry exactly one such row, so **every per-proxy count drops by exactly one** — EtherFiNodesManager **18→17**, LiquidityPool **17→16**, Liquifier **8→7**, EETH **6→5**, and the three single-row proxies `0x2b90103c` / `0x4a84ba0b` / `0x5585996e` **1→0**, leaving **96 real upgrades across 21 proxies**. And the unit of an upgrade count is the **transaction, not the log**: `0xc9c80e5b…` carries 19 protocol-1 events across 19 proxies and is **one** governance action (the register's "11 proxies on 2026-07-14" was also wrong — 19). Count via `upgrade_action_counts` / `governance_actions_for`, never `COUNT(upgrade_events.id)` |
 | 18 contracts with audit rows and 0 proven | — | CONF | must read **unknown**, not 0 (inv.1). `max(proven firms)` is 1 on every contract while `all_firms` reaches 7 |
 
 ## 9. Earned negatives — publish as findings with a counterfactual, not dismissals
@@ -242,6 +242,8 @@ measurable here.**
 `effect_transcript_*.foundry_version` | byte-identical to `anvil_version` on all 78; reading them as two agreeing sources is fabricated corroboration
 `rate_limit` witness (`capacity`, `refill_rate`, `bounds_total_extraction`) | all `not_determined` 10/10 while `mandatory='proven'`; the witness's own text refuses a severity conclusion. Live temptation: mandatory on a $467M function
 `effect_verdicts.current_check_passed` · `bytecode_cache.selfdestructed_at` · `upgrade_events.old_impl` | 0 populated / NULL by construction
+`tx.from` as the upgrade's authoriser (any shape: `receipt.from`, `eth_getTransactionByHash().from`, an `eoa_one_hop` executor kind) | it is the **submitter**. 11 of the 15 Safe-direct transactions were relayed to one Safe by **six different** senders. Even where `receipt.to == proxy` it proves only msg.sender in the **top-level frame** — not msg.sender at the upgrade site, and nothing about what the guard reads. Publish `top_level_msg_sender` and stop there
+`timelock_is_decoy` from "no direct upgrade after the first timelock-routed one" | absence of an observed bypass is not proof no bypass exists. Zero-after-first holds on all 8 dual-class proxies and licenses nothing. Only the positive `direct_upgrade_witnessed_at_block` is publishable
 `semantic_functions[].contract` (declaring contract) | the code-factoring information inv.13 requires the score to be invariant to
 
 ## 11. Product-vs-privileged
@@ -259,3 +261,28 @@ The pipeline computes proof-strength gates and **discards them at the persistenc
 5. `effect_verdicts` — pin fork observations to one block per run, or publish the per-verdict block as part of the witness identity.
 6. **2-day timelock** (`contracts.id=11`) — 0 `effective_functions` while gating 53 rows across 16 contracts. Cheapest fix to the largest weakest-path blind spot.
 7. ~~**Safe modules and guard**~~ — **LANDED 2026-07-30 (C1).** Two `eth_getStorageAt` plus `VERSION()` after `kind=='safe'`, at a pinned height, published as `details->'safe_protection'` (§4). NOT via `getModulesPaginated` in `_CLASSIFY_PROBE_SIGS` — those calldata builders cannot pass arguments. k/n is an upper bound **in fact**, not in principle, on 1 of the 19 Safes.
+
+## 13. Upgrade executor fold — `upgrade_transactions` (C4 / Unit 8)
+
+Per **distinct transaction**, from that transaction's own receipt (one
+`eth_getTransactionReceipt` per `tx_hash`; a mined receipt is immutable, so this
+is one-time). Normative entry: `SCORING_INVARIANTS.md` **B16**.
+
+**The row's existence is the coverage discriminator** — a row means the receipt
+was read and decoded; no row means never read or read failed. Do not read a
+missing row as any polarity.
+
+| field | pop. | status | notes |
+|---|--:|---|---|
+| `governance_action_id` (= `upgrade_transactions.tx_hash`) | 68 tx / 120 events | REQ | **the unit of an upgrade count.** `0xc9c80e5b…` is 19 events across 19 proxies and ONE action. Count with `governance_actions_for` / `upgrade_action_counts`, never `COUNT(upgrade_events.id)` |
+| `executor_kind` | 3-valued, never NULL | REQ (gate + cite) | `timelock_routed` / `safe_direct` / `not_determined`. A positive needs three things at once: a keccak-matched marker log, an emitter the **persisted classification plane** independently typed, and a provably complete log set. Unclassified emitter ⇒ `not_determined` (the 11 measured transactions on the unmodelled Safe `0xf155a263…` are exactly this) |
+| `executor_address` + `executor_classification_source` + `executor_classified_type` | iff kind positive | REQ / GATE | a CHECK constraint makes the gate inseparable from the payload |
+| `executor_classification_block` | **0 today** | REQ | `not_determined` on every current row; from B10.1a's `safe_protection.probe_block` going forward. Why it matters: the kind asserts the emitter is typed a Safe/timelock **by our classifier**, not that it was one at the upgrade's block |
+| `executor_call_targets` → `executor_call_targeted_proxy(tx, proxy)` | gated on `timelock_routed` | REQ | the `target` word of each `CallExecuted`. On `0xc9c80e5b…` **24 of the 26** `Upgraded` emitters are targets — joining every log in the transaction to the executor over-attributes `0x3c55986c…` and `0xd789870b…`. `not_determined` (never `false`) for `safe_direct`: `ExecutionSuccess` carries no target |
+| `receipt_log_set_complete_for_tx` | computed | GATE | **computed, never asserted**: the stored `Upgraded` events must appear in the receipt's own logs, and the `logsBloom` must agree with the log array about `CallExecuted`. A bloom has no false negatives, so bloom-absent is independent proof of absence — which is what licenses `safe_direct`. Bloom-present with no such log ⇒ `not_determined` (a pruned array) |
+| `is_deployment` (derived, per (tx, proxy)) | **24 of 120** | REQ | two arms, either sufficient: receipt (`to IS NULL AND contractAddress == proxy`, 18) or the **two-witness** creation pair (`getcontractcreation` naming the tx AND `eth_getCode(proxy, event_block−1) == 0x`, 6 — all via factory `0x356d1b83…`). Neither witness alone. A not-determined event **stays counted** |
+| `upgrade_count` + `upgrade_count_basis` | per contract | REQ / GATE | an **upper bound**: proven deployments removed, unproven events kept. **Post-exclusion zero publishes `None`**, never `0` — the number is rendered as "N upgrades" and zero would read as an earned negative over a recording surface that is itself unwitnessed (`recorded_event_coverage: not_determined`) |
+| `top_level_msg_sender` (derived) | 4 tx | CONF | `receipt.from` where `receipt.to == proxy`. Claim = "msg.sender in the top-level frame". Never "who authorised" |
+| `direct_upgrade_witnessed_at_block` | per proxy | CONF | "a direct-Safe path WAS exercised at block B". Says nothing about now |
+| `authorising_eoa` | **0/68 ever** | **BAN** | always `not_determined`, published as the literal string so the refusal reaches the consumer |
+| `timelock_is_decoy` | **0/24 ever** | **BAN** | always `not_determined`; no column, no computation |
