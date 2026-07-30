@@ -1626,9 +1626,13 @@ cursor, so there is no corroborating fold).
 | `capability_expr` `finite_set` + `members=[]` + `membership_quality='exact'` + `confidence='enumerable'` | **52 rows**, all `restricted`, all with 0 principals | **REQUIRED** | **nobody can call it.** The empty is *earned*: `solmate_roles.py:178-197` refuses to emit an exact empty in both failure modes (index-cold → `no_index_cursor` + `deferred_pending_index`; authority-unconfirmed → `authority_unconfirmed_no_role_events`), both falling through to `external_check_only`; read-gap empties get `lower_bound`/`partial` + an `empty_reason`. Measured: **52/52 exact+enumerable, 0 lower_bound.** Cross-verified on `TellerWithMultiAssetSupport.setAuthority`: `trace.roles=[]` **and** `owner=0x0` at block 25641257 — both disjuncts of Solmate `requiresAuth` provably empty. **All 11 `restricted_no_principal` warnings are exactly these rows**, and their `"missing_witness": "principal resolution"` text is **factually wrong** — resolution ran and returned "nobody". inv.13 requires inert functions be no-ops. |
 | `controller_values` `source='owner'`, `resolved_type='zero'`, `authority_provenance='caller_gate'` | **22 rows / 22 contracts holding $94,026,174** | **REQUIRED** | `owner == address(0)`, each an `eth_call` at a recorded block. **Lowers:** the owner disjunct is dead, so a resolved role finite_set is the *whole* answer, not a lower bound. **Raises:** where the only recovery/unpause path was the owner, this is the **affirmative** `irreversibility_proven` witness that `freeze_severity()` currently infers from claim *absence*. |
 | `effective_functions.conditions` `kind='one_shot'` + `latch_state='consumed'` | **22 rows** (21 open, 1 restricted), all `initialize`-family | **REQUIRED** | a spent initializer is inert. Current impact **zero** (none carry claims) — reported because that is *accidental*, not principled: initializers routinely grant admin roles, and the first `roles.grant` matcher that fires on one produces a catastrophic-shaped **open** finding. This latch is the proven refutation. |
-| `indexed_event_cursors.backfill_complete` + `last_indexed_block` (+ `last_indexed_block_hash`) | **80/80 warm**, all at block 25641245, hash on 80/80 | **GATE** | makes **absence of an event a proven negative**. Verified in code, not taken from the flag: `_seed_block` seeds `creation_block - 1` and **defers enrollment entirely** when the creation block can't be resolved (`event_log_indexer.py:607`); the zero address is rejected (`:593`); `backfill_complete` is set only at the confirmation-depth-deep head (`:369`, `:415`); a reorg rewind deletes logs address-wide and clears the flag on every sibling cursor (`:340-358`). |
-| never-emitted events | **11 zero-log warm cursors / 4 addresses** | **REQUIRED** | usable instance: `LayerZeroTellerWithRateLimiting` — `AllowFrom`/`DenyFrom`/`AllowOperator`/`DenyOperator` each warm with **0 logs**. The transfer denylist has **provably never been written since deployment**. A proven fact about `transfer_policy.configure` and the `beforeTransfer` gate. |
-| `monitored_contracts.monitoring_config.tracked_topics[]` | 71 entries (topic0, signature, event_type, controller_id, `effect_tags.writes[]` 173 names) | **REQUIRED** | the topic0 → state-variable map. Without it, absence proves *"topic `0xae893dda…` never fired"*; with it, *"the `fromDenyList` state variable has provably never been written."* Derived from the analyzer materialization (`analyzer:state_variable:*`), not an LLM. |
+| `indexed_event_cursors.backfill_complete` + `last_indexed_block` (+ `last_indexed_block_hash`) | **80/80 warm**, all at block 25641245, hash on 80/80 | **GATE** | bounds a cursor from **ABOVE only**. Verified in code, not taken from the flag: `_seed_block` seeds `creation_block - 1` and **defers enrollment entirely** when the creation block can't be resolved (`event_log_indexer.py:607`); the zero address is rejected (`:594`); `backfill_complete` is set only at the confirmation-depth-deep head; a reorg rewind deletes logs address-wide and clears the flag on every sibling cursor. It does **not** on its own make absence a proven negative — limits 1, 4 and 5 below must also hold, and on all 80 legacy rows limits 1 and 5 do not. |
+| `indexed_event_cursors.first_indexed_block` + `first_indexed_block_basis` | 0/80 today (nullable, no backfill); written on every new enrolment | **GATE** | the covered range's LOWER bound. proven-present = basis `creation_block_minus_one` (all three pinned reads agreed). proven-absent: n/a — this is a bound, not a predicate. `not_determined` = NULL/NULL (predates the column), NULL + basis `not_determined` (witness attempted and failed), or a value with basis `explicit_seed` (a seed, not evidence; population 0). **The revert/failure/absence path is `not_determined`**, and the block is discarded with the basis so no consumer can see a number it may not cite. Consumption: **cite** on any event-absence claim; **gate** for U7B's `holder_set_exhaustive`. |
+| `indexed_event_cursors.enrollment_basis` | 0/80 today (NULL = predates); `predicate_tree_hint` or `tracked_topics_asserted` on every new row | **GATE** | whether the row carries a variable attribution. `predicate_tree_hint` = a static writer hint named this topic as a writer of a specific storage variable. `tracked_topics_asserted` = minted from a tracking plan, which names topics an emitter *can* emit and attributes them to no variable — such a cursor is forced to `complete=False` at `event_logs_pg._cursor_state`, so a zero-row fold over it can never publish an exact empty. NULL ≠ the token, so the 80 legacy rows fold unchanged. **Failure path = NULL/`not_determined` = no exactness.** Consumption: **gate**. |
+| `indexed_event_cursors.max_window_log_count` + `window_stats_cap` + `window_stats_basis` | 0/80 counts (NULL); `window_stats_basis='unmeasured_legacy'` stamped on 80/80 by the migration | **GATE** | per-cursor page completeness. proven-present = `complete` (continuous record ∧ max < cap ∧ persisted cap == cap in force). proven-absent = `incomplete` (a page reached its cap). `not_determined` = anything else, **including the shipped default (cap unset), so it is the state of every cursor today**. `unmeasured_legacy` means NEVER MEASURED — it is not lane-D's `coverage: "partial"` (measured and incomplete) — and counts stay NULL rather than 0, which would read as a measured empty page. **Failure/absence path = `not_determined`.** Consumption: **gate** on "no such event exists"; **cite** the residual otherwise. |
+| `absence_coverage` object (`services/resolution/absence_coverage.py`; computed, not stored) | per (chain_id, address) | **GATE (CONF payload)** | ceiling, never a licence. Carries `write_surface` (always `null`), `write_surface_basis` (always `not_determined`), `write_surface_asserted` (a caller's echo, under its own key), `enrolled`/`warm`/`missing`, `range_lower_bound(_basis)`, `page_completeness`, `enrollment_complete` (**always false**), `earned_negative_admissible` (**always false**), `blocking_reasons`. The gate ships inside the same object as its payload, so a consumer cannot read the numbers without the verdict. **Small-pop: denylist emitters 4 addresses, 0-cursor subset 3 — B14: cite/gate/three-state only, never calibrate an enrolment threshold. No threshold, ratio or weight is derived anywhere in U10A.** |
+| never-emitted events | **25 zero-log warm cursors / 8 addresses** (this register previously said 11/4, which does not reproduce under any join) | **`not_determined` — WITHDRAWN (U10A / D4)** | ~~The transfer denylist has provably never been written since deployment.~~ **Withdrawn, not softened, and for all three denylist variables — `toDenyList`, `fromDenyList` and `operatorDenyList` alike.** The writers are 6 topics across 4 protocol-1 Tellers = 24 (address, topic0) pairs, of which **4 are enrolled** — all 4 on `0x4de413a2` (`AllowFrom`/`DenyFrom`/`AllowOperator`/`DenyOperator`), while `AllowTo`/`DenyTo` have **no cursor at any of the 4 emitters** and the other 3 emitters have **no cursor at all**. 4 of 24 covers no variable's write surface across the emitter set, so the 4 warm zero-log cursors license nothing about `fromDenyList` or `operatorDenyList` either — B5 limit 4 forbids all three. Even those 4 carry an unquantified page residual (limit 5). The conclusion may well be true — an ad-hoc genesis fold returned 0 logs — but that fold is not persisted and so cannot license a replayable claim (inv.11). |
+| `monitored_contracts.monitoring_config.tracked_topics[]` | **224 (address, topic0) pairs / 46 addresses**, all active, all `chain='ethereum'` | **GATE for enrolment; BAN as a topic→variable map** | ~~the topic0 → state-variable map~~ — it is **not** one: `effect_tags.writes[]` is a union across every emitter of a signature (`tracking.py::_effect_tags_for_signature`), so all six Allow/Deny entries carry the identical triple and reading it forward attributes a write to the wrong event. What it IS good for is **enrolment**: `topic0` alone names a durable cursor. Before U10A only **4 of 224** pairs had one, and `enroll_from_completed_jobs` could never mint the rest because it reads only `enumeration_hint` records. `enroll_from_tracked_topics` (U10A) closes that, minting ~220 new pairs over 85 distinct topic0s — including all **24/24** denylist pairs. Those rows carry `enrollment_basis = 'tracked_topics_asserted'` and are held at `complete=False` by `event_logs_pg._cursor_state`, so they index history and license nothing. |
 
 **Two independent planes can answer the same question — read both before
 publishing `not_determined`.** `controller_values` records **19** protocol-1 rows
@@ -1640,17 +1644,68 @@ are explicit read failures — warning material, never a fact. But `fromDenyList
 `eth_call` failed and the event index answers it anyway. A scorer that consults only
 the call plane publishes an unknown it already has the evidence to resolve.
 
-**Three limits on absence-as-proof, verbatim into any implementation:**
+**Five limits on absence-as-proof, verbatim into any implementation:**
 
-1. **The lower bound of the covered range is NOT persisted.** There is no
-   `first_indexed_block` column; the proof rests on the `_seed_block` *code*
-   invariant. Either persist a lower bound or restrict to the gate the resolution
-   layer already uses.
+1. **The lower bound of the covered range is persisted only where it was
+   witnessed.** `indexed_event_cursors.first_indexed_block` +
+   `first_indexed_block_basis` now exist (U10A). The bound may be cited **only**
+   on basis `creation_block_minus_one`, which requires all three pinned reads to
+   agree: `eth_getCode` empty at `B−1`, non-empty and not a 0xef0100 (EIP-7702)
+   stub at `B`, **and** a genesis-anchored untopiced `eth_getLogs` returning zero
+   logs at or below `B−1`. The first two alone prove that *a* deployment landed at
+   `B`, not that it was the *first* — CREATE2 over a pre-Cancun-cleared address
+   reads identically. Basis `explicit_seed` is a caller's seed, not a witness.
+   NULL/NULL = predates the column: **all 80 legacy rows**, deliberately not
+   backfilled, because a value recovered now from a cache is not a value that was
+   witnessed then. NULL must reach the consumer as "lower bound unknown", never
+   as 0.
+   **STATED DEFERRAL (U10A):** this bound is *published* but is deliberately NOT
+   wired into `event_logs_pg`'s exactness gates. Doing so would demote all 80
+   legacy cursors and collapse the 52 exact-empty rows in the first row of this
+   table, whose empty rests on a different and stronger basis
+   (`solmate_roles.py:178-197` refusing an exact empty in both failure modes).
+   That is a separate change with its own blast radius and its own panel. What
+   U10A *does* gate on is `enrollment_basis` (limit 4), which is scoped to the
+   rows U10A itself creates.
 2. **No cursor is not evidence of anything.** Cursors exist for only 32 addresses ×
    25 topics — whatever monitoring/resolution enrolled.
 3. **Never assert at live head.** `_cursor_covers_block` (`event_logs_pg.py:74`)
    already refuses: the cursor lags head by ≥ `confirmation_depth` + poll
    interval. Absence is proven up to `last_indexed_block`, not to now.
+4. **Absence is proven for a state variable only if EVERY topic that can write it
+   has a warm cursor. Enumerate the write surface, then check enrollment.** That
+   enumeration is **`not_determined` today and no code here changes it**: the
+   static pass attaches writer-event hints only to CALLER-keyed mappings
+   (`predicate_artifacts.py:592-624`), so a mapping keyed on a function parameter
+   gets none; `SemanticControlAnalysis.mapping_writer_events` is declared and
+   never populated; and `tracked_topics[].effect_tags.writes[]` is BANNED as a
+   topic→variable map (a union across every emitter of a signature). Therefore
+   `services/resolution/absence_coverage.py` publishes a **ceiling** —
+   `enrollment_complete` — and hard-wires `earned_negative_admissible: False`.
+   Supplying `write_surface_topics` populates `enrolled`/`missing`/
+   `blocking_reasons` **for reporting only**; it never changes
+   `write_surface_basis`, and therefore never changes either verdict. Making the
+   verdict reachable requires a proven inverse index and a new adversarial panel.
+5. **A page returned at an upstream's result cap is not a proven page.** The
+   fetcher now treats a 200-OK page whose length reaches the configured cap as a
+   REJECT and bisects it, and records `max_window_log_count` + the
+   `window_stats_cap` in force + `window_stats_basis` per cursor. `complete`
+   requires a continuous record, a recorded maximum strictly under the cap, and
+   that the persisted cap still be the one in force — a cap change collapses the
+   verdict to `not_determined` rather than re-grading history. The shipped cap is
+   **unset**, so **no cursor is page-complete today and every event-absence
+   negative carries an unquantified residual.** Measured 2026-07-30 against the
+   deployed eRPC route: `getLogsMaxAllowedRange` = **2,000,000 on the INCLUSIVE
+   count** (`toBlock − fromBlock + 1`; 2,000,000 OK, 2,000,001 → `-32012`
+   `ErrGetLogsExceededMaxAllowedRange`, `details.requestRange` equal to that
+   count), and production's `end = start + MAX_BLOCK_RANGE − 1` yields exactly
+   1,000,000, safely under. No result-cap truncation was observed up to 125,629
+   logs in one window, and a `fromBlock: 0x0` request bypasses the range guard
+   entirely yet stayed byte-identical to a 1M-chunked fold on two real
+   populations (1,902 and 3,541 logs), failing LOUD (`-32603` timeout) at ~82k
+   rather than truncating. **That is a mutable now-fact about a third party at one
+   moment, not an invariant** — which is why the cap is persisted with the counts
+   it gated.
 
 ### B6. Preconditions
 

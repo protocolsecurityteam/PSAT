@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import IndexedEventCursor, IndexedEventLog
+from db.models import ENROLLMENT_BASIS_TRACKED_TOPICS, IndexedEventCursor, IndexedEventLog
 from services.resolution.adapters import EnumerationResult
 from utils.logging import record_stage_metric
 
@@ -484,15 +484,36 @@ class PostgresEventLogRepo:
 
     def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or
-        ``(None, False)`` when no cursor exists."""
+        ``(None, False)`` when no cursor exists.
+
+        Every exactness gate in this repo funnels through here, and a zero-row
+        fold under a complete state is published as an EXACT EMPTY — an earned
+        negative asserting the event never fired. A cursor enrolled from a
+        monitoring tracking plan cannot support that: the plan names topics an
+        emitter can emit and attributes them to no state variable, so a warm
+        cursor over one of them proves that THAT TOPIC never fired, never that the
+        variable behind it was never written by some other topic nobody enrolled.
+        Such a cursor is held at ``complete=False``, which routes callers to the
+        inline fallback exactly as a cold cursor does — it still indexes, it just
+        never licenses the negative.
+
+        Rows predating ``enrollment_basis`` are NULL, which is not the token, so
+        the 80 pre-existing cursors keep folding exactly as before.
+        """
         row = self.session.execute(
-            select(IndexedEventCursor.last_indexed_block, IndexedEventCursor.backfill_complete)
+            select(
+                IndexedEventCursor.last_indexed_block,
+                IndexedEventCursor.backfill_complete,
+                IndexedEventCursor.enrollment_basis,
+            )
             .where(IndexedEventCursor.chain_id == chain_id)
             .where(IndexedEventCursor.event_address == event_address.lower())
             .where(IndexedEventCursor.topic0 == topic0.lower())
         ).first()
         if row is None:
             return None, False
+        if row[2] == ENROLLMENT_BASIS_TRACKED_TOPICS:
+            return row[0], False
         return row[0], bool(row[1])
 
 

@@ -1375,6 +1375,24 @@ class IndexedEventLog(Base):
     )
 
 
+# ``indexed_event_cursors`` provenance vocabulary. It lives here, with the
+# columns, because the writer (the indexer worker) and the reader (the resolution
+# repo) must agree on the exact tokens and neither may import the other.
+#
+# ``first_indexed_block_basis`` — only CREATION licenses citing the lower bound.
+FIRST_INDEXED_BASIS_CREATION = "creation_block_minus_one"
+FIRST_INDEXED_BASIS_EXPLICIT = "explicit_seed"
+CURSOR_BASIS_NOT_DETERMINED = "not_determined"
+# ``enrollment_basis`` — whether the row carries a variable attribution.
+ENROLLMENT_BASIS_PREDICATE_HINT = "predicate_tree_hint"
+ENROLLMENT_BASIS_TRACKED_TOPICS = "tracked_topics_asserted"
+# ``window_stats_basis`` — neither token ever means "measured and incomplete";
+# that is expressed by a count at or above the cap that gated it.
+WINDOW_STATS_CONTINUOUS = "continuous_from_first_indexed_block"
+WINDOW_STATS_UNMEASURED_LEGACY = "unmeasured_legacy"
+WINDOW_STATS_NOT_DETERMINED = CURSOR_BASIS_NOT_DETERMINED
+
+
 class IndexedEventCursor(Base):
     """One scan cursor per ``(chain_id, event_address, topic0)``."""
 
@@ -1395,6 +1413,36 @@ class IndexedEventCursor(Base):
     # consult this flag (not the block number) before trusting the durable index;
     # until it flips True they fall back to an inline fetch.
     backfill_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Lower bound of the range this cursor's logs cover, and what proves it.
+    # ``backfill_complete`` is an UPPER-bound flag only; nothing here bounds the
+    # range from below, so absence of a log below ``first_indexed_block`` is
+    # proven only when the basis is ``creation_block_minus_one`` — which requires
+    # all three pinned reads of ``_witness_seed_block`` to agree. NULL/NULL means
+    # the row predates these columns (lower bound unknown); a populated block with
+    # basis ``explicit_seed`` is a seed a caller supplied, NOT a witness; basis
+    # ``not_determined`` means the witness was attempted and failed, and the block
+    # is NULL because a number no consumer may cite is a number no consumer should
+    # see.
+    first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    first_indexed_block_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # How this cursor came to exist. ``predicate_tree_hint`` = a static
+    # ``enumeration_hint`` named this (chain, address, topic0) as a writer of a
+    # specific storage variable. ``tracked_topics_asserted`` = the row was minted
+    # from ``monitored_contracts.monitoring_config->tracked_topics``, which names
+    # topics an emitter CAN emit and attributes them to no variable — enough to
+    # gather evidence, never enough to license an exact-empty. NULL = predates the
+    # column. Read at the ``_cursor_state`` choke point in
+    # ``services/resolution/repos/event_logs_pg.py``.
+    enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Largest ``eth_getLogs`` page this cursor has ever accepted, the result cap
+    # in force when those pages were fetched, and whether the record is continuous
+    # from ``first_indexed_block``. A page returned at the cap may have been
+    # truncated by the upstream, so "no such log exists" is proven only when every
+    # window came back strictly under a cap that was actually enforced. All three
+    # are NULL on rows whose windows predate the columns.
+    max_window_log_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_basis: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
 
 class WorkerHeartbeat(Base):

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Mapping, MutableMapping, Protocol, Sequence, TypeGuard
+from typing import Any, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
 from sqlalchemy import delete, func, select
@@ -16,23 +17,37 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import (
+    CURSOR_BASIS_NOT_DETERMINED,
+    ENROLLMENT_BASIS_PREDICATE_HINT,
+    ENROLLMENT_BASIS_TRACKED_TOPICS,
+    FIRST_INDEXED_BASIS_CREATION,
+    WINDOW_STATS_CONTINUOUS,
+    WINDOW_STATS_NOT_DETERMINED,
     Contract,
     ControllerValue,
     IndexedEventCursor,
     IndexedEventLog,
     Job,
     JobStatus,
+    MonitoredContract,
     SessionLocal,
     derive_job_chain_id,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
-from services.resolution.repos.event_logs_rpc import FetchedEventLog
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
-from utils.chains import ChainInfo, UnknownChainError, all_chains, chain_by_id, supported_chain_ids
+from utils.chains import (
+    ChainInfo,
+    UnknownChainError,
+    all_chains,
+    chain_by_id,
+    chain_by_name,
+    supported_chain_ids,
+)
 from utils.etherscan import get_contract_creation_block
 from utils.logging import configure_logging, log_timed_phase
-from utils.rpc import require_rpc_url
+from utils.rpc import require_rpc_url, rpc_request
 from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -64,6 +79,11 @@ DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
 DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
+# Monitored contracts inspected per pass when enrolling cursors from tracking
+# plans. Every cursor it mints is a cold backfill from the emitter's deploy
+# block, so the surface is drained across passes and the scan budget above still
+# bounds the work each pass actually does.
+DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_LIMIT", "50"))
 # When a pass stops on its window budget there's more backfill pending, so the
 # backfill loop re-runs after this short pause instead of the full poll interval
 # — a cold fleet drains at throughput rather than idling 60s between every
@@ -87,6 +107,18 @@ _SOLMATE_ROLE_TOPICS = [
         "UserRoleUpdated(address,uint8,bool)",
     )
 ]
+
+
+# Basis vocabulary lives in ``db/models.py`` with the columns it describes.
+# ``FIRST_INDEXED_BASIS_EXPLICIT`` has no production writer: every enrolment path
+# here witness-grades. It stays in the domain because the distinction between a
+# seed a caller supplied and a bound three reads agreed on is exactly what stops a
+# future caller's seed from being read as a witness.
+BASIS_NOT_DETERMINED = CURSOR_BASIS_NOT_DETERMINED
+
+# EIP-7702 delegation indicator: 0xef0100 ‖ 20-byte address = 23 bytes.
+_EIP7702_PREFIX = "ef0100"
+_EIP7702_CODE_HEX_LEN = 46
 
 
 def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
@@ -180,6 +212,9 @@ def _role_store_topic0s(
 
 
 class LogFetcher(Protocol):
+    # ``window_stats`` is optional on the protocol so a fetcher that predates it
+    # still satisfies it; ``_fetch_window`` passes the accumulator only where the
+    # implementation declares it.
     def fetch_logs(
         self,
         *,
@@ -187,6 +222,22 @@ class LogFetcher(Protocol):
         topics: Sequence[str],
         from_block: int,
         to_block: int,
+    ) -> list[FetchedEventLog]: ...
+
+
+class StatsAwareLogFetcher(Protocol):
+    """A fetcher that reports what each accepted page returned. Narrower than
+    :class:`LogFetcher`; ``_fetch_window`` checks the real signature before
+    treating a fetcher as one, so this never widens what a caller must provide."""
+
+    def fetch_logs(
+        self,
+        *,
+        event_address: str | Sequence[str],
+        topics: Sequence[str],
+        from_block: int,
+        to_block: int,
+        window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]: ...
 
 
@@ -253,7 +304,17 @@ def enroll_event_cursor(
     event_address: str,
     topic0: str,
     start_block: int = 0,
+    first_indexed_block: int | None = None,
+    first_indexed_block_basis: str | None = None,
+    enrollment_basis: str | None = None,
 ) -> bool:
+    """Insert one cursor, ignoring a conflict on an existing row.
+
+    The three provenance arguments all default to "nothing was proven": a caller
+    that does not pass them gets NULL / ``not_determined``, never a witness. That
+    default is the point — ``start_block``'s own ``= 0`` default sits right above
+    them and must NOT be inherited as a claim that the range starts at genesis.
+    """
     stmt = (
         pg_insert(IndexedEventCursor)
         .values(
@@ -261,11 +322,164 @@ def enroll_event_cursor(
             event_address=event_address.lower(),
             topic0=topic0.lower(),
             last_indexed_block=start_block,
+            first_indexed_block=first_indexed_block,
+            first_indexed_block_basis=first_indexed_block_basis or BASIS_NOT_DETERMINED,
+            enrollment_basis=enrollment_basis or BASIS_NOT_DETERMINED,
+            window_stats_basis=(
+                WINDOW_STATS_CONTINUOUS
+                if first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION
+                else WINDOW_STATS_NOT_DETERMINED
+            ),
         )
         .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0"])
     )
     result = session.execute(stmt)
     return bool(getattr(result, "rowcount", 0))
+
+
+def _is_empty_code(code: object) -> bool:
+    return isinstance(code, str) and len(code[2:] if code.lower().startswith("0x") else code) == 0
+
+
+def _is_eip7702_delegation(code: object) -> bool:
+    """True for a 0xef0100‖address delegation stub.
+
+    A 7702 account has code without ever having been *deployed*, and the
+    delegation can be set and cleared repeatedly, so the code-appears-at-B
+    transition says nothing about when the account first emitted a log.
+    """
+    if not isinstance(code, str):
+        return False
+    body = (code[2:] if code.lower().startswith("0x") else code).lower()
+    return len(body) == _EIP7702_CODE_HEX_LEN and body.startswith(_EIP7702_PREFIX)
+
+
+def _witness_seed_block(
+    address: str,
+    seed: int,
+    cache: dict[tuple[int, str], tuple[int | None, str]],
+    *,
+    chain_id: int,
+) -> tuple[int | None, str]:
+    """Grade ``seed`` as a proven lower bound with THREE pinned reads, returning
+    ``(first_indexed_block, basis)``.
+
+    ``eth_getCode`` empty at ``seed`` and non-empty at ``seed + 1`` proves that a
+    deployment landed at ``seed + 1``. It does NOT prove that it was the FIRST —
+    an address cleared by a pre-Cancun SELFDESTRUCT is still re-deployable at the
+    same address by CREATE2, and the earlier incarnation's logs are still in the
+    chain. So the pair is a necessary condition, not the witness.
+
+    The witness is the third read: one genesis-anchored ``eth_getLogs`` for the
+    address with NO topic filter. Zero logs at or below ``seed`` is direct
+    evidence that no event of any kind was emitted there, which is exactly the
+    claim ``first_indexed_block`` is cited for. Any log ⇒ a prior incarnation was
+    observed and the number is DISCARDED, not lowered — we do not know how far
+    back it goes. (The request deliberately exceeds the upstream's block-range
+    cap; on this deployment a ``fromBlock: 0x0`` request bypasses that guard, and
+    if it ever stops doing so the call raises and lands on ``not_determined``,
+    which is the safe direction.)
+
+    Every failure path — either code read, the log read, a raise, a timeout, a
+    non-list response, a 7702 delegation stub at ``seed + 1`` — returns
+    ``(None, not_determined)``. The block is dropped along with the basis on
+    purpose: a number that no consumer is allowed to cite is a number no consumer
+    should be able to see.
+    """
+    addr = address.lower()
+    key = (chain_id, addr)
+    if key in cache:
+        return cache[key]
+    graded: tuple[int | None, str] = (None, BASIS_NOT_DETERMINED)
+    try:
+        rpc_url = require_rpc_url(chain_id=chain_id)
+        code_before = rpc_request(rpc_url, "eth_getCode", [addr, hex(seed)], chain_id=chain_id)
+        code_at = rpc_request(rpc_url, "eth_getCode", [addr, hex(seed + 1)], chain_id=chain_id)
+        if _is_empty_code(code_before) and not _is_empty_code(code_at) and not _is_eip7702_delegation(code_at):
+            prior_logs = rpc_request(
+                rpc_url,
+                "eth_getLogs",
+                [{"address": addr, "fromBlock": "0x0", "toBlock": hex(seed)}],
+                chain_id=chain_id,
+            )
+            if isinstance(prior_logs, list) and not prior_logs:
+                graded = (seed, FIRST_INDEXED_BASIS_CREATION)
+            elif isinstance(prior_logs, list):
+                logger.info(
+                    "logs observed below the creation seed; lower bound not determined",
+                    extra={
+                        "address": addr,
+                        "chain_id": chain_id,
+                        "seed": seed,
+                        "prior_log_count": len(prior_logs),
+                    },
+                )
+    except Exception as exc:
+        logger.warning(
+            "first-indexed-block witness failed for %s; lower bound not determined",
+            addr,
+            extra={"address": addr, "chain_id": chain_id, "seed": seed, "exc_type": type(exc).__name__},
+        )
+    cache[key] = graded
+    return graded
+
+
+def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: str) -> bool:
+    """Whether this exact cursor is already enrolled.
+
+    Enrollment is conflict-ignoring, so this changes no outcome — it only keeps
+    the three-read witness off addresses that would no-op, which is what makes the
+    probe's steady-state RPC cost zero rather than two calls per address per pass.
+    """
+    return (
+        session.execute(
+            select(IndexedEventCursor.chain_id)
+            .where(IndexedEventCursor.chain_id == chain_id)
+            .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
+            .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
+        ).first()
+        is not None
+    )
+
+
+_FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
+
+
+def _fetch_window(
+    fetcher: LogFetcher,
+    *,
+    event_address: str,
+    topics: list[str],
+    from_block: int,
+    to_block: int,
+    window_stats: list[FetchWindowStat],
+) -> list[FetchedEventLog]:
+    """Call ``fetch_logs``, passing the stats accumulator only to fetchers that
+    take one.
+
+    Decided by signature inspection rather than by catching ``TypeError`` around
+    the call: that would also swallow a genuine ``TypeError`` raised deep inside a
+    fetch and silently retry it, turning a real fault into a quiet degraded pass.
+    A fetcher without the parameter leaves ``window_stats`` empty, which
+    ``_fold_window_stats`` reads as "advanced without a record", not as "no logs".
+    """
+    key = type(fetcher)
+    accepts = _FETCHER_ACCEPTS_WINDOW_STATS.get(key)
+    if accepts is None:
+        try:
+            accepts = "window_stats" in inspect.signature(fetcher.fetch_logs).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        _FETCHER_ACCEPTS_WINDOW_STATS[key] = accepts
+    if accepts:
+        return cast(StatsAwareLogFetcher, fetcher).fetch_logs(
+            event_address=event_address,
+            topics=topics,
+            from_block=from_block,
+            to_block=to_block,
+            window_stats=window_stats,
+        )
+    return fetcher.fetch_logs(event_address=event_address, topics=topics, from_block=from_block, to_block=to_block)
 
 
 def index_event_group_step(
@@ -379,11 +593,18 @@ def index_event_group_step(
 
     start = min(int(c.last_indexed_block or 0) for c in active) + 1
     window_end = min(target, start - 1 + max(1, max_block_span))
-    logs = fetcher.fetch_logs(
+    # Collected per accepted page, so a cursor records how big the pages it
+    # advanced through actually were. A fetcher that predates the accumulator
+    # simply leaves it empty, and an empty record downgrades the cursor rather
+    # than being read as "no logs".
+    window_stats: list[FetchWindowStat] = []
+    logs = _fetch_window(
+        fetcher,
         event_address=event_address.lower(),
         topics=[c.topic0.lower() for c in active],
         from_block=start,
         to_block=window_end,
+        window_stats=window_stats,
     )
     logs_by_topic: dict[str, list[FetchedEventLog]] = {}
     for log in logs:
@@ -410,6 +631,11 @@ def index_event_group_step(
                 # advance so a later reorg pre-check can't compare the hash of
                 # one block against the position of another.
                 cursor.last_indexed_block_hash = None
+                # Only cursors that actually moved through this window record it.
+                # A group scans from its MIN member, so a cursor already above
+                # ``window_end`` gained no coverage here and must not inherit a
+                # page count from blocks it had already passed.
+                _fold_window_stats(cursor, window_stats)
         if int(cursor.last_indexed_block or 0) >= target:
             members_at_target += 1
             cursor.backfill_complete = True
@@ -635,6 +861,40 @@ def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain
     return seed
 
 
+def _enroll_witnessed(
+    session: Session,
+    *,
+    chain_id: int,
+    address: str,
+    topic0: str,
+    seed_cache: dict[tuple[int, str], int | None],
+    witness_cache: dict[tuple[int, str], tuple[int | None, str]],
+    enrollment_basis: str,
+) -> bool:
+    """Seed, witness-grade, and enrol one cursor. True when a row was inserted.
+
+    Keeps the existing defer-instead-of-genesis rule verbatim: an unresolvable
+    creation block inserts NOTHING, so a transient Etherscan failure can never pin
+    a cursor to a full-chain backfill.
+    """
+    if _cursor_exists(session, chain_id, address, topic0):
+        return False
+    seed = _seed_block(address, seed_cache, chain_id=chain_id)
+    if seed is None:
+        return False
+    first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id)
+    return enroll_event_cursor(
+        session,
+        chain_id=chain_id,
+        event_address=address,
+        topic0=topic0,
+        start_block=seed,
+        first_indexed_block=first_indexed_block,
+        first_indexed_block_basis=basis,
+        enrollment_basis=enrollment_basis,
+    )
+
+
 def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     jobs = session.execute(
         select(Job)
@@ -648,6 +908,7 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     # the job's own chain, not a single map-wide value, so the same address on two
     # chains keeps independent creation blocks and role-store standards.
     seed_cache: dict[tuple[int, str], int | None] = {}
+    witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
     role_store_topic_cache: dict[tuple[int, str], list[str]] = {}
     for job in jobs:
         artifact = get_artifact(session, job.id, "predicate_trees")
@@ -676,13 +937,16 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                 address = _event_address_for_descriptor(descriptor, hint, job, values)
                 if not _is_enrollable_event_address(address):
                     continue
-                start_block = _seed_block(address, seed_cache, chain_id=job_chain_id)
-                if start_block is None:
-                    # Creation block not yet known — enroll on a later pass at the
-                    # real deploy block rather than backfilling from genesis.
-                    continue
-                if enroll_event_cursor(
-                    session, chain_id=job_chain_id, event_address=address, topic0=topic0, start_block=start_block
+                # Creation block not yet known -> nothing is inserted; enroll on a
+                # later pass at the real deploy block rather than from genesis.
+                if _enroll_witnessed(
+                    session,
+                    chain_id=job_chain_id,
+                    address=address,
+                    topic0=topic0,
+                    seed_cache=seed_cache,
+                    witness_cache=witness_cache,
+                    enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
                 ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
@@ -694,17 +958,17 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                 # it once its ControllerValue is captured.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if _is_enrollable_event_address(authority):
-                    start_block = _seed_block(authority, seed_cache, chain_id=job_chain_id)
-                    if start_block is not None:
-                        for topic0 in _SOLMATE_ROLE_TOPICS:
-                            if enroll_event_cursor(
-                                session,
-                                chain_id=job_chain_id,
-                                event_address=authority,
-                                topic0=topic0,
-                                start_block=start_block,
-                            ):
-                                inserted += 1
+                    for topic0 in _SOLMATE_ROLE_TOPICS:
+                        if _enroll_witnessed(
+                            session,
+                            chain_id=job_chain_id,
+                            address=authority,
+                            topic0=topic0,
+                            seed_cache=seed_cache,
+                            witness_cache=witness_cache,
+                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                        ):
+                            inserted += 1
             elif _is_delegated_role_gate_descriptor(descriptor):
                 # Enroll the role-store's grant/revoke cursor at the authority
                 # PROXY — the delegatecall emits RoleSet there, so job.address
@@ -715,19 +979,116 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
                 if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
                     session, job_chain_id, authority
                 ):
-                    start_block = _seed_block(authority, seed_cache, chain_id=job_chain_id)
-                    if start_block is not None:
-                        for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
-                            if enroll_event_cursor(
-                                session,
-                                chain_id=job_chain_id,
-                                event_address=authority,
-                                topic0=topic0,
-                                start_block=start_block,
-                            ):
-                                inserted += 1
+                    for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
+                        if _enroll_witnessed(
+                            session,
+                            chain_id=job_chain_id,
+                            address=authority,
+                            topic0=topic0,
+                            seed_cache=seed_cache,
+                            witness_cache=witness_cache,
+                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                        ):
+                            inserted += 1
     session.commit()
     return inserted
+
+
+def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
+    """Enrol durable cursors for the topics a monitoring tracking plan already
+    names, which nothing enrolled before.
+
+    ``enroll_from_completed_jobs`` reads ONE surface — ``enumeration_hint``
+    records on ``predicate_trees`` — and a hint is only attached to a mapping
+    keyed on the CALLER. A mapping keyed on a function parameter (a transfer
+    denylist keyed on the recipient is the canonical case) therefore gets no
+    hint at any emitter and no cursor anywhere, so its history was never indexed
+    and an absence over it was never observable.
+    ``monitoring_config->tracked_topics`` already lists those topics per emitter,
+    and it is analyzer-derived, so enrolling from it closes the gathering hole.
+
+    What this reads from ``tracked_topics`` is ``topic0`` and nothing else. It
+    does NOT read ``effect_tags.writes[]``: that list is a union over every
+    emitter of a signature, so reading it forward attributes a write to the wrong
+    event. Consequently these cursors carry no variable attribution at all, which
+    is what ``enrollment_basis = tracked_topics_asserted`` records and what the
+    resolution-side gate keys on. Enrolment gathers evidence; it licenses nothing.
+    """
+    rows = session.execute(
+        select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
+        .where(MonitoredContract.is_active.is_(True))
+        .order_by(MonitoredContract.id.asc())
+        .limit(limit)
+    ).all()
+    inserted = 0
+    seed_cache: dict[tuple[int, str], int | None] = {}
+    witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
+    for address, chain, config in rows:
+        if not _is_enrollable_event_address(address):
+            continue
+        try:
+            # The row's OWN chain through the registry — never a map-wide default,
+            # so an address that lives on another chain is not guessed as mainnet.
+            chain_id = chain_by_name(chain).chain_id
+        except (UnknownChainError, TypeError):
+            continue
+        if chain_id not in supported_chain_ids():
+            continue
+        specs = (config or {}).get("tracked_topics") if isinstance(config, dict) else None
+        if not isinstance(specs, list):
+            continue
+        seen: set[str] = set()
+        for spec in specs:
+            topic0 = spec.get("topic0") if isinstance(spec, dict) else None
+            if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
+                continue
+            if topic0.lower() in seen:
+                continue
+            seen.add(topic0.lower())
+            if _enroll_witnessed(
+                session,
+                chain_id=chain_id,
+                address=address,
+                topic0=topic0,
+                seed_cache=seed_cache,
+                witness_cache=witness_cache,
+                enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+            ):
+                inserted += 1
+    session.commit()
+    return inserted
+
+
+def _fold_window_stats(cursor: IndexedEventCursor, stats: list[FetchWindowStat]) -> None:
+    """Record what the pages this cursor just advanced through actually returned.
+
+    ``max_window_log_count`` only ever grows: the question it answers is "did ANY
+    window come back at its cap", so the maximum over the cursor's whole history
+    is the entire answer and a per-window table would store the same verdict in
+    unbounded space.
+
+    The cap that gated those pages is persisted with them. Without it the
+    completeness verdict would depend on an env var the row does not record — a
+    mutable now-fact published without its counterfactual — and raising the cap
+    later would silently re-grade history that was never fetched under it. A cap
+    that is absent, or that disagrees with the one already on the row, collapses
+    the record to ``not_determined`` rather than picking a winner.
+    """
+    if not stats:
+        # The cursor moved without anything recording what came back, so its
+        # window record is no longer continuous and cannot be repaired.
+        cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
+        return
+    observed_caps = {stat.cap for stat in stats}
+    observed_cap = observed_caps.pop() if len(observed_caps) == 1 else None
+    highest = max(stat.returned_log_count for stat in stats)
+    prior_max = cursor.max_window_log_count
+    cursor.max_window_log_count = highest if prior_max is None else max(int(prior_max), highest)
+    if observed_cap is None or (cursor.window_stats_cap is not None and int(cursor.window_stats_cap) != observed_cap):
+        cursor.window_stats_cap = None
+        cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
+        return
+    cursor.window_stats_cap = observed_cap
 
 
 def _bulk_insert_logs(
@@ -911,8 +1272,15 @@ def run_event_log_indexer_loop(
             try:
                 with SessionLocal() as session:
                     with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                        enrolled = enroll_from_completed_jobs(session)
+                        from_jobs = enroll_from_completed_jobs(session)
+                        # Bounded per pass: each new cursor is a cold backfill, so
+                        # a large tracking plan is drained over successive passes
+                        # rather than dumping every window into one.
+                        from_tracked = enroll_from_tracked_topics(session, limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT)
+                        enrolled = from_jobs + from_tracked
                         ph["enrolled"] = enrolled
+                        ph["enrolled_from_jobs"] = from_jobs
+                        ph["enrolled_from_tracked_topics"] = from_tracked
                     with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                         summary = scan_enrolled_events(
                             session,
