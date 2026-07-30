@@ -5,12 +5,12 @@ Two defects are pinned here.
 **The fork was never pinned.** ``_build_anvil_cmd`` passed ``--fork-url`` and no
 ``--fork-block-number``, so a Tier-2 anvil forked at whatever head the upstream
 served AT SPAWN while the transcript recorded the preflight's height — a height
-the fork demonstrably was not taken at. Measured on the PR-161 run: 274
-``effect_verdicts``, **0** carrying a ``block_number`` (the key was absent from
-``witness`` entirely), and the 304 transcript blobs spanning 51 distinct heights
-over 495 blocks in one run. The argv assertions below are exact LIST compares
-rather than membership checks precisely so an edit that drops the pin fails here
-instead of silently restoring the unrecorded head.
+that is not provably the height the fork was taken at. Measured on the PR-161
+run: 274 ``effect_verdicts``, **0** carrying a ``block_number`` (the key was
+absent from ``witness`` entirely), and the 304 transcript blobs spanning 51
+distinct heights over 495 blocks in one run. The argv assertions below are exact
+LIST compares rather than membership checks precisely so an edit that drops the
+pin fails here instead of silently restoring the unrecorded head.
 
 **Zero is not a height.** ``_preflight`` returns ``block = 0`` when the head
 cannot be pinned; ``0`` forks at GENESIS and would read as a real height. Every
