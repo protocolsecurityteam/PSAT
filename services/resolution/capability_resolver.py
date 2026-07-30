@@ -65,6 +65,7 @@ from .one_shot_probe import (
     LatchReadResult,
     annotate_capability_one_shot,
     collect_one_shot_latches,
+    latch_descriptor_digest,
     one_shot_probe_enabled,
     resolve_one_shot_state,
     tree_has_one_shot_role,
@@ -772,7 +773,7 @@ def _maybe_one_shot_probe(
         chain_id,
         runtime_addr.lower(),
         probe_height,
-        tuple(sorted(str(latch.get("slot") or latch.get("getter_selector") or "") for latch in all_latches)),
+        latch_descriptor_digest(all_latches),
     )
     result = pass_cache.get(cache_key)
     if result is None:
