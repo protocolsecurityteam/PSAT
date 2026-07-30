@@ -160,7 +160,7 @@ def load():
     cur.execute(
         """
         select c.id cid, lower(c.address) addr, coalesce(sum(cb.usd_value),0) usd
-        from contracts c left join contract_balances cb on cb.contract_id=c.id
+        from contracts c left join contract_balances_latest cb on cb.contract_id=c.id
         where c.protocol_id=%s group by 1,2
     """,
         (PROTOCOL_ID,),

@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from db.jsonb import jsonb_has_payload
 from db.models import (
     Contract,
-    ContractBalance,
+    ContractBalanceLatest,
     ControlGraphEdge,
     ControlGraphNode,
     ControllerValue,
@@ -780,9 +780,14 @@ def _prefetch_child_tables(
         return local, len(local)
 
     def _balances(s: Session) -> tuple[dict[int, list[Any]], int]:
+        # ``contract_balances_latest``, not the base table: both writers are
+        # insert-only now, so the base table carries every past cycle and this
+        # would list the same holding once per refresh.
         local: dict[int, list[Any]] = {}
         rows = 0
-        for b in s.execute(select(ContractBalance).where(ContractBalance.contract_id.in_(id_list))).scalars():
+        for b in s.execute(
+            select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id.in_(id_list))
+        ).scalars():
             local.setdefault(b.contract_id, []).append(b)
             rows += 1
         return local, rows

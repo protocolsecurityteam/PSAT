@@ -327,7 +327,7 @@ def load():
         select cb.contract_id cid, lower(c.address) caddr,
                coalesce(lower(cb.token_address),'native') asset,
                cb.token_symbol, cb.usd_value, cb.fetched_at
-        from contract_balances cb join contracts c on c.id=cb.contract_id
+        from contract_balances_latest cb join contracts c on c.id=cb.contract_id
         where c.protocol_id=%s order by cb.contract_id, asset, cb.id
     """,
         (PROTOCOL_ID,),

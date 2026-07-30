@@ -39,7 +39,8 @@ from db.models import (
     CONTROL_EDGE_RELATIONS,
     Artifact,
     Contract,
-    ContractBalance,
+    ContractBalanceFetch,
+    ContractBalanceLatest,
     ControlGraphEdge,
     EffectiveFunction,
     EffectsPlanMarker,
@@ -51,6 +52,8 @@ from db.models import (
     TvlSnapshot,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
+from services.monitoring.balance_reads import positive_raw_balance
+from utils.balance_status import ASSET_SET_STATUS_AT_PAGE_CAP
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id
 from utils.etherscan import token_balances_may_be_truncated
 from utils.logging import record_degraded
@@ -292,9 +295,20 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
     graph = AuthorityGraph()
 
     # Balances: sum USD per contract, keyed by the contract's on-chain address.
+    #
+    # Reads the ``latest`` view, not the base table: the writers are insert-only,
+    # so the base table carries every past cycle and this SUM would add the same
+    # holding once per hour.
+    #
+    # The join stays INNER, deliberately. A contract with no current row produces
+    # NO ``deployment_balance`` key, and that absence is read downstream as
+    # not_determined; a LEFT JOIN would give it a 0 entry, and
+    # ``recipes._add_reach`` publishes the acting deployment's balance as
+    # ``observed_reach_floor_usd`` — so a $0.00 floor indistinguishable from
+    # "holds nothing" would be minted out of a failed fetch.
     bal_rows = session.execute(
-        select(Contract.id, Contract.address, func.coalesce(func.sum(ContractBalance.usd_value), 0))
-        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        select(Contract.id, Contract.address, func.coalesce(func.sum(ContractBalanceLatest.usd_value), 0))
+        .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
         .where(Contract.protocol_id == protocol_id)
         .group_by(Contract.id, Contract.address)
     ).all()
@@ -422,10 +436,16 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     rows = session.execute(
         select(
             Contract.id,
-            ContractBalance.token_address,
-            ContractBalance.usd_value,
+            ContractBalanceLatest.token_address,
+            ContractBalanceLatest.usd_value,
+            ContractBalanceLatest.raw_balance,
+            ContractBalanceFetch.asset_set_status,
+            ContractBalanceFetch.asset_page_length,
         )
-        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
+        # OUTER: a legacy row (``fetch_id IS NULL``) has no fetch to join to, and
+        # dropping it would silently withdraw every pre-migration holding.
+        .outerjoin(ContractBalanceFetch, ContractBalanceFetch.id == ContractBalanceLatest.fetch_id)
         .where(Contract.protocol_id == protocol_id)
     ).all()
     holders = _deployment_by_contract(session, protocol_id)
@@ -439,21 +459,36 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     # is never treated as 0 in the max: a copy of the same holding that happened to be
     # priced is strictly more informative.
     best: dict[tuple[str, str], float | None] = {}
-    for contract_id, token_address, usd in rows:
+    # Per holder, whether ANY contributing fetch proves its page was capped.
+    # WEAKEST WINS: one capped sibling means this holder's asset list may be
+    # missing entries, whatever the other siblings said. Taking the last-seen or
+    # the strongest value would let a complete-looking fetch mask a capped one.
+    holder_capped: dict[str, bool] = {}
+    for contract_id, token_address, usd, raw_balance, asset_set_status, asset_page_length in rows:
         holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
         if holder is None:
+            continue
+        # A row is a holdings witness only if a strictly positive quantity was
+        # witnessed. Row EXISTENCE alone must never mean "holds this asset":
+        # that reading is what makes this function the delivery trap for the
+        # balance three-state, and it is only accidentally sound today (measured:
+        # 0 of 1617 stored rows are non-positive). Unparseable is EXCLUDED, never
+        # admitted, and never raised.
+        if not positive_raw_balance(raw_balance):
             continue
         asset = _addr(token_address) or NATIVE_ASSET_LOG_EMITTER
         key = (holder, asset)
         value = None if usd is None else float(_usd(usd))
         if key not in best:
             best[key] = value
-            continue
-        current = best[key]
-        if current is None:
-            best[key] = value
-        elif value is not None:
-            best[key] = max(current, value)
+        else:
+            current = best[key]
+            if current is None:
+                best[key] = value
+            elif value is not None:
+                best[key] = max(current, value)
+        if _completeness_from_fetch(asset_set_status, asset_page_length) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP:
+            holder_capped[holder] = True
     # Per-holder completeness, from the same rows. The native row is excluded from the
     # count because it is fetched separately and is not part of the paged list.
     token_rows: dict[str, int] = {}
@@ -462,15 +497,48 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
             token_rows[holder] = token_rows.get(holder, 0) + 1
     out: dict[str, list[AssetHolding]] = {}
     for (holder, asset), usd_value in sorted(best.items()):
+        # The recorded page length is the real witness; the stored-row count is
+        # the fallback that still covers every legacy row (``asset_page_length``
+        # is NULL on all of them, permanently — it was never recorded).
+        completeness = (
+            HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+            if holder_capped.get(holder)
+            else _holdings_completeness(token_rows.get(holder, 0))
+        )
         out.setdefault(holder, []).append(
             AssetHolding(
                 holder=holder,
                 asset=asset,
                 usd_value=usd_value,
-                completeness=_holdings_completeness(token_rows.get(holder, 0)),
+                completeness=completeness,
             )
         )
     return {holder: tuple(items) for holder, items in out.items()}
+
+
+def _completeness_from_fetch(asset_set_status: str | None, asset_page_length: int | None) -> str:
+    """A TOTAL mapping from one fetch's recorded page facts to a completeness state.
+
+    Total over the whole ``ASSET_SET_STATUSES`` vocabulary crossed with every
+    page length including ``None``, and it provably cannot return a whole/complete
+    state — there is no such member of :data:`HOLDINGS_COMPLETENESS_STATES` to
+    return. That is the point of routing the merged ``asset_set_status`` through
+    one function: the status vocabulary gained a value that names the at-cap case,
+    and a naive reading of its three siblings as "not capped, therefore whole"
+    would turn a page fact into a proven-absence claim about the holder's assets.
+
+    ``returned_assets`` is ``not_determined``, not complete: a page below the cap
+    is consistent with a whole list AND with the endpoint's own paging, and the
+    stored rows cannot separate them.
+
+    ``fetch_failed`` and ``None`` (a legacy row, no fetch recorded) are
+    ``not_determined`` for the plainest reason: nothing was learned.
+    """
+    if asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP:
+        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+    if asset_page_length is not None and token_balances_may_be_truncated(asset_page_length):
+        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+    return HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 def _holdings_completeness(stored_token_rows: int) -> str:
@@ -531,18 +599,25 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     real deposit. Native balance (``token_address IS NULL``) is excluded — it is
     not an argument any token parameter can take."""
     rows = session.execute(
-        select(Contract.id, ContractBalance.token_address, ContractBalance.usd_value)
-        .join(ContractBalance, ContractBalance.contract_id == Contract.id)
+        select(Contract.id, ContractBalanceLatest.token_address, ContractBalanceLatest.usd_value)
+        .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
         .where(
             Contract.protocol_id == protocol_id,
-            ContractBalance.token_address.isnot(None),
-            ContractBalance.usd_value > 0,
+            ContractBalanceLatest.token_address.isnot(None),
+            # Strictly stronger than the positive-quantity witness
+            # ``_asset_holdings_by_deployment`` requires: a priced holding above
+            # zero is necessarily a held one.
+            ContractBalanceLatest.usd_value > 0,
         )
         # `usd_value DESC` alone is a PARTIAL order and the tie population is not
         # empty (two contracts here hold 2 and 3 tokens at an identical value), so
         # which holdings survive the `limit` below would be left to the query
         # plan. The trailing keys make the order total.
-        .order_by(ContractBalance.usd_value.desc(), ContractBalance.token_address.asc(), ContractBalance.id.asc())
+        .order_by(
+            ContractBalanceLatest.usd_value.desc(),
+            ContractBalanceLatest.token_address.asc(),
+            ContractBalanceLatest.id.asc(),
+        )
     ).all()
     out: dict[int, list[str]] = {}
     for contract_id, token, _usd in rows:
