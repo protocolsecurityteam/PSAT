@@ -389,8 +389,9 @@ def test_the_recorded_router_op_is_projected_into_the_published_witness():
     """The transparency join above runs on the producer dict in process; a
     consumer holding only the persisted claim saw none of it. The projection
     carries the op identity through verbatim — ``selector`` is the keccak4 of
-    the callee's canonical signature and ``callee`` its bare AST name, an
-    intra-unit call identity and never a resolved on-chain target."""
+    the signature the AST records (ABI-canonical only where the parameter types
+    lower) and ``callee`` its bare AST name, an intra-unit call identity and
+    never a resolved on-chain target."""
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
         sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
