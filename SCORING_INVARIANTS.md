@@ -2251,9 +2251,9 @@ honest unknown.
 **Its measured corpus impact is nevertheless 0 rows.** The four `TopUp` /
 `TopUpV2` / `TopUpDest` contract rows on the replica carry **0
 `effective_functions`** between them, and **no** stored `capability_expr` has
-`0x…dEaD` as a `finite_set` member (the 20 trees mentioning the literal are
-`conditional_universal` / `signature_witness` / `external_check_only` nodes, not
-the empty-set shape). So the code path is real and fixture-exercised while the
+`0x…dEaD` as a `finite_set` member — the burn address does not appear anywhere
+in any stored `capability_expr`; a loose `dead` substring match returns 23
+trees, 21 of them the word `deadline` in time conditions. So the code path is real and fixture-exercised while the
 persisted blast radius is nil — which is why this is registered as a behaviour
 change with a stated 0-row impact rather than as a row-flipping correction.
 
