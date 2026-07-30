@@ -1273,9 +1273,34 @@ shapes (universals, argued from the source); simulation can only PROVE
 | `claims[].witness.flows[].amount_kind.{kind,tier}` | 152 entries, 100%. Bounded kinds on **19 of 86** flow.out entries: `capped_by_balance` 6, `bounded_by_storage` 5, `balance_delta` 4, `msg_value` 2, `token_identity` 2 | **REQUIRED** | the **amount bound** inv.2 already demands. `capped_by_balance` = *"provably ≤ this contract's own balance… a real upper bound / mitigation"* (`effects.py:144-158`). `token_identity` = exactly one non-fungible token moves — **forbids pricing the row off a fungible balance sheet**. |
 | `claims[].witness.flows[].target_constraint.{state,guard,binding,pins,leaf_path}` | 63 entries. flow.out: `not_determined` 43, `constrained` 6 (`external_call_revert` 4, `hash_commitment` 2), `unconstrained_proven` 4. value_router: `unconstrained_proven` 5, `constrained`/`hash_commitment` 5 | **REQUIRED** | three-valued and earned in both directions. Per `flows.py:75-80` **only `unconstrained_proven` licenses the caller-chosen (theft-shaped) reading**; `_facts.py:624-628` — *"a missing tree is NOT proof that no gate exists."* `guard` separates a self-enforcing merkle/hash commitment from `external_call_revert` (only as strong as the external contract). |
 | `claims[].witness.flows[].from_is_self` | 145/145 (T 89, F 56) | **REQUIRED** | inv.2 already mandates it. Note: **zero `flow.out` flows have `from_is_self=false`** — all 56 sit on `value_router` / `flow.in`, so there is no lever here today. |
+| `claims[].witness.flows[].router_ops[].{selector,callee}` | applicable = the 41 `value_router` claims (41 flow entries). **0/41 populated in this snapshot**; the projection lands with U5/D5 and the stored rows gain the key only when the claims stage re-runs. Producer side already 73/73 routed flows (81 op entries); label corpus 5/5 routed flows, now 5/5 on the claims plane too | **CONFIDENCE** (obligation: **cite**) | **the identity of the call(s) that carry a routed move** — the only identity there is, because a routed flow's own `selector` names the CALLEE's inner transfer, not the call this function makes. Each op is `{selector = keccak4 of the callee's canonical signature, callee = the bare AST function name}` (`effects.py:_bare_callee_name` :410-418; emitted at `:3305-3307`). **`callee` is an INTRA-UNIT AST identity and never a resolved on-chain target** — the name is carried precisely because an interface-typed parameter makes the declared signature hash to a different selector, so a consumer may join it to this unit's own functions and to nothing else. |
 | `claims[].witness.configures` (+ `set_vars`, `hook_pointer`) | 8/8 `transfer_policy.configure` | **REQUIRED** | the contract the policy **affects**. All 8 name BoringVault (**$1,392,349**) while living on a Teller holding **$0**. Re-points VaS. **Direction: raises.** |
 | `claims[].witness.destination_constraint.{guard,binding,pins}` | 5 / 5 / 4 on `exec.arbitrary` | **REQUIRED** | the scorer reads only `.state`. The `hash_commitment` + `pins=true` rows are the four timelock `execute`/`executeBatch` functions — a **genuinely stronger `constrained`** than `EtherFiNodesManager.forwardExternalCall`, whose `constrained` rests on `external_call_revert` (only as strong as the external contract) and which is the one EOA-gated, CONFIRMED-M11 arbitrary-exec finding. Same 0.35 softening today, materially different evidence. |
 | `claims[].witness.callee` (+ `sink_id`, `source_tier`) | 11 `cross_contract_join` (flow.in 6, flow.out 5) | **REQUIRED** | where the value actually is — all 11 name BoringVault ($1.39M) from a $0 Teller. Same class as B1/G2, different mechanism. |
+
+**R-ROUTEROPS — three-state, and the absence path is the fail-closed one.**
+`router_ops` present with ≥1 op = the carrying call(s) are **proven** (AST, no
+inference, no default, no name classification anywhere in the derivation).
+**Key absent = `not_determined`**, and it is the single reachable failure state:
+the producer recorded nothing, the artifact predates the field, or the flow is
+not routed at all — `flows.py:92-93` guards on truthiness, so a missing field and
+an empty list collapse into the same key-absent shape and **`[]` is never
+emitted**. That matters because an empty list of ops reads as "this routed flow
+crosses no call", which would license exactly the transparency the absence
+denies. Absence therefore keeps its existing fail-closed meaning, which the
+in-process consumer already enforces (`_facts.py:485-529`): a routed flow with no
+recorded op makes nothing extra transparent, its router leaf **blocks**, and the
+mandatory gate falls to `not_determined` — it can never mint
+`unconstrained_proven`. **There is no proven-absent state**: "this routed move
+crosses no call" is not representable and must not be inferred from key absence.
+The projection is a passthrough of a value the in-process consumer has always
+read, so no published verdict inverts; only a consumer holding the persisted
+witness alone changes, from `not_determined` to the same AST fact. Ops arrive in
+the producer's sort order and the projection preserves it; the order carries no
+severity. **Small populations:** none relied on (producer 73/73, applicable
+claims 41/41) — but note the end-to-end join the investigation byte-verified
+covers **11** of the 41 rows, the remaining 30 failing only on ABI-vs-Slither
+signature canonicalization, not on data absence.
 
 **R-STATIC — the computation already exists and is sanctioned.**
 `services/effects/calldata.py:1077 static_destination_shape` is a **conjunction**
@@ -1607,6 +1632,11 @@ denominator systematically flatters the grade.
     `router_ops` is the *only* identity of the carrying call. `value_router` is
     correctly `NOT_SCORED` today, but the router plane cannot be scored later
     without a projection change.
+    **↳ Half-closed (U5/D5, 2026-07-30): the projection now publishes
+    `router_ops` (`flows.py:92-93`) — see B2/R-ROUTEROPS for the registered
+    field and its three-state. The measured `0 of 152` stands for this snapshot;
+    the 41 applicable rows gain the key on re-analysis, not retroactively. The
+    `sink_ids=[]` half is untouched and still open.**
 
 ### B11. Traps — present, plausible-looking, not witnesses
 
