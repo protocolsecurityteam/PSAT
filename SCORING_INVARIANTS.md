@@ -610,10 +610,24 @@ as-of height are unrecoverable.
 
 Consequence for §E's third corollary, now written into it: **a strength gate that
 is not published alongside its payload does not discharge the obligation.** A
-conforming scorer must read `details->'trace'[*].basis` (demoting
-`internal_accessor_convention` and `slot_name_keyword` below `auto_getter`), and
-must treat any verdict whose strength gate was dropped as carrying the *weakest*
-branch that could have produced it.
+conforming scorer must read the basis (demoting every accessor-NAME arm below the
+ABI-forced one), and must treat any verdict whose strength gate was dropped as
+carrying the *weakest* branch that could have produced it.
+
+**Vocabulary, as shipped by A3 (2026-07-30).** The basis is now published
+top-level as `function_principals.details->>'authority_basis'` as well as in the
+trace, and the conflated `internal_accessor_convention` label is split at the
+write point by which helper produced the selector:
+`standard_namespaced_accessor` (an ERC-7201 accessor-table match) and
+`deunderscore_convention` (the leading-underscore convention); `auto_getter` is
+renamed `abi_auto_getter`. **Only `abi_auto_getter` is ranked above the rest** —
+the name-matched arms are mutually **UNORDERED**, sharing one
+`accessor_name_matched` tier, with `accessor_slot_agreement: not_determined` on
+each. Any finer ordering is a model choice published with its version and, per
+B14 (33 rows / 2 principals / 3 runtime addresses), may only gate, cite or
+three-state — never weight. A scorer must seat the legacy literal in the weak
+tier too (33 persisted rows carry it) and default an unrecognised label to the
+weakest tier.
 
 #### S2. Refutations that change what a scorer may do
 
@@ -1827,7 +1841,7 @@ module topic keeps "no module has ever been enabled" at `not_determined`.
 | **T-PRICE** — `contract_balances.price_usd` | No provenance column, and **432/721 rows have `price_usd=0.00` with `usd_value=NULL`** (212 spam symbols). `sum(usd_value)` is correct only because `usd_value` is NULL; nothing distinguishes "worthless spam" from "price lookup failed", so using `price_usd` directly would silently price real holdings at zero. |
 | **T-ROLEDEFS** — `role_definitions.role_name` | Mis-parses ERC-7201 storage-slot constants as roles (`AccessControlDefaultAdminRulesStorageLocation`, `OwnableStorageLocation`). The 9 real rows are standard OZ/Timelock names already in the authority plane. |
 | **T-TARGETS** — `effective_functions.effect_targets` | Display projection concatenating state-write variable names with dotted call heads; **501 of 1,642** populated rows carry only call heads. Use `state_writes` / `sinks` / `state_changing`. (Searched for the analogous shape inside `claims[]` — **none recurs**: `sink_ids` are structured identifiers, `flows[]` typed objects, `observed_blast_radius` canonical ABI signatures.) |
-| **T-ACCESSOR** — `internal_accessor_convention` (33 rows) | The returned address is a real `eth_call` result, but the *binding* is a naming convention: when the gate is `msg.sender == _owner` the resolver reads the public `owner()` getter assuming it fronts the same storage. Fail-closed to a whitelist (`predicate_evaluator.py:1318-1332`), so a tight convention — **admissible with a stated residual, never presented as bytecode-grade.** |
+| **T-ACCESSOR** — accessor-name bases (33 persisted rows, label `internal_accessor_convention`; written as `deunderscore_convention` / `standard_namespaced_accessor` since A3) | The returned address is a real `eth_call` result, but the *binding* is a name match: when the gate is `msg.sender == _owner` the resolver reads the public `owner()` getter assuming it fronts the same storage. Fail-closed to a whitelist, so a tight convention — **admissible with a stated residual, never presented as bytecode-grade.** The ERC-7201 arm is an EXACT-name table match and so reads authoritative; it is seated in the SAME weak tier, unordered against the convention arm, and both publish `accessor_slot_agreement: not_determined`. |
 | **T-SUMMARIES** — `contract_summaries` | §4's *verdict* (corroboration only) is right but its stated *reason* is wrong: these are **IR-derived from the Slither AST, not LLM** (`summaries.py`), and `is_pausable` is genuinely three-valued. The real reason to keep them off the grade is **redundancy**: `is_pausable=true` agrees with "has a `pause.set` claim" on **all 30**, zero disagreement either way. The cited split-proxy under-reporting is **not observable on this corpus**. The one non-redundant field is `standards` (ERC165 15, ERC20 14, ERC2612 13), a witness for inv.3's product-vs-privileged split — today `PRODUCT_CLAIMS` treats `erc20.transfer` as product on `claim_id` alone, one step from name inference. |
 
 ### B12. Negative results — do not go looking here
@@ -2104,3 +2118,152 @@ version, never a measured strength.
   scheduling fact this unit does not control and did not measure. Until a row is
   re-resolved it keeps the 5-key shape and must be read as the weakest branch,
   which is the same obligation as any absent witness.
+
+### B16. Caller-set currency and accessor basis — the S1 strength gates, published (A2 + A3 / Unit 2)
+
+Closes the second and third bullets of **B0b/S1** for the caller-set plane: the
+event-fold height and the emptiness reason were computed at the adapter leaf and
+**dropped by every finite combinator**, and the accessor basis was published only
+inside `details->'trace'[*].basis`. Both are re-publication of facts the producer
+already had; **nothing here is a new inference and no read was added.**
+
+**Populations are PROSPECTIVE.** On the PR-161 replica 250 of 1,799 rows carry any
+`last_indexed_block` and **0 carry more than one height leaf**, so the MIN
+combinator and both `exact_as_of` arms are 0-population on stored data; the 33
+basis rows carry the pre-split label. Every field below materializes on the **next
+resolution pass**. Stored rows keep their current shape and, per the rule this
+appendix already states, must be read as the weakest branch.
+
+#### B16.1 Fold height and exactness (`effective_functions.capability_expr`)
+
+| field | JSON path | population | status | three-state — and where failure lands | consumption obligation |
+|---|---|--:|---|---|---|
+| `last_indexed_block` | `.last_indexed_block` (any node) | 250/1799 today, at leaves only | **GATE** | Proven-present = **MIN** over every operand's fold height — a **STALENESS FLOOR**, not an as-of. There is no proven-absent. **Absent = `not_determined`**, and that is where *every* fail-closed arm lands: any operand without a height (an unpinned live `owner()` read is blockless by construction) makes the whole result blockless. `min`-of-present is **banned**. | **arithmetic + three-state** via `capability_currency` (`current`/`stale`/`not_determined`, `lag_blocks` never 0 by default). |
+| `exact_as_of` | `.exact_as_of` | 0 today (prospective) | **GATE** | Three states, all distinguishable: an **int** (every operand carried a height and ALL were equal — one instant), the literal **`"not_determined"`** (heights present but heterogeneous — an *earned* refusal), and **key absent** (never computed: a leaf, or an operand with no height). | **gate + cite.** The only height admissible as an "the set was exactly this at block B" claim. |
+| `empty_reason` | `.empty_reason` | 1 of 52 protocol-1 empties today | **GATE** | Propagated **only on INHERITED emptiness** — an operand that was already empty carries its own reason through. Emptiness *created* by an operation (`{X} − {X}` on the blacklist path) mints **no** reason; absent = `not_determined`. Two already-empty operands that disagree resolve to absent, not to whichever came first. | **gate.** Never `is not None` — see B16.3's allow-list. |
+
+**Why MIN may not be promoted to an as-of** (this is the load-bearing correction
+in this entry, and it withdraws the argument the original A2 plan rested on):
+both fold families publish **state-AT-h with revocations already applied**
+(`adapters/enumerable_role_store.py`, `adapters/solmate_roles.py`). For
+`intersect(A@h1, B@h2)` with `h1 < h2`, an address revoked from B in `(h1, h2]`
+is absent from the published B, so the published intersection can be empty while
+the true intersection at `h1` was not — "empty at MIN" is **false**, not merely
+unproven. On the subtractive paths (`finite − blacklist`, and both `negate`
+arms) the argument **inverts**: the published set is a *subset* of the true set
+at MIN. Hence `exact_as_of` exists only for the equal-heights case, and a
+consumer may **never** substitute `last_indexed_block` for it.
+
+**Ten mint sites, nine propagating.** `capabilities.py` rebuilds a capability at
+ten places; nine now carry provenance through `_carry_fold_provenance`
+(`intersect`/`union` of finite and of cofinite, `finite ∩ blacklist`,
+`finite ∪ blacklist`, and all three `negate` arms). The tenth —
+`negate(external_check_only)` — is a **deliberate non-site**: its operand is a
+probe interface that never carries a height, so there is nothing to propagate
+and nothing to date. A test asserts that arm emits neither key, so the omission
+cannot later read as an oversight. `negate` carries the height but **not**
+`empty_reason`: why a set is empty says nothing about why its complement is.
+
+#### B16.2 The live read's own provenance (`.trace[]`)
+
+| field | JSON path | population | status | three-state — and where failure lands | consumption obligation |
+|---|---|--:|---|---|---|
+| `observed_at_block` | `.trace[*].observed_at_block` on `live_getter_resolution` / `live_slot_resolution` | 0 today (prospective) | **GATE** | Proven-present = the `eth_call` / `eth_getStorageAt` was pinned to exactly this height. **Absent = the read went to `"latest"`** and has no reproducible height (`block` is `None` on the controller-read path, as `FIELDS.md` §4 records) — publishing a head here would stamp a bounded claim onto an unbounded read. | **gate + cite.** Required for inv.11/12 replay and for B16.3's credit. |
+| the trace itself on an empty result | `.trace[0]` | 0 today; **4 stored rows have no trace at all** | **REQ** | An exact-empty from a live read now carries `{step, selector\|slot, contract}`. Before this, the strongest earned negative in the system was published bare: 4 rows (ef 192, 797, 1151, 1613) are unreconstructible, and one of them — EACAggregatorProxy, whose `pendingOwner()` **reverts** on mainnet — provably did not come from the zero branch at all. | **gate.** |
+| `read_address` | `.trace[*].read_address` | 0 realized | CONF | Recorded only on the burn arm, so the "this address is unspendable" characterization is checkable downstream instead of taken on trust. | **cite.** |
+
+**`empty_reason` vocabulary, extended and narrowed.** Added: `owner_read_zero`
+and `slot_read_zero` — each says only *what was read*, at a stated block.
+Added `owner_read_burn_address` for a `0x…dEaD` read, which is now **split off
+from the zero shape**: `0x0` can never be `msg.sender` on mainnet, which is what
+makes a zero read a real "nobody", whereas `0x…dEaD` is an ordinary address
+merely *believed* keyless — a convention, not a proof. That arm publishes a
+`lower_bound`/`partial` empty, never `exact`/`enumerable`, and never earns the
+credit. **Removed:** the slot reader no longer stamps `empty_by_design` from a
+**default argument value** (`zero_empty_reason="empty_by_design"`); the
+parameter is gone. Classifying an emptiness as an intended accept-side ceiling
+rests on the accessor's `pending` prefix — an identifier — and that claim stays
+where it discloses its basis (`_pending_ceiling_capability`, whose trace records
+`basis: "accessor_name"`).
+
+**Burn-vs-zero on stored rows is NOT determinable.** The 4 provenance-less
+exact-empties carry no contract and no selector, so which branch produced them
+cannot be reconstructed: they are **≤4 candidate rows, split not determinable
+from persisted data**. Only re-resolution settles it. (An earlier draft of this
+work claimed "0 rows realized" for the burn arm; that claim is withdrawn — it
+was absence-as-witness.)
+
+**The burn arm is REAL, not hypothetical.** Solady's `TopUp` / `TopUpV2` hold
+`owner() == 0x…dEaD` on mainnet, and the repo's own verbatim fixture
+(`tests/fixtures/contracts/authority/solady/`) exercises exactly that path. So
+this is a **value change on a live shape**, not an armed-but-unrealized branch:
+that gate previously published `membership_quality='exact'` — "provably nobody
+can call this" — and now publishes `lower_bound` + `owner_read_burn_address`.
+Consequences: no principal is minted either way (unchanged, and that was already
+correct), but such a row no longer reads as `resolved_empty` and can no longer
+earn the credit. The direction is conservative: an unproven negative becomes an
+honest unknown.
+
+#### B16.3 The earned-negative gate (`analysis_detail` → `exact_empty_credit`)
+
+An empty caller set is the strongest earned negative the resolver publishes, and
+the shipped consumers award it on `membership_quality == "exact" && members == []`
+alone (`site/src/protocolScore.js:127-140`, `guardSummary.js:74`) — a shape a
+provenance-less empty satisfies exactly as well as a read-confirmed one. The gate
+is now **served beside the payload** rather than re-derived downstream.
+
+| verdict | meaning |
+|---|---|
+| `earned` | **all four** hold: `exact` + `enumerable`; a trace step from an **allow-listed** coverage-proving producer; an **observation block**; and an **allow-listed** read-confirmed `empty_reason`. The payload carries `{block, block_source, empty_reason}` so the gate travels with its witness. |
+| `not_determined` | anything short of that, with `missing[]` naming which requirement failed. **Withholds** a credit; never asserts that a caller exists. |
+| `not_applicable` | not an empty finite_set. |
+
+Three allow-lists, because a presence check fails open:
+- **coverage-proving steps** = `{solmate_roles_authority, enumerable_role_store,
+  live_getter_resolution, live_slot_resolution}` — the two folds refuse to fold
+  at all without a `backfill_complete` cursor (`no_index_cursor` → deferred), the
+  two reads are single pinned calls that are their own surface. Any other step,
+  present or future, reads `not_determined`.
+- **read-confirmed reasons** = `{owner_read_zero, slot_read_zero}`. Excluded with
+  cause: `empty_by_design` (name-derived classification), `unreadable_revert` /
+  `unreadable_empty` / `not_read` / `bad_input` (failure states — a failure may
+  never license a credit), `owner_read_burn_address` (convention, not proof).
+- **observation block** = a trace `observed_at_block`, or an `exact_as_of` int.
+  **`last_indexed_block` is NOT admissible** — admitting the MIN here would
+  launder the refuted "empty at MIN" arm back in through the consumer.
+
+**Measured blast radius (reproducible predicate).** Applying the repo's own
+`project_capability_surface` / `capability_surface_openness` /
+`_is_resolved_empty_capability` to all 1,799 `effective_functions` rows carrying a
+`capability_expr` on the PR-161 replica: **86 rows** are `restricted` resting
+SOLELY on the resolved-empty branch (no public path, no principal rows) — 52
+protocol-1 / 34 protocol-NULL; 82 carry a `solmate_roles_authority` step (50 of
+them protocol-1), 4 are zero-trace; and **86/86 carry no `last_indexed_block`
+anywhere in the tree**. Under this gate **0 of the 86 are `earned` today**.
+That is why the gate is a **separate served field and does NOT change `status`
+or `authority_openness`**: folding it into `status` would withdraw `restricted`
+from all 86 — including 50 protocol-1 empties whose emptiness was chain-verified
+5/5 at block 25643300 — which trades an over-claim for a much larger
+under-claim. The credit is withheld at the consumer, where it can be re-earned
+by re-resolution, not erased from the surface.
+
+**Withdrawal, stated precisely.** The plan named ef 192, 1613, 797 and 1151 as
+losing an `empty_by_design` credit. Re-measured: **only ef 192 carries
+`empty_by_design`** (it is the single node with that reason in all 1,799 trees,
+and it is the trace-less default-argument shape); ef 797, 1151 and 1613 carry
+**no `empty_reason` at all**. All four fail this gate regardless — on the
+missing trace and the missing block — so all four read `not_determined` until
+re-resolved. ef 192 may re-earn the credit honestly once re-resolved, since its
+producing path now publishes a slot read with its block.
+
+#### B16.4 Small-population bar (B14)
+
+`empty_reason` present on **1 of 52** protocol-1 empties · zero-trace empties
+**4 corpus / 2 protocol-1** · burn arm **≤4 candidates, split not determinable** ·
+`slot_name_keyword` **0 rows** · A3 = 33 rows but only **2 distinct principals /
+3 runtime addresses** · realizable height candidates: **≤25** blockless
+`enumerable_role_store` nodes, of which **8** carry two fold steps (the shape
+where both operands provably carried a height). Every one of these is at or
+under the bar: they may **gate, cite or three-state**, and **none may calibrate a
+weight or a threshold**. The `abi_auto_getter` rename touches **0** persisted
+rows; the de-underscore split touches all 33.
