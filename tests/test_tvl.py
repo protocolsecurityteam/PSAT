@@ -17,6 +17,7 @@ from services.monitoring.tvl import (
     take_tvl_snapshot,
 )
 from tests.conftest import requires_postgres
+from tests.support.balance_stubs import page
 
 # Unique address helpers — each test class gets its own prefix to avoid
 # unique-constraint collisions across tests sharing the same DB.
@@ -180,18 +181,20 @@ class TestRefreshContractBalances:
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 2_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr(
-            "utils.etherscan.get_token_balances",
-            lambda address, chain_id=1: [
-                {
-                    "token_address": "0x" + "dd" * 20,
-                    "token_name": "USDC",
-                    "token_symbol": "USDC",
-                    "decimals": 6,
-                    "balance": 500_000_000,
-                    "price_usd": 1.0,
-                    "usd_value": 500.0,
-                }
-            ],
+            "utils.etherscan.get_token_balances_page",
+            lambda address, chain_id=1: page(
+                [
+                    {
+                        "token_address": "0x" + "dd" * 20,
+                        "token_name": "USDC",
+                        "token_symbol": "USDC",
+                        "decimals": 6,
+                        "balance": 500_000_000,
+                        "price_usd": 1.0,
+                        "usd_value": 500.0,
+                    }
+                ]
+            ),
         )
 
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
@@ -221,7 +224,7 @@ class TestRefreshContractBalances:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", _raise)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", _raise)
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", _raise)
 
         breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
@@ -248,7 +251,7 @@ class TestTakeTvlSnapshot:
         )
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 1_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 3000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         snapshot, _ = take_tvl_snapshot(db_session, protocol.id)
 
@@ -272,7 +275,7 @@ class TestTakeTvlSnapshot:
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         snapshot, _ = take_tvl_snapshot(db_session, protocol.id)
 
@@ -308,7 +311,7 @@ class TestRefreshAllProtocols:
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         count = refresh_all_protocols(db_session)
         assert count == 2
@@ -344,7 +347,7 @@ class TestRefreshAllProtocols:
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         count = refresh_all_protocols(db_session)
         assert count == 2  # cap honored
@@ -385,7 +388,7 @@ class TestSnapshotDedup:
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         s1, _ = take_tvl_snapshot(db_session, protocol.id)
         s2, _ = take_tvl_snapshot(db_session, protocol.id)
@@ -485,7 +488,7 @@ class TestNativeAssetPricingDispatch:
     def _mock_eth_native(self, monkeypatch, *, wei: int) -> None:
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: wei)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
     def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup):
         # Base is ETH-native → byte-identical to mainnet pricing.
@@ -538,7 +541,7 @@ class TestNativeAssetPricingDispatch:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 100_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)  # mainnet quote, unused here
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
         # POL/USD (probed value); the balance is 100 POL → $8.26.
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 0.0826)
 
@@ -614,7 +617,7 @@ class TestEthPriceDegradationDB:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 5_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", _raise_price)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         with caplog.at_level(logging.WARNING, logger="services.monitoring.tvl"):
             breakdown, _ = refresh_contract_balances(db_session, protocol.id)
@@ -655,7 +658,7 @@ class TestContractBreakdownCompositeKey:
         protocol, addr = self._two_chain_twin(db_session)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
@@ -698,20 +701,23 @@ class TestContractBreakdownCompositeKey:
         )
         db_session.commit()
 
-        breakdown = _read_existing_balances(db_session, protocol.id)
+        breakdown, partial = _read_existing_balances(db_session, protocol.id)
 
         eth_key = _entity_key("ethereum", addr)
         base_key = _entity_key("base", addr)
         assert set(breakdown) == {eth_key, base_key}
         assert breakdown[eth_key]["total_usd"] == 2000.0
         assert breakdown[base_key]["total_usd"] == 4000.0
+        # These are legacy-shaped rows (no fetch recorded), and the view still
+        # publishes them: an absent fetch plane is not a failed one.
+        assert partial is False
 
     def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup):
         protocol, _addr_unused = self._two_chain_twin(db_session)
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", self._chain_varying_eth_balance)
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         snapshot, partial = take_tvl_snapshot(db_session, protocol.id)
 
@@ -741,7 +747,7 @@ class TestMainnetEthQuoteFailurePartial:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 3_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", _raise_price)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
@@ -767,7 +773,7 @@ class TestMainnetEthQuoteFailurePartial:
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 3_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_eth_price", _raise_price)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda address, chain_id=1: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
         cycles: list[dict] = []
         monkeypatch.setattr("services.monitoring.tvl.emit_monitor_cycle", lambda *a, **k: cycles.append(k))

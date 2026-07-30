@@ -14,6 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from db.models import ContractBalance, ContractBalanceFetch
+from tests.support.balance_stubs import page
+from utils.balance_status import NATIVE_STATUS_FETCH_FAILED, NATIVE_STATUS_NOT_DETERMINED
 from workers.resolution_worker import ResolutionWorker
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
@@ -28,7 +31,7 @@ def _stub_etherscan_balances(monkeypatch):
     """
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
 
 
 def _can_connect() -> bool:
@@ -293,6 +296,25 @@ class TestProxyAddressOverride:
         assert captured_plan[0]["contract_address"] == PROXY_ADDRESS
 
 
+def _added(session) -> list:
+    """Every object handed to ``session.add`` on a MagicMock session."""
+    return [c.args[0] for c in session.add.call_args_list if c.args]
+
+
+def _balance_rows(session) -> int:
+    """HOLDINGS rows only. The fetch-provenance row is not a holding and must
+    never be counted as one — that separation is the whole point of the plane."""
+    return sum(1 for o in _added(session) if isinstance(o, ContractBalance))
+
+
+def _fetch_objects(session) -> list:
+    return [o for o in _added(session) if isinstance(o, ContractBalanceFetch)]
+
+
+def _fetch_rows(session) -> int:
+    return len(_fetch_objects(session))
+
+
 # ---------------------------------------------------------------------------
 # 3. _fetch_balances — ETH + tokens stored, price failure handled
 # ---------------------------------------------------------------------------
@@ -310,25 +332,30 @@ class TestFetchBalancesHappyPath:
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 2000.0)
         monkeypatch.setattr(
-            "utils.etherscan.get_token_balances",
-            lambda addr, *a, **k: [
-                {
-                    "token_address": "0xtoken1",
-                    "token_name": "USDC",
-                    "token_symbol": "USDC",
-                    "decimals": 6,
-                    "balance": 1000000,
-                    "price_usd": 1.0,
-                    "usd_value": 1.0,
-                }
-            ],
+            "utils.etherscan.get_token_balances_page",
+            lambda addr, *a, **k: page(
+                [
+                    {
+                        "token_address": "0xtoken1",
+                        "token_name": "USDC",
+                        "token_symbol": "USDC",
+                        "decimals": 6,
+                        "balance": 1000000,
+                        "price_usd": 1.0,
+                        "usd_value": 1.0,
+                    }
+                ]
+            ),
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # 2 add calls: 1 ETH + 1 token
-        assert session.add.call_count == 2
+        # 2 holdings rows: 1 ETH + 1 token. The third ``add`` is the
+        # ``ContractBalanceFetch`` provenance row, which is NOT a holding and is
+        # counted separately for exactly that reason.
+        assert _balance_rows(session) == 2
+        assert _fetch_rows(session) == 1
         session.commit.assert_called()
 
     def test_price_failure_still_stores_eth(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -339,29 +366,38 @@ class TestFetchBalancesHappyPath:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_native_price", MagicMock(side_effect=Exception("API down")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         # Should still add ETH balance even if price failed
-        assert session.add.call_count == 1
+        assert _balance_rows(session) == 1
+        assert _fetch_rows(session) == 1
         session.commit.assert_called()
 
-    def test_balance_fetch_exception_returns_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_balance_fetch_exception_writes_no_holding_but_leaves_a_trace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         fake_contract = SimpleNamespace(id=42)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # No balances stored on exception
-        session.add.assert_not_called()
+        # No holdings row on a failed read — the balance is not known, and the
+        # earlier code path recorded that only via ``record_degraded``, leaving
+        # the balance plane showing a plain absence. A provenance row now says
+        # the read was attempted and failed.
+        assert _balance_rows(session) == 0
+        fetches = _fetch_objects(session)
+        assert len(fetches) == 1
+        assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
 
     def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A BSC job records its native gas balance under BNB at the BNB quote,
@@ -373,12 +409,12 @@ class TestFetchBalancesHappyPath:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000)  # 2 BNB
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 600.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=56)
 
-        native_rows = [c.args[0] for c in session.add.call_args_list if c.args[0].token_address is None]
+        native_rows = [o for o in _added(session) if isinstance(o, ContractBalance) and o.token_address is None]
         assert len(native_rows) == 1
         row = native_rows[0]
         assert row.token_symbol == "BNB"
@@ -741,12 +777,21 @@ class TestFetchBalancesZeroEth:
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        session.add.assert_not_called()
+        # No holdings row for a zero balance — a row here would be consumed as
+        # "this deployment holds the native asset". The zero itself is recorded
+        # on the fetch plane, and because this read came from the UNPINNED
+        # Etherscan path it is ``not_determined``, never ``proven_zero``: the
+        # answer carries no height, so it proves zero at no height.
+        assert _balance_rows(session) == 0
+        fetches = _fetch_objects(session)
+        assert len(fetches) == 1
+        assert fetches[0].native_status == NATIVE_STATUS_NOT_DETERMINED
+        assert fetches[0].block_number is None
         session.commit.assert_called()
 
 
@@ -770,7 +815,7 @@ class TestFetchBalancesProxyAddress:
             return 0
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", fake_get_eth)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         job = _job(request={"proxy_address": PROXY_ADDRESS})
