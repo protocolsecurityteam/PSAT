@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from eth_abi.abi import decode
+from eth_utils.crypto import keccak as _keccak
 
 from schemas.contract_analysis import ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
@@ -469,6 +470,148 @@ def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, ch
     return raw
 
 
+# --- Safe module / guard protection probe (C1) -----------------------------
+#
+# Every value below is derived from a preimage the deployed Safe singletons
+# contain verbatim, recomputed at import so the constant can never drift from
+# the preimage it claims:
+#
+#   modules head — Safe stores ``mapping(address => address) modules`` at storage
+#     slot 1 and seeds it with ``modules[SENTINEL_MODULES] = SENTINEL_MODULES``
+#     where ``SENTINEL_MODULES == address(0x1)``. The head word therefore lives at
+#     ``keccak256(abi.encode(address(0x1), uint256(1)))``.
+#   guard — ``GUARD_STORAGE_SLOT = keccak256("guard_manager.guard.address")``,
+#     the literal present in the 1.3.0 and 1.4.1 singletons.
+_SAFE_SENTINEL_MODULES_WORD = (1).to_bytes(32, "big")
+_SAFE_MODULES_MAPPING_SLOT_WORD = (1).to_bytes(32, "big")
+_SAFE_MODULES_HEAD_SLOT = "0x" + _keccak(_SAFE_SENTINEL_MODULES_WORD + _SAFE_MODULES_MAPPING_SLOT_WORD).hex()
+_SAFE_GUARD_SLOT = "0x" + _keccak(text="guard_manager.guard.address").hex()
+_SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
+
+# Safe releases whose DEPLOYED singleton source was read and found to contain (or
+# to lack) ``GUARD_STORAGE_SLOT``. A zero word at the guard slot means "no guard
+# is set" only on a release that HAS the feature; on 1.1.1 the slot is unused
+# storage, and reading its zero as "guard disabled" would be a defaulted witness.
+# Any version outside both sets — including a variant suffix such as ``1.3.0+L2``
+# whose source was not read — is not_determined, never assumed either way.
+_SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1"})
+_SAFE_VERSIONS_WITHOUT_GUARD = frozenset({"1.1.1"})
+
+_NOT_DETERMINED = "not_determined"
+_BLOCK_TAG_ALIASES = frozenset({"latest", "pending", "earliest", "safe", "finalized"})
+
+
+def _resolve_pinned_block(rpc_url: str, block_tag: str, *, chain_id: int | None = None) -> int | None:
+    """The integer height the protection probe will pin its reads to, or ``None``.
+
+    An explicit quantity tag is already the height. A moving alias is resolved to
+    a concrete number FIRST and the reads are then issued against that number, so
+    the published ``probe_block`` is the height the words actually came from
+    rather than whatever ``latest`` meant at each individual read. ``None`` (head
+    read failed) suppresses the probe entirely — a module set observed at an
+    unknown height is a now-fact with no block, which may not be published."""
+    tag = (block_tag or "").strip().lower()
+    if tag.startswith("0x"):
+        try:
+            return int(tag, 16)
+        except ValueError:
+            return None
+    if tag not in _BLOCK_TAG_ALIASES:
+        return None
+    try:
+        return _current_block_number(rpc_url, chain_id=chain_id)
+    except Exception:
+        return None
+
+
+def _word_to_address(word: str | None) -> str | None:
+    """The address a 32-byte word holds, or ``None`` when the word is not a
+    clean left-padded address (top 12 bytes set ⇒ it is not an address at all)."""
+    if not isinstance(word, str) or not word.startswith("0x"):
+        return None
+    body = word[2:].lower().rjust(64, "0")
+    if len(body) != 64 or body[:24] != "0" * 24:
+        return None
+    return "0x" + body[24:]
+
+
+def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str, str | None]:
+    """``(guard_state, guard_address)`` from the guard slot word and VERSION().
+
+    Four states, and the failure/absence path is ``not_determined`` in every arm:
+    an unread word, an unknown version, or a word that contradicts the version's
+    feature set all land there rather than on a polarity."""
+    if guard_word is None or version is None:
+        return _NOT_DETERMINED, None
+    address = _word_to_address(guard_word)
+    if address is None:
+        return _NOT_DETERMINED, None
+    is_zero = address == "0x" + "0" * 40
+    if version in _SAFE_VERSIONS_WITH_GUARD:
+        return ("proven_zero", None) if is_zero else ("proven_address", address)
+    if version in _SAFE_VERSIONS_WITHOUT_GUARD:
+        # A nonzero word at a slot the release does not implement is unexplained;
+        # "feature_absent" would be asserting more than the read supports.
+        return ("feature_absent", None) if is_zero else (_NOT_DETERMINED, None)
+    return _NOT_DETERMINED, None
+
+
+def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> dict:
+    """The Safe module/guard protection witness, at a pinned height.
+
+    Two storage words plus ``VERSION()``. The module linked list is NOT walked, so
+    the head word can only ever prove the list EMPTY (head == sentinel). A
+    non-sentinel head proves a module exists — which makes the k/n signer threshold
+    an upper bound on protection — but says nothing about how many, so the set stays
+    ``not_determined``: publishing ``[head]`` would report a two-module Safe as a
+    one-module Safe. Never raises; every failure arm publishes ``not_determined``."""
+    out: dict[str, object] = {
+        "probe_block": _NOT_DETERMINED,
+        "safe_version": _NOT_DETERMINED,
+        "modules_head": _NOT_DETERMINED,
+        "module_set": _NOT_DETERMINED,
+        "module_set_basis": _NOT_DETERMINED,
+        "protection_is_upper_bound": _NOT_DETERMINED,
+        "guard": _NOT_DETERMINED,
+    }
+    probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
+    if probe_block is None:
+        return out
+    out["probe_block"] = probe_block
+    pinned = hex(probe_block)
+
+    decoded_version = _try_eth_call_decoded(rpc_url, address, "VERSION()", "string", pinned, chain_id=chain_id)
+    version = decoded_version if isinstance(decoded_version, str) else None
+    if version is not None:
+        out["safe_version"] = version
+
+    def _word(slot: str) -> str | None:
+        try:
+            raw = _get_storage_at(rpc_url, address, slot, pinned, chain_id=chain_id)
+        except Exception:
+            return None
+        return "0x" + raw[2:].lower().rjust(64, "0") if isinstance(raw, str) and raw.startswith("0x") else None
+
+    head_word = _word(_SAFE_MODULES_HEAD_SLOT)
+    if head_word is not None:
+        out["modules_head"] = head_word
+        head_address = _word_to_address(head_word)
+        if head_address == _SAFE_SENTINEL_ADDRESS:
+            out["module_set"] = []
+            out["module_set_basis"] = "storage_linked_list_terminated"
+        elif head_address is not None and head_address != "0x" + "0" * 40:
+            # A module is enabled at probe_block; it can act without meeting the
+            # signer threshold, so k/n bounds protection from above. The count
+            # stays unknown — this is the only positive the head word earns.
+            out["protection_is_upper_bound"] = True
+            out["modules_head_address"] = head_address
+
+    out["guard"], guard_address = _safe_guard_state(_word(_SAFE_GUARD_SLOT), version)
+    if guard_address is not None:
+        out["guard_address"] = guard_address
+    return out
+
+
 def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
     """The ERC-1967 implementation slot: an implementation address when the
     slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
@@ -682,6 +825,9 @@ def _classify_uncached_batched(
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
+                # Nested so a consumer cannot read module_set without its probe_block:
+                # both are one now-fact and neither means anything alone.
+                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
             },
             had_error,
         )
@@ -781,6 +927,7 @@ def _classify_uncached(
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
+                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
             },
             had_error,
         )
