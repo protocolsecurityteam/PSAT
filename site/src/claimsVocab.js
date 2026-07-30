@@ -1600,9 +1600,11 @@ export function claimWitnessFacts(fn) {
       // not_determined, or an absent source on an older verdict. The freeze window
       // was NOT established — say so, rather than borrowing the proven-indefinite
       // sentence (which is the most severe statement this inspector makes).
+      // Symmetrically it may not read as a MITIGATION: an unread window is not a
+      // short one, so this sentence carries no duration and no expiry either way.
       facts.push({
         label: "Auto-expiry",
-        value: "not determined (no freeze window read)",
+        value: "window not determined",
       });
     }
   }
