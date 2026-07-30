@@ -68,6 +68,7 @@ def upgrade() -> None:
         sa.Column("executor_classification_block", sa.BigInteger(), nullable=True),
         sa.Column("executor_call_targets", postgresql.JSONB(), nullable=True),
         sa.Column("receipt_log_set_complete_for_tx", sa.Boolean(), nullable=False),
+        sa.Column("receipt_upgraded_counts", postgresql.JSONB(), nullable=False),
         sa.Column("fetched_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.CheckConstraint(
             "executor_kind IN ('timelock_routed', 'safe_direct', 'not_determined')",

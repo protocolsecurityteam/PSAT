@@ -12,9 +12,10 @@ not:
 * it collapses the 19x fanout, because ``(chain_id, tx_hash)`` is the governance
   action id;
 * it proves NOTHING about who authorised anything. ``receipt.from`` on a Safe
-  ``execTransaction`` is a relayer — six different senders were measured
-  submitting for one Safe — so ``authorising_eoa`` is ``not_determined`` on
-  every row including the one-hop transactions where ``receipt.to == proxy``.
+  ``execTransaction`` is a relayer — the 11 ``ExecutionSuccess``-bearing
+  transactions on one Safe were submitted by five distinct senders — so
+  ``authorising_eoa`` is ``not_determined`` on every row including the one-hop
+  transactions where ``receipt.to == proxy``.
 
 Every fixture is a real mainnet receipt, trimmed to the three topics the fold
 reads (``tests/fixtures/upgrade_receipts/protocol1_receipts.json``); the wire is
@@ -310,6 +311,71 @@ def test_pruned_log_array_with_intact_bloom_is_not_determined(world, wire):
     assert row.executor_call_targets is None
 
 
+def test_pruned_log_array_with_the_bloom_removed_is_not_determined(world, wire):
+    """The same pruning, with the ``logsBloom`` gone as well.
+
+    This is the shape that made the bloom a *consistency check* rather than a
+    witness: with no bloom there is nothing to disagree with, so a
+    "consistent-unless-contradicted" rule reads silence as agreement and mints
+    ``safe_direct`` from a receipt whose ground truth is ``timelock_routed``.
+    The absence arm is only ever licensed by a bloom that is actually there and
+    actually works.
+    """
+    session = world["session"]
+    proxy = world["contract"](PROXY_ETHERFI_NODES_MANAGER)
+    world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
+    world["classify"](TIMELOCK, "timelock")
+    world["classify"](SAFE_ROUTING_THE_TIMELOCK, "safe")
+
+    stripped = _receipt(TX_FANOUT)
+    stripped["logs"] = [log for log in stripped["logs"] if log["topics"][0].lower() != CALL_EXECUTED_TOPIC0.lower()]
+    stripped.pop("logsBloom")
+    wire.receipts = {TX_FANOUT: stripped}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_FANOUT))
+    assert row.receipt_log_set_complete_for_tx is False
+    assert row.executor_kind == "not_determined"
+    assert row.executor_kind != "safe_direct"
+    assert row.executor_address is None
+
+
+def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
+    """An all-zero bloom is shape-valid and answers "absent" to every query.
+
+    Read as a witness it proves every marker missing at once — the purest form
+    of absence-as-evidence. The positive control catches it: the log array
+    carries an ``Upgraded`` log, so a working bloom must confirm THAT, and a
+    bloom which cannot answer a question whose answer we know may not be
+    trusted on the question we do not.
+    """
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe")
+
+    zeroed = _receipt(TX_SAFE_DIRECT, logsBloom="0x" + "0" * 512)
+    assert uh._bloom_has_topic(zeroed["logsBloom"], CALL_EXECUTED_TOPIC0) is False, (
+        "the zeroed bloom is shape-valid and reports absence — that is the trap"
+    )
+    wire.receipts = {TX_SAFE_DIRECT: zeroed}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.receipt_log_set_complete_for_tx is False
+    assert row.executor_kind == "not_determined"
+    assert row.executor_kind != "safe_direct"
+
+    # Control: the same receipt with its real bloom does reach safe_direct, so
+    # the assertion above is the bloom's doing and not some other refusal.
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    session.refresh(row)
+    assert row.receipt_log_set_complete_for_tx is True
+    assert row.executor_kind == "safe_direct"
+
+
 def test_receipt_missing_our_own_event_is_not_complete(world, wire):
     """Self-consistency: a receipt that does not carry the very ``Upgraded`` log
     we stored for it cannot be used to reason about what it does NOT carry."""
@@ -359,15 +425,18 @@ def test_nineteen_events_are_one_governance_action(fanout_world):
     assert len(ids) == 19
     assert session.query(UpgradeEvent).filter(UpgradeEvent.tx_hash == TX_FANOUT).count() == 21
 
+    # The action id is the PAIR, not the bare hash: the same 32 bytes can name
+    # a different transaction on another chain, and a bare-hash union across
+    # contracts would silently merge them (#158).
     actions = uh.governance_actions_for(session, ids)
-    assert actions == {TX_FANOUT}
+    assert actions == {(1, TX_FANOUT)}
     assert len(actions) == 1
 
     # A7: the answer is always relative to the scope asked for. The same
     # transaction touches proxies outside it, and widening the scope must not
     # multiply the action.
     all_ids = ids + [c.id for c in fanout_world["out_of_scope"]]
-    assert uh.governance_actions_for(session, all_ids) == {TX_FANOUT}
+    assert uh.governance_actions_for(session, all_ids) == {(1, TX_FANOUT)}
     assert session.query(UpgradeTransaction).count() == 1
 
 
@@ -419,7 +488,7 @@ def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(wo
 
     ``receipt.from`` is right there, populated, on a transaction whose executor
     is a Safe we positively classified. It is still the submitter, not the
-    signer set: six different senders were measured relaying for one Safe.
+    signer set: five distinct senders were measured relaying for one Safe.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
@@ -620,6 +689,44 @@ def test_within_tx_double_upgrade_is_never_excluded(world, wire):
     entry = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]
     assert entry["count"] == 1
     assert entry["basis"]["deployments_excluded"] == 0
+
+
+def test_under_projected_pair_is_caught_by_the_receipts_own_count(world, wire):
+    """The stored rows cannot witness their own under-projection.
+
+    If a swap-and-restore transaction lands only ONE of its two ``Upgraded``
+    logs in ``upgrade_events``, the stored pair count reads "one event" and the
+    deployment guard would exclude a transaction that also carried a real
+    implementation change. The receipt's own per-proxy log count is the
+    independent check, and the guard takes the larger of the two.
+
+    **Latent, with zero live instances**: all 3 measured swap-and-restore pairs
+    are fully projected and none of them is a creation transaction, so this
+    arm never fires on the current corpus. It is here because the failure is
+    silent when it does.
+    """
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    # Only ONE row stored for a transaction whose receipt carries two.
+    world["event"](proxy, TX_SWAP_AND_RESTORE, BLOCK_SWAP_AND_RESTORE, impl="0x" + "aa" * 20)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe")
+    wire.receipts = {TX_SWAP_AND_RESTORE: _receipt(TX_SWAP_AND_RESTORE)}
+    wire.creation = {PROXY_SAFE_DIRECT: (TX_SWAP_AND_RESTORE, BLOCK_SWAP_AND_RESTORE)}
+    wire.code = {(PROXY_SAFE_DIRECT, hex(BLOCK_SWAP_AND_RESTORE - 1)): "0x"}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SWAP_AND_RESTORE))
+    witness = session.get(ContractCreationWitness, (1, PROXY_SAFE_DIRECT))
+    assert row.receipt_upgraded_counts[PROXY_SAFE_DIRECT] == 2
+    # Both creation witnesses agree, and the pair count from the stored rows is
+    # 1 — everything the deployment rule needs, except that the receipt says the
+    # transaction touched this proxy twice.
+    assert witness.creation_tx_hash == TX_SWAP_AND_RESTORE
+    assert witness.code_absent_at_probe is True
+    assert not uh.event_is_deployment(
+        row, witness, proxy_address=PROXY_SAFE_DIRECT, event_block=BLOCK_SWAP_AND_RESTORE, pair_event_count=1
+    )
+    assert uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["count"] == 1
 
 
 def test_real_swap_and_restore_is_one_action_not_two(world, wire):

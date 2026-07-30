@@ -589,6 +589,11 @@ def _finalize_upgrade_history(
                     fold_stats["kinds"],
                 )
         except Exception as exc:
+            # A DB-layer failure leaves the session in a failed transaction, and
+            # every later statement in this stage would raise
+            # PendingRollbackError instead of doing its work. Roll back first so
+            # the fold's failure costs the fold only.
+            session.rollback()
             record_degraded(
                 phase="static_upgrade_executor_fold",
                 exc=exc,

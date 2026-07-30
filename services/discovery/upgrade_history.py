@@ -961,9 +961,10 @@ def synthesize_from_events(session, contract) -> dict | None:
 #
 # What this deliberately does NOT publish, and why:
 #   * ``authorising_eoa`` — never, from anything. ``receipt.from`` on a Safe
-#     ``execTransaction`` is a relayer: six different senders were measured
-#     submitting for one Safe. tx.from names the submitter, never the signer
-#     set. The literal ``"not_determined"`` is published instead so the refusal
+#     ``execTransaction`` is a relayer: the 11 ``ExecutionSuccess``-bearing
+#     transactions on one Safe were submitted by FIVE distinct senders
+#     (re-measured over all 68 receipts). tx.from names the submitter, never
+#     the signer set. The literal ``"not_determined"`` is published instead so the refusal
 #     reaches the consumer rather than being an omission it could fill in.
 #   * ``timelock_is_decoy`` — never. "No direct upgrade after the timelock's
 #     first use" is an ABSENCE of observed bypass, not proof no bypass exists.
@@ -1157,20 +1158,30 @@ def _decode_receipt(
 ) -> dict | None:
     """Receipt dict -> the column values, or ``None`` if it is unusable.
 
-    ``receipt_log_set_complete_for_tx`` is COMPUTED here, never asserted. Two
-    checks, both of which must hold:
+    ``receipt_log_set_complete_for_tx`` is COMPUTED here, never asserted. Three
+    checks, all of which must hold:
 
-      (i)  self-consistency — every stored ``Upgraded`` event for this
-           transaction is present in the receipt's own log array, emitted by
-           its proxy. A truncated or filtered receipt fails.
-      (ii) bloom agreement — the ``logsBloom`` and the log array must agree
-           about ``CallExecuted``. Bloom-says-absent is independent proof of
-           absence (no false negatives); bloom-says-present with no such log in
-           the array means the array may be pruned, and eRPC fanning out across
-           upstreams makes that a real risk rather than a theoretical one.
+      (i)   self-consistency — every stored ``Upgraded`` event for this
+            transaction is present in the receipt's own log array, emitted by
+            its proxy. A truncated or filtered receipt fails.
+      (ii)  a USABLE bloom — the ``logsBloom`` must be present, well-formed,
+            and must itself confirm an ``Upgraded`` log the array carries. The
+            positive control is the load-bearing half: an all-zero bloom is
+            shape-valid and answers "absent" to every query, so without a
+            question whose answer is known to be *yes* a zeroed bloom reads as
+            proof of absence for everything. A missing or unusable bloom is not
+            a licence to reason from absence — it is the withdrawal of one.
+      (iii) bloom agreement — the usable bloom and the log array must agree
+            about ``CallExecuted``. Bloom-says-absent is then independent proof
+            of absence (a bloom has no false negatives); bloom-says-present
+            with no such log in the array means the array may be pruned, and
+            eRPC fanning out across upstreams makes that a real risk rather
+            than a theoretical one.
 
-    Without (ii) the ``safe_direct`` verdict would rest on an absence observed
-    only in the array whose completeness is exactly what is in question.
+    (ii) and (iii) exist because ``safe_direct`` is an ABSENCE verdict. Without
+    them it would rest on an absence observed only in the array whose
+    completeness is exactly what is in question — and a receipt with its bloom
+    stripped would mint it.
     """
     block_number = _hex_int_or_none(receipt.get("blockNumber"))
     block_hash = receipt.get("blockHash")
@@ -1199,8 +1210,18 @@ def _decode_receipt(
 
     call_executed = _logs_with_topic(logs, CALL_EXECUTED_TOPIC0)
     execution_success = _logs_with_topic(logs, EXECUTION_SUCCESS_TOPIC0)
-    bloom_says_call_executed = _bloom_has_topic(receipt.get("logsBloom"), CALL_EXECUTED_TOPIC0)
-    bloom_consistent = not (bloom_says_call_executed is True and not call_executed)
+    logs_bloom = receipt.get("logsBloom")
+    bloom_says_call_executed = _bloom_has_topic(logs_bloom, CALL_EXECUTED_TOPIC0)
+    # The positive control: the array carries an ``Upgraded`` log, so a working
+    # bloom must say so. An absent, malformed or all-zero bloom fails here, and
+    # a bloom that cannot answer a question we know the answer to may not be
+    # trusted on the question we do not.
+    bloom_usable = (
+        bloom_says_call_executed is not None
+        and bool(upgraded_logs)
+        and _bloom_has_topic(logs_bloom, UPGRADED_TOPIC0) is True
+    )
+    bloom_agrees = bloom_usable and not (bloom_says_call_executed is True and not call_executed)
 
     to_addr = receipt.get("to")
     created = receipt.get("contractAddress")
@@ -1212,7 +1233,12 @@ def _decode_receipt(
         "receipt_to": to_addr.lower() if isinstance(to_addr, str) else None,
         "created_contract_address": created.lower() if isinstance(created, str) else None,
         "is_contract_creation": not isinstance(to_addr, str),
-        "receipt_log_set_complete_for_tx": bool(self_consistent and bloom_consistent),
+        "receipt_log_set_complete_for_tx": bool(self_consistent and bloom_agrees),
+        # The receipt's OWN per-proxy Upgraded-log count. The stored rows cannot
+        # detect their own under-projection, so the deployment guard reads the
+        # larger of the two: a receipt showing two Upgraded logs for a proxy is
+        # never a plain creation, whatever got projected.
+        "receipt_upgraded_counts": upgraded_by_proxy,
         "_call_executed": call_executed,
         "_execution_success": execution_success,
     }
@@ -1468,6 +1494,7 @@ def fold_upgrade_transactions(
             "created_contract_address",
             "is_contract_creation",
             "receipt_log_set_complete_for_tx",
+            "receipt_upgraded_counts",
         ):
             setattr(row, field, decoded[field])
         for field, value in verdict.items():
@@ -1561,14 +1588,19 @@ def event_is_deployment(tx_row, creation_row, *, proxy_address: str, event_block
     default that keeps an unclassified event COUNTED. An upgrade count that may
     over-count is honest; one that silently drops real upgrades is not.
     """
-    # A transaction that emitted two Upgraded logs for one proxy (a within-tx
-    # swap-and-restore) is not a plain deployment, and excluding it would drop a
-    # real implementation change along with the creation.
-    if pair_event_count != 1:
-        return False
     if tx_row is None or tx_row.tx_status != 1:
         return False
     proxy = proxy_address.lower()
+    # A transaction that emitted two Upgraded logs for one proxy (a within-tx
+    # swap-and-restore) is not a plain deployment, and excluding it would drop a
+    # real implementation change along with the creation. The count is taken as
+    # the LARGER of what we projected and what the receipt itself shows: the
+    # stored rows cannot witness their own under-projection, so trusting them
+    # alone would let a half-projected pair be excluded as a bare creation.
+    observed = tx_row.receipt_upgraded_counts
+    observed_for_proxy = int(observed.get(proxy, 0) or 0) if isinstance(observed, dict) else 0
+    if max(pair_event_count, observed_for_proxy) != 1:
+        return False
     if tx_row.is_contract_creation and (tx_row.created_contract_address or "") == proxy:
         return True
     if creation_row is None:
@@ -1582,10 +1614,24 @@ def event_is_deployment(tx_row, creation_row, *, proxy_address: str, event_block
     return True
 
 
+def _chain_id_for_contract(chain_name: str | None) -> int | None:
+    """The chain id a contract's rows are scoped to, or ``None``.
+
+    Uses the mainnet coalesce this module already applies in
+    ``_contract_chain_filter`` (legacy rows persisted ``chain=NULL`` for
+    mainnet, invariants 1/6/12). An unrecognised chain NAME is a different
+    thing from a NULL one and resolves to ``None`` — never to 1. Guessing here
+    would reintroduce exactly the cross-chain twin aliasing #158 closed.
+    """
+    from utils.rpc import chain_id_for_chain_name
+
+    return chain_id_for_chain_name(canonical_chain(chain_name) or "ethereum")
+
+
 def _load_action_context(session, contract_ids):
     from sqlalchemy import select, tuple_
 
-    from db.models import ContractCreationWitness, UpgradeEvent, UpgradeTransaction
+    from db.models import Contract, ContractCreationWitness, UpgradeEvent, UpgradeTransaction
 
     ids = [int(cid) for cid in (contract_ids or [])]
     if not ids:
@@ -1597,10 +1643,13 @@ def _load_action_context(session, contract_ids):
             UpgradeEvent.tx_hash,
             UpgradeEvent.block_number,
             UpgradeEvent.chain_id,
-        ).where(UpgradeEvent.contract_id.in_(ids))
+            Contract.chain,
+        )
+        .join(Contract, Contract.id == UpgradeEvent.contract_id)
+        .where(UpgradeEvent.contract_id.in_(ids))
     ).all()
 
-    keys = sorted({(int(cid), str(tx).lower()) for _c, _p, tx, _b, cid in events if cid is not None and tx})
+    keys = sorted({(int(cid), str(tx).lower()) for _c, _p, tx, _b, cid, _ch in events if cid is not None and tx})
     tx_rows: dict[tuple[int, str], Any] = {}
     if keys:
         for row in session.execute(
@@ -1608,7 +1657,7 @@ def _load_action_context(session, contract_ids):
         ).scalars():
             tx_rows[(row.chain_id, row.tx_hash)] = row
 
-    addr_keys = sorted({(int(cid), (proxy or "").lower()) for _c, proxy, _t, _b, cid in events if cid is not None})
+    addr_keys = sorted({(int(cid), (proxy or "").lower()) for _c, proxy, _t, _b, cid, _ch in events if cid is not None})
     creation_rows: dict[tuple[int, str], Any] = {}
     if addr_keys:
         for row in session.execute(
@@ -1627,13 +1676,13 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
 
     events, tx_rows, creation_rows = _load_action_context(session, contract_ids)
     pair_counts: dict[tuple[int, str], int] = {}
-    for cid, _proxy, tx, _blk, _chain in events:
+    for cid, _proxy, tx, _blk, _chain, _name in events:
         if tx:
             key = (int(cid), str(tx).lower())
             pair_counts[key] = pair_counts.get(key, 0) + 1
 
     per_contract: dict[int, dict] = {}
-    for cid, proxy, tx, block, chain in events:
+    for cid, proxy, tx, block, chain, chain_name in events:
         cid = int(cid)
         state = per_contract.setdefault(
             cid,
@@ -1646,9 +1695,17 @@ def _fold_actions(session, contract_ids) -> dict[int, dict]:
                 "deployments_excluded": 0,
                 "kinds": {},
                 "direct_blocks": [],
+                "chain_id": None,
             },
         )
         state["events_total"] += 1
+        # The chain this contract's actions are scoped to. A written
+        # ``upgrade_events.chain_id`` is a fact and wins; otherwise the module's
+        # own documented mainnet coalesce (``_contract_chain_filter``, invariants
+        # 1/6/12) resolves the contract's chain NAME. An unrecognised name
+        # resolves to nothing and is NOT guessed.
+        if state["chain_id"] is None:
+            state["chain_id"] = chain if chain is not None else _chain_id_for_contract(chain_name)
         if not tx:
             state["events_without_tx_hash"] += 1
             continue
@@ -1716,8 +1773,9 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
                 # topics are folded and old_impl is NULL on every backfilled
                 # row, so "no event" never licenses "no upgrade happened".
                 "recorded_event_coverage": NOT_DETERMINED,
-                # tx.from is the submitter. Six relayers were measured for one
-                # Safe. There is no witness for the signer set, on any row.
+                # tx.from is the submitter: the 11 ExecutionSuccess-bearing
+                # transactions on one Safe were sent by FIVE distinct
+                # addresses. There is no witness for the signer set, on any row.
                 "authorising_eoa": NOT_DETERMINED,
                 # 0-direct-upgrades-after-the-first-timelock-use is an absence
                 # of observed bypass, never proof the bypass is closed.
@@ -1730,18 +1788,32 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
     return out
 
 
-def governance_actions_for(session, contract_ids) -> set[str]:
-    """The distinct governance actions these contracts' events describe.
+def governance_actions_for(session, contract_ids) -> set[tuple[int, str]]:
+    """The distinct governance actions these contracts' events describe, as
+    ``(chain_id, tx_hash)`` pairs.
 
-    ``(chain_id, tx_hash)`` is the action id, so the 19-log transaction folds to
-    ONE action rather than 19. Events proven to be deployments are not actions
-    and are excluded; events with no receipt fact are kept, because absence of
-    a deployment proof is not proof of one.
+    ``(chain_id, tx_hash)`` — not the bare hash — IS the action id, matching the
+    key of ``upgrade_transactions`` and the cross-chain scoping discipline of
+    #158: the same 32 bytes can name two different transactions on two chains,
+    and a bare-hash union across contracts would silently merge them.
+
+    The 19-log transaction folds to ONE action rather than 19. Events proven to
+    be deployments are not actions and are excluded; events with no receipt fact
+    are kept, because absence of a deployment proof is not proof of one.
 
     Scoped to *contract_ids*: the same transaction can touch proxies outside the
     caller's scope, so the answer is always relative to the scope asked for.
+
+    A contract whose chain resolves to nothing (an unrecognised chain NAME, not
+    a NULL one) contributes nothing here — a chain-scoped key cannot be minted
+    without a chain, and inventing one is the aliasing bug. Its actions are
+    still COUNTED by ``upgrade_action_counts``, which is per-contract and needs
+    no cross-contract key.
     """
-    actions: set[str] = set()
+    actions: set[tuple[int, str]] = set()
     for state in _fold_actions(session, contract_ids).values():
-        actions |= state["actions"]
+        chain_id = state["chain_id"]
+        if chain_id is None:
+            continue
+        actions |= {(int(chain_id), tx) for tx in state["actions"]}
     return actions

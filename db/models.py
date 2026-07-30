@@ -948,12 +948,21 @@ class UpgradeTransaction(Base):
     executor_call_targets: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # COMPUTED, never asserted. True only when (i) every stored ``Upgraded``
     # event for this tx is present in the receipt's own log array, emitted by
-    # its proxy, and (ii) the ``logsBloom`` agrees with the log array about
-    # ``CallExecuted`` (a bloom has no false negatives, so bloom-says-absent is
-    # independent proof of absence; bloom-says-present with no such log means
-    # the log array may be pruned). False withdraws every marker-ABSENCE
-    # inference — which is the whole basis of ``safe_direct``.
+    # its proxy, (ii) the ``logsBloom`` is present, well-formed and passes a
+    # positive control — it must confirm an ``Upgraded`` log the array actually
+    # carries, which is what rules out the all-zero bloom that answers "absent"
+    # to everything — and (iii) that usable bloom agrees with the log array
+    # about ``CallExecuted`` (a bloom has no false negatives, so bloom-absent is
+    # then independent proof of absence; bloom-present with no such log means
+    # the array may be pruned). False withdraws every marker-ABSENCE inference —
+    # which is the whole basis of ``safe_direct``.
     receipt_log_set_complete_for_tx: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The receipt's own ``Upgraded``-log count per emitting proxy. Kept because
+    # the projected rows cannot witness their own under-projection: if only one
+    # of two logs was stored, the stored pair count says "one event" and the
+    # deployment guard would exclude a transaction that also carried a real
+    # implementation change.
+    receipt_upgraded_counts: Mapped[Any] = mapped_column(JSONB, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
