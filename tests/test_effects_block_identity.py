@@ -440,6 +440,24 @@ def test_the_claims_consumer_receives_the_height_or_its_absence():
     assert "block_source" not in blank
 
 
+@pytest.mark.parametrize("bad_block", [0, -1, None, "25643300", True])
+def test_the_publication_point_refuses_a_height_that_is_not_one(bad_block):
+    """Belt-and-braces on the stamp itself. ``new_transcript`` already refuses to
+    certify these, but the stamp is the last gate before the witness and must not
+    depend on its caller having been careful — a stringly height or a ``True``
+    that ``isinstance(_, int)`` would accept is not a block."""
+    from services.effects.harness import _stamp_observation_height, proven
+
+    eff = proven(
+        "supply",
+        tier="tier1",
+        details={},
+        transcript={"block_number": bad_block, "block_source": BLOCK_SOURCE_INVOCATION_PIN},
+    )
+    _stamp_observation_height(eff)
+    assert eff.details == {}
+
+
 def test_the_pin_scope_vocabulary_is_closed():
     # An unrecognized source is not a source: the stamp is gated on membership,
     # so a typo'd or invented scope publishes nothing rather than a free-text tag.
