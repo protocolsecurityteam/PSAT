@@ -16,6 +16,7 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     ContractBalance,
+    ContractBalanceFetch,
     ControllerValue,
     Job,
     JobStage,
@@ -24,6 +25,11 @@ from db.models import (
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import create_job, find_existing_job_for_address, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from services.monitoring.balance_reads import (
+    native_status_for,
+    pinned_native_balances,
+    prune_balance_fetches,
+)
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
@@ -31,6 +37,7 @@ from services.resolution.capability_resolver import (
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import build_control_snapshot
+from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -332,7 +339,13 @@ class ResolutionWorker(BaseWorker):
         ``chain_id`` is required: it scopes every Etherscan v2 read to
         the job's chain so an L2 job records L2 balances/prices, not mainnet
         ones. A chainless balance fetch can no longer default to mainnet."""
-        from utils.etherscan import get_eth_balance, get_native_price, get_token_balances, parallel_get
+        from utils.etherscan import (
+            TokenBalancePage,
+            get_eth_balance,
+            get_native_price,
+            get_token_balances_page,
+            parallel_get,
+        )
 
         address = job.address
         if not address or not contract_row:
@@ -342,13 +355,19 @@ class ResolutionWorker(BaseWorker):
         target_address = request.get("proxy_address") or address
 
         self.update_detail(session, job, "Fetching token balances")
+        # One pinned native read first. A zero is only ever publishable as a
+        # PROVEN zero from here: Etherscan's ``account/balance`` is ``tag=latest``
+        # and its answer carries no height. Failure drops through to the unpinned
+        # path below, where the same zero is not_determined.
+        pinned_block, pinned_wei = pinned_native_balances([target_address], chain_id=chain_id)
+
         # Fan out the three Etherscan calls (eth balance, token balances, eth
         # price). All three serialise on the global rate lock, so threading
         # only stacks RTTs — the limiter is preserved.
         results = parallel_get(
             {
                 "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
-                "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
+                "tokens": (lambda: get_token_balances_page(target_address, chain_id=chain_id)),
                 "native_price": (lambda: get_native_price(chain_id)),
             },
             heartbeat=heartbeat,
@@ -356,16 +375,18 @@ class ResolutionWorker(BaseWorker):
 
         eth_wei_raw = results.get("eth_wei")
         tokens_raw = results.get("tokens")
-        if isinstance(eth_wei_raw, BaseException) or isinstance(tokens_raw, BaseException):
-            primary_exc = eth_wei_raw if isinstance(eth_wei_raw, BaseException) else tokens_raw
+        native_failed = isinstance(eth_wei_raw, BaseException)
+        tokens_failed = isinstance(tokens_raw, BaseException)
+        if native_failed or tokens_failed:
+            primary_exc = eth_wei_raw if native_failed else tokens_raw
             assert isinstance(primary_exc, BaseException)
             record_degraded(
                 phase="balance_fetch",
                 exc=primary_exc,
                 context={
                     "address": target_address,
-                    "eth_failed": isinstance(eth_wei_raw, BaseException),
-                    "tokens_failed": isinstance(tokens_raw, BaseException),
+                    "eth_failed": native_failed,
+                    "tokens_failed": tokens_failed,
                 },
             )
             logger.warning(
@@ -374,18 +395,64 @@ class ResolutionWorker(BaseWorker):
                 eth_wei_raw,
                 tokens_raw,
             )
-            return
-        eth_wei = cast(int, eth_wei_raw)
-        tokens = cast(list, tokens_raw)
+        page = (
+            TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
+            if tokens_failed
+            else cast(TokenBalancePage, tokens_raw)
+        )
+        tokens = page.rows
 
-        # Clear old balances
-        session.query(ContractBalance).filter(ContractBalance.contract_id == contract_row.id).delete()
+        # The pinned word wins when there is one; otherwise the unpinned answer,
+        # or nothing at all when the read failed. ``eth_wei is None`` is the
+        # not-known state and never becomes a zero.
+        eth_wei: int | None
+        native_block: int | None
+        if pinned_block is not None and target_address.lower() in pinned_wei:
+            eth_wei = pinned_wei[target_address.lower()]
+            native_block = pinned_block
+        else:
+            native_block = None
+            eth_wei = None if native_failed else cast(int, eth_wei_raw)
+
+        native_status = native_status_for(
+            wei=eth_wei, pinned=native_block is not None, failed=native_failed and native_block is None
+        )
+
+        # The fetch row is written BEFORE any early return, so a failure leaves a
+        # persisted trace of the same shape the TVL writer leaves. This is what
+        # the earlier early-return could not do: it returned before touching the
+        # DB, so ``record_degraded`` was the only evidence and the balance plane
+        # showed a plain absence.
+        fetch = ContractBalanceFetch(
+            contract_id=contract_row.id,
+            chain_id=chain_id,
+            observed_address=target_address,
+            block_number=native_block,
+            native_status=native_status,
+            asset_set_status=page.status,
+            asset_page_length=page.page_length,
+            writer=BALANCE_WRITER_RESOLUTION,
+        )
+        session.add(fetch)
+        session.flush()
+
+        if native_failed or tokens_failed:
+            # Nothing observed for the failed class, so nothing is written for
+            # it — and, because the writer is insert-only, nothing prior is
+            # destroyed either. The view keeps publishing the last non-failed
+            # fetch for each class.
+            prune_balance_fetches(session, contract_row.id, target_address)
+            session.commit()
+            return
+
+        # No DELETE: insert-only, with ``contract_balances_latest`` deciding what
+        # is current per row class.
 
         # Native gas balance, valued in this chain's OWN native coin:
         # the symbol/name are the registry's native_asset, and the USD quote is
         # that coin's price — an L2/alt-L1 balance is never labeled or priced as
         # mainnet ETH.
-        if eth_wei > 0:
+        if eth_wei is not None and eth_wei > 0:
             native_asset = chain_by_id(chain_id).native_asset
             if native_asset == "ETH":
                 native_symbol, native_name = "ETH", "Ether"
@@ -416,10 +483,15 @@ class ResolutionWorker(BaseWorker):
                     raw_balance=str(eth_wei),
                     price_usd=native_price,
                     usd_value=round(native_usd, 2) if native_usd else None,
+                    observed_address=target_address,
+                    block_number=native_block,
+                    fetch_id=fetch.id,
                 )
             )
 
-        # ERC-20 token balances
+        # ERC-20 token balances. ``block_number`` stays NULL even when the native
+        # read above was pinned: these quantities come from Etherscan's unpinned
+        # page and must not inherit a height they were never read at.
         for tok in tokens:
             session.add(
                 ContractBalance(
@@ -431,11 +503,15 @@ class ResolutionWorker(BaseWorker):
                     raw_balance=str(tok["balance"]),
                     price_usd=tok.get("price_usd"),
                     usd_value=tok.get("usd_value"),
+                    observed_address=target_address,
+                    block_number=None,
+                    fetch_id=fetch.id,
                 )
             )
 
+        prune_balance_fetches(session, contract_row.id, target_address)
         session.commit()
-        total = len(tokens) + (1 if eth_wei > 0 else 0)
+        total = len(tokens) + (1 if eth_wei is not None and eth_wei > 0 else 0)
         logger.info("Job %s: stored %d balance(s) for %s", job.id, total, target_address)
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
