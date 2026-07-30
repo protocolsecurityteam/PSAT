@@ -639,10 +639,37 @@ credit over 36 capabilities / 30 contracts. **B13 lists this mechanism under
 > (2/4,2/4) |S|=3 vs 3 and 3. Publish the **minimum coalition size** (4 for the
 > WeETH freeze), never a boolean "independent".
 
-B10.1's caveat is **empty on this corpus and does not weaken this**: probed on all
+~~B10.1's caveat is **empty on this corpus and does not weaken this**: probed on all
 9 Safes at 25643300, `getModulesPaginated` returns `[]` with the sentinel and the
-guard slot is zero, so k/n is currently exact, not an upper bound. (One block;
-needs a recorded block plus an `EnabledModule`/`ChangedGuard` monitor.)
+guard slot is zero, so k/n is currently exact, not an upper bound.~~
+**↳ RETRACTED (2026-07-30, Unit 7A / C1). The Safe-principal population is 19, not
+9, and B10.1's caveat is NOT empty.** No plane yields 9:
+`select count(distinct lower(address)) from function_principals where
+resolved_type='safe'` → **19**; `control_graph_nodes` → 18; protocol-1-scoped
+(join `contracts` on `protocol_id=1`) → 11; `monitored_contracts`
+`contract_type='safe'` → 11. (An earlier draft cited "`principal_labels` 20"
+without stating its query; a re-measure gave 14 by address-join and 80 by
+label-match, so the figure is withdrawn — the point stands on the four above.)
+Re-probed independently on all 19 at 25643300 via `utils/rpc`:
+`modules[SENTINEL_MODULES]`
+(`0xcc69885f…792f`) holds the sentinel on **18** and
+`0x…2e1b5a40edc922bce489668b11749b8eabd67f6b` on
+**`0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca`** (VERSION `1.1.1`, threshold 4) —
+**one enabled module**, so **k/n is an upper bound on protection for 1 of 19**.
+Guard slot `0x4a204f62…34c8` is zero on **19/19** and the 1.5.0 module-guard slot
+`0xb104e0b9…9947` is zero on 19/19. Versions: **`1.4.1` ×9, `1.3.0` ×9, `1.1.1`
+×1** — measured twice at 25643300, and the slot-0 singleton agrees with `VERSION()`
+on **19/19** against the canonical deployments (`0x41675c09…` 1.4.1 ×9,
+`0xd9db270c…` 1.3.0 ×9, `0x34cfac64…` 1.1.1 ×1).
+A zero guard word is `proven_zero` only on 1.3.0/1.4.1; on 1.1.1 the slot is
+unused storage, so it is `feature_absent`. The corpus-level "k/n is exact" claim
+was a negative published from a 9-row subset without the observation block — the
+absence-as-proof error this register exists to prevent. The witness is now
+persisted per Safe (Appendix B10.1a) with its `probe_block`.
+`0x21f73d42`'s reach is 4 `function_principals` rows on 1 contract with
+`protocol_id IS NULL`, so **no scored verdict moves**; the correction is to the
+register, not to a score. **B14: the module-bearing population is 1 and its reach
+4 — neither may calibrate a rule.**
 
 **R2 — B6's entire population table is measured from the field B6 itself forbids.**
 Three lanes independently measured `function_principals.details.conditions` and got
@@ -1497,6 +1524,87 @@ Three decisions this enables:
 `CANCELLER_ROLE` for both analyzed timelocks; `claims[].witness.standard =
 'oz_timelock'` (16 rows) identifies the mechanism without name inference.
 
+### B4c. `role_definitions.role_name` — admission (D6-reject, 2026-07-30)
+
+| field | JSON path / column | pop. | status | three-state | failure path |
+|---|---|--:|---|---|---|
+| `role_name` | `role_definitions.role_name`; artifact `semantic_control.role_definitions[].role` | 19 rows total, 11 protocol-1 | **CONFIDENCE** (a declared role name, not a holder set) | present = the constant is **proven** to be a key of a set the contract tests membership in / **row absent** = not determined | a leaf the lowering could not classify, a `bytes32` constant whose set descriptor is missing, or a state var not in scope ⇒ **no row**. Absence is never "this contract has no roles" |
+
+**Admission rule (structural, one arm, no identifier is read).** A
+`bytes32 constant` operand mints a role name only when it is witnessed as the
+**KEY of a persisted mapping the leaf tests membership in**: leaf
+`kind == "membership"` **AND** `set_descriptor.kind == "mapping_membership"`
+**AND** the operand's `member_path` is empty. That is the in-contract
+AccessControl read `_roles[ROLE][account]`, where the lowering saw both the
+mapping and the constant indexing it. A non-empty `member_path` means the
+constant is a struct BASE being dereferenced, which is what a storage-layout
+pointer is.
+
+Measured on the persisted predicate trees of contracts 454 / 599 / 623: 8 real
+roles all match, and the 2 ERC-7201 pointers
+(`AccessControlDefaultAdminRulesStorageLocation` with `member_path ["_pendingDefaultAdmin"]`,
+`OwnableStorageLocation` with `["_owner"]`) match none — they are `equality`
+leaves with no set descriptor at all.
+
+**Residual, stated with cause: cross-contract role checks — including a genuine
+`registry.hasRole(bytes32,address)` registry — mint no `role_definitions` row.**
+An `external_set` descriptor records the callee's signature and selector from
+`ir.function.full_name` (`predicates.py:2338`), which is the interface the
+**CALLING** contract declared, not a proven property of the deployed callee. A
+slot lens, a merkle-tree contract, or a `hasRole` whose body is
+`return salts[salt]` and drops its `account` argument entirely all lower to a
+byte-identical descriptor when declared under that name, and each was measured
+minting an ERC-7201 pointer / merkle root / CREATE2 salt as a role. Argument
+position adds no independent witness: `_build_external_bool_leaf` fills
+`key_sources` from *every* call argument, so "is an argument of a gate-shaped
+view call" stands in for key-ness — a defaulted witness. **Those roles are
+`not_determined`, never "no roles".** The excision costs nothing measured: across
+all six role-bearing contracts in the persisted corpus every surviving row is
+mapping-arm and the `external_set` descriptor count over the 19 rows is **0**, so
+the arm's only exhibit was a synthetic test contract — under B14 a rule with
+population 0 may not be kept.
+
+`predicate_evaluator._canonical_authority_selector_for_slot` carries a related
+refusal so a role key is never re-read as an `owner()`/`governor()` slot locator.
+It is deliberately **wider** there (leaf kind + descriptor kind, admitting
+`external_set` too): that predicate WITHHOLDS a reroute, so over-matching costs a
+resolution, never publishes a wrong address, whereas this rule MINTS a fact and
+must be strict.
+
+**Banned as the fix:** the name-suffix guard `_is_storage_layout_constant`
+(inv.2 — it classifies on `endswith("_slot")` / `"storagelocation"` and is wrong
+in **both** directions); gating on `set_descriptor.storage_var == '_roles'` or on
+the presence of `enumeration_hint` — contract 599's five real Lido roles
+(`FINALIZE` / `MANAGE_TOKEN_URI` / `ORACLE` / `PAUSE` / `RESUME`) carry
+`storage_var: "TMP_1189"` and **no** `enumeration_hint`, so either gate drops
+all five.
+
+**Coverage, published as `not_determined` and never as "no roles":** 50
+role-keyed gates carry the role as a `view_call` (30) or `parameter` (20) operand
+and never reach `role_definitions` at all. `authority_plane_coverage` for the
+real names is `not_determined` — they are absent from `effective_functions.authority_roles`,
+`capability_expr`, `claims`, `function_principals.details` and
+`control_graph_edges.label` by name and by keccak, which is a coverage gap, not
+evidence that no such role gates anything. `TIMELOCK_ADMIN_ROLE` is not carried
+at all, so B0b's anti-decoy credit stays CONFIDENCE.
+
+**Flips:** ids **1** (contract 454) and **19** (contract 623) stop being written.
+No user-visible fact moves — the table has no reader outside its own writer
+(`workers/static_worker.py:2003`, which DELETEs the contract's rows and
+re-inserts from the fresh analysis, so a re-analysis is the whole deletion
+vehicle) and the cross-chain code-plane copier (`db/queue.py:2073-2082`, which
+only fills a target that has none). The artifact field is read in-process by
+`contract_analysis_pipeline/tracking.py:1103` to build controller tracking hints.
+**Residual:** until a donor contract is re-analyzed its pre-fix rows persist, and
+`db/queue.py:2073`'s copier will replicate them — including the two ERC-7201
+pointer rows — into a never-analyzed target's table on the next cross-chain reuse.
+
+**Small populations (B14 — none may calibrate):** mis-parsed rows **2**;
+protocol-1 role-event emitters **3**; the `OPERATING_ADMIN_ROLE` holder set **1**
+address; the `TIMELOCK_ADMIN_ROLE` evidence **1** grant log. The five contract-599
+role names are **single-witness** (leaf shape only — those addresses have no
+cursor, so there is no corroborating fold).
+
 ### B5. Earned negatives — proven-inert, not unknown
 
 | fact | count | status | decides |
@@ -1610,12 +1718,53 @@ denominator systematically flatters the grade.
 
 ### B10. Missing witnesses
 
-1. **Safe modules, guard, and nonce are not probed.** `tracking.py:561` probes
-   exactly six selectors (`getOwners`, `getThreshold`, `getMinDelay`, `delay`,
-   `UPGRADE_INTERFACE_VERSION`, `owner`) — no `getModulesPaginated`, no guard-slot
-   `eth_getStorageAt`. **A Safe with an enabled module is bypassable without
-   meeting the threshold**, so k/n is an *upper bound* on protection, not the
-   protection. Cheap fix: two more probes in the existing batched classifier.
+1. ~~**Safe modules, guard, and nonce are not probed.**~~ **CLOSED for modules and
+   guard (2026-07-30, Unit 7A / C1); the nonce is still unprobed.** The classifier
+   now fires two `eth_getStorageAt` plus `VERSION()` after `kind=='safe'` and
+   persists the witness under `function_principals.details->'safe_protection'` /
+   `control_graph_nodes.details->'safe_protection'` — see **B10.1a**. **A Safe with
+   an enabled module is bypassable without meeting the threshold**, so k/n is an
+   *upper bound* on protection wherever the module set is not a proven empty.
+
+### B10.1a. `details->'safe_protection'` — the Safe module/guard witness (C1)
+
+Written by `services/resolution/tracking.py::_probe_safe_protection`, fired once
+per address classified `safe` (~19 addresses / +3 RPC each, plus one
+`eth_blockNumber` to pin the height). All seven keys are always present; each is
+its own three-state and **every failure, revert or absence path lands on
+`not_determined`**. Nested under one object deliberately: `module_set` is a
+mutable now-fact and may not be read apart from its `probe_block` (B0b/S1 —
+a strength gate published separately from its payload does not discharge the
+obligation).
+
+| field | JSON path | pop. | status | three-state | failure path |
+|---|---|--:|---|---|---|
+| `probe_block` | `details->'safe_protection'->>'probe_block'` | 19 applicable | **REQUIRED** | integer height every other key was read at / `"not_determined"` | head read failed or the caller passed an unrecognised block tag ⇒ `"not_determined"` **and the probe is suppressed entirely** — no other key can be positive |
+| `safe_version` | `…->>'safe_version'` | 19 applicable | **GATE** | the probed contract's **self-reported** `VERSION()` string / `"not_determined"` | call reverted, returned nothing, or failed to decode ⇒ `"not_determined"`. Required to read the guard word; nothing else depends on it. **Self-reported, not proven** — a lookalike could return any string; on this corpus it is corroborated by slot-0 singleton identity matching the canonical Safe deployments at 25643300 on **19/19**, which the probe does not itself read |
+| `modules_head` | `…->>'modules_head'` | 19 applicable | **REQUIRED** | the raw 32-byte word at `keccak256(abi.encode(address(0x1), uint256(1)))` / `"not_determined"` | read raised ⇒ `"not_determined"`. **Cite, never enumerate from** |
+| `module_set` | `…->'module_set'` | 19 applicable | **REQUIRED**, three-state | `[]` = **proven empty at `probe_block`** (head == sentinel) / `"not_determined"` | any non-sentinel head — including a zero word (mapping entry never written) and a word that is not a left-padded address — and any read failure ⇒ `"not_determined"`. **A non-empty enumerated array is NEVER published here**; it is admissible only from a list walked to the sentinel or a paginated `eth_call` that returned `next == sentinel`, neither of which this probe performs |
+| `module_set_basis` | `…->>'module_set_basis'` | 19 applicable | **REQUIRED** (cite) | `"storage_linked_list_terminated"` / `"not_determined"` | not_determined whenever `module_set` is |
+| `protection_is_upper_bound` | `…->'protection_is_upper_bound'` | 1 true / 18 not_determined | **GATE** | `true` = **proven**: a module is enabled at `probe_block`, so k/n bounds protection from above; the module address is cited as `modules_head_address` / `"not_determined"` | **never `false`.** Proving k/n exact needs "no module has ever been enabled", which requires a warm `EnabledModule` cursor from the Safe's creation block; absent that it stays `not_determined`, including on a proven-empty head |
+| `guard` | `…->>'guard'` | 19 applicable | **REQUIRED**, four-state | `"proven_address"` (+`guard_address`) / `"proven_zero"` — **only** on a release whose deployed singleton carries `GUARD_STORAGE_SLOT` (1.3.0, 1.4.1) / `"feature_absent"` — 1.1.1, where the slot is unused storage and a zero there is not "guard disabled" / `"not_determined"` | word unread, version unknown or outside both verified sets (incl. variant suffixes like `1.3.0+L2`), or a word contradicting the version's feature set ⇒ `"not_determined"` |
+
+**Consumption obligation.** `module_set == []` + its `probe_block` licenses
+treating k/n as the protection *at that height only*; `protection_is_upper_bound
+== true` **must** demote any k/n-derived protective credit for that Safe;
+`guard == "proven_address"` names an additional gate and `"feature_absent"` is a
+proven statement about the release, not about a policy. `not_determined` on any
+key means the scorer may neither credit nor charge that dimension.
+
+**Small populations (B14 — may gate/cite/three-state, may never calibrate):**
+module-bearing Safes **1**; its reach **4** rows on 1 contract, `protocol_id IS
+NULL`. Version populations 1.4.1 ×9 / 1.3.0 ×9 / **1.1.1 ×1** — and the 1.1.1
+population, the only one on which `guard: feature_absent` is ever reached, is a
+single address.
+
+**Monitor half.** `EnabledModule` / `DisabledModule` / `ChangedGuard` are
+registered in `GOVERNANCE_EVENT_TOPICS` (so `_scan_topics_union` enrolls every
+active Safe) and the two slots are polled as `storage_slot` entries. The poll and
+the fold observe **change**; neither publishes membership. A cold cursor on either
+module topic keeps "no module has ever been enabled" at `not_determined`.
 2. **Freeze duration bound.** `auto_expiry` and `duration_bound_seconds` exist on
    all 4 proven freeze verdicts and are populated on **zero**. Until they land the
    bound may not be credited — and indefiniteness may not be assumed.

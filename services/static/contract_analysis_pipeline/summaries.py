@@ -64,6 +64,41 @@ def _function_has_sensitive_sink(effect_info: dict | None) -> bool:
     return False
 
 
+def _operand_is_role_key(leaf: Mapping[str, Any] | None, operand: Mapping[str, Any]) -> bool:
+    """True iff *operand* is witnessed as a KEY of a persisted mapping the leaf
+    tests membership in — the only shape in which a ``bytes32`` constant is
+    proven to be a role.
+
+    ``kind="membership"`` + a ``mapping_membership`` descriptor + an empty
+    ``member_path``: the in-contract AccessControl read ``_roles[ROLE][account]``,
+    where the lowering saw the mapping and the constant indexing it. A non-empty
+    ``member_path`` means the constant is a struct BASE being dereferenced, which
+    is what an ERC-7201 / EIP-1967 storage pointer (``OwnableStorageLocation``,
+    ``AccessControlDefaultAdminRulesStorageLocation``) is. Both are
+    ``bytes32 constant``, so the compiler type alone cannot tell a pointer from a
+    role; the lowering shape can, without reading the identifier.
+
+    **Cross-contract role checks are deliberately NOT admitted, including a
+    genuine ``registry.hasRole(ROLE, msg.sender)``.** An ``external_set``
+    descriptor records the callee signature from ``ir.function.full_name``
+    (``predicates.py:2338``) — the CALLER's declared interface, not the deployed
+    callee's ABI — so "the callee is ``hasRole(bytes32,address)``" is an
+    unverified claim the caller makes about someone else's code. A slot lens or a
+    merkle-tree contract declared under that name lowers identically, and
+    ``_build_external_bool_leaf`` fills ``key_sources`` from every call argument,
+    so argument position adds no independent witness. Those roles are
+    ``not_determined`` — never "no roles"; see ``SCORING_INVARIANTS.md`` B4c.
+    """
+    if not isinstance(leaf, Mapping):
+        return False
+    if operand.get("member_path"):
+        return False
+    if leaf.get("kind") != "membership":
+        return False
+    descriptor = leaf.get("set_descriptor")
+    return isinstance(descriptor, Mapping) and descriptor.get("kind") == "mapping_membership"
+
+
 def _role_names_from_tree(tree: dict | None, state_vars_by_name: Mapping[str, Any] | None = None) -> set[str]:
     if not isinstance(tree, dict):
         return set()
@@ -79,6 +114,11 @@ def _role_names_from_tree(tree: dict | None, state_vars_by_name: Mapping[str, An
             if leaf.get("authority_role") in {"caller_authority", "delegated_authority"}:
                 for operand in leaf.get("operands") or []:
                     if not isinstance(operand, dict) or operand.get("source") != "state_variable":
+                        continue
+                    # Per-operand, because key-ness is a property of the operand's
+                    # POSITION in the set descriptor, not of the leaf. See
+                    # ``_operand_is_role_key``.
+                    if not _operand_is_role_key(leaf, operand):
                         continue
                     name = operand.get("state_variable_name")
                     if (

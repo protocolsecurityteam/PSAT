@@ -66,6 +66,20 @@ EXECUTION_FAILURE_TOPIC0 = "0x" + keccak(text="ExecutionFailure(bytes32,uint256)
 EXECUTION_FROM_MODULE_SUCCESS_TOPIC0 = "0x" + keccak(text="ExecutionFromModuleSuccess(address)").hex()
 EXECUTION_FROM_MODULE_FAILURE_TOPIC0 = "0x" + keccak(text="ExecutionFromModuleFailure(address)").hex()
 
+# Safe module enable/disable and guard swap. An enabled module can move the
+# Safe's assets WITHOUT meeting the k/n signer threshold, so these are the
+# events that decide whether k/n bounds protection at all; the pipeline could
+# already see a module EXECUTE (above) but not one being ENABLED.
+#
+# Indexing differs by release and the topic0 does not: the ``address`` argument
+# is indexed from 1.4.1 and non-indexed on 1.1.1/1.3.0, so the same topic0
+# carries the module in ``topics[1]`` on some Safes and in the data word on
+# others. A decoder that reads only topics silently returns nothing on a 1.3.0
+# Safe — see the topics-or-data read in ``parse_governance_log``.
+ENABLED_MODULE_TOPIC0 = "0x" + keccak(text="EnabledModule(address)").hex()
+DISABLED_MODULE_TOPIC0 = "0x" + keccak(text="DisabledModule(address)").hex()
+CHANGED_GUARD_TOPIC0 = "0x" + keccak(text="ChangedGuard(address)").hex()
+
 # ---------------------------------------------------------------------------
 # Topic -> event_type mapping
 # ---------------------------------------------------------------------------
@@ -86,6 +100,9 @@ GOVERNANCE_EVENT_TOPICS: dict[str, str] = {
     EXECUTION_FAILURE_TOPIC0: "safe_tx_failed",
     EXECUTION_FROM_MODULE_SUCCESS_TOPIC0: "safe_module_executed",
     EXECUTION_FROM_MODULE_FAILURE_TOPIC0: "safe_module_failed",
+    ENABLED_MODULE_TOPIC0: "safe_module_enabled",
+    DISABLED_MODULE_TOPIC0: "safe_module_disabled",
+    CHANGED_GUARD_TOPIC0: "safe_guard_changed",
 }
 
 ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOPICS}
@@ -125,6 +142,10 @@ ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOP
 #                            tx wrapper activity)
 #       ``_safe_module_op`` — ExecutionFromModule[Success|Failure]
 #                            (Safe module call activity)
+#       ``_safe_modules``   — EnabledModule / DisabledModule (the module
+#                            SET changed; the Safe exposes no named
+#                            state var for the linked list)
+#       ``_safe_guard``     — ChangedGuard (guard slot swap)
 #   - ``delegates: True`` marks events that signal a delegate-target swap.
 #     Set on every proxy-impl event (Upgraded, NewImplementation,
 #     BeaconUpgraded, DiamondCut, etc.) so the upgrade-triggered paths
@@ -156,6 +177,9 @@ _HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
     "safe_tx_failed": {"writes": ["_safe_op"]},
     "safe_module_executed": {"writes": ["_safe_module_op"]},
     "safe_module_failed": {"writes": ["_safe_module_op"]},
+    "safe_module_enabled": {"writes": ["_safe_modules"]},
+    "safe_module_disabled": {"writes": ["_safe_modules"]},
+    "safe_guard_changed": {"writes": ["_safe_guard"]},
     # Per-contract canonical types from ``parse_tracked_log``. Events
     # produced through that path already carry tags from the spec; the
     # entries here are the synthesis fallback for callers that pass only
@@ -343,6 +367,20 @@ def parse_governance_log(log: dict) -> dict | None:
         # module address in topics[1].
         if len(topics) >= 2 and topics[1]:
             event["module"] = _topic_to_address(topics[1])
+
+    elif event_type in ("safe_module_enabled", "safe_module_disabled", "safe_guard_changed"):
+        # EnabledModule/DisabledModule/ChangedGuard(address). Indexed from Safe
+        # 1.4.1, non-indexed on 1.1.1/1.3.0 — same topic0 either way. Read
+        # topics[1] when the emitter indexed it, else the single data word;
+        # topics-only would decode 1.3.0 as "no address" and 1.3.0 is 9 of the
+        # 19 Safes on this corpus.
+        key = "guard" if event_type == "safe_guard_changed" else "module"
+        if len(topics) >= 2 and topics[1]:
+            event[key] = _topic_to_address(topics[1])
+        else:
+            raw = (data or "").replace("0x", "")
+            if len(raw) >= 64:
+                event[key] = "0x" + raw[24:64]
 
     _attach_effect_tags(event)
     return event

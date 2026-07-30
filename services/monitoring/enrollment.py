@@ -637,6 +637,9 @@ def _build_monitoring_config(
         "watch_pause": False,
         "watch_roles": False,
         "watch_safe_signers": contract_type == "safe",
+        # Module/guard changes decide whether the k/n threshold bounds protection
+        # at all — an enabled module acts without meeting it.
+        "watch_safe_modules": contract_type == "safe",
         "watch_timelock": contract_type == "timelock",
     }
 

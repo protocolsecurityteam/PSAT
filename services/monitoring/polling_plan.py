@@ -96,6 +96,15 @@ EIP1822_LOGIC_SLOT = "0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876c
 OZ_LEGACY_IMPL_SLOT = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
 GNOSIS_MASTERCOPY_SLOT = "0x0"
 
+# Safe module linked list head — ``modules[SENTINEL_MODULES]`` with the mapping
+# at storage slot 1 and ``SENTINEL_MODULES == address(0x1)`` — and the guard
+# slot, ``keccak256("guard_manager.guard.address")``, the literal the 1.3.0 and
+# 1.4.1 singletons carry. Recomputed from the preimages so neither can drift
+# from what it claims to be. Duplicated from services/resolution/tracking.py for
+# the same import-graph reason as the proxy slots above.
+SAFE_MODULES_HEAD_SLOT = "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
+SAFE_GUARD_SLOT = "0x" + keccak(text="guard_manager.guard.address").hex()
+
 # proxy_type → polling entry that resolves the current implementation.
 # Mirrors ``services/monitoring/proxy_watcher._RESOLVE_BY_TYPE`` but
 # emits the unified poll_plan entry shape. ``custom`` / ``compound`` /
@@ -186,6 +195,26 @@ _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
             "type": "uint256",
             "source": "vendored:safe",
             "suppress_when_scan_event_types": ["threshold_changed"],
+        },
+        # Head of the Safe module linked list. The poll observes CHANGE, not
+        # membership: the head alone cannot enumerate the list (see the
+        # resolution-plane probe), so a moved head means "the module set
+        # changed", never "the module set is [head]".
+        {
+            "field": "modules_head",
+            "kind": "storage_slot",
+            "slot": SAFE_MODULES_HEAD_SLOT,
+            "type_kind": "address",
+            "source": "vendored:safe",
+            "suppress_when_scan_event_types": ["safe_module_enabled", "safe_module_disabled"],
+        },
+        {
+            "field": "guard",
+            "kind": "storage_slot",
+            "slot": SAFE_GUARD_SLOT,
+            "type_kind": "address",
+            "source": "vendored:safe",
+            "suppress_when_scan_event_types": ["safe_guard_changed"],
         },
     ],
     "timelock": [

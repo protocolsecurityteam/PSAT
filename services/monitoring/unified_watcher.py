@@ -803,6 +803,8 @@ _WRITE_TARGET_TO_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "threshold": ("watch_safe_signers",),
     "_safe_op": ("watch_safe_signers",),
     "_safe_module_op": ("watch_safe_signers",),
+    "_safe_modules": ("watch_safe_modules",),
+    "_safe_guard": ("watch_safe_modules",),
     "_timelock_op": ("watch_timelock",),
     "min_delay": ("watch_timelock",),
 }

@@ -395,9 +395,15 @@ class TestTopUpSoladyFixture:
         assert _called(recorder, OWNER_SELECTOR)
 
     def test_controller_tracking_emits_no_dead_owner_slot_role(self) -> None:
-        """The Pass-1 fix: ``_OWNER_SLOT`` reaches role_definitions (it's a
-        bytes32-constant caller operand) but must NOT become a dead
-        ``role_identifier:_OWNER_SLOT`` controller target."""
+        """No dead ``role_identifier:_OWNER_SLOT`` controller target.
+
+        The Pass-1 fix suppressed the target downstream while ``_OWNER_SLOT``
+        still reached ``role_definitions`` as a bytes32-constant caller operand.
+        D6-reject removed it at the source: a slot pointer is an equality leaf
+        with no set descriptor, so it is no longer admitted as a role at all.
+        Both halves are asserted — the downstream suppression must survive on its
+        own, since it also covers slot constants reaching the tracking plane by
+        any other route."""
         sl = _compile_fixture("TopUpSolady.sol", (0, 8, 4))
         contract = _contract(sl, "TopUpSolady")
         project_dir = FIXTURES_DIR
@@ -405,8 +411,8 @@ class TestTopUpSoladyFixture:
         effects = build_effects(contract)
         semantic = _build_semantic_control_summary(contract, project_dir, predicate_trees, effects)
 
-        # The slot constant is still classified as a "role" upstream …
-        assert "_OWNER_SLOT" in [r.get("role") for r in semantic.get("role_definitions", [])]
+        # D6-reject: the slot constant is no longer minted as a role upstream …
+        assert "_OWNER_SLOT" not in [r.get("role") for r in semantic.get("role_definitions", [])]
 
         targets = build_controller_tracking(contract, project_dir, predicate_trees, effects, semantic)
         controller_ids = {t["controller_id"] for t in targets}
