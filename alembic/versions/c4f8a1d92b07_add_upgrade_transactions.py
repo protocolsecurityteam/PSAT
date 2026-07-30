@@ -32,10 +32,8 @@ composite MATCH SIMPLE foreign key: a NULL in either column disables the
 constraint, which is what lets an event exist before its receipt fact is folded
 and what carries the poll writer's ``tx_hash``-less rows.
 
-REBASE MARKER — Wave-2 migration chain position 2 (U4 -> **U8** -> U10A ->
-U10B -> U7B). Unit 4's revision had not landed when this was authored, so
-``down_revision`` points at the then-current head; repoint it at Unit 4's
-revision id when this branch is rebased onto it.
+Wave-2 migration chain position 2: it follows Unit 4's balance-provenance
+revision (``c1a4b7e02f18``) and precedes the event-cursor coverage revision.
 """
 
 import sqlalchemy as sa
@@ -44,7 +42,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "c4f8a1d92b07"
-down_revision = "b6d5e1c07a94"
+down_revision = "c1a4b7e02f18"
 branch_labels = None
 depends_on = None
 

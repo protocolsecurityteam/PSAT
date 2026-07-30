@@ -266,7 +266,7 @@ The pipeline computes proof-strength gates and **discards them at the persistenc
 
 Per **distinct transaction**, from that transaction's own receipt (one
 `eth_getTransactionReceipt` per `tx_hash`; a mined receipt is immutable, so this
-is one-time). Normative entry: `SCORING_INVARIANTS.md` **B16**.
+is one-time). Normative entry: `SCORING_INVARIANTS.md` **B17**.
 
 **The row's existence is the coverage discriminator** — a row means the receipt
 was read and decoded; no row means never read or read failed. Do not read a
