@@ -26,6 +26,11 @@ from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
+from services.discovery.perimeter import (
+    PERIMETER_SPAWN_DEPTH_CAP,
+    PERIMETER_SPAWN_LIMIT,
+    queue_discovered_contracts,
+)
 from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
@@ -710,6 +715,25 @@ class PolicyWorker(BaseWorker):
                         resolved_graph=refreshed_graph,
                     )
                     session.commit()
+                # Bring the refresh's newly-discovered contracts inside the
+                # analysis perimeter. Without this, a node FIRST seen here — every
+                # role principal, since role principals need the effective
+                # permissions computed this stage — could never be analysed: the
+                # only other spawn site runs earlier, in the resolution stage.
+                # Budgeted, because this path is recursive (an analysed manager
+                # projects its own role principals and spawns again), and every
+                # cut is recorded rather than dropped.
+                spawn_result = queue_discovered_contracts(
+                    session,
+                    job,
+                    refreshed_graph,
+                    rpc_url,
+                    site="policy_refresh",
+                    chain_name=_chain_name_for_job(job),
+                    budget=PERIMETER_SPAWN_LIMIT,
+                    depth_cap=PERIMETER_SPAWN_DEPTH_CAP,
+                )
+                store_artifact(session, job.id, "perimeter_spawn_summary", data=spawn_result)
                 # Persist any newly materialized nested artifacts (rare — most come
                 # from resolution stage already).
                 new_addresses = set(refreshed_nested) - set(nested_artifacts)

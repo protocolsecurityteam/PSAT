@@ -2023,6 +2023,118 @@ registered in `GOVERNANCE_EVENT_TOPICS` (so `_scan_topics_union` enrolls every
 active Safe) and the two slots are polled as `storage_slot` entries. The poll and
 the fold observe **change**; neither publishes membership. A cold cursor on either
 module topic keeps "no module has ever been enabled" at `not_determined`.
+
+### B10.1b. `details->'gated_contract_backlink'` — the role-principal pairing witness (C3 / Unit 9)
+
+Written by `services/resolution/tracking.py::probe_declared_vault_backlink`,
+fired from the recursive walk's role-principal projection
+(`services/resolution/recursive.py::_maybe_probe_backlink`) for a principal whose
+`details.source` is `semantic_capability:role_grant` **and** which resolved to an
+analyzable contract. ~32 addresses on this corpus, +2 RPC each (the `vault()`
+read and the negative control; the control is fired only when the read produced
+a decodable address). Persisted verbatim onto `control_graph_nodes.details` by
+`replace_control_graph_rows`. **No migration.**
+
+**Why it exists.** The ten `ManagerWithMerkleVerification` contracts hold the
+sole `canCall` on a BoringVault's `manage`. Their identity was available only as
+`control_graph_nodes.label` — a name, i.e. the T-LABELS trap (inv.2). This
+replaces the label's PAIRING content with a structural read: M itself declares V.
+
+| field | JSON path | pop. | status | three-state | failure path |
+|---|---|--:|---|---|---|
+| `probe_block` | `details->'gated_contract_backlink'->>'probe_block'` | 32 applicable | **REQUIRED** | integer height every other key was read at | head read failed or an unrecognised block tag ⇒ **the entire key is ABSENT** (the probe returns `None` and nothing is written). There is no "positive with an unstated height" state |
+| `backlink_getter` | `…->>'backlink_getter'` | 32 applicable | **REQUIRED** (cite) | the literal probed selector, `"vault()"` | never absent while the object exists |
+| `backlink_address` | `…->>'backlink_address'` | 10 expected / 22 not_determined | **REQUIRED** | the address the getter returned, **published only when it MATCHES the gated contract** | revert, empty return, non-32-byte return, decode failure, transport error, failed/errored control, **or any mismatch** ⇒ `"not_determined"`. The non-matching value is deliberately withheld — see the ban below |
+| `negative_control` | `…->>'negative_control'` | 32 applicable | **GATE** | `"passed"` — a selector nothing implements reverted or returned nothing | `"failed"` (the address ANSWERS it ⇒ catch-all fallback, every duck-typed read worthless), `"error"` (control not established), `"not_determined"` (not fired, because the `vault()` read produced nothing for it to gate). Every non-`"passed"` value forces the verdict to `not_determined` |
+| `declared_vault_matches_gated_contract` | `…->'declared_vault_matches_gated_contract'` | 10 expected true / 22 not_determined | **REQUIRED**, three-state, **no false state** | `true` — the returned address byte-equals the contract whose function this principal gates, at `probe_block`, control passed | **every** other outcome ⇒ `"not_determined"` |
+
+**What it earns, exactly.** *M declares V as its `vault()` at `probe_block`, with
+the nonsense-selector control passed.* That corroborates the **(M, V) PAIRING**
+the projection already asserts, from a structural read instead of a name.
+
+**Consumption obligation.** Cite + gate. `true` licenses citing M as the
+structurally-corroborated counterparty of V in place of the label string. It is a
+**mutable now-fact** (inv.10) and may not be read apart from its `probe_block`.
+
+**BANS — all three are unproven-positive vectors, and two are measured:**
+
+1. **It does not establish M's component TYPE and does not identify M as "the
+   manager."** Measured counterexample: `0x35dd2463…`, a LayerZeroTeller and not
+   a manager, returns `0x86b5780b…` — the same V — on the same probe with the
+   control passing, so it would publish `true` exactly as a manager does. The
+   witness substitutes for the label's PAIRING content only, never its TYPE
+   content.
+2. **A mismatch is NOT an earned negative.** A pairing established by some other
+   mechanism is not refuted by this getter answering differently. This is
+   enforced structurally rather than by convention: `backlink_address` is
+   published only on a match, so a consumer cannot reconstruct
+   `backlink_address != V` and read it as a disproof. A reader must also never
+   treat an ABSENT key as `false` — absence means the height could not be pinned.
+3. **"The manager is analysed" must never become "the manage capability is
+   bounded."** `manageRoot(strategist)` is a root hash; a root is not a decodable
+   permission set, so the strategist's admissible call set stays
+   `not_determined` from on-chain state alone even after every manager is
+   analysed. The `contract_gated_unknown_path` warnings are deleted only when a
+   manager's own authority resolves, never by this witness.
+
+**Small populations (B14 — may gate/cite/three-state, may never calibrate):**
+confirming rows **10**; distinct bytecode variants **2**; the whole role-grant
+jobless population **19**, of which only 10 carry the manager label — which is
+why the spawn keys on provenance and the witness on an address equality.
+
+**Verification.** `vault()` reproduces the gated contract on **10/10** managers at
+block **25643300**, and the negative control passes **10/10** (`totallyBogusVaultFn()`
+reverts on every one), so the getter is not a catch-all fallback. Carry-forward
+(§9): `_resolve_probe_block` persists nothing, so this proves stability at
+25643300, not that the observed run read there — new rows carry their own
+`probe_block` and fix this going forward only.
+
+### B10.1c. The perimeter omission ledgers — `selection_summary.not_selected` / `.pre_rank_excluded` / `perimeter_spawn_summary` (C2 + C3 / Unit 9)
+
+A dropped candidate that leaves no record is indistinguishable from a candidate
+that never existed. That is the whole of the C2 defect: `contracts.id=11`
+(0xcd425f44…, the 2-day timelock gating 53 rows across 16 contracts) ranked
+0.3836 at queue positions 42-57 against `analyze_limit=2` and was cut with
+nothing but a `record_stage_metric` count to show for it. The targeted fix is
+**one job plus a ledger**, never a raised threshold.
+
+| field | JSON path | status | three-state / semantics | failure path |
+|---|---|---|---|---|
+| `not_selected[]` | artifact `selection_summary` | **REQUIRED** (cite) | one `{address, chain, rank_score, reason}` per **ranked** candidate that did not become a child. `reason` ∈ `budget_exhausted` \| `chain_not_enabled` \| `existing_job` \| `in_cascade_dedupe` | `[]` means "no ranked candidate was dropped" — proven, because the producer enumerates every non-selected ranked entry, including on the budget-already-full early return |
+| `pre_rank_excluded[]` | artifact `selection_summary` | **REQUIRED** (cite) | one `{address, chain, reason[, effective_confidence]}` per row removed **before** ranking. `reason` ∈ `below_confidence_threshold` \| `superseded_impl_anchor` | `[]` means "no row was removed upstream of the ranking" |
+| `perimeter_spawn_summary` | artifact, policy stage | **REQUIRED** (cite) | `{site, budget, budget_used, spawn_depth, queued[], omitted[], out_of_population[]}` | `omitted` reasons ∈ `budget_exhausted` \| `depth_exhausted` \| `chain_not_enabled` \| `zero_address` \| `invalid_address` |
+
+**Consumption obligation.** Cite. These are what make a population invariant
+expressible as **"zero UNLOGGED omissions"** rather than "zero omissions" — a
+legitimate budget cut is a correct outcome and must not redden the gate.
+
+**The claim a consumer may make, stated exactly.** Nothing was dropped **iff
+`not_selected == [] AND pre_rank_excluded == []`**. `not_selected == []` alone
+does NOT support it: two filters run upstream of the ranking (the
+`effective_confidence >= 0.3` threshold and the superseded-impl anchor
+predicate), and before this unit the first survived only as a count and the
+second was applied in SQL, so neither left an enumerable trace.
+
+**The three spawn dispositions PARTITION the node list** — `queued` +
+`omitted` + `out_of_population` == every node — and `out_of_population`
+(`root_node`, `not_analyzed`, `not_contract_node`, `existing_job`) is the
+fail-closed/dedup set, which is NOT an omission and must never be counted as
+one.
+
+**Budget accounting.** The budget decrements at `create_job` and nowhere else, so
+a candidate rejected by any earlier gate provably consumes none of it. Gate
+ordering is therefore not load-bearing and cannot silently regress.
+
+**`PERIMETER_SPAWN_LIMIT` (8) and `PERIMETER_SPAWN_DEPTH_CAP` (2) are NAMED MODEL
+CHOICES, not measured reliabilities** (B14: the population is 19 rows, far below
+the floor at which calibrating a threshold on observed data is admissible).
+`spawn_depth` counts PERIMETER SPAWN GENERATIONS and is carried in the child's
+request; it is **not** `control_graph_nodes.depth` — the walk's BFS distance,
+which is `1` on all 19 jobless role-grant nodes — and the two must never be read
+for each other. Because the width budget (8) is below the jobless population
+(19), a single policy refresh drains at most 8: the 30 manager-attributable
+`contract_gated_unknown_path` warnings may **not** be asserted to resolve in one
+run.
 2. **Freeze duration bound.** `auto_expiry` and `duration_bound_seconds` exist on
    all 4 proven freeze verdicts and are populated on **zero**. Until they land the
    bound may not be credited — and indefiniteness may not be assumed.
@@ -2034,12 +2146,36 @@ module topic keeps "no module has ever been enabled" at `not_determined`.
    pipeline resolves this shape completely. **Cheapest fix to the largest remaining
    weakest-path blind spot.**
 5. **`ManagerWithMerkleVerification` is not a `contracts` row.** It is the sole
-   `canCall` for `BoringVault.manage` (the M10-confirmed 60 contract-gated
-   warnings), so its own authority cannot be walked. B4's `controller_values`
+   `canCall` for `BoringVault.manage`, so its own authority cannot be walked.
+   **CORRECTED (2026-07-30, Unit 9 / C3):** the "M10-confirmed 60 contract-gated
+   warnings" credited the managers with the whole warning class. Measured
+   manager-attributable share is **30**, against class totals of **68 / 60 / 64**
+   in `score.json` / `score_v2.json` / `score_v3.json` respectively — so 60 was
+   the class size in one file, not the managers' contribution. Crediting 60
+   over-states their share ~2x. Note also that the perimeter spawn's width budget
+   (8) is below the 19-row jobless population, so those 30 cannot be asserted to
+   resolve in a single run. B4's `controller_values`
    closes the *registry* half of the Boring plane; this is the other half.
 6. **Timelock queue/grace/expiry state.** Only `getMinDelay()` is read — no
    `getTimestamp(id)`, no pending-operation enumeration, no grace period. "Is
    something queued right now" cannot be scored or alerted on.
+6b. **The timelock `delay` duck-type control covers FUTURE rows only (2026-07-30,
+   Unit 9 / C2).** `details["delay"]` has exactly two writers —
+   `services/resolution/tracking.py:913` (`_classify_uncached_batched`) and
+   `:1013` (`_classify_uncached`) — and both now sit behind
+   `_duck_type_permitted()`, so a catch-all fallback can no longer mint a
+   `timelock` with a fabricated delay. That is a **producer invariant on rows
+   written after 382d81dc (PR #161)**, not a property of the rows on hand: the
+   observed run wrote its jobs between 2026-07-29 19:57:30Z and 21:44:17Z, and
+   `_NEGATIVE_CONTROL_SIG` first appears in 382d81dc at 2026-07-30 00:28:56Z.
+   **The 53 existing rows carrying `delay=172800` therefore have no control
+   witness and no `probe_block` for the delay read** — their
+   `trace[0].probe_block=25641184` belongs to the `enumerable_role_store` fold on
+   authority `0x62247d29…`, not to `getMinDelay()` on `0xcd425f44…`. Until the C2
+   job or a re-resolution rewrites them, that delay may **not** be cited as a
+   proven ordinal. (Re-measured at 25643300: `getMinDelay()` = 172800 and both a
+   bogus nullary and a same-name-different-arity selector revert — the control
+   passes today, which is evidence about the contract, not about the rows.)
 7. **No block witness on `details`** for Safe threshold/owners or timelock delay.
    Recoverable via `controller_values.block_number` (290/290) or
    `details->'trace'[*].probe_block`, but a config fact published without its

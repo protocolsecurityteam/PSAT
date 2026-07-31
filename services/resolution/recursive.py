@@ -39,6 +39,7 @@ from .tracking import (
     build_control_snapshot,
     classify_resolved_address,
     classify_resolved_address_with_status,
+    probe_declared_vault_backlink,
 )
 from .tracking_plan import build_control_tracking_plan
 
@@ -667,6 +668,44 @@ def _nested_principals_for_details(resolved_type: str, details: dict[str, object
         if isinstance(owner, str) and owner.startswith("0x"):
             principals.append((owner.lower(), "proxy_admin_owner", "proxy admin owner"))
     return principals
+
+
+#: Provenance marker (``services/policy/capability_surface.py``) identifying a
+#: principal the POLICY stage projected from a witnessed role grant. Read off the
+#: persisted ``details`` a named code path wrote — never off ``label``.
+ROLE_GRANT_SOURCE = "semantic_capability:role_grant"
+
+
+def _maybe_probe_backlink(
+    rpc_url: str,
+    *,
+    principal_address: str,
+    gated_contract_address: str,
+    details: Mapping[str, Any],
+    node_type: str,
+    chain_id: int | None,
+) -> dict[str, Any] | None:
+    """The ``vault()`` back-link witness for a role-granted CONTRACT principal.
+
+    Fired on provenance, not on a name: only for a node whose ``details.source``
+    is the role-grant marker and which resolved to an analyzable contract, so the
+    ~88 plain-principal and non-role-grant nodes pay nothing. A raise here must
+    not fail the walk — the witness is optional and its absence is honest.
+    """
+    if node_type != "contract" or details.get("source") != ROLE_GRANT_SOURCE:
+        return None
+    if not gated_contract_address or principal_address == gated_contract_address:
+        return None
+    try:
+        return probe_declared_vault_backlink(
+            rpc_url,
+            principal_address,
+            gated_contract_address,
+            chain_id=chain_id,
+        )
+    except Exception as exc:
+        logger.debug("recursive: back-link probe failed for %s: %s", principal_address, exc)
+        return None
 
 
 def _safe_role_int(role: Any) -> int | None:
@@ -1438,6 +1477,16 @@ def resolve_control_graph(
                     details = merged_details
 
                 node_type = "contract" if resolved_type in ANALYZABLE_TYPES else "principal"
+                backlink = _maybe_probe_backlink(
+                    rpc_url,
+                    principal_address=principal_address,
+                    gated_contract_address=address,
+                    details=details,
+                    node_type=node_type,
+                    chain_id=chain_id,
+                )
+                if backlink is not None:
+                    details = {**details, "gated_contract_backlink": backlink}
                 principal_node_id = _ensure_node(
                     nodes,
                     address=principal_address,
