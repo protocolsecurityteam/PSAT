@@ -51,11 +51,11 @@ import logging
 import os
 from typing import Any, Mapping, TypedDict
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractDependency, Job, JobStage
-from db.queue import create_job, find_existing_job_for_address
+from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
 from utils.chains import chain_enabled
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
     parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
     parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
+    parent_chain = _mainnet_coalesced_chain(getattr(parent_contract, "chain", None))
     if parent_id is None:
         return parent_owns_high, {}
 
@@ -182,10 +183,17 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     # back-links to the parent. Batch so the loop stays O(deps) not O(deps×SELECTs).
     proxy_edge_addrs = [row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"]
     dep_impl_by_addr: dict[str, str | None] = {}
+    # Chain-scoped like ``is_known_proxy``: a back-link is only evidence on the
+    # parent's own chain — a CREATE2 twin elsewhere satisfies the bare address
+    # match. Mainnet-coalesced so legacy NULL-chain rows still match a mainnet
+    # parent while a non-mainnet lookup stays isolated.
     if proxy_edge_addrs:
         try:
             dep_contract_rows = session.execute(
-                select(Contract).where(Contract.address.in_(proxy_edge_addrs))
+                select(Contract).where(
+                    Contract.address.in_(proxy_edge_addrs),
+                    func.lower(func.coalesce(Contract.chain, "ethereum")) == parent_chain,
+                )
             ).scalars()
             for dc in dep_contract_rows:
                 dep_impl_by_addr[dc.address.lower()] = (dc.implementation or "").lower() or None

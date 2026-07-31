@@ -1443,6 +1443,81 @@ class TestStructuralOwnershipPropagation:
         assert create_calls[0]["parent_owns_high"] is True
 
     @requires_postgres
+    def test_proxy_back_link_on_another_chain_does_not_propagate(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dep's back-linking Contract row exists only on ANOTHER chain
+        (CREATE2 twin): the back-link is not evidence on the parent's chain,
+        so the child must not inherit (readiness §2.5)."""
+        session = db_session_for_resolution
+        parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+
+        from db.models import Contract, ContractDependency
+
+        parent = Contract(
+            address=parent_addr,
+            chain="ethereum",
+            protocol_id=None,
+            contract_name="ImplParent",
+            discovery_sources=["defillama"],
+        )
+        session.add(parent)
+        session.commit()
+        # The only row carrying the back-link is the same-address twin on base.
+        session.add(
+            Contract(
+                address=dep_addr,
+                chain="base",
+                protocol_id=None,
+                contract_name="DepProxyTwin",
+                is_proxy=True,
+                implementation=parent_addr,
+            )
+        )
+        session.add(
+            ContractDependency(
+                contract_id=parent.id,
+                dependency_address=dep_addr,
+                relationship_type="proxy",
+                source=["dynamic"],
+            )
+        )
+        session.commit()
+
+        from db.models import Job, JobStage, JobStatus
+
+        real_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.resolution,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        session.add(real_job)
+        session.commit()
+        parent.job_id = real_job.id
+        session.commit()
+        job = _job(id=real_job.id, request={"rpc_url": "rpc"})
+
+        create_calls: list[dict] = []
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert "discovery_relationship" not in create_calls[0], (
+            "a cross-chain twin's back-link satisfied the structural check — the lookup is no longer chain-scoped"
+        )
+        assert "parent_owns_high" not in create_calls[0]
+
+    @requires_postgres
     def test_relationship_type_alone_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
