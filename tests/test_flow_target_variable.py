@@ -97,6 +97,44 @@ contract Router {
     }
 }
 
+// Two DIFFERENT declarations that share an identifier, each with its own
+// setter and its own value. Two routed sites, one flow key.
+contract LegA {
+    IERC20 public token;
+    address public recipient;
+
+    function setOnA(address r) external {
+        recipient = r;
+    }
+
+    function pay(uint256 amount) external {
+        token.transfer(recipient, amount);
+    }
+}
+
+contract LegB {
+    IERC20 public token;
+    address public recipient;
+
+    function setOnB(address r) external {
+        recipient = r;
+    }
+
+    function pay(uint256 amount) external {
+        token.transfer(recipient, amount);
+    }
+}
+
+contract TwoLegs {
+    LegA private legA;
+    LegB private legB;
+
+    function sweep(uint256 amount) external {
+        legA.pay(amount);
+        legB.pay(amount);
+    }
+}
+
 contract AsmRouter {
     IERC20 public token;
     address public recipientAddress;
@@ -138,7 +176,11 @@ def compiled(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def effects(compiled):
-    return {name: build_effects(contract) for name, contract in compiled.items() if name in ("Router", "AsmRouter")}
+    return {
+        name: build_effects(contract)
+        for name, contract in compiled.items()
+        if name in ("Router", "AsmRouter", "TwoLegs")
+    }
 
 
 def _flow(effects, contract: str, signature: str) -> dict:
@@ -229,7 +271,7 @@ def test_disagreeing_sites_publish_the_member_list_and_no_scalar(effects):
     destination = _destination(_flow(effects, "Router", "sweepBoth(uint256)"))
     assert destination == {
         "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
-        "target_variables": ["otherRecipient", "recipientAddress"],
+        "target_variables": ["Router.otherRecipient", "Router.recipientAddress"],
     }
     assert "target_variable" not in destination
     assert "target_writer_signatures" not in destination
@@ -255,6 +297,10 @@ def test_declaration_initialiser_is_a_writer_for_membership_not_for_publication(
     assert "target_writer_signatures" not in destination
     assert "target_writer_scan_complete" not in destination
     assert destination["writer_surface_closed"] == "not_determined"
+    # The two absences carry OPPOSITE risk, so they are not the same key being
+    # missing: an initialiser-only destination is effectively fixed short of an
+    # upgrade, an unattributed storage alias may be redirectable by anyone.
+    assert destination["target_writer_absent_reason"] == "declaration_initialiser_only"
 
 
 def test_empty_writer_list_only_where_the_kind_already_earned_it(effects):
@@ -289,3 +335,22 @@ def test_constant_and_immutable_name_a_variable_but_no_writer(effects):
             "target_variable": variable,
             "writer_surface_closed": "not_determined",
         }
+
+
+def test_same_named_declarations_are_not_one_destination(effects):
+    """``LegA.recipient`` and ``LegB.recipient`` are two declarations with two
+    setters and two values. Both routed sites fold to ``storage_setter`` and
+    both name "recipient", so agreement on the NAME would publish the scalar —
+    whose registered meaning is "every contributing site named the same one" —
+    over two different destinations, and skip the member list a consumer is
+    instructed to take the worst of. Members are canonical because bare names
+    cannot tell them apart."""
+    destination = _destination(_flow(effects, "TwoLegs", "sweep(uint256)"))
+    assert destination == {
+        "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
+        "target_variables": ["LegA.recipient", "LegB.recipient"],
+    }
+    assert "target_variable" not in destination
+    # In particular the two setters must not be merged into one floor that
+    # reads as the writer set of a single destination.
+    assert "target_writer_signatures" not in destination

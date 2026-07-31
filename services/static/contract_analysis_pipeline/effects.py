@@ -110,8 +110,17 @@ class ReceiverDescriptor(TypedDict):
     # resolution basis: ``variable + "()"`` is the inv.2 shape this descriptor
     # exists to replace.
     variable: str | None
-    # caller_named | contract_state_unresolved | not_determined
-    asset_identity: str
+    # caller_named | contract_state_unresolved | not_determined.
+    #
+    # It names where the RECEIVER came from, and asserts nothing about the
+    # receiver being an asset — a library-math call binds a ``uint256`` quantity
+    # as its receiver, and 7 of the 20 caller-named rows on the corpus are
+    # exactly that shape. Reading it as "the asset is caller-named" beside
+    # ``param_index`` would state a coherent-looking falsehood: on
+    # ``redeem(address to, IERC20 withdrawAsset, uint256 shareAmount)`` the
+    # published index is 2 and the asset is in slot 1. Hence the field is named
+    # for the receiver, not for the asset.
+    receiver_provenance: str
     # Diagnostic, present only when ``binding`` is ``not_determined``, so that
     # "the sites conflicted" and "the head never resolved" stop being the same
     # published value. Carries no consumption obligation.
@@ -265,13 +274,18 @@ class ValueFlow(TypedDict):
     router_ops: NotRequired[list[dict[str, str | None]]]
     # The AST identifier of the state variable the destination resolves to,
     # published only when ``target_kind`` is one of the state-variable kinds and
-    # every contributing site named the SAME variable. A mapping/array element
-    # never emits one (the element is not its base). Identity for a join and for
-    # display — never a resolution basis.
+    # every contributing site named the same DECLARATION — compared on the
+    # canonical ``Contract.var``, not on the bare identifier, because two
+    # contracts in one call graph may each declare ``recipient`` with separate
+    # setters and separate values. A mapping/array element never emits one (the
+    # element is not its base). Identity for a join and for display — never a
+    # resolution basis.
     target_variable: NotRequired[str]
-    # The distinct variables when the sites named more than one. Present exactly
-    # where ``target_variable`` is absent for that reason, so a consumer can
-    # never read one member as the whole.
+    # The distinct declarations when the sites named more than one, CANONICAL
+    # (``Contract.var``) because bare names cannot tell them apart — which is
+    # exactly why the list exists. Present precisely where ``target_variable``
+    # is absent for that reason, so a consumer can never read one member as the
+    # whole.
     target_variables: NotRequired[list[str]]
     # The signatures WITHIN THE ANALYSED COMPILATION UNIT that write
     # ``target_variable``. A floor: "redirectable at least by these writers'
@@ -285,6 +299,15 @@ class ValueFlow(TypedDict):
     # blind spot (assembly ``sstore``, delegatecall, unresolved alias) made the
     # write attribution non-exhaustive.
     target_writer_scan_complete: NotRequired[bool]
+    # Which absence ``target_writer_signatures`` is, when it is absent and the
+    # kind did not earn ``[]``. The two carry OPPOSITE risk:
+    # ``declaration_initialiser_only`` — the only attributed write is the
+    # declaration-site initialiser Slither synthesises, so the destination is
+    # effectively fixed short of an upgrade; ``alias_unattributed`` — a real
+    # write reaches it through a storage-pointer alias this pass could not
+    # attribute to a signature, so it may be redirectable and by whom is
+    # unknown. Diagnostic: it explains an absence, it never licenses a positive.
+    target_writer_absent_reason: NotRequired[str]
     # Whether the writer set is the WHOLE write surface at the deployed address.
     # Always ``not_determined``: this stage analyses ONE compilation unit, while
     # the runtime address may be a proxy (upgrade-extensible write surface) or
@@ -610,12 +633,14 @@ def _receiver_not_determined(reason: str) -> ReceiverDescriptor:
         "visibility": None,
         "auto_getter_selector": None,
         "variable": None,
-        "asset_identity": "not_determined",
+        "receiver_provenance": "not_determined",
         "not_determined_reason": reason,
     }
 
 
-def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, int]) -> ReceiverDescriptor:
+def _receiver_descriptor(
+    resolved: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
+) -> ReceiverDescriptor:
     """Describe a call's resolved receiver structurally.
 
     ``entry_param_ids`` maps the ENTRY function's formal-parameter object ids
@@ -625,7 +650,18 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
     argument reaches it is a dataflow question this walk does not ask. Such a
     receiver is reported as a parameter of ``internal_helper`` scope with no
     index and NO ``caller_named`` claim; only identity against the entry's own
-    parameter objects licenses that."""
+    parameter objects licenses that.
+
+    ``entry_contract`` bounds the state-variable arm to declarations the
+    ANALYSED CONTRACT actually has. The walk recurses into library calls, so a
+    library's own ``public constant`` reaches this function as a perfectly good
+    ``StateVariable`` — but it is inlined at each call site, it is not this
+    unit's storage, and the accessor it would name does not exist in this
+    contract's ABI, so a pinned read at the deployment address would revert or
+    fall through. It also defeats the fold silently: two same-named constants,
+    one on the contract and one on the library, produce BYTE-IDENTICAL
+    descriptors (same name ⇒ same visibility, mutability and minted selector),
+    so a disagreement between two distinct assets reads as agreement."""
     from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
     from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
     from slither.slithir.variables import Constant  # type: ignore[import]
@@ -644,6 +680,10 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
     variable = str(name) if isinstance(name, str) and name else None
 
     if isinstance(resolved, StateVariable):
+        declaring = getattr(resolved, "contract", None)
+        own = {id(entry_contract)} | {id(base) for base in getattr(entry_contract, "inheritance", []) or []}
+        if entry_contract is None or declaring is None or id(declaring) not in own:
+            return _receiver_not_determined("foreign_declaration")
         if getattr(resolved, "is_constant", False):
             mutability = "constant"
         elif getattr(resolved, "is_immutable", False):
@@ -663,7 +703,7 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
             # is storage of the analysed unit and nothing more; the token that
             # carries an address is minted where the address is READ, pinned to
             # its block.
-            "asset_identity": "contract_state_unresolved",
+            "receiver_provenance": "contract_state_unresolved",
         }
 
     index = entry_param_ids.get(id(resolved))
@@ -676,7 +716,7 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
             "visibility": None,
             "auto_getter_selector": None,
             "variable": variable,
-            "asset_identity": "caller_named",
+            "receiver_provenance": "caller_named",
         }
     if any(resolved is parameter for parameter in getattr(unit, "parameters", []) or []):
         return {
@@ -687,7 +727,7 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
             "visibility": None,
             "auto_getter_selector": None,
             "variable": variable,
-            "asset_identity": "not_determined",
+            "receiver_provenance": "not_determined",
         }
     return {
         "binding": "local",
@@ -697,7 +737,7 @@ def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, in
         "visibility": None,
         "auto_getter_selector": None,
         "variable": variable,
-        "asset_identity": "not_determined",
+        "receiver_provenance": "not_determined",
     }
 
 
@@ -718,7 +758,7 @@ def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor
 
 
 def _classify_node_irs(
-    node: Any, unit: Any, entry_param_ids: dict[int, int]
+    node: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
 ) -> list[tuple[str, str, str | None, ReceiverDescriptor | None]]:
     """Classify the non-state-write sinks at a node. Returns a list of
     ``(kind, target, selector, receiver)`` quads; ``receiver`` is populated
@@ -754,7 +794,7 @@ def _classify_node_irs(
                 head = getattr(ir, "destination", None)
             resolved = _resolve_cast_head(head, def_by_id)
             destination_name = getattr(resolved, "name", None) or str(resolved) or "unknown"
-            receiver = _receiver_descriptor(resolved, unit, entry_param_ids)
+            receiver = _receiver_descriptor(resolved, unit, entry_param_ids, entry_contract)
             out.append(("external_call", f"{destination_name}.{function_name}", selector, receiver))
         elif op == "LowLevelCall":
             target = getattr(getattr(ir, "destination", None), "name", None) or str(
@@ -790,6 +830,7 @@ def _walk_unit_for_sinks(
     visited: set[Any],
     origin: str,
     entry_param_ids: dict[int, int],
+    entry_contract: Any,
 ) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None]]:
     """Recursively gather ``(kind, target, selector, origin, receiver)`` sink
     tuples from ``unit`` and any internal/library/modifier callees. ``origin``
@@ -809,7 +850,7 @@ def _walk_unit_for_sinks(
     for node in getattr(unit, "nodes", []) or []:
         for var_name in _node_kind_state_writes(node):
             found.append(("state_write", var_name, None, origin, None))
-        for kind, target, selector, receiver in _classify_node_irs(node, unit, entry_param_ids):
+        for kind, target, selector, receiver in _classify_node_irs(node, unit, entry_param_ids, entry_contract):
             found.append((kind, target, selector, origin, receiver))
         # Recurse into internal/library callees so transitive writes
         # surface on the entry-point's record.
@@ -821,7 +862,7 @@ def _walk_unit_for_sinks(
             if callee is None or not getattr(callee, "nodes", None):
                 continue
             child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-            found.extend(_walk_unit_for_sinks(callee, visited, child_origin, entry_param_ids))
+            found.extend(_walk_unit_for_sinks(callee, visited, child_origin, entry_param_ids, entry_contract))
     return found
 
 
@@ -838,7 +879,7 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
     entry_param_ids = {
         id(parameter): position for position, parameter in enumerate(getattr(function, "parameters", []) or [])
     }
-    quints = _walk_unit_for_sinks(function, set(), "body", entry_param_ids)
+    quints = _walk_unit_for_sinks(function, set(), "body", entry_param_ids, getattr(function, "contract", None))
 
     out: list[SinkRecord] = []
     index: dict[tuple[str, str, str | None], int] = {}
@@ -1473,6 +1514,7 @@ class _UnitCtx:
         state_vars_by_name: dict[str, Any],
         setters: dict[str, list[str]],
         alias_indeterminate: set[str],
+        alias_resolved: set[str],
         setter_scan_complete: bool,
         nested: bool,
         param_bindings: dict[str, tuple[str, ...]] | None = None,
@@ -1488,6 +1530,7 @@ class _UnitCtx:
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
         self.alias_indeterminate = alias_indeterminate
+        self.alias_resolved = alias_resolved
         self.setter_scan_complete = setter_scan_complete
         self.nested = nested
         self.param_bindings = param_bindings
@@ -1593,6 +1636,7 @@ def _build_unit_ctx(
     state_vars_by_name: dict[str, Any],
     setters: dict[str, list[str]],
     alias_indeterminate: set[str],
+    alias_resolved: set[str],
     setter_scan_complete: bool,
     param_bindings: dict[str, tuple[str, ...]] | None = None,
     param_index_bindings: dict[str, int] | None = None,
@@ -1602,6 +1646,7 @@ def _build_unit_ctx(
         state_vars_by_name,
         setters,
         alias_indeterminate,
+        alias_resolved,
         setter_scan_complete,
         not is_entry,
         param_bindings,
@@ -2329,6 +2374,7 @@ def _callee_return_origin(ir: Any, ctx: _UnitCtx, depth: int) -> tuple[str, ...]
         ctx.state_vars_by_name,
         ctx.setters,
         ctx.alias_indeterminate,
+        ctx.alias_resolved,
         ctx.setter_scan_complete,
         bindings,
         index_bindings,
@@ -2823,6 +2869,36 @@ _STATE_VAR_TARGET_KINDS = frozenset({"constant", "immutable", "storage_setter", 
 _WRITER_SURFACE_CLOSED: Literal["not_determined"] = "not_determined"
 
 
+# One destination site that named no state variable at all.
+_NO_TARGET_VAR: tuple[str | None, str | None, tuple[str, ...], bool, str | None] = (None, None, (), False, None)
+
+
+def _target_variable_site(name: str, ctx: _UnitCtx) -> tuple[str | None, str | None, tuple[str, ...], bool, str | None]:
+    """One destination site: ``(name, canonical name, writers, scan complete,
+    reason no writer was attributed)``.
+
+    The CANONICAL name is what sites are compared on. Two contracts in one call
+    graph may each declare ``recipient``, with separate setters and separate
+    values; agreeing on the bare identifier would publish the scalar — whose
+    registered meaning is "every contributing site named the same one" — over
+    two different declarations, and silently skip the member list a consumer is
+    instructed to read the worst of."""
+    variable = ctx.state_vars_by_name.get(name)
+    canonical = getattr(variable, "canonical_name", None) if variable is not None else None
+    writers = tuple(ctx.setters.get(name, ()))
+    reason: str | None = None
+    if not writers and name in ctx.setters:
+        # Only a SETTER target has an absent-writer question at all: a constant
+        # or immutable is not in this map, and its kind already answers it. The
+        # two ways a setter target can have no NAMED writer carry opposite risk,
+        # so they must not both read as a bare absent key: a declaration-site
+        # initialiser is effectively fixed short of an upgrade, while an
+        # unattributed storage-pointer alias is a real writer this pass could
+        # not name and may be reachable by anyone.
+        reason = "alias_unattributed" if name in ctx.alias_resolved else "declaration_initialiser_only"
+    return (name, str(canonical) if canonical else None, writers, ctx.setter_scan_complete, reason)
+
+
 def _target_state_var_name(operand: Any, ctx: _UnitCtx) -> str | None:
     """The ONE state variable a destination operand reads, or ``None``.
 
@@ -3269,7 +3345,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     # the fold because a routed walk classifies against the CALLEE's contract,
     # whose setters are a different set from the entry's.
     target_variable_sites: dict[
-        tuple[str, str | None, str, bool, str], list[tuple[str | None, tuple[str, ...], bool]]
+        tuple[str, str | None, str, bool, str], list[tuple[str | None, str | None, tuple[str, ...], bool, str | None]]
     ] = {}
     # Per routed-flow key: the ``(selector, bare name)`` identities of the ops
     # that carry the move (see ``ValueFlow.router_ops``). Only ever populated
@@ -3285,9 +3361,11 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     # crossing a HighLevelCall rebuilds it for the CALLEE's contract so
     # ``address(this)``, state-var mutability, and self-detection are read against
     # the contract whose body is actually running, not the router's.
-    ctx_tuple_cache: dict[int, tuple[dict[str, Any], dict[str, list[str]], set[str], bool]] = {}
+    ctx_tuple_cache: dict[int, tuple[dict[str, Any], dict[str, list[str]], set[str], set[str], bool]] = {}
 
-    def contract_ctx_tuple(contract: Any) -> tuple[dict[str, Any], dict[str, list[str]], set[str], bool]:
+    def contract_ctx_tuple(
+        contract: Any,
+    ) -> tuple[dict[str, Any], dict[str, list[str]], set[str], set[str], bool]:
         cache_key = id(contract)
         cached = ctx_tuple_cache.get(cache_key)
         if cached is not None:
@@ -3296,9 +3374,11 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
             getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
         }
         setters = _setter_state_vars(contract) if contract is not None else {}
-        alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
+        aliased = _aliased_storage_writes(contract) if contract is not None else (set(), set(), False)
+        alias_indeterminate = aliased[1]
+        alias_resolved = aliased[0]
         scan_complete = _setter_scan_complete(contract) if contract is not None else False
-        result = (state_vars_by_name, setters, alias_indeterminate, scan_complete)
+        result = (state_vars_by_name, setters, alias_indeterminate, alias_resolved, scan_complete)
         ctx_tuple_cache[cache_key] = result
         return result
 
@@ -3311,13 +3391,16 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     ) -> _UnitCtx:
         # Fresh per (unit, bindings); the expensive per-unit ProvenanceEngine is
         # memoized inside ``_engine_bundle_for``, so this wrapper is cheap.
-        state_vars_by_name, setters, alias_indeterminate, scan_complete = contract_ctx_tuple(class_contract)
+        state_vars_by_name, setters, alias_indeterminate, alias_resolved, scan_complete = contract_ctx_tuple(
+            class_contract
+        )
         return _build_unit_ctx(
             unit,
             is_entry,
             state_vars_by_name,
             setters,
             alias_indeterminate,
+            alias_resolved,
             scan_complete,
             param_bindings,
             param_index_bindings,
@@ -3392,11 +3475,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         amount_sites.setdefault(key, []).append(amount_site)
         target_variable_name = _target_state_var_name(target, ctx)
         target_variable_sites.setdefault(key, []).append(
-            (
-                target_variable_name,
-                tuple(ctx.setters.get(target_variable_name, ())) if target_variable_name is not None else (),
-                ctx.setter_scan_complete,
-            )
+            _target_variable_site(target_variable_name, ctx) if target_variable_name is not None else _NO_TARGET_VAR
         )
         target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
         # A ``param_derived`` amount is a call RESULT, so the slot to publish is
@@ -3686,40 +3765,49 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
 def _attach_target_variable(
     flow: ValueFlow,
     target: KindTier,
-    sites: list[tuple[str | None, tuple[str, ...], bool]],
+    sites: list[tuple[str | None, str | None, tuple[str, ...], bool, str | None]],
 ) -> None:
     """Publish the destination's variable identity, its in-unit writers, and
     the two gates that bound what either may be read to mean.
 
     Requires the folded kind to NAME a state variable at all — a ``param`` or
     ``msg_sender`` destination has no variable, and an ``indeterminate`` fold
-    has no single one. Sites naming different variables publish the member list
-    and no scalar: two setter-backed variables both fold to ``storage_setter``,
-    so agreement on the KIND is not agreement on the destination.
+    has no single one. Sites naming different DECLARATIONS publish the member
+    list and no scalar: two setter-backed variables both fold to
+    ``storage_setter``, so agreement on the KIND is not agreement on the
+    destination — and two contracts may each declare ``recipient``, so
+    agreement on the NAME is not either. The members are canonical
+    (``Contract.var``) precisely because bare names cannot tell them apart,
+    which is the whole reason the list is published.
 
     The writer list rides with BOTH its gates or not at all. ``[]`` is emitted
     only under ``storage_no_setter``, where the kind itself is the completed-scan
-    negative; a ``storage_setter`` whose writes were attributed only through a
-    storage alias has a real writer this pass cannot name, so its key is omitted
-    rather than published empty."""
+    negative; where no writer could be NAMED the key is omitted and
+    ``target_writer_absent_reason`` says which of the two absences it is."""
     if target["kind"] not in _STATE_VAR_TARGET_KINDS or not sites:
         return
-    names = {name for name, _, _ in sites if name is not None}
-    if len(names) > 1:
-        flow["target_variables"] = sorted(names)
+    if any(canonical is None for _, canonical, _, _, _ in sites):
+        # A site whose declaration could not be identified cannot be shown to
+        # agree with anything.
         return
-    if len(names) != 1 or any(name is None for name, _, _ in sites):
+    canonicals = {canonical for _, canonical, _, _, _ in sites if canonical is not None}
+    if len(canonicals) > 1:
+        flow["target_variables"] = sorted(canonicals)
         return
-    flow["target_variable"] = next(iter(names))
+    flow["target_variable"] = sites[0][0] or ""
     # Never ``true``, and never derived: the closed-surface question is not
     # answerable from one compilation unit. Published wherever the variable is,
     # so even a row carrying no writer list still carries the bound.
     flow["writer_surface_closed"] = _WRITER_SURFACE_CLOSED
-    writers = sorted({signature for _, signatures, _ in sites for signature in signatures})
+    writers = sorted({signature for _, _, signatures, _, _ in sites for signature in signatures})
     if not writers and target["kind"] != "storage_no_setter":
+        if target["kind"] == "storage_setter":
+            reasons = {reason for _, _, _, _, reason in sites if reason}
+            if len(reasons) == 1:
+                flow["target_writer_absent_reason"] = next(iter(reasons))
         return
     flow["target_writer_signatures"] = writers
-    flow["target_writer_scan_complete"] = all(complete for _, _, complete in sites)
+    flow["target_writer_scan_complete"] = all(complete for _, _, _, complete, _ in sites)
 
 
 def _fold_param_index(kind: KindTier, indexes: list[int | None]) -> int | None:

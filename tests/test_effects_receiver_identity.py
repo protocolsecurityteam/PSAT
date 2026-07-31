@@ -63,6 +63,17 @@ library ArrayLib {
     }
 }
 
+// A library with its OWN public constant receiver. The sink walk recurses into
+// library calls, so this declaration reaches the receiver arm — but it belongs
+// to the library, not to the analysed contract.
+library LConst {
+    IERC20 public constant T = IERC20(address(0x3333333333333333333333333333333333333333));
+
+    function go(address to, uint256 amount) internal {
+        T.transfer(to, amount);
+    }
+}
+
 library MapLib {
     function get(mapping(address => uint256) storage m, address key) internal view returns (uint256) {
         return m[key];
@@ -147,6 +158,23 @@ contract Receivers {
         return balances.get(key);
     }
 }
+
+contract LibConstUser {
+    function pay(address to, uint256 amount) external {
+        LConst.go(to, amount);
+    }
+}
+
+// The same identifier declared on BOTH the contract and the library, holding
+// two different addresses. Both sites key to the same sink record.
+contract Collide {
+    IERC20 public constant T = IERC20(address(0x4444444444444444444444444444444444444444));
+
+    function pay(address to, uint256 amount) external {
+        T.transfer(to, amount);
+        LConst.go(to, amount);
+    }
+}
 """
 
 
@@ -155,11 +183,20 @@ def _selector(signature: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def effects(tmp_path_factory):
+def compiled(tmp_path_factory):
     path = tmp_path_factory.mktemp("receivers") / "Receivers.sol"
     path.write_text(textwrap.dedent(_SRC).strip() + "\n")
-    contract = next(c for c in Slither(str(path)).contracts if c.name == "Receivers")
-    return build_effects(contract)
+    return {c.name: c for c in Slither(str(path)).contracts}
+
+
+@pytest.fixture(scope="module")
+def effects(compiled):
+    return build_effects(compiled["Receivers"])
+
+
+@pytest.fixture(scope="module")
+def foreign(compiled):
+    return {name: build_effects(compiled[name]) for name in ("LibConstUser", "Collide")}
 
 
 def _receiver(effects, signature: str, target: str) -> dict | None:
@@ -180,7 +217,7 @@ def test_entry_parameter_receiver_is_caller_named(effects):
         "visibility": None,
         "auto_getter_selector": None,
         "variable": "token",
-        "asset_identity": "caller_named",
+        "receiver_provenance": "caller_named",
     }
 
 
@@ -196,7 +233,7 @@ def test_public_immutable_receiver_carries_its_minted_getter(effects):
         "visibility": "public",
         "auto_getter_selector": "0x8e0191b5",
         "variable": "immToken",
-        "asset_identity": "contract_state_unresolved",
+        "receiver_provenance": "contract_state_unresolved",
     }
     assert _selector("immToken()") == "0x8e0191b5"
 
@@ -213,7 +250,7 @@ def test_internal_state_variable_receiver_mints_no_getter(effects):
         # confuse with a shape this plane never examined.
         "auto_getter_selector": None,
         "variable": "hiddenToken",
-        "asset_identity": "contract_state_unresolved",
+        "receiver_provenance": "contract_state_unresolved",
     }
 
 
@@ -246,7 +283,7 @@ def test_local_and_internal_state_variable_are_not_confused(effects):
         "visibility": None,
         "auto_getter_selector": None,
         "variable": "local",
-        "asset_identity": "not_determined",
+        "receiver_provenance": "not_determined",
     }
     assert internal is not None and internal["binding"] == "state_variable"
 
@@ -258,7 +295,7 @@ def test_hand_written_getter_is_never_paired_with_a_local(effects):
     local = _receiver(effects, "payLocal(address,uint256)", "local.safeTransfer")
     assert local is not None
     assert local["auto_getter_selector"] is None
-    assert local["asset_identity"] == "not_determined"
+    assert local["receiver_provenance"] == "not_determined"
 
 
 # --- A1: the DECLARED TYPE licenses the selector, not the identifier --------
@@ -299,7 +336,7 @@ def test_internal_helper_formal_is_not_an_abi_slot(effects):
         "visibility": None,
         "auto_getter_selector": None,
         "variable": "token",
-        "asset_identity": "not_determined",
+        "receiver_provenance": "not_determined",
     }
 
 
@@ -315,7 +352,7 @@ def test_disagreeing_sites_fold_to_not_determined(effects):
         "visibility": None,
         "auto_getter_selector": None,
         "variable": None,
-        "asset_identity": "not_determined",
+        "receiver_provenance": "not_determined",
         "not_determined_reason": "fold_disagreement",
     }
 
@@ -338,7 +375,7 @@ def test_no_asset_address_is_ever_published_by_this_plane(effects):
             if receiver is None:
                 continue
             assert "asset_address" not in receiver
-            assert receiver["asset_identity"] in {
+            assert receiver["receiver_provenance"] in {
                 "caller_named",
                 "contract_state_unresolved",
                 "not_determined",
@@ -373,3 +410,43 @@ def test_witness_joins_each_receiver_to_its_own_sink(tmp_path):
     by_variable = {r["variable"]: r for r in receivers.values()}
     assert by_variable["immToken"]["auto_getter_selector"] == "0x8e0191b5"
     assert by_variable["hiddenToken"]["auto_getter_selector"] is None
+
+
+# --- F1: a declaration this contract does not have --------------------------
+
+
+def test_library_constant_is_not_this_contract_s_storage(foreign):
+    """The sink walk recurses into library calls, so a library's own
+    ``public constant`` arrives as a perfectly good ``StateVariable``. It is
+    inlined at each call site, it is not this unit's storage, and the accessor
+    it would name is NOT in this contract's ABI — a pinned read at the
+    deployment address would revert or fall through to a fallback. The
+    declaration's owner, not its type, is what refuses it."""
+    receiver = _receiver(foreign["LibConstUser"], "pay(address,uint256)", "T.transfer")
+    assert receiver == {
+        "binding": "not_determined",
+        "param_scope": None,
+        "param_index": None,
+        "mutability": None,
+        "visibility": None,
+        "auto_getter_selector": None,
+        "variable": None,
+        "receiver_provenance": "not_determined",
+        "not_determined_reason": "foreign_declaration",
+    }
+    assert receiver["auto_getter_selector"] is None
+
+
+def test_same_named_foreign_declaration_does_not_read_as_agreement(foreign):
+    """Two ``T``s holding two different addresses — one on the contract, one on
+    the library — reach ONE sink record. Described by name alone their
+    descriptors are byte-identical (same visibility, same mutability, same
+    minted selector), so the fold would publish two distinct assets as one
+    agreed receiver. Refusing the foreign declaration is what makes the
+    disagreement visible."""
+    receiver = _receiver(foreign["Collide"], "pay(address,uint256)", "T.transfer")
+    assert receiver is not None
+    assert receiver["binding"] == "not_determined"
+    assert receiver["not_determined_reason"] == "fold_disagreement"
+    assert receiver["variable"] is None
+    assert receiver["auto_getter_selector"] is None

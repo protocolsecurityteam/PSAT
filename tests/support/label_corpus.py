@@ -396,6 +396,7 @@ _FLOW_KEYS = (
     "target_variables",
     "target_writer_signatures",
     "target_writer_scan_complete",
+    "target_writer_absent_reason",
     "writer_surface_closed",
 )
 

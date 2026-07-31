@@ -441,12 +441,12 @@
               "selector": "0xb7009613",
               "origin": "guard",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xbf7e214f",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "authority",
                 "visibility": "public"
               }
@@ -496,12 +496,12 @@
               "selector": "0xb7009613",
               "origin": "guard",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xbf7e214f",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "authority",
                 "visibility": "public"
               }
@@ -551,12 +551,12 @@
               "selector": "0xb7009613",
               "origin": "guard",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xbf7e214f",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "authority",
                 "visibility": "public"
               }
@@ -606,12 +606,12 @@
               "selector": "0xb7009613",
               "origin": "guard",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xbf7e214f",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "authority",
                 "visibility": "public"
               }
@@ -662,12 +662,12 @@
               "selector": "0xb7009613",
               "origin": "guard",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xbf7e214f",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "authority",
                 "visibility": "public"
               }
@@ -864,12 +864,12 @@
               "selector": "0xabd626b0",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x7f5a7c7b",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "hook",
                 "visibility": "public"
               }
@@ -917,12 +917,12 @@
               "selector": "0xabd626b0",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x7f5a7c7b",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "hook",
                 "visibility": "public"
               }
@@ -1244,12 +1244,12 @@
               "selector": "0xa0b5ffb0",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1315,12 +1315,12 @@
                 ],
                 "sink_receivers": {
                   "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -1366,12 +1366,12 @@
               "selector": "0x5beae096",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1438,12 +1438,12 @@
                 ],
                 "sink_receivers": {
                   "payGatewayDirect(IERC20,address,uint256):sink0:external_call:token.transferFrom": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -1483,12 +1483,12 @@
               "selector": "0x23b872dd",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1538,12 +1538,12 @@
                 ],
                 "sink_receivers": {
                   "pull(IERC20,address,uint256):sink0:external_call:token.safeTransferFrom": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -1581,12 +1581,12 @@
               "selector": "0x5beae096",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1651,12 +1651,12 @@
                 ],
                 "sink_receivers": {
                   "recoverERC721(IERC721,address,uint256):sink0:external_call:collection.safeTransferFrom": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "collection",
                     "visibility": null
                   }
@@ -1688,12 +1688,12 @@
               "selector": "0x42842e0e",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "collection",
                 "visibility": null
               }
@@ -1788,12 +1788,12 @@
                 ],
                 "sink_receivers": {
                   "splitPay(IERC20,address,uint256,uint256):sink0:external_call:token.safeTransfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -1840,12 +1840,12 @@
               "selector": "0xd0c407e1",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1907,12 +1907,12 @@
                 ],
                 "sink_receivers": {
                   "sweep(IERC20):sink1:external_call:token.safeTransfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -1951,12 +1951,12 @@
               "selector": "0x70a08231",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -1966,12 +1966,12 @@
               "selector": "0xd0c407e1",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -2039,12 +2039,12 @@
                 ],
                 "sink_receivers": {
                   "sweepTo(IERC20,address,uint256):sink0:external_call:token.safeTransfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -2083,12 +2083,12 @@
               "selector": "0xd0c407e1",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -2138,12 +2138,12 @@
               "selector": "0x18457e61",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfbfa77cf",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "vault",
                 "visibility": "public"
               }
@@ -2234,12 +2234,12 @@
               "selector": "0x39d6ba32",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfbfa77cf",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "vault",
                 "visibility": "public"
               }
@@ -2332,12 +2332,12 @@
               "selector": "0x39d6ba32",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfbfa77cf",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "vault",
                 "visibility": "public"
               }
@@ -2433,12 +2433,12 @@
               "selector": "0x820973da",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x4fb3ccc5",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "accountant",
                 "visibility": "public"
               }
@@ -2448,12 +2448,12 @@
               "selector": "0xb67bee04",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 2,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "shareAmount",
                 "visibility": null
               }
@@ -2463,12 +2463,12 @@
               "selector": "0x18457e61",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfbfa77cf",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "vault",
                 "visibility": "public"
               }
@@ -3149,12 +3149,12 @@
                 ],
                 "sink_receivers": {
                   "deposit(uint256):sink1:external_call:token.transferFrom": {
-                    "asset_identity": "not_determined",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": null,
                     "param_scope": "internal_helper",
+                    "receiver_provenance": "not_determined",
                     "variable": "token",
                     "visibility": null
                   }
@@ -3186,12 +3186,12 @@
               "selector": "0x5beae096",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xf85cb5c8",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "reserveAsset",
                 "visibility": "public"
               }
@@ -3201,12 +3201,12 @@
               "selector": "0x23b872dd",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": "internal_helper",
+                "receiver_provenance": "not_determined",
                 "variable": "token",
                 "visibility": null
               }
@@ -3300,12 +3300,12 @@
               "selector": "0xce7c2ac2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xf85cb5c8",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "reserveAsset",
                 "visibility": "public"
               }
@@ -3372,12 +3372,12 @@
                 ],
                 "sink_receivers": {
                   "payAllowlisted(IERC20,address,uint256):sink0:external_call:token.transfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -3410,12 +3410,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -3479,12 +3479,12 @@
                 ],
                 "sink_receivers": {
                   "payAnyone(IERC20,address,uint256):sink0:external_call:token.transfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -3517,12 +3517,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -3590,12 +3590,12 @@
                 ],
                 "sink_receivers": {
                   "payCommitted(IERC20,address,uint256,bytes32):sink0:external_call:token.transfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -3628,12 +3628,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -3702,12 +3702,12 @@
                 ],
                 "sink_receivers": {
                   "payTreasuryOnly(IERC20,address,uint256):sink0:external_call:token.transfer": {
-                    "asset_identity": "caller_named",
                     "auto_getter_selector": null,
                     "binding": "parameter",
                     "mutability": null,
                     "param_index": 0,
                     "param_scope": "entry_point",
+                    "receiver_provenance": "caller_named",
                     "variable": "token",
                     "visibility": null
                   }
@@ -3740,12 +3740,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "token",
                 "visibility": null
               }
@@ -4051,12 +4051,12 @@
               "selector": "0xee33b7e2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xb86d5298",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "module",
                 "visibility": "public"
               }
@@ -4306,12 +4306,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "local",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "not_determined",
                 "variable": "t",
                 "visibility": null
               }
@@ -4366,12 +4366,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "local",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "not_determined",
                 "variable": "t",
                 "visibility": null
               }
@@ -4429,12 +4429,12 @@
               "selector": "0xa9803dcc",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 1,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "to",
                 "visibility": null
               }
@@ -4493,12 +4493,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x5ef32cc6",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "fallbackRoute",
                 "visibility": "public"
               }
@@ -4565,12 +4565,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x5ef32cc6",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "fallbackRoute",
                 "visibility": "public"
               }
@@ -4637,12 +4637,12 @@
               "selector": "0x202d45d3",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 1,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "data",
                 "visibility": null
               }
@@ -4707,12 +4707,12 @@
               "selector": "0x24d78c05",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "target",
                 "visibility": null
               }
@@ -4827,12 +4827,12 @@
               "selector": "0x2a011594",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "target",
                 "visibility": null
               }
@@ -4895,12 +4895,12 @@
               "selector": "0xa0b5ffb0",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "target",
                 "visibility": null
               }
@@ -4956,12 +4956,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "caller_named",
                 "auto_getter_selector": null,
                 "binding": "parameter",
                 "mutability": null,
                 "param_index": 0,
                 "param_scope": "entry_point",
+                "receiver_provenance": "caller_named",
                 "variable": "a",
                 "visibility": null
               }
@@ -5016,12 +5016,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "local",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "not_determined",
                 "variable": "t",
                 "visibility": null
               }
@@ -5059,12 +5059,12 @@
               "selector": "0x119943f7",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x2b3297f9",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "swapper",
                 "visibility": "public"
               }
@@ -5122,12 +5122,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "local",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "not_determined",
                 "variable": "t",
                 "visibility": null
               }
@@ -5183,12 +5183,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x5ef32cc6",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "fallbackRoute",
                 "visibility": "public"
               }
@@ -5198,12 +5198,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "not_determined",
                 "auto_getter_selector": null,
                 "binding": "local",
                 "mutability": null,
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "not_determined",
                 "variable": "t",
                 "visibility": null
               }
@@ -5259,12 +5259,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x5ef32cc6",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "fallbackRoute",
                 "visibility": "public"
               }
@@ -5303,12 +5303,12 @@
               "selector": "0xbe6002c2",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x5ef32cc6",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "fallbackRoute",
                 "visibility": "public"
               }
@@ -5318,12 +5318,12 @@
               "selector": "0x119943f7",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x2b3297f9",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "swapper",
                 "visibility": "public"
               }
@@ -5730,12 +5730,12 @@
               "selector": "0xb6b55f25",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfbfa77cf",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "vault",
                 "visibility": "public"
               }
@@ -5787,12 +5787,12 @@
               "selector": "0x0aeef8c8",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xddceafa9",
                 "binding": "state_variable",
                 "mutability": "mutable",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "recovery",
                 "visibility": "public"
               }
@@ -5914,12 +5914,12 @@
                 ],
                 "sink_receivers": {
                   "withdrawDecoy(address,uint256):sink1:external_call:token.transfer": {
-                    "asset_identity": "contract_state_unresolved",
                     "auto_getter_selector": "0xfc0c546a",
                     "binding": "state_variable",
                     "mutability": "immutable_in_implementation",
                     "param_index": null,
                     "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
                     "variable": "token",
                     "visibility": "public"
                   }
@@ -5952,12 +5952,12 @@
               "selector": "0x483f31ab",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x761ea860",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "decoyLimiter",
                 "visibility": "public"
               }
@@ -5967,12 +5967,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfc0c546a",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "token",
                 "visibility": "public"
               }
@@ -6037,12 +6037,12 @@
                 ],
                 "sink_receivers": {
                   "withdrawLimited(address,uint256):sink1:external_call:token.transfer": {
-                    "asset_identity": "contract_state_unresolved",
                     "auto_getter_selector": "0xfc0c546a",
                     "binding": "state_variable",
                     "mutability": "immutable_in_implementation",
                     "param_index": null,
                     "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
                     "variable": "token",
                     "visibility": "public"
                   }
@@ -6113,12 +6113,12 @@
               "selector": "0xb87a8ecd",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x74b87f67",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "limiter",
                 "visibility": "public"
               }
@@ -6128,12 +6128,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfc0c546a",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "token",
                 "visibility": "public"
               }
@@ -6198,12 +6198,12 @@
                 ],
                 "sink_receivers": {
                   "withdrawTokenLimited(address,uint256):sink1:external_call:token.transfer": {
-                    "asset_identity": "contract_state_unresolved",
                     "auto_getter_selector": "0xfc0c546a",
                     "binding": "state_variable",
                     "mutability": "immutable_in_implementation",
                     "param_index": null,
                     "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
                     "variable": "token",
                     "visibility": "public"
                   }
@@ -6274,12 +6274,12 @@
               "selector": "0xc0d5f68a",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0x74b87f67",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "limiter",
                 "visibility": "public"
               }
@@ -6289,12 +6289,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfc0c546a",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "token",
                 "visibility": "public"
               }
@@ -6359,12 +6359,12 @@
                 ],
                 "sink_receivers": {
                   "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer": {
-                    "asset_identity": "contract_state_unresolved",
                     "auto_getter_selector": "0xfc0c546a",
                     "binding": "state_variable",
                     "mutability": "immutable_in_implementation",
                     "param_index": null,
                     "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
                     "variable": "token",
                     "visibility": "public"
                   }
@@ -6397,12 +6397,12 @@
               "selector": "0xa9059cbb",
               "origin": "body",
               "receiver": {
-                "asset_identity": "contract_state_unresolved",
                 "auto_getter_selector": "0xfc0c546a",
                 "binding": "state_variable",
                 "mutability": "immutable_in_implementation",
                 "param_index": null,
                 "param_scope": null,
+                "receiver_provenance": "contract_state_unresolved",
                 "variable": "token",
                 "visibility": "public"
               }
