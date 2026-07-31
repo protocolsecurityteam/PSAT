@@ -179,7 +179,9 @@ HOLDER = "0x" + "44" * 20
 TOKEN = "0x" + "7a" * 20
 
 
-def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=100.0, tvl=None):
+def _value_out(
+    blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor: float | None = 100.0, tvl=None
+):
     remaining = list(blocks)
 
     def simulate(calls, block_tag=None, overrides=None):
