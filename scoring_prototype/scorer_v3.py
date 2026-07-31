@@ -339,6 +339,43 @@ def _f(v):
         return None
 
 
+def reach_floor_decision(obs):
+    """B4/§2: whether ``observed_reach_floor_usd`` may be adopted as a value.
+
+    Lifted out of ``main`` so the two fail-closed arms are callable, per the
+    plan's §0 "fail-closed arms exercised" bar -- ``main`` opens a DB and is a
+    CLI, so an arm buried in it is unreachable from a test.
+
+    The key is emitted only beside ``reach_indeterminate: true``
+    (``recipes.py:1706-1707`` writes the pair), so it is the acting deployment's
+    own balance off the B1/B2 balance plane, never a measurement of what this
+    call moved. And ``0.0`` there is "no proven bound", never a measured zero:
+    no path on that plane publishes a proven zero -- an absent
+    ``deployment_balance`` key defaults to 0.0 at ``selection.py:1369`` and an
+    all-unpriced sheet collapses to 0.0 in ``coalesce(sum(usd_value), 0)``
+    (B8.1a). Both non-adopting arms yield ``value: None``.
+    """
+    fl_usd = _f(obs.get("observed_reach_floor_usd"))
+    gated = str(obs.get("reach_indeterminate")).lower() == "true"
+    if gated and fl_usd is not None and fl_usd > 0.0:
+        return {
+            "adopted": True,
+            "value": fl_usd,
+            "basis": "observed_reach_floor_usd(>= floor, reach_indeterminate)",
+        }
+    return {
+        "adopted": False,
+        "value": None,
+        "basis": (
+            "observed_reach_floor_usd_zero(not_determined)"
+            if gated
+            else "observed_reach_floor_usd_ungated(not_determined)"
+        ),
+        "floor_usd": fl_usd,
+        "reach_indeterminate": obs.get("reach_indeterminate"),
+    }
+
+
 def _norm_sig(s):
     """V8: scored_denominator carries 5 of 33 entries as Solidity source-level
     type names that match no abi_signature. Normalise to the bare name so the
@@ -1348,33 +1385,26 @@ def main():
                     # publishes a proven zero -- an absent ``deployment_balance`` key
                     # defaults to 0.0 at selection.py:1369 and an all-unpriced sheet
                     # collapses to 0.0 in ``coalesce(sum(usd_value), 0)`` (B8.1a).
-                    fl_usd = _f(obs.get("observed_reach_floor_usd"))
-                    fl_gated = str(obs.get("reach_indeterminate")).lower() == "true"
-                    if fl_gated and fl_usd is not None and fl_usd > 0.0:
-                        inst_val = fl_usd
-                        val_basis = "observed_reach_floor_usd(>= floor, reach_indeterminate)"
+                    fl = reach_floor_decision(obs)
+                    inst_val = fl["value"]
+                    val_basis = fl["basis"]
+                    if fl["adopted"]:
                         citations.append(
                             {
                                 "field": "observed_reach_floor_usd",
-                                "value": fl_usd,
+                                "value": fl["value"],
                                 "direction": "lower_bound",
                                 "gate": "reach_indeterminate=true",
                             }
                         )
                     else:
-                        inst_val = None
-                        val_basis = (
-                            "observed_reach_floor_usd_zero(not_determined)"
-                            if fl_gated
-                            else "observed_reach_floor_usd_ungated(not_determined)"
-                        )
                         warnings.append(
                             {
                                 "kind": "reach_floor_not_a_bound",
                                 **ctx,
                                 "capability": cid,
-                                "floor_usd": fl_usd,
-                                "reach_indeterminate": obs.get("reach_indeterminate"),
+                                "floor_usd": fl["floor_usd"],
+                                "reach_indeterminate": fl["reach_indeterminate"],
                                 "note": (
                                     "a 0.00 floor is 'no proven bound', not a proven "
                                     "zero -- it is the acting deployment's own balance "

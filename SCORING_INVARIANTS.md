@@ -520,9 +520,20 @@ the local replica of the PR-161 observed run (`protocol_id=1` / etherfi,
 1,200 `function_principals` (870 with `details`); 721 `contract_balances`; 209
 `audit_contract_coverage`; 290 `controller_values`; 80 `indexed_event_cursors`.
 
-**REQUIRED** = must be consumed. **GATE** = must be consumed as a precondition on
-a sibling field. **CONFIDENCE** = real, not grade-admissible (inv.6). **BANNED** =
-must not be used as a witness. Population counts are `populated / applicable`.
+**REQUIRED** = must be consumed, **and the value is grade-admissible**. **GATE** =
+must be consumed as a precondition on a sibling field. **CONFIDENCE** = real, not
+grade-admissible (inv.6). **BANNED** = must not be used as a witness.
+
+**The four values mix two axes, and reading them as one is what produced the
+`transcript_ptr` contradiction B0b S7 adjudicates.** The axes are:
+(a) **grade-admissibility** — may this value move a number? REQ/GATE yes, CONF no,
+BAN never; and (b) **consumption obligation** — must a conforming scorer do
+something with it, and which of gate / arithmetic / cite / three-state? **They are
+orthogonal.** A field can be non-grade-admissible **and** carry a MANDATORY
+consumption obligation: `CONFIDENCE` names the first, the stated obligation names
+the second, and a mandatory citation therefore does **not** re-derive `REQUIRED`.
+Read bare `CONFIDENCE` as "optional" only where the entry states no obligation.
+Population counts are `populated / applicable`.
 
 ### B0. Corrections to the first draft of this appendix
 
@@ -1311,27 +1322,41 @@ drift, and the losing label must stay visible so nobody "restores" it.
    a current cross-contract read, and ERC-20 rows stay UNPINNED (the stated Q1
    deferral of B8.1a), so the measured **1h40m** write smear is still the only time
    coordinate a token holding has and `block_number` cannot stand in for it.
-2. **`effect_verdicts.transcript_ptr` — `CONF` (trace), with a MANDATORY `cite`
-   obligation, in both files.** B7 said **REQUIRED for inv.9 traceability**;
-   `FIELDS.md` §7 said **CONF / trace**. Neither was right on its own, so this is not
-   a relabelling of one side: both files are changed to the same statement.
-   **`REQUIRED` overstates the value.** It is a MinIO object key. It enters no gate,
-   enters no arithmetic, and has no value axis to branch three ways on; the only
-   consumption in §E's vocabulary it can bear is `cite`, and marking it REQ invites a
-   scorer to look for a grade use it does not have. **Bare `CONF` understates the
-   obligation.** "Real but not grade-admissible" reads as optional, and the inv.9
-   traceability duty B7 asserted is real and not optional. The adjudicated entry keeps
-   the label that is true of the VALUE and the obligation that is true of the
-   CONSUMER: **CONF (trace); consumption obligation = `cite`, and that citation is
-   MANDATORY under inv.9** — a published verdict must carry its transcript pointer,
-   because the fact being claimed lives inside the blob and the pointer is the only
-   thing that makes it human-checkable. Three-state: **proven-present** = the pointer
-   resolves via `(job_id, name)` → `artifacts.storage_key`; **there is no
-   proven-absent state** — no verdict is observed without a transcript having been
-   written; **not_determined** = NULL or a key that does not resolve, and such a row
-   must be published **without a traceability claim**, never as "no transcript
-   exists". Population 274/274, **271 distinct** (5 rows share a blob), so pointer
-   identity is not verdict identity.
+2. **`effect_verdicts.transcript_ptr` — `CONF`, three-state, consume as `cite` +
+   `three-state` only, with the citation MANDATORY under inv.9 — in both files.**
+   B7 said **REQUIRED for inv.9 traceability**; `FIELDS.md` §7 said **CONF / trace**.
+   Neither was right on its own, so this is not a relabelling of one side: both files
+   are changed to the same statement.
+   **First, the hole that generated the contradiction, because otherwise this erratum
+   does not hold.** The vocabulary as originally written (Appendix B preamble)
+   defined `REQUIRED` as "must be consumed", full stop — so *any* mandatory
+   consumption mechanically re-derives `REQUIRED`, and a later reader would restore
+   exactly the label this erratum removes. **The preamble is amended in the same
+   change:** the four values mix **two orthogonal axes** — *grade-admissibility*
+   (may this move a number? REQ/GATE yes, CONF no, BAN never) and *consumption
+   obligation* (must a scorer do something, and which of gate / arithmetic / cite /
+   three-state). A field may be non-grade-admissible **and** carry a mandatory
+   obligation. Without that amendment this item is unenforceable; with it, it is a
+   statement about two different things.
+   **`REQUIRED` was wrong on the grade axis.** The value is a MinIO object key: it
+   enters no gate and no arithmetic, so it may move no number.
+   **Bare `CONF` was wrong on the obligation axis.** "Real but not
+   grade-admissible" reads as optional, and the inv.9 traceability duty B7 asserted
+   is real and not optional. The adjudicated entry states both: **CONF, three-state;
+   consume as `cite` + `three-state` only; the citation is MANDATORY under inv.9** —
+   a published verdict must carry its transcript pointer, because the fact being
+   claimed lives inside the blob and the pointer is the only thing that makes it
+   human-checkable. Three-state: **proven-present** = the pointer resolves via
+   `(job_id, name)` → `artifacts.storage_key`; **there is no proven-absent state** —
+   no verdict is observed without a transcript having been written;
+   **not_determined** = NULL or a key that does not resolve, and the scorer must
+   BRANCH on that, publishing such a row **without a traceability claim** and never
+   as "no transcript exists". That mandated branch **is** the three-state
+   consumption — which is why the obligation is the same `cite + three-state` pair
+   the two rows below this one already carry (`witness.block_number`,
+   `witness.block_source`), and this entry now matches their idiom verbatim rather
+   than inventing a third. Population 274/274, **271 distinct** (5 rows share a
+   blob), so pointer identity is not verdict identity.
 
 ### B1. Extraction magnitude — what a fund-out can move
 
@@ -1519,7 +1544,7 @@ and `details->>'source'` are constants (T-ORIGIN); the real provenance is
 
 | step | rows | strength |
 |---|--:|---|
-| `solmate_roles_authority` | **326** (B0b S4 corrects this row's original 261; re-measured 2026-07-30 on the replica — `function_principals` rows carrying the step, scoped to `contracts.protocol_id = 1`: **326**; whole-table it is 436) | deterministic event fold (`RoleCapabilityUpdated`/`PublicCapabilityUpdated`/`UserRoleUpdated`) |
+| `solmate_roles_authority` | **326** (B0b S4 corrects this row's original 261; re-measured 2026-07-30 on the replica — `function_principals` rows carrying the step, scoped to `contracts.protocol_id = 1`: **326**; whole-table it is 436. **The step that identifies this table's scope as protocol-1 is `external_check_materialized` — 58 whole-table, 0 protocol-1, and absent from this table**; the four small rows below are identical under both scopes and discriminate nothing) | deterministic event fold (`RoleCapabilityUpdated`/`PublicCapabilityUpdated`/`UserRoleUpdated`) |
 | `enumerable_role_store` | **296** (B0b S4 corrects this row's original 242; re-measured same way: 296 protocol-1, 296 whole-table) | deterministic role-filtered fold vs the runtime; carries `probe_block`, `fold_frontier`, `candidate_count` |
 | `live_getter_resolution` | 44 | deterministic `eth_call` of a nullary getter |
 | `authority_getter_basis` | 33 | **convention-bound** — see T-ACCESSOR |
@@ -1791,7 +1816,7 @@ Population: `business` 2009, `time` 172, `pause` 17, `reentrancy` 10,
 | `effect_verdicts.witness.observation` | `executed` 179 / `reverted` 95 | **GATE** — `config.py:63-80`: on a reverted row `{"value_moved": false}` means **"not measured"**, never "moves no value". An absent key predates the discriminator; treat as unmeasured unless `verdict='proven'`. |
 | `claims[].witness.effect_verdict_id` | 69, all distinct | **REQUIRED** — the join key for B1/B3 fields that are not projected. |
 | `claims[].tier` | `standard_exact` 353, `idiom_structural` 100, `behavioral_observed` 69, `policy_derived` 19 | **REQUIRED** — currently collected into `witness_tiers` but **never enters the arithmetic**. |
-| `effect_verdicts.transcript_ptr` | 274/274, **271 distinct** (5 rows share a blob) | **CONFIDENCE (trace); consumption obligation = `cite`, and the citation is MANDATORY under inv.9.** ADJUDICATED 2026-07-30, see **B0b S7 item 2** — this row previously read `REQUIRED`, which overstated a MinIO object key that enters no gate, no arithmetic and no three-state branch; `FIELDS.md` §7 previously read bare `CONF`, which dropped the obligation. Neither the pointer nor the blob is grade-admissible, **and** a published verdict must still carry its pointer, because the fact being claimed lives inside the blob and this is the only thing that makes it human-checkable. **proven-present** = resolves via `(job_id, name)` → `artifacts.storage_key`. **There is no proven-absent state.** **not_determined** = NULL or a key that does not resolve; such a row publishes **without a traceability claim**, never as "no transcript exists". |
+| `effect_verdicts.transcript_ptr` | 274/274, **271 distinct** (5 rows share a blob) | **CONFIDENCE, three-state; consume as `cite` + `three-state` only — and the citation is MANDATORY under inv.9.** ADJUDICATED 2026-07-30, see **B0b S7 item 2** — this row previously read `REQUIRED`, which asserted grade-admissibility a MinIO object key does not have; `FIELDS.md` §7 previously read bare `CONF`, which dropped the obligation. The two are orthogonal axes (§ vocabulary, above), so both statements now stand together. **proven-present** = resolves via `(job_id, name)` → `artifacts.storage_key`. **There is no proven-absent state.** **not_determined** = NULL or a key that does not resolve — and the scorer must BRANCH on that, publishing such a row **without a traceability claim** and never as "no transcript exists". That mandated branch is the three-state consumption; the citation is the cite consumption. Never arithmetic, never a gate. |
 | `effect_verdicts.witness.revert_reason` | 39, **all `unknown`** | CONFIDENCE |
 | `effect_verdicts.witness.block_number` | **0/274 — the key is ABSENT on every existing row** | **CONFIDENCE, three-state; consume as cite + three-state only.** The height the verdict was observed at. Corrects `FIELDS.md` §7's `304/304, 51 distinct blocks`, which was wrong on both location and denominator: `witness`'s key universe across the 274 rows is 20 distinct keys (per-row 2–10), none a block key, and the 304 counted **transcript blobs** (those do carry it — 51 distinct heights, 25640764…25641259, span 495 blocks in one run; 7 jobs carry two heights each, so the pin is per stage INVOCATION). Emitted from now on by `harness._stamp_observation_height`, the single publication point every recipe's `emit()` passes through. **proven-present** = a positive height the probe demonstrably ran at — Tier 1 simulates at `hex(block_number)`, Tier 2 reports the `--fork-block-number` its own fork was spawned with (`anvil.fork_block_pin`). **There is no proven-absent state**: no verdict is observed at no block. **not_determined is the ABSENT key**, and it is the state every failure and absence path lands on — an unpinnable head (`_preflight` yields the `0` sentinel and disables Tier 1), a fork spawned unpinned, a Tier-0 index read (decides from event history, no single height), and a twin's plain cache hit (state-plane, stripped by `DEPLOYMENT_PLANE_KEYS`). **`0` is never published**: it is the failure sentinel and forks at genesis. Never arithmetic and never a gate — a scorer may cite it and must treat its absence as unknown, never as "current". All 274 existing rows stay `not_determined`; the 78 Tier-2 rows' true heights are **unrecoverable** and nothing is back-filled. Small-population: the 4 freeze rows (137/149/173/219) and the 7 two-block jobs are named as instances; the fix is argued from the code contract (an unpassed `--fork-block-number`), not from their count (B14). |
 | `effect_verdicts.witness.block_source` | **0/274 — the key is ABSENT on every existing row** | **CONFIDENCE, three-state; consume as cite + three-state only.** The SCOPE the pin above is shared across, published only ever alongside it — a height without its scope cannot be compared across rows, so the pair is stamped and stripped together and neither may be read alone. Closed vocabulary (`config.BLOCK_SOURCES`): `invocation_pin` \| `job_pin` \| `run_pin`; an unrecognized value publishes **nothing** rather than a free-text tag. **proven-present** = the named scope. Only `invocation_pin` is emitted today, and it explicitly does **not** make a run internally coherent (one run spanned 51 heights over 495 blocks); `job_pin`/`run_pin` are reserved and unemitted, because a per-run pin needs a run/batch column `jobs` does not have and is a separate schema decision. **No proven-absent state**; **not_determined is the ABSENT key**, on exactly the same failure paths as `block_number`. Consumption obligation: three-state + cite — two verdicts may be treated as one world state only when both carry the same height **and** a scope that spans them. Same small-population flags, same argument (B14). |
@@ -1948,7 +1973,7 @@ today has three indistinguishable causes: no current balance row at all (this
 default), current rows that are all unpriced (`coalesce(sum(usd_value), 0)`, the 22
 of 60 keys in the next paragraph), and a genuinely empty priced sheet. **Cause of the deferral, not
 an excuse for it:** `acting_balance_usd` is a non-optional `float` threaded through
-`selection.Candidate` → `calldata.EffectSpec:149` → `orchestrator:399` →
+`selection.Candidate` → `calldata.ValueOutPlanInputs:149` → `orchestrator:399` →
 `recipes:567` → `_add_reach:1549`, and carrying `None` through it would publish a
 NEW witness shape — `reach_indeterminate: true` with **no** `observed_reach_floor_usd`
 key — which is a change to a published fact and owes the §4 adversarial panel that
@@ -2132,23 +2157,53 @@ analyzable contract. Persisted verbatim onto `control_graph_nodes.details` by
 `replace_control_graph_rows`. **No migration.**
 
 **Population (measured, not estimated).** **37** marked `control_graph_nodes`
-rows / **38** projections (the number of probe firings) over **32** distinct
-addresses: **32** distinct M, **17** distinct V **over the 38 projections**
-(**16** over the 37 marked rows — see the B14 note below; the two figures are the
-same measurement at the two denominators this entry already distinguishes, and
-neither is a correction of the other). Re-run over all 38 pairs at
-block 25643300: **20 publish `true`, 18 `not_determined`** — 17 `not_determined`
-if counted over marked rows — and all 18 because the getter does not answer, so
-with zero mismatches and zero control failures the mismatch arm is **latent
-here**. The row and projection counts differ by one on purpose: a lens keyed on
+rows over **32** distinct addresses: **32** distinct M, **16** distinct V. Re-run
+over those 37 pairs at block 25643300: **20 publish `true`, 17 `not_determined`**,
+and all 17 because the getter does not answer, so with zero mismatches and zero
+control failures the mismatch arm is **latent here**.
+
+**WITHDRAWN 2026-07-30 (register reconciliation): the "38 projections / 17
+distinct V / 18 `not_determined`" figures, and the mechanism that was offered for
+them.** That mechanism claimed a lens keyed on
 `details->>'source' = 'semantic_capability:role_grant'` **undercounts firings by
-one**, because `_ensure_node`'s last-write-wins merge
-(`services/resolution/recursive.py:615-618`) can overwrite the role-grant marker
-with a later projection onto the same row — measured on
-`(0x70a64840…, 0x6889e57b…)` at `contract_id=471`, whose marker is NULL while its
-`role_principal` edge survives. That same merge is why
-`gated_contract_address` is published: it makes each verdict name its own
-subject rather than depending on a sibling key that can be erased.
+one**, because `_ensure_node`'s merge
+(`services/resolution/recursive.py:615-618`) had overwritten the role-grant marker
+on `(0x70a64840…, 0x6889e57b…)` at `contract_id=471`. **It is false, on four
+independent witnesses:** (i) that merge is
+`merged_details = dict(current); merged_details.update(details)`, and
+`dict.update` **cannot remove a key** — it can only overwrite `source` with
+another `source`, and the whole table carries just two values (`role_grant` 106,
+`beacon` 1); (ii) `control_graph_nodes.id 213` has **no `source` key at all** —
+its `details` keys are `address, controller_label, delay,
+mapping_enumeration_status` — so the marker was never written, not overwritten;
+(iii) node `id 514` is the **same address** `0x70a64840…` **carrying** the marker
+on `contract_id=47`, so the address is marked wherever the role-grant branch is
+what discovered it; and (iv) 213 is not singular — **28** nodes have a
+`role_principal` edge, `node_type='contract'` and address ≠ their contract's
+address while carrying no marker, and **28 of 28 carry a `controller_label`
+payload and 0 of 28 carry any `source` key**. They are the `controllers` branch
+of `_role_principals_from_effective_permissions` (`recursive.py:773-776`), which
+never stamps `ROLE_GRANT_SOURCE`.
+**The lens is therefore EXACT for firings, not an undercount.**
+`_maybe_probe_backlink` (`recursive.py:695`) returns `None` unless
+`details["source"] == ROLE_GRANT_SOURCE`, and `recursive.py:1480-1497` hands that
+same `details` object to `_ensure_node`, whose merge can only add or overwrite —
+so **a node that fired the probe must persist the marker.**
+**What remains genuinely unwitnessed, published as `not_determined` rather than
+guessed:** the *firing* count. A second firing onto an already-created node
+(the same M reached twice inside one contract's walk) overwrites its row and
+leaves no trace, so the persisted plane can witness **37 marked rows** and cannot
+witness whether 37 or more invocations produced them. Reconstruction method, if
+it is ever needed: re-run the walk over the job's `effective_permissions`
+artifacts and count `_maybe_probe_backlink` invocations directly. **Distinct V is
+unaffected either way** — V is the contract's own address, and a repeat firing
+shares its contract — so **16** is stable under every mechanism.
+
+**The merge is still real, and still the reason `gated_contract_address` is
+published** — what it cannot do is remove a key, not that it does nothing. A later
+projection onto the same row overwrites `gated_contract_backlink` wholesale, so each
+verdict must name its own subject rather than infer it from a sibling key a
+subsequent write can replace.
 
 **Cost.** +2 RPC per applicable pair (the `vault()` read, plus the negative
 control fired only on a match), and `resolve_control_graph` runs in **both** the
@@ -2236,21 +2291,18 @@ it. The fix is the byte-identity of shape 2 above, pinned by
 and mutation-verified.
 
 **Small populations (B14 — may gate/cite/three-state, may never calibrate):**
-`true` rows **20** (only 10 of them managers); distinct V **16 over the 37 MARKED
-`control_graph_nodes` rows** (**17** over the 38 projections — the population
-paragraph's figure); the role-grant jobless population **19**.
+`true` rows **20** (only 10 of them managers); distinct V **16**; the role-grant
+jobless population **19**.
 
-**The 16-vs-17 gap, measured rather than asserted (2026-07-30).** On the replica the
-marker lens — `details->>'source' = 'semantic_capability:role_grant'`,
-`node_type='contract'`, node address ≠ its contract's address — returns exactly **37
-rows / 32 distinct M / 16 distinct V**. The 38th firing is the documented
-last-write-wins overwrite: `control_graph_nodes.id 213`
-(`0x70a64840a353c58f63333570f53dba0948bece3d`, the M) sits on `contract_id 471`
-(`0x6889e57bca038c28520c0b047a75e567502ea5f6`, the V) with its `source` marker
-overwritten to NULL while its `role_principal` edge survives — and `0x6889e57b…` is
-**not** one of the 16 V the marker lens sees, so the 38th projection contributes the
-17th distinct V. A consumer counting V off the persisted marker will get 16 and that
-is correct **for that lens**; 17 is the count of V the probe actually fired against.
+**The distinct-V figure, measured (2026-07-30).** On the replica the marker lens —
+`details->>'source' = 'semantic_capability:role_grant'`, `node_type='contract'`,
+node address ≠ its contract's address — returns exactly **37 rows / 32 distinct M /
+16 distinct V**, and that lens is exact for firings (see the withdrawal above). **16
+is the figure to publish.** An earlier draft of this entry published **17**, on the
+strength of a 38th "projection" at `control_graph_nodes.id 213` whose marker was said
+to have been overwritten; the marker was never written at all — 213 is one of 28
+controller-derived role principals — so `0x6889e57b…` is not a V this probe ever
+fired against and there is no 17th.
 
 **Verification.** Over all 37 pairs at block **25643300**: 20 `true` / 17
 `not_determined`; on the ten manager pairs `vault()` returns the gated contract
@@ -3069,8 +3121,8 @@ it. This does not conflate administering a role with holding it: OZ expresses
 "may administer X" as membership in a *different* `bytes32`, hence a different
 primary key.
 
-| field | column | pop. | status | three-state | failure path |
-|---|---|--:|---|---|---|
+| field | column | pop. | status | three-state | failure path | consume as |
+|---|---|--:|---|---|---|---|
 | `holders` | `role_holder_planes.holders` | 11 protocol-1 `(registry, role_hash)` keys / 3 registries | **REQUIRED** | proven-present = a **LOWER BOUND**, each member independently witnessed / proven-absent **unreachable by design** / `not_determined` = NULL | revert, transport failure, cold-or-missing cursor on either topic, unpinnable probe block, or zero confirmations ⇒ **NULL**. **Never `[]`** — a DB CHECK makes the empty array unrepresentable | three-state + cite. **`len(holders)` is a FLOOR, never a count** |
 | `holders_basis` | `.holders_basis` | 11 | **GATE** | `pinned_has_role_confirmed` / `not_determined` | any failure ⇒ `not_determined` | gate |
 | `holder_set_exhaustive` | `.holder_set_exhaustive` | 11 | **GATE** | **always `not_determined`**, CHECK-pinned | unconditional | gate. A consumer may **never** read `holders` as complete |
