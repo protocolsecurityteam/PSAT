@@ -213,6 +213,51 @@ def _attach_effect_tags(event: dict | None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Strict word decoding (Safe module/guard addresses)
+# ---------------------------------------------------------------------------
+
+
+def _strict_word(raw: object, index: int = 0) -> str | None:
+    """Word *index* of a ``0x``-prefixed ABI body, lowercased, or ``None``.
+
+    Strict for the same reason ``restaking_reads.decode_word`` is. ``"0x"`` is
+    not a zero word, and the ``.replace("0x", "").zfill(64)`` shape used by the
+    older decoders left-pads an empty topic into the zero address and strips a
+    ``0x`` occurring anywhere in the body, leaving a short string that slices to
+    a wrong address. ``bytes.fromhex`` rather than ``int(..., 16)`` because
+    ``int`` accepts ``_`` separators and surrounding whitespace; it ignores
+    ASCII whitespace itself, hence the explicit byte-length check after it.
+    """
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        return None
+    body = raw[2:]
+    if not body or len(body) % 64 or len(body) < (index + 1) * 64:
+        return None
+    word = body[index * 64 : (index + 1) * 64]
+    try:
+        data = bytes.fromhex(word)
+    except ValueError:
+        return None
+    if len(data) != 32:
+        return None
+    return word.lower()
+
+
+def _strict_word_address(raw: object, index: int = 0) -> str | None:
+    """The address held by word *index*, or ``None``.
+
+    ``None`` when the word is malformed (see :func:`_strict_word`) or when its
+    top 12 bytes are set — an ABI-encoded address is left-padded with zeros, so
+    a word that is not is not an address and publishing its low 20 bytes would
+    invent one. An event that does not decode publishes no address at all.
+    """
+    word = _strict_word(raw, index)
+    if word is None or word[:24] != "0" * 24:
+        return None
+    return "0x" + word[24:]
+
+
+# ---------------------------------------------------------------------------
 # Governance log parser
 # ---------------------------------------------------------------------------
 
@@ -364,9 +409,11 @@ def parse_governance_log(log: dict) -> dict | None:
         # ExecutionFromModule[Success|Failure](address indexed module).
         # No SafeTx hash + no payment — the call bypasses the SafeTx
         # wrapping path because the module is pre-authorised. Just the
-        # module address in topics[1].
-        if len(topics) >= 2 and topics[1]:
-            event["module"] = _topic_to_address(topics[1])
+        # module address in topics[1], published only when that topic is a
+        # whole, well-formed word — an undecodable log names no module.
+        module = _strict_word_address(topics[1]) if len(topics) >= 2 else None
+        if module is not None:
+            event["module"] = module
 
     elif event_type in ("safe_module_enabled", "safe_module_disabled", "safe_guard_changed"):
         # EnabledModule/DisabledModule/ChangedGuard(address). Indexed from Safe
@@ -374,13 +421,19 @@ def parse_governance_log(log: dict) -> dict | None:
         # topics[1] when the emitter indexed it, else the single data word;
         # topics-only would decode 1.3.0 as "no address" and 1.3.0 is 9 of the
         # 19 Safes on this corpus.
+        #
+        # Either source must decode as a whole word before anything is
+        # published: an empty topic left-padded to width is the ZERO ADDRESS,
+        # which on ``safe_guard_changed`` is the word for "guard removed" — a
+        # protection-withdrawal fact minted from a log that carried no address.
+        # A body that does not decode yields no key at all, not a zero.
         key = "guard" if event_type == "safe_guard_changed" else "module"
         if len(topics) >= 2 and topics[1]:
-            event[key] = _topic_to_address(topics[1])
+            decoded = _strict_word_address(topics[1])
         else:
-            raw = (data or "").replace("0x", "")
-            if len(raw) >= 64:
-                event[key] = "0x" + raw[24:64]
+            decoded = _strict_word_address(data)
+        if decoded is not None:
+            event[key] = decoded
 
     _attach_effect_tags(event)
     return event

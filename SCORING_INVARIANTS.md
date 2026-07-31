@@ -1901,7 +1901,16 @@ through the aggregate rather than to collapse it in SQL, which changes
 `tvl.py::_read_existing_balances` now **omits** a contract with no non-failed
 fetch rather than emitting `total_usd: 0.0`, and derives `partial=True` instead of
 hardcoding `False`: that zero would otherwise enter `TvlSnapshot.total_usd` as a
-measurement.
+measurement. **`refresh_contract_balances` (the default hourly branch) now applies
+the same rule**, which it did not when the sibling was fixed: a contract whose
+native or asset class failed this cycle — or whose nonzero native quantity could
+not be priced — is omitted and flips `partial`, instead of being published at
+`total_usd: 0.0`. The balance rows are still written either way; only the
+published total is withheld. A *measured* empty contract keeps its `0.0`, so
+absence from the breakdown means "not measured", not "holds nothing". Individual
+unpriced ERC-20s are still folded out of the total silently — that is the same
+open limit stated above, and it needs the priced/unpriced three-state carried
+through the aggregate.
 
 **Entity misattribution (M7/16a) — an OPEN defect, not a withdrawal.** Re-verified
 independently at block **25643300**: `contracts.id 544` (AuctionManager
@@ -1999,11 +2008,22 @@ obligation).
 |---|---|--:|---|---|---|
 | `probe_block` | `details->'safe_protection'->>'probe_block'` | 19 applicable | **REQUIRED** | integer height every other key was read at / `"not_determined"` | head read failed or the caller passed an unrecognised block tag ⇒ `"not_determined"` **and the probe is suppressed entirely** — no other key can be positive |
 | `safe_version` | `…->>'safe_version'` | 19 applicable | **GATE** | the probed contract's **self-reported** `VERSION()` string / `"not_determined"` | call reverted, returned nothing, or failed to decode ⇒ `"not_determined"`. Required to read the guard word; nothing else depends on it. **Self-reported, not proven** — a lookalike could return any string; on this corpus it is corroborated by slot-0 singleton identity matching the canonical Safe deployments at 25643300 on **19/19**, which the probe does not itself read |
-| `modules_head` | `…->>'modules_head'` | 19 applicable | **REQUIRED** | the raw 32-byte word at `keccak256(abi.encode(address(0x1), uint256(1)))` / `"not_determined"` | read raised ⇒ `"not_determined"`. **Cite, never enumerate from** |
-| `module_set` | `…->'module_set'` | 19 applicable | **REQUIRED**, three-state | `[]` = **proven empty at `probe_block`** (head == sentinel) / `"not_determined"` | any non-sentinel head — including a zero word (mapping entry never written) and a word that is not a left-padded address — and any read failure ⇒ `"not_determined"`. **A non-empty enumerated array is NEVER published here**; it is admissible only from a list walked to the sentinel or a paginated `eth_call` that returned `next == sentinel`, neither of which this probe performs |
+| `modules_head` | `…->>'modules_head'` | 19 applicable | **REQUIRED** | the raw 32-byte word at `keccak256(abi.encode(address(0x1), uint256(1)))` / `"not_determined"` | read raised, **or returned anything that is not exactly 64 hex nibbles** ⇒ `"not_determined"`. **Cite, never enumerate from** |
+| `module_set` | `…->'module_set'` | 19 applicable | **REQUIRED**, three-state | `[]` = **proven empty at `probe_block`** (head == sentinel) / `"not_determined"` | any non-sentinel head — including a zero word (mapping entry never written) and a word that is not a left-padded address — any read failure, **and any malformed return (short, empty, whitespace- or separator-bearing)** ⇒ `"not_determined"`. **A non-empty enumerated array is NEVER published here**; it is admissible only from a list walked to the sentinel or a paginated `eth_call` that returned `next == sentinel`, neither of which this probe performs |
 | `module_set_basis` | `…->>'module_set_basis'` | 19 applicable | **REQUIRED** (cite) | `"storage_linked_list_terminated"` / `"not_determined"` | not_determined whenever `module_set` is |
 | `protection_is_upper_bound` | `…->'protection_is_upper_bound'` | 1 true / 18 not_determined | **GATE** | `true` = **proven**: a module is enabled at `probe_block`, so k/n bounds protection from above; the module address is cited as `modules_head_address` / `"not_determined"` | **never `false`.** Proving k/n exact needs "no module has ever been enabled", which requires a warm `EnabledModule` cursor from the Safe's creation block; absent that it stays `not_determined`, including on a proven-empty head |
-| `guard` | `…->>'guard'` | 19 applicable | **REQUIRED**, four-state | `"proven_address"` (+`guard_address`) / `"proven_zero"` — **only** on a release whose deployed singleton carries `GUARD_STORAGE_SLOT` (1.3.0, 1.4.1) / `"feature_absent"` — 1.1.1, where the slot is unused storage and a zero there is not "guard disabled" / `"not_determined"` | word unread, version unknown or outside both verified sets (incl. variant suffixes like `1.3.0+L2`), or a word contradicting the version's feature set ⇒ `"not_determined"` |
+| `guard` | `…->>'guard'` | 19 applicable | **REQUIRED**, four-state | `"proven_address"` (+`guard_address`) / `"proven_zero"` — **only** on a release whose deployed singleton carries `GUARD_STORAGE_SLOT` (1.3.0, 1.4.1) / `"feature_absent"` — 1.1.1, where the slot is unused storage and a zero there is not "guard disabled" / `"not_determined"` | word unread **or malformed**, version unknown or outside both verified sets (incl. variant suffixes like `1.3.0+L2`), or a word contradicting the version's feature set ⇒ `"not_determined"` |
+
+**Decode discipline (why every "malformed ⇒ not_determined" above is load-bearing).**
+The words are decoded through `services/monitoring/restaking_reads.py::decode_word`
+— exactly 64 nibbles behind `0x`, parsed with `bytes.fromhex` (not `int(…, 16)`,
+which accepts `_` separators and strips whitespace) and re-checked at 32 bytes
+(`bytes.fromhex` ignores ASCII whitespace too). Nothing is left-padded before
+being length-checked: under a pad-then-check decoder `"0x"` becomes the zero word
+— i.e. `guard: "proven_zero"` — and `"0x1"` becomes `address(0x1)`, the modules
+sentinel, i.e. `module_set: []` with basis `storage_linked_list_terminated`, a
+proven-empty that licenses the k/n reading. Both were reachable from a
+one-character return before this was tightened.
 
 **Consumption obligation.** `module_set == []` + its `probe_block` licenses
 treating k/n as the protection *at that height only*; `protection_is_upper_bound
@@ -2023,6 +2043,12 @@ registered in `GOVERNANCE_EVENT_TOPICS` (so `_scan_topics_union` enrolls every
 active Safe) and the two slots are polled as `storage_slot` entries. The poll and
 the fold observe **change**; neither publishes membership. A cold cursor on either
 module topic keeps "no module has ever been enabled" at `not_determined`.
+The address on those three events is indexed from 1.4.1 and non-indexed on
+1.1.1/1.3.0, so `parse_governance_log` reads `topics[1]` or the single data word
+— each strictly, as a whole 32-byte left-padded word. A topic or body that does
+not decode publishes **no** `module` / `guard` key at all: padded to width, an
+empty topic is `0x0000…0000`, which on `ChangedGuard` is how "the guard was
+removed" is written.
 
 ### B10.1b. `details->'gated_contract_backlink'` — the role-principal pairing witness (C3 / Unit 9)
 

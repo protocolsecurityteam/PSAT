@@ -15,6 +15,7 @@ from eth_utils.crypto import keccak as _keccak
 
 from schemas.contract_analysis import ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
+from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
 from utils.rpc import (
@@ -488,6 +489,9 @@ _SAFE_MODULES_HEAD_SLOT = "0x" + _keccak(_SAFE_SENTINEL_MODULES_WORD + _SAFE_MOD
 _SAFE_GUARD_SLOT = "0x" + _keccak(text="guard_manager.guard.address").hex()
 _SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
 
+# The largest word value that is still a left-padded address.
+_ADDRESS_WORD_MAX = (1 << 160) - 1
+
 # Safe releases whose DEPLOYED singleton source was read and found to contain (or
 # to lack) ``GUARD_STORAGE_SLOT``. A zero word at the guard slot means "no guard
 # is set" only on a release that HAS the feature; on 1.1.1 the slot is unused
@@ -525,14 +529,17 @@ def _resolve_pinned_block(rpc_url: str, block_tag: str, *, chain_id: int | None 
 
 
 def _word_to_address(word: str | None) -> str | None:
-    """The address a 32-byte word holds, or ``None`` when the word is not a
-    clean left-padded address (top 12 bytes set ⇒ it is not an address at all)."""
-    if not isinstance(word, str) or not word.startswith("0x"):
+    """The address a 32-byte word holds, or ``None``.
+
+    ``None`` for anything that is not exactly 64 hex nibbles behind ``0x``, and
+    ``None`` when the top 12 bytes are set (that word is not an address at all).
+    The decode is delegated to ``decode_word`` rather than re-derived: left-pad
+    then length-check cannot reject anything, and under it ``"0x1"`` pads into
+    the modules sentinel — a one-nibble read minting a proven-empty module set."""
+    value = _decode_word(word)
+    if value is None or value > _ADDRESS_WORD_MAX:
         return None
-    body = word[2:].lower().rjust(64, "0")
-    if len(body) != 64 or body[:24] != "0" * 24:
-        return None
-    return "0x" + body[24:]
+    return "0x" + f"{value:040x}"
 
 
 def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str, str | None]:
@@ -586,11 +593,20 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
         out["safe_version"] = version
 
     def _word(slot: str) -> str | None:
+        """The 32-byte word at ``slot``, or ``None`` for a failed or malformed read.
+
+        Nothing is padded. ``eth_getStorageAt`` answering ``"0x"``, ``"0x1"``, a
+        63-nibble body or whitespace is not a word, and padding one to width
+        before checking it would turn "the node told us nothing" into the
+        sentinel or into a zero — a proven state minted from a non-observation.
+        Every such shape leaves the whole probe ``not_determined``."""
         try:
             raw = _get_storage_at(rpc_url, address, slot, pinned, chain_id=chain_id)
         except Exception:
             return None
-        return "0x" + raw[2:].lower().rjust(64, "0") if isinstance(raw, str) and raw.startswith("0x") else None
+        if not isinstance(raw, str) or _decode_word(raw) is None:
+            return None
+        return "0x" + raw[2:].lower()
 
     head_word = _word(_SAFE_MODULES_HEAD_SLOT)
     if head_word is not None:
