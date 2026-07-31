@@ -303,7 +303,7 @@ def refresh_contract_balances(
 
         # Native coin (ETH / POL / BNB / ... — symbol is the chain's native_asset)
         if eth_wei is not None and eth_wei > 0:
-            eth_usd = (eth_wei / 1e18) * native_price if native_price else None
+            eth_usd = (eth_wei / 1e18) * native_price if native_price is not None else None
             session.add(
                 ContractBalance(
                     contract_id=contract.id,
@@ -313,13 +313,13 @@ def refresh_contract_balances(
                     decimals=18,
                     raw_balance=str(eth_wei),
                     price_usd=native_price,
-                    usd_value=round(eth_usd, 2) if eth_usd else None,
+                    usd_value=round(eth_usd, 2) if eth_usd is not None else None,
                     observed_address=observed_address,
                     block_number=native_block,
                     fetch_id=fetch.id,
                 )
             )
-            if eth_usd:
+            if eth_usd is not None:
                 contract_total += eth_usd
                 tokens.append({"symbol": native_symbol, "usd_value": round(eth_usd, 2)})
 

@@ -56,7 +56,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractDependency, Job, JobStage
 from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
-from utils.chains import chain_enabled
+from utils.chains import canonical_chain, chain_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
     parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
     parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
-    parent_chain = _mainnet_coalesced_chain(getattr(parent_contract, "chain", None))
+    parent_chain = _mainnet_coalesced_chain(canonical_chain(getattr(parent_contract, "chain", None)))
     if parent_id is None:
         return parent_owns_high, {}
 
