@@ -275,6 +275,9 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         if path in allowed:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if "RestakingPosition" in text:
+        # Both the mapped identifier AND the table name: a raw-SQL consumer
+        # (``FROM restaking_positions_latest``) never mentions the class, and the
+        # table name is the substring both relations share.
+        if any(needle in text for needle in ("RestakingPosition", "restaking_positions")):
             offenders.append(str(path.relative_to(root)))
     assert offenders == []

@@ -88,6 +88,18 @@ ZERO_ADDRESS = "0x" + "0" * 40
 _INT256_MODULUS = 1 << 256
 _INT256_MAX = (1 << 255) - 1
 
+# Storage widths of the two pod-derived columns. A word above these is not a
+# smaller number; it is a fact this schema cannot hold, i.e. a non-observation.
+_INT32_MAX = (1 << 31) - 1
+_INT64_MAX = (1 << 63) - 1
+
+
+def _bounded(value: int | None, ceiling: int) -> int | None:
+    """``value`` if the column can hold it, else ``None``. Never clamped."""
+    if value is None or value > ceiling:
+        return None
+    return value
+
 
 @dataclass(frozen=True)
 class NodeReads:
@@ -109,19 +121,34 @@ class NodeReads:
     last_checkpoint_timestamp: str | None
 
 
+def _hex_word_value(body: str) -> int | None:
+    """64 hex NIBBLES as an unsigned int, or ``None``.
+
+    ``bytes.fromhex`` rather than ``int(body, 16)`` because Python's ``int``
+    accepts ``_`` separators and strips surrounding whitespace, so a 63-nibble
+    return with a trailing newline parses as a perfectly clean value. That is a
+    short return decoding to a number — precisely the shape the length check
+    above it exists to reject, arriving through the parser instead of past it.
+    """
+    if len(body) != 64:
+        return None
+    try:
+        return int.from_bytes(bytes.fromhex(body), "big")
+    except ValueError:
+        return None
+
+
 def decode_word(raw: object) -> int | None:
     """A full 32-byte word as an unsigned int, or ``None``.
 
-    ``None`` for a failed call, a short return, ``"0x"``, or anything non-hex.
-    There is deliberately no lenient path: ``int("0x0", 16)`` is 0, so a decoder
-    that tolerated short return data would mint a zero out of an empty return.
+    ``None`` for a failed call, a short return, ``"0x"``, or anything that is not
+    64 hex digits. There is deliberately no lenient path: ``int("0x0", 16)`` is 0,
+    so a decoder that tolerated short return data would mint a zero out of an
+    empty return.
     """
     if not isinstance(raw, str) or len(raw) != WORD_HEX_LEN or not raw.startswith("0x"):
         return None
-    try:
-        return int(raw, 16)
-    except ValueError:
-        return None
+    return _hex_word_value(raw[2:])
 
 
 def decode_int256_word(raw: object) -> int | None:
@@ -145,11 +172,18 @@ def decode_address_word(raw: object) -> str | None:
     and ``None`` only where no word was returned at all. Callers must keep those
     apart: the zero address is half of the proven-absent arm, an absent word is
     ``not_determined``.
+
+    **The high-order 12 bytes must be zero.** Truncating them instead would read
+    a non-canonical word as a clean address, and this is wire-reachable: an
+    upgraded or non-conformant callee can return one. It is load-bearing twice —
+    the identity cross-read mints ``proven_pod_cross_read`` on two address legs
+    matching, and the witnessed strategy is both published and used to build the
+    shares calldata.
     """
     value = decode_word(raw)
-    if value is None:
+    if value is None or value >> 160:
         return None
-    return "0x" + f"{value:064x}"[24:]
+    return "0x" + f"{value:040x}"
 
 
 def decode_strict_bool_word(raw: object) -> bool | None:
@@ -181,9 +215,8 @@ def decode_withdrawable_shares(raw: object) -> tuple[int | None, int | None]:
     body = raw[2:]
     if len(body) != 64 * 6:
         return None, None
-    try:
-        words = [int(body[i * 64 : (i + 1) * 64], 16) for i in range(6)]
-    except ValueError:
+    words = [_hex_word_value(body[i * 64 : (i + 1) * 64]) for i in range(6)]
+    if any(word is None for word in words):
         return None, None
     if words[0] != 0x40 or words[1] != 0x80 or words[2] != 1 or words[4] != 1:
         return None, None
@@ -241,6 +274,36 @@ def _agreement(withdrawable: int, deposits: list[int]) -> str:
     return CROSS_READ_DISAGREE_WITHIN_INVARIANT
 
 
+def withdrawable_calldata_operands(calldata: object) -> tuple[str, str] | None:
+    """``(staker, strategy)`` actually encoded in a ``getWithdrawableShares`` call.
+
+    ``None`` unless the bytes are exactly the one-strategy shape this module
+    issues: the right selector, then ``(address staker, address[] strategies)``
+    with head offset ``0x40``, length 1, and one element — every operand a
+    canonical address word.
+
+    This exists so the strategy is read back out of the BYTES THAT WERE SENT
+    rather than taken on the caller's word. A gate that is only a calling
+    convention on an exported function is not a gate: the same function, handed a
+    strategy the answer was not read against, would publish it beside the answer.
+    """
+    if not isinstance(calldata, str) or not calldata.startswith("0x"):
+        return None
+    body = calldata[2:]
+    if len(body) != 8 + 64 * 4:
+        return None
+    if "0x" + body[:8] != selector(_SEL_GET_WITHDRAWABLE_SHARES):
+        return None
+    words = body[8:]
+    staker = decode_address_word("0x" + words[0:64])
+    offset = _hex_word_value(words[64:128])
+    length = _hex_word_value(words[128:192])
+    strategy = decode_address_word("0x" + words[192:256])
+    if staker is None or strategy is None or offset != 0x40 or length != 1:
+        return None
+    return staker, strategy
+
+
 def position_record(
     *,
     chain_id: int,
@@ -249,12 +312,20 @@ def position_record(
     block_hash: str,
     strategy: str | None,
     reads: NodeReads,
+    withdrawable_calldata: str | None = None,
 ) -> dict[str, object]:
     """The published record for one node at one pinned height.
 
     ``strategy`` is ``EigenPodManager.beaconChainETHStrategy()`` read at the SAME
     block, or ``None`` if that read failed — in which case no shares read is
     licensed at all, whatever came back on the wire.
+
+    ``withdrawable_calldata`` is the exact calldata the shares answer was read
+    with. The witnessed strategy alone does not license the quantity: the answer
+    must have been read AGAINST that strategy, and against THIS node. Both are
+    checked out of the issued bytes, so the gate holds for any caller rather than
+    only for the one that happens to use a single variable for both. Omitted
+    (``None``) ⇒ the quantity is ``not_determined``.
 
     Four bases, disjoint and exhaustive; the two quantity-bearing ones are the
     only ones a consumer may read as an observation.
@@ -295,12 +366,23 @@ def position_record(
     # Pod-derived facts require the proven pod. Without this gate a
     # ``lastCheckpointTimestamp`` of 0 — "never checkpointed" — could be minted
     # against an address never proven to have a pod at all.
-    record["active_validator_count"] = decode_word(reads.active_validator_count)
-    record["last_checkpoint_timestamp"] = decode_word(reads.last_checkpoint_timestamp)
+    #
+    # Range-guarded to the storage column's own width. An out-of-range word is a
+    # non-observation of that fact and nothing more; letting it reach the insert
+    # raises NumericValueOutOfRange and aborts the whole batch, so ONE malformed
+    # pod would cost every other node in the cycle its observation.
+    record["active_validator_count"] = _bounded(decode_word(reads.active_validator_count), _INT32_MAX)
+    record["last_checkpoint_timestamp"] = _bounded(decode_word(reads.last_checkpoint_timestamp), _INT64_MAX)
 
     if strategy is None:
         # The strategy is a witness, not a literal. Without it the shares read
         # is against an unproven input, and a wrong input answers 0 with success.
+        return record
+
+    operands = withdrawable_calldata_operands(withdrawable_calldata)
+    if operands is None or operands != (node_address.lower(), strategy.lower()):
+        # Either the calldata was not supplied, or the answer was read against a
+        # different strategy or a different staker than the ones being published.
         return record
 
     withdrawable, dm_deposit = decode_withdrawable_shares(reads.withdrawable_shares)
@@ -375,8 +457,19 @@ def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
     except Exception as exc:
         logger.info("restaking position: block header read failed at %d: %s", block, exc)
         return None
-    block_hash = (header or {}).get("hash") if isinstance(header, dict) else None
+    if not isinstance(header, dict):
+        return None
+    block_hash = header.get("hash")
     if not isinstance(block_hash, str) or len(block_hash) != WORD_HEX_LEN:
+        return None
+    # The header must be the one that was asked for. A racing or load-balanced
+    # upstream can answer a different height, and pairing that hash with this
+    # number would make the stored reorg witness name a block the reads were not
+    # issued at — which is the replay claim (inv.11/12), not a detail.
+    number = header.get("number")
+    if not isinstance(number, str) or not number.startswith("0x"):
+        return None
+    if _hex_word_value(number[2:].rjust(64, "0")) != block:
         return None
     return block, block_hash
 
@@ -428,26 +521,29 @@ def read_positions(
         strategy = None
 
     nodes = [a.lower() for a in node_addresses]
+    # Without a witnessed strategy the shares call is not issued at all: its
+    # answer could not license anything, and an unissued call is cheaper than a
+    # discarded one. The stride follows so the windows stay aligned.
+    stride = 5 if strategy else 4
+    issued: dict[str, str] = {}
     first_calls: list[tuple[str, str]] = []
     for node in nodes:
         first_calls.append((node, selector(_SEL_GET_EIGEN_POD)))
         first_calls.append((eigen_pod_manager, selector(_SEL_OWNER_TO_POD) + _word(node)))
         first_calls.append((eigen_pod_manager, selector(_SEL_HAS_POD) + _word(node)))
         first_calls.append((eigen_pod_manager, selector(_SEL_POD_OWNER_DEPOSIT_SHARES) + _word(node)))
-        first_calls.append(
-            (
-                delegation_manager,
-                _withdrawable_calldata(node, strategy) if strategy else selector(_SEL_GET_WITHDRAWABLE_SHARES),
-            )
-        )
+        if strategy:
+            issued[node] = _withdrawable_calldata(node, strategy)
+            first_calls.append((delegation_manager, issued[node]))
     first = _aggregate(url, first_calls, block_tag, chain_id)
     if len(first) != len(first_calls):
         return []
 
     partial: dict[str, list[str | None]] = {}
     for index, node in enumerate(nodes):
-        window = first[index * 5 : index * 5 + 5]
-        partial[node] = [data if ok else None for ok, data in window]
+        window = first[index * stride : index * stride + stride]
+        values = [data if ok else None for ok, data in window]
+        partial[node] = values + [None] * (5 - stride)
 
     # Second round: the pod-local legs, for the nodes whose pod cross-read holds.
     pod_by_node: dict[str, str] = {}
@@ -498,6 +594,7 @@ def read_positions(
                     active_validator_count=count,
                     last_checkpoint_timestamp=timestamp,
                 ),
+                withdrawable_calldata=issued.get(node),
             )
         )
     return records
@@ -589,8 +686,14 @@ def persist_positions(
             )
         )
     session.flush()
-    for node in {str(record["node_address"]) for record in records}:
-        prune_positions(session, chain_id=int(str(records[0]["chain_id"])), node_address=node)
+    # One cycle reads one chain, so every record here shares a ``chain_id`` and
+    # the first row's is the batch's. A future multi-chain caller must prune per
+    # (chain, node) instead — pruning node X on the wrong chain would delete
+    # observations that were never in this batch.
+    chain_ids = {int(str(record["chain_id"])) for record in records}
+    for chain_id in chain_ids:
+        for node in {str(record["node_address"]) for record in records if int(str(record["chain_id"])) == chain_id}:
+            prune_positions(session, chain_id=chain_id, node_address=node)
     return len(records)
 
 
@@ -643,4 +746,5 @@ __all__ = [
     "prune_positions",
     "read_positions",
     "restaking_history_depth",
+    "withdrawable_calldata_operands",
 ]

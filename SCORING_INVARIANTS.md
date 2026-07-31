@@ -2788,11 +2788,46 @@ its direction (`>= X wei`), its `shares_basis` and `node_set_completeness`.
 `contracts.id 569` — **the beacon implementation**, whose own `getEigenPod()`
 returns a 32-byte zero) and **2038** (`EtherFiNodesManager.forwardExternalCall`)
 **stay `reach = not_determined`**. This unit writes nothing to
-`effective_functions`, `recipes.py`, or any reach projection. Licensing that
-consumption needs a **destination witness** that `forwardExternalCall` reaches the
-EigenLayer withdrawal path; `destination_constraint.state` is `not_determined`
-today. Attaching the position to either row is **inv.16a's sweepETH error — the
+`effective_functions`, `recipes.py`, or any reach projection.
+
+Licensing that consumption needs a **destination witness** that
+`forwardExternalCall` reaches the EigenLayer withdrawal path. **Neither row has
+one, but they do not have the same state, and the difference matters enough to
+state exactly.** Measured on the replica:
+
+* ef **1184** — `witness.destination_constraint` is `{"state": "not_determined"}`;
+* ef **2038** — `{"state": "constrained", "guard": "external_call_revert",
+  "binding": "operand", "leaf_path": [1], "pins": null}`.
+
+`constrained` on 2038 is **not** a destination witness. The guard is
+`external_call_revert`: it witnesses that the function propagates a failure of
+the call it makes, which constrains what happens *if* the call reverts. It says
+nothing about **where** the call goes — `pins` is `null`, so no destination is
+pinned at all, and a revert-propagation guard is compatible with every possible
+callee. The conclusion is therefore unchanged for both rows, and this paragraph
+previously asserted `not_determined` for both, which was false for 2038.
+
+Attaching the position to either row is **inv.16a's sweepETH error — the
 5,188× over-valuation — recurring in a new place**.
+
+#### Deferral: the plane has no production writer yet
+
+**Stated with its cause.** Nothing in this repository calls `read_positions`,
+`persist_positions` or `enroll_restaking_fold` on a schedule; every public symbol
+of both new modules has exactly two references, its definition and its
+`__all__`. No `PubkeyLinked` cursor exists on the replica, and **no row of this
+plane is published anywhere today**.
+
+That is deliberate, not an oversight. Wiring a periodic writer is the one part of
+this unit that cannot be verified under the constraint that forbids running the
+orchestrator or a full pipeline end-to-end, so shipping it would have meant
+shipping the only unexercised code in the unit. The strictly-smaller provable
+core is the witness and its schema, both of which ARE exercised. The
+consequence to state plainly: the "3 reads/node/cycle steady-state" and "its own
+cursor" in the unit's spec describe a cycle that **does not yet run**, and the
+structural exclusion from every spot-balance reader is currently absolute for the
+trivial reason that the plane is empty. The remaining work is the periodic step
+and its enrollment call, nothing in the witness itself.
 
 **Small populations (B14).** 1 `EtherFiNode` `contracts` row (569); 2
 `forwardExternalCall` consumer rows (1184, 2038); the lane's original single

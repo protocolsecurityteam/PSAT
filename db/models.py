@@ -1746,6 +1746,13 @@ class RestakingPosition(Base):
             ")",
             name="ck_rp_basis_matches_value",
         ),
+        # A share quantity is unsigned by construction (the withdrawable leg is
+        # a ``uint256``); only the DEPOSIT leg is signed. Without this the DB
+        # would accept a negative the producer cannot emit.
+        CheckConstraint(
+            "eigenlayer_beacon_shares_wei IS NULL OR eigenlayer_beacon_shares_wei >= 0",
+            name="ck_rp_shares_non_negative",
+        ),
         CheckConstraint(
             f"eigenpod_basis <> '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}' OR eigenpod IS NULL",
             name="ck_rp_no_pod_has_no_address",

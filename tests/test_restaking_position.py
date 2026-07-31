@@ -24,16 +24,21 @@ import pytest
 from sqlalchemy import inspect, select, text
 
 from db.models import Contract, Protocol, RestakingPosition, RestakingPositionLatest
+from services.monitoring import restaking_reads
 from services.monitoring.restaking_reads import (
+    PINNED_FINALITY_MARGIN,
     NodeReads,
+    decode_address_word,
     decode_int256_word,
     decode_strict_bool_word,
     decode_withdrawable_shares,
     decode_word,
     manager_contract_id_for,
     persist_positions,
+    pinned_head,
     position_record,
     restaking_history_depth,
+    withdrawable_calldata_operands,
 )
 from tests.conftest import requires_postgres
 from utils.restaking_status import (
@@ -50,6 +55,7 @@ from utils.restaking_status import (
     SHARES_BASIS_NOT_DETERMINED,
     SHARES_BASIS_READ_FAILED,
 )
+from utils.rpc import selector
 
 BLOCK = 25643300
 BLOCK_HASH = "0x" + "ab" * 32
@@ -74,6 +80,10 @@ EFNM_PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 EFNM_IMPLEMENTATION = "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05"
 
 ZERO_WORD = "0x" + "0" * 64
+
+
+# Distinguishes "caller said nothing" from "caller passed None on purpose".
+_SENTINEL = "<default>"
 
 
 def _word(value: int) -> str:
@@ -102,7 +112,25 @@ def _reads(**overrides: str | None) -> NodeReads:
     return NodeReads(**base)  # type: ignore[arg-type]
 
 
-def _record(node: str = NODE_WITH_SHARES, strategy: str | None = STRATEGY, **overrides: str | None) -> dict:
+def _calldata(node: str = NODE_WITH_SHARES, strategy: str = STRATEGY) -> str:
+    """The exact bytes a ``getWithdrawableShares`` read is issued with."""
+    return (
+        selector("getWithdrawableShares(address,address[])")
+        + node.lower().removeprefix("0x").rjust(64, "0")
+        + f"{64:064x}"
+        + f"{1:064x}"
+        + strategy.lower().removeprefix("0x").rjust(64, "0")
+    )
+
+
+def _record(
+    node: str = NODE_WITH_SHARES,
+    strategy: str | None = STRATEGY,
+    calldata: str | None = _SENTINEL,
+    **overrides: str | None,
+) -> dict:
+    if calldata is _SENTINEL:
+        calldata = _calldata(node, strategy) if strategy else None
     return position_record(
         chain_id=1,
         node_address=node,
@@ -110,6 +138,7 @@ def _record(node: str = NODE_WITH_SHARES, strategy: str | None = STRATEGY, **ove
         block_hash=BLOCK_HASH,
         strategy=strategy,
         reads=_reads(**overrides),
+        withdrawable_calldata=calldata,
     )
 
 
@@ -171,6 +200,7 @@ class TestHappyPathBothShapes:
                 active_validator_count=_word(0),
                 last_checkpoint_timestamp=_word(1784243039),
             ),
+            withdrawable_calldata=_calldata(NODE_ZERO_SHARES),
         )
         assert record == {
             "chain_id": 1,
@@ -219,6 +249,7 @@ class TestHappyPathBothShapes:
                 active_validator_count=_word(0),
                 last_checkpoint_timestamp=_word(1784221571),
             ),
+            withdrawable_calldata=_calldata("0xf538ac27909beed9652b8f008f2246851fded09b"),
         )
         # The pod backing this very row holds exactly 320 ETH at this block.
         assert record["eigenlayer_beacon_shares_wei"] == 0
@@ -315,6 +346,7 @@ class TestStrategyIsWitnessed:
                 active_validator_count=None,
                 last_checkpoint_timestamp=None,
             ),
+            withdrawable_calldata=_calldata("0x00000000000000000000000000000000deadbeef"),
         )
         assert record == _skeleton("0x00000000000000000000000000000000deadbeef")
 
@@ -465,6 +497,95 @@ class TestDecoders:
         assert decode_withdrawable_shares("0x") == (None, None)
 
 
+class TestDecoderStrictness:
+    """A short or non-canonical word must not become a clean number.
+
+    Python's ``int(s, 16)`` accepts ``_`` separators and strips surrounding
+    whitespace, so a 63-nibble return with a trailing newline parses fine — the
+    length check would be satisfied by the padding and the value decoded anyway.
+    Not reachable through ``multicall3_aggregate3`` today (it re-hexes via
+    ``bytes.hex()``), but every decoder here is exported.
+    """
+
+    def test_whitespace_padded_short_word_is_not_a_zero(self):
+        assert decode_word("0x" + "0" * 63 + "\n") is None
+
+    def test_underscore_separated_word_is_rejected(self):
+        assert decode_word("0x_" + "f" * 63) is None
+
+    @pytest.mark.parametrize("body", ["0" * 63 + "\n", "_" + "f" * 63, "g" * 64, "0" * 62 + " 1"])
+    def test_non_hex_bodies_reject_across_every_decoder(self, body):
+        raw = "0x" + body
+        assert decode_word(raw) is None
+        assert decode_int256_word(raw) is None
+        assert decode_address_word(raw) is None
+        assert decode_strict_bool_word(raw) is None
+
+    def test_whitespace_element_word_does_not_decode_to_a_quantity(self):
+        clean = _shares_return(0, 0)
+        dirty = clean[: 2 + 64 * 3] + "0" * 63 + "\n" + clean[2 + 64 * 4 :]
+        assert decode_withdrawable_shares(dirty) == (None, None)
+
+    def test_whitespace_padded_offset_word_fails_the_shape_assertion(self):
+        dirty = "0x" + " " + "0" * 61 + "40" + "".join(f"{v:064x}" for v in (0x80, 1, 0, 1, 0))
+        assert decode_withdrawable_shares(dirty) == (None, None)
+
+    def test_dirty_high_order_bits_are_not_truncated_into_an_address(self):
+        """Wire-reachable: a non-conformant or upgraded callee returns this."""
+        dirty = "0x" + "de" * 12 + POD_WITH_SHARES.removeprefix("0x")
+        assert decode_address_word(dirty) is None
+        assert decode_address_word("0x" + "00" * 12 + POD_WITH_SHARES.removeprefix("0x")) == POD_WITH_SHARES
+
+    def test_dirty_address_word_denies_the_pod_cross_read(self):
+        dirty = "0x" + "de" * 12 + POD_WITH_SHARES.removeprefix("0x")
+        record = _record(get_eigen_pod=dirty, owner_to_pod=dirty)
+        assert record["eigenpod_basis"] == EIGENPOD_BASIS_NOT_DETERMINED
+
+
+class TestStrategyGateIsOnTheIssuedBytes:
+    """The witnessed strategy alone is a calling convention, not a gate.
+
+    What licenses the quantity is that the answer was read AGAINST that strategy
+    and against THIS node, checked out of the bytes that were sent.
+    """
+
+    def test_asserted_strategy_must_match_the_calldata(self):
+        record = _record(strategy=NEAR_MISS_STRATEGY, calldata=_calldata(NODE_WITH_SHARES, STRATEGY))
+        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
+        assert record["shares_strategy"] is None
+
+    def test_calldata_for_a_different_staker_is_rejected(self):
+        record = _record(calldata=_calldata(NODE_ZERO_SHARES, STRATEGY))
+        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
+
+    def test_omitted_calldata_yields_not_determined(self):
+        record = _record(calldata=None)
+        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "0x",
+            "0xdeadbeef",
+            "0x" + "00" * 132,
+            selector("getWithdrawableShares(address,address[])")
+            + NODE_WITH_SHARES.removeprefix("0x").rjust(64, "0")
+            + f"{32:064x}"
+            + f"{1:064x}"
+            + STRATEGY.removeprefix("0x").rjust(64, "0"),
+        ],
+    )
+    def test_malformed_calldata_is_rejected(self, bad):
+        assert withdrawable_calldata_operands(bad) is None
+        assert _record(calldata=bad)["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
+
+    def test_coherent_calldata_publishes(self):
+        record = _record()
+        assert record["shares_basis"] == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
+        assert record["shares_strategy"] == STRATEGY
+        assert withdrawable_calldata_operands(_calldata()) == (NODE_WITH_SHARES, STRATEGY)
+
+
 class TestPodFactsRequireAProvenPod:
     def test_pod_facts_withheld_without_the_cross_read(self):
         record = _record(has_pod="0x", active_validator_count=_word(0), last_checkpoint_timestamp=_word(0))
@@ -474,6 +595,72 @@ class TestPodFactsRequireAProvenPod:
     def test_never_checkpointed_zero_is_a_witness_when_the_pod_is_proven(self):
         record = _record(last_checkpoint_timestamp=_word(0))
         assert record["last_checkpoint_timestamp"] == 0
+
+    def test_out_of_range_pod_words_are_not_determined_not_an_abort(self):
+        """One malformed pod must not cost every other node its observation.
+
+        Unguarded, a 2**200 word reaches the insert as a Numeric that the int4 /
+        int8 columns cannot hold, raising NumericValueOutOfRange and taking the
+        whole batch down with it.
+        """
+        record = _record(active_validator_count=_word(2**200), last_checkpoint_timestamp=_word(2**200))
+        assert record["active_validator_count"] is None
+        assert record["last_checkpoint_timestamp"] is None
+
+    @pytest.mark.parametrize(
+        ("count", "timestamp", "expected"),
+        [
+            (2**31 - 1, 2**63 - 1, (2**31 - 1, 2**63 - 1)),
+            (2**31, 2**63 - 1, (None, 2**63 - 1)),
+            (3, 2**63, (3, None)),
+        ],
+    )
+    def test_pod_fact_bounds_are_the_column_widths(self, count, timestamp, expected):
+        record = _record(active_validator_count=_word(count), last_checkpoint_timestamp=_word(timestamp))
+        assert (record["active_validator_count"], record["last_checkpoint_timestamp"]) == expected
+
+
+class TestPinnedHead:
+    """The stored height and hash must name the same block the reads were at."""
+
+    def _stub(self, monkeypatch, header):
+        calls = {"n": 0}
+
+        def fake(url, method, params, **kwargs):
+            if method == "eth_blockNumber":
+                return hex(BLOCK + PINNED_FINALITY_MARGIN)
+            calls["n"] += 1
+            return header
+
+        monkeypatch.setattr(restaking_reads, "rpc_request", fake)
+        return calls
+
+    def test_matching_header_pins(self, monkeypatch):
+        self._stub(monkeypatch, {"number": hex(BLOCK), "hash": BLOCK_HASH})
+        assert pinned_head(1, "http://stub") == (BLOCK, BLOCK_HASH)
+
+    def test_header_for_a_different_height_is_refused(self, monkeypatch):
+        """A racing or load-balanced upstream can answer another block.
+
+        Pairing that hash with this number would make the stored reorg witness
+        name a block the reads were never issued at.
+        """
+        self._stub(monkeypatch, {"number": hex(BLOCK - 3), "hash": BLOCK_HASH})
+        assert pinned_head(1, "http://stub") is None
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            {"hash": BLOCK_HASH},
+            {"number": BLOCK, "hash": BLOCK_HASH},
+            {"number": hex(BLOCK), "hash": "0xabc"},
+            {"number": hex(BLOCK)},
+            None,
+        ],
+    )
+    def test_unusable_header_writes_nothing(self, monkeypatch, header):
+        self._stub(monkeypatch, header)
+        assert pinned_head(1, "http://stub") is None
 
 
 @requires_postgres
@@ -549,6 +736,10 @@ class TestConstraintsAreABackstop:
             pytest.param(
                 {"eigenpod_basis": EIGENPOD_BASIS_NO_EIGENPOD_PROVEN},
                 id="absent-pod-carrying-an-address",
+            ),
+            pytest.param(
+                {"eigenlayer_beacon_shares_wei": -1, "deposit_shares_wei": -1},
+                id="negative-share-quantity",
             ),
         ],
     )

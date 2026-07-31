@@ -144,6 +144,10 @@ def upgrade() -> None:
         sa.CheckConstraint("cross_read_agreement IN " + _tuple(CROSS_READ_AGREEMENTS), name="ck_rp_agreement_domain"),
         sa.CheckConstraint(_SHARES_ARMS, name="ck_rp_basis_matches_value"),
         sa.CheckConstraint(
+            "eigenlayer_beacon_shares_wei IS NULL OR eigenlayer_beacon_shares_wei >= 0",
+            name="ck_rp_shares_non_negative",
+        ),
+        sa.CheckConstraint(
             f"eigenpod_basis <> '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}' OR eigenpod IS NULL",
             name="ck_rp_no_pod_has_no_address",
         ),
