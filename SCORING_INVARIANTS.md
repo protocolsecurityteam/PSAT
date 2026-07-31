@@ -2033,12 +2033,21 @@ fired from the recursive walk's role-principal projection
 analyzable contract. Persisted verbatim onto `control_graph_nodes.details` by
 `replace_control_graph_rows`. **No migration.**
 
-**Population (measured, not estimated).** **37** applicable `control_graph_nodes`
-rows over **32** distinct addresses, corresponding to **37 distinct (M, V)
-pairs** (32 distinct M, 16 distinct V). Re-run over all 37 pairs at block
-25643300: **20 publish `true`, 17 `not_determined`** (all 17 because the getter
-does not answer — zero mismatches and zero control failures in this corpus, so
-the mismatch arm is **latent here**).
+**Population (measured, not estimated).** **37** marked `control_graph_nodes`
+rows / **38** projections (the number of probe firings) over **32** distinct
+addresses: **32** distinct M, **17** distinct V. Re-run over all 38 pairs at
+block 25643300: **20 publish `true`, 18 `not_determined`** — 17 `not_determined`
+if counted over marked rows — and all 18 because the getter does not answer, so
+with zero mismatches and zero control failures the mismatch arm is **latent
+here**. The row and projection counts differ by one on purpose: a lens keyed on
+`details->>'source' = 'semantic_capability:role_grant'` **undercounts firings by
+one**, because `_ensure_node`'s last-write-wins merge
+(`services/resolution/recursive.py:615-618`) can overwrite the role-grant marker
+with a later projection onto the same row — measured on
+`(0x70a64840…, 0x6889e57b…)` at `contract_id=471`, whose marker is NULL while its
+`role_principal` edge survives. That same merge is why
+`gated_contract_address` is published: it makes each verdict name its own
+subject rather than depending on a sibling key that can be erased.
 
 **Cost.** +2 RPC per applicable pair (the `vault()` read, plus the negative
 control fired only on a match), and `resolve_control_graph` runs in **both** the
