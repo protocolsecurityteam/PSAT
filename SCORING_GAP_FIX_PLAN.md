@@ -991,8 +991,13 @@ consensus layer, not readable from the execution layer (~66 ETH here, unbounded 
 general). **Attach the position to `effective_functions.id` 1184** (the beacon
 **implementation**, whose own `getEigenPod()==0x0`) **or 2038** as reach until a
 **destination witness** proves `forwardExternalCall` reaches the EigenLayer
-withdrawal path (`destination_constraint.state` is `not_determined` today) — both
-rows stay `reach = not_determined`. This is the sweepETH 16a error (5,188×
+withdrawal path. Neither row has one, but they do not share a state: ef 1184 is
+`{"state": "not_determined"}` while ef 2038 is `{"state": "constrained", "guard":
+"external_call_revert", "binding": "operand", "leaf_path": [1], "pins": null}`.
+`constrained` there is **not** a destination witness — a revert-propagation guard
+constrains what happens *if* the call reverts, says nothing about where it goes, and
+`pins` is null, so it is compatible with every callee. Both rows stay
+`reach = not_determined`. This is the sweepETH 16a error (5,188×
 over-valuation) waiting to recur. If ever published as a floor it carries its
 direction (`>= $X`) and its own basis column so it can **never** be summed with a
 spot balance.
