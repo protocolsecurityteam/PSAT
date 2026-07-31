@@ -2703,3 +2703,148 @@ the row's only handle on its own transaction — to preserve referential
 tidiness. NO ACTION instead refuses to delete a receipt fact that events still
 reference; the normal lifecycle never needs to (`Contract` deletes cascade to
 the events, i.e. the child side).
+
+### B18. Role holder plane — the lower bound a fold cannot fake (D6-accept / Unit 7B)
+
+`role_definitions` could name a role and `function_principals` could name an
+address, but nothing joined the two: `effective_functions.authority_roles`,
+`capability_expr`, `claims` and `control_graph_edges.label` match the real role
+names — and their keccaks — **zero** times. This plane closes that, keyed
+`(chain_id, registry_address, role_hash)` in the new table
+`role_holder_planes`.
+
+**Two surfaces, and neither does the other's job.** The
+`RoleGranted`/`RoleRevoked` fold PROPOSES candidates; a pinned
+`hasRole(bytes32,address)` (`0x91d14854`) read WITNESSES each one. Only the read
+can put an address in `holders`. That asymmetry is the whole design: a fold that
+misses grants, mis-orders revokes or stops early yields a **smaller** lower
+bound, never a wrong one. What the fold's incompleteness costs is completeness,
+and completeness is published separately and permanently as `not_determined`.
+
+Because the fold only proposes, candidates are drawn from every address that
+ever *appears* for a role — granted and revoked alike. An address the fold
+believes revoked whose `hasRole` returns true is **admitted**; the read proves
+it. This does not conflate administering a role with holding it: OZ expresses
+"may administer X" as membership in a *different* `bytes32`, hence a different
+primary key.
+
+| field | column | pop. | status | three-state | failure path |
+|---|---|--:|---|---|---|
+| `holders` | `role_holder_planes.holders` | 11 protocol-1 `(registry, role_hash)` keys / 3 registries | **REQUIRED** | proven-present = a **LOWER BOUND**, each member independently witnessed / proven-absent **unreachable by design** / `not_determined` = NULL | revert, transport failure, cold-or-missing cursor on either topic, unpinnable probe block, or zero confirmations ⇒ **NULL**. **Never `[]`** — a DB CHECK makes the empty array unrepresentable | three-state + cite. **`len(holders)` is a FLOOR, never a count** |
+| `holders_basis` | `.holders_basis` | 11 | **GATE** | `pinned_has_role_confirmed` / `not_determined` | any failure ⇒ `not_determined` | gate |
+| `holder_set_exhaustive` | `.holder_set_exhaustive` | 11 | **GATE** | **always `not_determined`**, CHECK-pinned | unconditional | gate. A consumer may **never** read `holders` as complete |
+| `as_of_block` (+ `as_of_block_hash`) | `.as_of_block` | 11 | **REQUIRED** | present iff `holders` non-NULL | `holders` NULL ⇒ NULL | cite (inv.10 — a mutable now-fact carries its height) |
+| `cursor_first_indexed_block` (+ basis) | `.cursor_first_indexed_block` | **0/11 witnessed** | **GATE** | proven only at basis `creation_block_minus_one` | NULL, `not_determined` **or `explicit_seed`** ⇒ NULL + `not_determined` | cite |
+| `cursor_last_indexed_block` | `.cursor_last_indexed_block` | 11 | **CONF** | upper bound only; the weaker of the two topics | missing cursor ⇒ NULL + `coverage: partial` | cite. **Never a lower-bound witness** |
+| `cursor_enrollment_bases` | `.cursor_enrollment_bases` | 11 | **CONF** | recorded verbatim per topic | — | cite. Recorded, **not depended on** — see below |
+| `cursor_page_completeness` | `.cursor_page_completeness` | **`not_determined` on all** | **GATE** | from U10A `page_completeness` | — | cite (the residual) |
+| `coverage` | `.coverage` | 11 | **GATE** | `lower_bound` / `partial`. **Never `complete`** | cold cursor or NULL holders ⇒ `partial` | gate |
+| `role_name` | `.role_name` | 8/11 | **CONFIDENCE** | proven-present = a proven preimage / NULL = key absent, `not_determined` | keccak mismatch, or the zero-word arm without an answered `hasRole` ⇒ NULL | **cite only. Never gates, never keys anything** |
+| `role_name_basis` | `.role_name_basis` | 11 | **GATE** | `keccak_preimage` / `accesscontrol_default_admin_literal` / `not_determined` | mismatch ⇒ `not_determined` | gate on `role_name` |
+| `candidate_count`, `unconfirmed_candidate_count` | `.candidate_count` … | 11 | **CONF** | integers, or **NULL when `holders` is NULL** | — | cite (the floor's visible residual) |
+| `fold_chain_disagreements` | `.fold_chain_disagreements` | 11 | **CONF** | recorded, **never diagnosed** | — | cite. Cause is `not_determined` |
+
+**What `holders` proves, stated exactly:** *this address's own `hasRole`
+predicate returned true at `as_of_block`.* That is a behavioural read of deployed
+code, not a claim about the layout of `_roles` — and it is the right predicate
+anyway, because `hasRole` is the same virtual function `_checkRole` dispatches
+to, so an override that fools this read fools the gate identically. This is what
+separates this ACCEPT from the `external_set` arm B4c excised: there the callee's
+interface was the **calling** contract's declaration with nothing corroborating
+it; here the canonical OZ topic0 emitted **by that address** and **that address's
+own predicate** independently name the same `(role, account)` pair.
+
+**What `role_name` proves:** that a preimage of `role_hash` is the string S — a
+total, publicly verifiable mathematical fact. It does **not** prove this registry
+declares a constant named S. That is why the candidate pool may be drawn from
+anywhere (it is `role_definitions.role_name`, corpus-wide, uncoupled from the
+contract) without weakening the result: the keccak check is the witness, the pool
+is only a generator. It is also why the pool safely contains D6-reject's
+mis-parsed ERC-7201 pointers, which persist until their contract is re-analysed —
+their hashes match nothing.
+
+**Identity is the hash, and only one hash space is in play.** Rows are minted
+from the OZ topic pair **literally**, not from
+`role_store_standards.spec_by_topic0()`. That map also carries Solady's
+`RoleSet(address,uint256,bool)` (`0xaddc47d7…`, `role_topic_index=2` where OZ
+uses 1), measured at **125 logs / 5 warm cursors on `0x62247d29…` (contract 507,
+protocol-1), 40 distinct role words**. Folding it here would have widened the
+plane from 11 keys to 51 — and the failure is not a mere miscount: on that
+registry `hasRole(bytes32,address)` **succeeds**, returning a genuine zero word
+(while `hasAnyRole`/`rolesOf` revert), because a Solady `uint256` role cast into
+the OZ `bytes32` mapping reads its **zero default**. Those 40 rows would each be
+a fully-successful, zero-confirmation probe over roles that *do* have holders —
+`[]` by another name across 78% of the plane, and a default standing in for a
+witness. Solady logs therefore mint **no row**, and row-absence means
+`not_determined`.
+
+**`holder_set_exhaustive` is a deferral with cause, not an impossibility.** OZ's
+`AccessControlEnumerable` getter would be a genuine on-chain exhaustive witness,
+and `role_store_standards` already declares it — but measured at block 25643300,
+`getRoleMemberCount(bytes32)` and `getRoleMember(bytes32,uint256)` **both revert
+on 4/4** role registries and `supportsInterface(0x5a05180f)` is **false on 4/4**
+(interface id derived, not trusted). Under B14 an arm with population 0 may not
+be built — the same reasoning that excised B4c's `external_set` arm. The CHECK
+constraint is therefore **deliberately stricter than plan §6**, which deferred
+only "until D4(a)+(c) land": an enumerable registry, or the proven inverse index
+`absence_coverage` lacks, would each license a real value here, and a future unit
+must revisit the constraint rather than assume it was derived from something
+weaker.
+
+**What U10A's interface does and does not do here.** `earned_negative_admissible`
+is consulted **only to refuse** (it is hard-wired False). `enrollment_basis`'s
+exactness allow-list — `{None, 'predicate_tree_hint'}` — governs whether a cursor
+may support an **exact empty**, and this plane never claims one; the basis is
+therefore *recorded and cited*, not depended on, so a `tracked_topics_asserted`
+cursor still supports a lower bound. Coldness (`backfill_complete` false or a
+missing cursor on either topic) **does** withhold every floor for that registry:
+the candidate set is then knowingly partial, and a floor published from it invites
+a reader to treat its size as a count.
+
+**The residual counters may not reconstruct the banned empty set.** "N probed,
+every read completed, none confirmed" *is* `[]`, written in three columns. So
+both counters are NULL exactly when `holders` is NULL, and — the subtler leak,
+caught in test — the `accesscontrol_default_admin_literal` name arm is withheld
+on a withheld row **even where the reads did complete**, because publishing it
+beside a NULL holder set would signal that every call succeeded. The keccak arm
+is unaffected: a preimage says nothing about whether any call was answered. A
+row where every read returned false and a row where every read reverted are
+**byte-identical**, on purpose.
+
+**Disagreements are recorded and never attributed.** `as_of_block` sits above
+`cursor_last_indexed_block` (25643300 vs 25641245 — a 2,055-block window), so
+"the fold missed a log" and "the state changed after the cursor stopped" are
+indistinguishable. The permitted keys are exactly
+`{registry, role_hash, address, fold_state, chain_state}`; no key naming a cause
+may be added. Should a future run close that window by pinning the two heights
+equal, non-attribution must still survive on principle — a cursor is an upper
+bound on what was **read**, never a proof of what was **emitted**.
+
+**Replay.** `as_of_block` is pinned at `head − DEFAULT_CONFIRMATION_DEPTH` (12)
+and its **block hash is persisted**, so the height is checkable after a reorg
+rather than merely trusted. This also closes plan §9's carry-forward that
+`_resolve_probe_block` persists nothing. An unpinnable height withholds the probe
+entirely; it is never retried against `"latest"`.
+
+**Verified on-chain at block 25643300:** the full protocol-1 differential is
+**20 probes / 20 agreeing / 0 disagreements / 0 reverts**, covering every
+candidate in the appearance set including all 6 revoked addresses (lane-D
+reported 12/12 over the active set only). The four corpus registries carrying
+warm role cursors and **zero** role logs — `0x5585996e` and `0xd5edf773`
+(both protocol-1), USDC `0xa0b86991`, `0xb8765ed7` — have `hasRole` **reverting
+on all four**, and correctly yield **no rows at all**.
+
+**Flips:** none. This plane only adds rows; no existing published fact changes.
+`services/chat/data.py::role_holders` is a *different* plane (function-authority
+derived, per `capability_role_grants`) and is deliberately **not** rewired here —
+repointing it would change a published fact without a panel scoped to that change.
+
+**Small populations (B14 — none may calibrate a rule, weight or threshold):**
+protocol-1 role-event emitters **3** (4 corpus-wide; 8 addresses carry role
+cursors); the `OPERATING_ADMIN_ROLE` holder set **1** address; the
+`TIMELOCK_ADMIN_ROLE` evidence **1** grant log; AccessControlEnumerable
+registries **0**. No ratio, threshold or weight is derived anywhere in this unit.
+`TIMELOCK_ADMIN_ROLE` carries **no** `role_definitions` row, so no preimage
+candidate exists and its `role_name` is absent — B0b's anti-decoy credit stays
+**CONFIDENCE**. That falls out of the pool rather than being special-cased, and
+must not be "fixed" by adding the name to a hardcoded list.
