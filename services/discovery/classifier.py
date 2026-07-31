@@ -115,10 +115,18 @@ def get_storage_at(rpc_url: str, address: str, slot: str, *, chain_id: int | Non
 
 
 def _slot_to_address(slot_value: str) -> str | None:
-    """Extract a 20-byte address from a 32-byte storage value.  Returns None for zero/empty."""
-    if not slot_value or slot_value in ("0x", "0x0"):
-        return None
-    raw = slot_value.replace("0x", "").zfill(64)
+    """Extract a 20-byte address from a 32-byte storage word.
+
+    ``None`` is a verdict — the word was read whole and carries no address —
+    so it is earned only by a full 64-nibble word. Anything short, over-long,
+    or non-hex raises ``ValueError``: a transport artifact must count as a
+    failed read, never as an empty slot (padding would let a truncated
+    response mint "confirmed non-proxy", or worse, an address)."""
+    if not isinstance(slot_value, str) or not slot_value.startswith("0x"):
+        raise ValueError(f"malformed storage word: {slot_value!r}")
+    raw = slot_value[2:].lower()
+    if len(raw) != 64 or set(raw) - set("0123456789abcdef"):
+        raise ValueError(f"malformed storage word: {slot_value!r}")
     addr_hex = raw[-40:]
     if all(c == "0" for c in addr_hex):
         return None
@@ -240,7 +248,7 @@ def _try_implementation_call(
             chain_id=chain_id,
         )
         return _slot_to_address(result)
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         return None
 
 
@@ -330,7 +338,13 @@ def _read_proxy_slots_batched(
             except RuntimeError:
                 raw = None
                 any_read_failed = True
-        decoded.append(_slot_to_address(raw) if isinstance(raw, str) else None)
+        try:
+            decoded.append(_slot_to_address(raw) if isinstance(raw, str) else None)
+        except ValueError:
+            # A malformed word is an unread slot, not an empty one — without
+            # this the caller reads it as "confirmed non-proxy".
+            decoded.append(None)
+            any_read_failed = True
     return tuple(decoded), any_read_failed
 
 
@@ -432,7 +446,10 @@ def classify_single(
         # Loads implementation from slot 0 and delegates.  Covers v1.0-1.3+
         # including minimal proxies where masterCopy()/singleton() revert.
         if GNOSIS_SLOT0_PATTERN in raw_bc:
-            slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0", chain_id=chain_id))
+            try:
+                slot0_impl = _slot_to_address(get_storage_at(rpc_url, address, "0x0", chain_id=chain_id))
+            except ValueError:
+                slot0_impl = None
             if slot0_impl:
                 logger.debug("%s → gnosis_safe proxy (slot0 pattern), impl=%s", address, slot0_impl)
                 info.update(type="proxy", proxy_type="gnosis_safe", implementation=slot0_impl)
