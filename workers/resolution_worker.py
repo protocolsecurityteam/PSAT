@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
@@ -18,6 +18,7 @@ from db.models import (
     ContractBalance,
     ContractBalanceFetch,
     ControllerValue,
+    IndexedEventCursor,
     Job,
     JobStage,
     derive_job_chain_id,
@@ -37,6 +38,11 @@ from services.resolution.capability_resolver import (
 )
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
+from services.resolution.role_holder_plane import (
+    ACCESS_CONTROL_TOPIC0S,
+    persist_role_holder_planes,
+    resolve_role_holder_planes,
+)
 from services.resolution.tracking import build_control_snapshot
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
@@ -314,6 +320,31 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
+        # Isolated for the same reason as the dependency edges above: this plane
+        # publishes only lower bounds, so it must never be able to fail a stage
+        # that proved something else.
+        try:
+            self._resolve_role_holder_plane(
+                session,
+                job,
+                chain_id=chain_id,
+                rpc_url=rpc_url,
+                registry_address=proxy_address or job.address,
+            )
+        except Exception as exc:
+            session.rollback()
+            record_degraded(
+                phase="resolution_role_holder_plane",
+                exc=exc,
+                context={"address": job.address or "0x0"},
+            )
+            logger.warning(
+                "Job %s: role-holder plane resolution failed: %s",
+                job.id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+
         self.update_detail(
             session,
             job,
@@ -325,6 +356,61 @@ class ResolutionWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
+
+    def _resolve_role_holder_plane(
+        self,
+        session: Session,
+        job: Job,
+        *,
+        chain_id: int,
+        rpc_url: str,
+        registry_address: str | None,
+    ) -> int:
+        """Publish this registry's role floors. Returns the rows written.
+
+        The gate is cursor EXISTENCE on both AccessControl topics, not warmth. A
+        cold cursor still mints a row whose floor is withheld (``holders`` NULL,
+        ``coverage`` partial); skipping it instead would erase the distinction
+        between a registry with no roles and a registry nothing was read from.
+        Everything past that precondition is the module's to refuse.
+
+        The registry is the RUNTIME address — the proxy an impl job's logs are
+        actually emitted at, never the implementation its ``contracts`` row is
+        keyed to.
+        """
+        if not registry_address:
+            return 0
+        enrolled = {
+            str(topic).lower()
+            for topic in session.execute(
+                select(IndexedEventCursor.topic0)
+                .where(IndexedEventCursor.chain_id == chain_id)
+                .where(func.lower(IndexedEventCursor.event_address) == registry_address.lower())
+                .where(IndexedEventCursor.topic0.in_(ACCESS_CONTROL_TOPIC0S))
+            ).scalars()
+        }
+        if not set(ACCESS_CONTROL_TOPIC0S).issubset(enrolled):
+            return 0
+
+        rows = resolve_role_holder_planes(
+            session,
+            chain_id=chain_id,
+            registry_address=registry_address,
+            rpc_url=rpc_url,
+        )
+        if not rows:
+            return 0
+        written = persist_role_holder_planes(session, rows)
+        session.commit()
+        record_stage_metric("role_holder_planes", written)
+        logger.info(
+            "Job %s: role-holder plane resolved for registry %s (%d row(s))",
+            job.id,
+            registry_address,
+            written,
+            extra={"registry_address": registry_address, "role_holder_planes": written},
+        )
+        return written
 
     def _fetch_balances(
         self,

@@ -23,6 +23,7 @@ from db.queue import (
     HEARTBEAT_EVENT_INDEXER,
     HEARTBEAT_OPS_ALERTER,
     HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
 )
@@ -40,6 +41,7 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_PROTOCOL_SCANNER: {"kind": "watcher", "interval_s": 600, "label": "Protocol event scanner"},
     HEARTBEAT_PROTOCOL_POLLER: {"kind": "watcher", "interval_s": 600, "label": "Protocol state poller"},
     HEARTBEAT_PROTOCOL_TVL: {"kind": "watcher", "interval_s": 3600, "label": "Protocol TVL refresh"},
+    HEARTBEAT_PROTOCOL_RESTAKING: {"kind": "watcher", "interval_s": 3600, "label": "Restaking position refresh"},
     HEARTBEAT_OPS_ALERTER: {"kind": "daemon", "interval_s": 120, "label": "Ops watchdog / alerter"},
 }
 

@@ -50,6 +50,7 @@ _KNOWN_PROCESSES = {
     "protocol_scanner",
     "protocol_poller",
     "protocol_tvl",
+    "protocol_restaking",
     "ops_alerter",
 }
 
