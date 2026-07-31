@@ -348,6 +348,9 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
     ]
     result = _spawn(db_session, parent, _graph(parent.address, nodes), budget=8, depth_cap=2)
 
+    # The partition claim is only licensed by ``walked``; assert the licence
+    # alongside the count it licenses.
+    assert result["walked"] is True
     total = len(result["queued"]) + len(result["omitted"]) + len(result["out_of_population"])
     assert total == len(nodes)
 
@@ -428,6 +431,11 @@ def test_partial_spawn_still_yields_a_ledger(db_session, seed, monkeypatch):
     assert len(ledger["queued"]) == 2
     assert ledger["budget_used"] == 2
     assert [q["address"] for q in ledger["queued"]] == addrs[:2]
+    # The prefix is intact AND marked incomplete: three of the five nodes were
+    # never placed in any disposition, so the partition claim must not hold.
+    assert ledger["walked"] is False
+    total = len(ledger["queued"]) + len(ledger["omitted"]) + len(ledger["out_of_population"])
+    assert total < len(addrs)
 
 
 def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, seed, monkeypatch):
@@ -436,6 +444,11 @@ def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, s
 
     An empty graph still publishes the artifact, so absence means exactly one
     thing: this job predates the ledger.
+
+    And the ledger it publishes must not read as a COMPLETED walk: the walker
+    never ran here, so ``walked`` is False and the three empty lists are a
+    prefix. Pinning the never-ran dict as byte-identical to a walked-and-omitted
+    -nothing one is what this assertion previously did.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, _address_factory = seed
@@ -455,7 +468,30 @@ def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, s
         "queued": [],
         "omitted": [],
         "out_of_population": [],
+        "walked": False,
     }
+
+
+def test_never_ran_ledger_differs_from_a_walk_that_omitted_nothing(db_session, seed, monkeypatch):
+    """FALSIFIER (fix 6): the two histories must not serialize identically.
+
+    Both produce three empty omission lists. Only the second walked the node
+    list, and only the second may license "nothing was omitted".
+    """
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    _protocol_id, parent, address_factory = seed
+    from services.discovery.perimeter import new_spawn_result
+
+    never_ran = new_spawn_result(site="policy_refresh", budget=8)
+
+    walked = _spawn(db_session, parent, _graph(parent.address, [_node(address_factory())]), budget=8, depth_cap=2)
+    # Same three empty omission lists on both sides — the whole point.
+    assert never_ran["omitted"] == walked["omitted"] == []
+    assert never_ran["out_of_population"] == walked["out_of_population"] == []
+
+    assert never_ran["walked"] is False
+    assert walked["walked"] is True
+    assert never_ran != walked
 
 
 def test_ledger_survives_a_poisoned_session(db_session, seed, monkeypatch):
