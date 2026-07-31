@@ -45,7 +45,7 @@ claims plane reads):
 from __future__ import annotations
 
 import re
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 from weakref import WeakKeyDictionary
 
 from eth_utils.crypto import keccak
@@ -63,6 +63,61 @@ from .token_slots import derive_token_slots
 SCHEMA_VERSION = "semantic-3"
 
 
+class ReceiverDescriptor(TypedDict):
+    """The STRUCTURAL identity of an ``external_call`` sink's receiver — the
+    object whose method is invoked (``asset.safeTransferFrom`` → ``asset``).
+
+    The sink's ``target`` string carries the receiver's identifier and nothing
+    else, so a consumer holding only that has a NAME. This descriptor answers
+    what the name cannot: whether the caller chose the receiver, whether it is
+    this unit's storage, and — only where the compiler itself minted one — the
+    selector of the getter that reads it. Every field is read off the declaring
+    AST node; none is inferred from the identifier.
+
+    ``binding`` is decided by ``isinstance``, never by ``visibility``: a
+    Slither ``LocalVariable`` answers ``visibility == "internal"``,
+    ``is_immutable is False`` and ``is_constant is False`` exactly as an
+    internal state variable does, so visibility is a silent false-positive
+    discriminator (a formal parameter would read as storage). ``mutability``,
+    ``visibility`` and ``auto_getter_selector`` are therefore populated ONLY
+    under ``isinstance(resolved, StateVariable)``; a ``SolidityVariable``
+    raises ``AttributeError`` on all three and is refused before they are read.
+
+    ``mutability`` is a DECLARATION CLASS, not a write-surface finding:
+    ``mutable`` means "declared plain storage in this compilation unit", NOT
+    "a writer exists" — that question is answered by the value-flow lattice's
+    ``target_kind``/``target_writer_signatures``, on its own evidence.
+    ``immutable_in_implementation`` is spelled the long way on purpose: an
+    ``immutable`` is inlined into the IMPLEMENTATION's bytecode, so behind a
+    proxy it is not an invariant of the address a consumer prices against.
+    """
+
+    # parameter | state_variable | local | not_determined
+    binding: str
+    # entry_point | internal_helper — parameter bindings only, else None. A
+    # nested helper's formal is NOT an ABI slot (the sink walk is transitive),
+    # so only ``entry_point`` can carry an index or prove the CALLER named it.
+    param_scope: str | None
+    param_index: int | None
+    # constant | immutable_in_implementation | mutable — state variables only.
+    mutability: str | None
+    visibility: str | None
+    # keccak4 of the compiler-minted auto-getter's signature. Emitted only for
+    # a public state variable whose getter takes NO arguments; see
+    # :func:`_auto_getter_selector` for why the type — not the name — licenses it.
+    auto_getter_selector: str | None
+    # The AST identifier, for display and for joining to source. NEVER a
+    # resolution basis: ``variable + "()"`` is the inv.2 shape this descriptor
+    # exists to replace.
+    variable: str | None
+    # caller_named | contract_state_unresolved | not_determined
+    asset_identity: str
+    # Diagnostic, present only when ``binding`` is ``not_determined``, so that
+    # "the sites conflicted" and "the head never resolved" stop being the same
+    # published value. Carries no consumption obligation.
+    not_determined_reason: NotRequired[str]
+
+
 class SinkRecord(TypedDict):
     """One sink reachable from a given external function. ``id`` is a
     stable cross-reference; ``function`` is the *originating* external
@@ -77,6 +132,12 @@ class SinkRecord(TypedDict):
     target: str
     selector: str | None
     origin: str  # body | guard
+    # High-level/library call sinks only — the arm where the receiver is
+    # resolved past its casts. A low-level call's destination never goes
+    # through that resolution, and a non-call sink has no receiver at all, so
+    # the key stays ABSENT there: absent means "never computed", which fails
+    # every downstream precondition exactly as ``not_determined`` does.
+    receiver: NotRequired[ReceiverDescriptor]
 
 
 class StateWriteFact(TypedDict):
@@ -202,6 +263,35 @@ class ValueFlow(TypedDict):
     # transparent — an unrecorded router identity can only block a negative
     # proof, never mint one.
     router_ops: NotRequired[list[dict[str, str | None]]]
+    # The AST identifier of the state variable the destination resolves to,
+    # published only when ``target_kind`` is one of the state-variable kinds and
+    # every contributing site named the SAME variable. A mapping/array element
+    # never emits one (the element is not its base). Identity for a join and for
+    # display — never a resolution basis.
+    target_variable: NotRequired[str]
+    # The distinct variables when the sites named more than one. Present exactly
+    # where ``target_variable`` is absent for that reason, so a consumer can
+    # never read one member as the whole.
+    target_variables: NotRequired[list[str]]
+    # The signatures WITHIN THE ANALYSED COMPILATION UNIT that write
+    # ``target_variable``. A floor: "redirectable at least by these writers'
+    # principals", never the closed set — see ``writer_surface_closed``.
+    # ``[]`` is the earned negative that ``storage_no_setter`` already asserts
+    # (scan complete, no writer found); the key is ABSENT when no signature was
+    # attributed, which is a different thing and must not be read as ``[]``.
+    target_writer_signatures: NotRequired[list[str]]
+    # The soundness gate for the line above, published in the SAME dict and at
+    # the same time so the payload can never travel without it. False means a
+    # blind spot (assembly ``sstore``, delegatecall, unresolved alias) made the
+    # write attribution non-exhaustive.
+    target_writer_scan_complete: NotRequired[bool]
+    # Whether the writer set is the WHOLE write surface at the deployed address.
+    # Always ``not_determined``: this stage analyses ONE compilation unit, while
+    # the runtime address may be a proxy (upgrade-extensible write surface) or
+    # one of several implementations (a sibling's writers are outside the unit).
+    # Deciding it needs a resolution-plane writer that knows the deployment is
+    # neither, which is why the type is a single literal rather than a bool.
+    writer_surface_closed: NotRequired[Literal["not_determined"]]
 
 
 class EffectInfo(TypedDict):
@@ -474,14 +564,175 @@ def _callee_signature(ir: Any) -> str | None:
     return None
 
 
-def _classify_node_irs(node: Any) -> list[tuple[str, str, str | None]]:
+def _auto_getter_selector(variable: Any) -> str | None:
+    """The selector of the getter solc mints for a ``public`` state variable,
+    or ``None`` when no NULLARY getter exists.
+
+    Why this is a compiler fact and not a name guess: for every ``public``
+    state variable solc emits an accessor at a selector it derives itself, and
+    it REJECTS a hand-written function that would collide with one — so the
+    binding from declaration to selector is 1:1 and enforced by the compiler,
+    which ``name + "()"`` is not.
+
+    The signature comes from the DECLARED TYPE (``solidity_signature``, i.e.
+    solc's own ``export_nested_types_from_variable`` rule), never from the
+    identifier, because the two disagree the moment the getter takes
+    arguments: ``uint256[] public amounts`` is read by ``amounts(uint256)``
+    (0x45f0a44f) while ``amounts()`` hashes to 0x6beaeeae, and
+    ``mapping(address => uint256) public balances`` is ``balances(address)``
+    (0x27e235e3) against ``balances()``'s 0x7bb98a68. Both are reachable here:
+    a library call's receiver is its FIRST ARGUMENT, which may be any type at
+    all. Emitting the minted-from-name value would publish four bytes that
+    address no function — a fabricated positive, and four bytes collide.
+
+    A parameterised getter cannot be read without choosing a key, and choosing
+    one is not something this plane can witness, so it yields ``None``."""
+    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+
+    if not isinstance(variable, StateVariable) or getattr(variable, "visibility", None) != "public":
+        return None
+    try:
+        _, parameters, _ = variable.signature
+        signature = variable.solidity_signature
+    except (AttributeError, TypeError, ValueError, KeyError):  # pragma: no cover - slither edge
+        return None
+    if parameters:
+        return None
+    return _selector_for(signature)
+
+
+def _receiver_not_determined(reason: str) -> ReceiverDescriptor:
+    return {
+        "binding": "not_determined",
+        "param_scope": None,
+        "param_index": None,
+        "mutability": None,
+        "visibility": None,
+        "auto_getter_selector": None,
+        "variable": None,
+        "asset_identity": "not_determined",
+        "not_determined_reason": reason,
+    }
+
+
+def _receiver_descriptor(resolved: Any, unit: Any, entry_param_ids: dict[int, int]) -> ReceiverDescriptor:
+    """Describe a call's resolved receiver structurally.
+
+    ``entry_param_ids`` maps the ENTRY function's formal-parameter object ids
+    to their positions. The sink walk is transitive, so a receiver that is a
+    formal of an internal helper is a real parameter of the unit being walked
+    but occupies no ABI slot of the entry point — and whether the entry's own
+    argument reaches it is a dataflow question this walk does not ask. Such a
+    receiver is reported as a parameter of ``internal_helper`` scope with no
+    index and NO ``caller_named`` claim; only identity against the entry's own
+    parameter objects licenses that."""
+    from slither.core.declarations.solidity_variables import SolidityVariable  # type: ignore[import]
+    from slither.core.variables.state_variable import StateVariable  # type: ignore[import]
+    from slither.slithir.variables import Constant  # type: ignore[import]
+
+    if resolved is None:
+        return _receiver_not_determined("unresolved_head")
+    type_name = type(resolved).__name__
+    if "Temporary" in type_name or "Reference" in type_name or "Tuple" in type_name:
+        # The cast walk stopped at a temporary (a computed value) or at a
+        # mapping/array element. Neither names a declaration.
+        return _receiver_not_determined("unresolved_head")
+    if isinstance(resolved, (SolidityVariable, Constant)):
+        return _receiver_not_determined("unsupported_variable_kind")
+
+    name = getattr(resolved, "name", None)
+    variable = str(name) if isinstance(name, str) and name else None
+
+    if isinstance(resolved, StateVariable):
+        if getattr(resolved, "is_constant", False):
+            mutability = "constant"
+        elif getattr(resolved, "is_immutable", False):
+            mutability = "immutable_in_implementation"
+        else:
+            mutability = "mutable"
+        visibility = getattr(resolved, "visibility", None)
+        return {
+            "binding": "state_variable",
+            "param_scope": None,
+            "param_index": None,
+            "mutability": mutability,
+            "visibility": str(visibility) if visibility else None,
+            "auto_getter_selector": _auto_getter_selector(resolved),
+            "variable": variable,
+            # Structural only. This plane resolves no address, so the receiver
+            # is storage of the analysed unit and nothing more; the token that
+            # carries an address is minted where the address is READ, pinned to
+            # its block.
+            "asset_identity": "contract_state_unresolved",
+        }
+
+    index = entry_param_ids.get(id(resolved))
+    if index is not None:
+        return {
+            "binding": "parameter",
+            "param_scope": "entry_point",
+            "param_index": index,
+            "mutability": None,
+            "visibility": None,
+            "auto_getter_selector": None,
+            "variable": variable,
+            "asset_identity": "caller_named",
+        }
+    if any(resolved is parameter for parameter in getattr(unit, "parameters", []) or []):
+        return {
+            "binding": "parameter",
+            "param_scope": "internal_helper",
+            "param_index": None,
+            "mutability": None,
+            "visibility": None,
+            "auto_getter_selector": None,
+            "variable": variable,
+            "asset_identity": "not_determined",
+        }
+    return {
+        "binding": "local",
+        "param_scope": None,
+        "param_index": None,
+        "mutability": None,
+        "visibility": None,
+        "auto_getter_selector": None,
+        "variable": variable,
+        "asset_identity": "not_determined",
+    }
+
+
+def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor | None:
+    """One descriptor per sink record, or ``not_determined`` when the sites
+    that folded into that record disagreed.
+
+    Collect-then-fold, mirroring :func:`_fold_param_index`: a first-seen loop
+    that overwrote on collision would not be STICKY — a third site agreeing
+    with the first could restore a value two disagreeing sites had already
+    destroyed, making the published fact depend on IR order."""
+    if not descriptors:
+        return None
+    distinct = {tuple(sorted(descriptor.items())) for descriptor in descriptors}
+    if len(distinct) == 1:
+        return descriptors[0]
+    return _receiver_not_determined("fold_disagreement")
+
+
+def _classify_node_irs(
+    node: Any, unit: Any, entry_param_ids: dict[int, int]
+) -> list[tuple[str, str, str | None, ReceiverDescriptor | None]]:
     """Classify the non-state-write sinks at a node. Returns a list of
-    ``(kind, target, selector)`` triples.
+    ``(kind, target, selector, receiver)`` quads; ``receiver`` is populated
+    only for the high-level/library call arm, which is the one that resolves
+    its head past casts, and is ``None`` everywhere else.
+
+    ``unit`` is the unit whose body this node belongs to (an internal helper
+    once the walk recurses); ``entry_param_ids`` always describes the ENTRY
+    point, which is what makes the two parameter scopes separable.
 
     State writes are handled separately — Slither's
     ``node.state_variables_written`` is more reliable than walking IR
     assignments by hand."""
-    out: list[tuple[str, str, str | None]] = []
+    out: list[tuple[str, str, str | None, ReceiverDescriptor | None]] = []
     # Non-SSA def map, node-local: the cast IRs defining an inline-cast receiver
     # (``IERC20(address(eETH)).safeTransferFrom`` emits both TypeConversions and
     # the call in one node) live here, letting the head resolve past the temporary.
@@ -490,7 +741,7 @@ def _classify_node_irs(node: Any) -> list[tuple[str, str, str | None]]:
         op = type(ir).__name__
         if op == "NewContract":
             target = getattr(ir, "contract_name", None) or str(getattr(ir, "contract_created", "")) or "unknown"
-            out.append(("contract_creation", str(target), None))
+            out.append(("contract_creation", str(target), None, None))
         elif op in ("HighLevelCall", "LibraryCall"):
             function_name = getattr(ir, "function_name", None) or "call"
             selector = _selector_for(_callee_signature(ir))
@@ -503,33 +754,34 @@ def _classify_node_irs(node: Any) -> list[tuple[str, str, str | None]]:
                 head = getattr(ir, "destination", None)
             resolved = _resolve_cast_head(head, def_by_id)
             destination_name = getattr(resolved, "name", None) or str(resolved) or "unknown"
-            out.append(("external_call", f"{destination_name}.{function_name}", selector))
+            receiver = _receiver_descriptor(resolved, unit, entry_param_ids)
+            out.append(("external_call", f"{destination_name}.{function_name}", selector, receiver))
         elif op == "LowLevelCall":
             target = getattr(getattr(ir, "destination", None), "name", None) or str(
                 getattr(ir, "destination", None) or "unknown"
             )
             function_name = str(getattr(ir, "function_name", "") or "")
             if function_name == "delegatecall":
-                out.append(("delegatecall", str(target), None))
+                out.append(("delegatecall", str(target), None, None))
             else:
-                out.append(("external_call", f"{target}.{function_name or 'call'}", None))
+                out.append(("external_call", f"{target}.{function_name or 'call'}", None, None))
         elif op == "SolidityCall":
             function_name = getattr(getattr(ir, "function", None), "name", "") or ""
             arguments = list(getattr(ir, "arguments", []) or [])
             if function_name.startswith("selfdestruct("):
-                out.append(("selfdestruct", "selfdestruct", None))
+                out.append(("selfdestruct", "selfdestruct", None, None))
             elif function_name.startswith("sstore("):
                 # Inline-assembly storage write. Slither does not populate
                 # node.state_variables_written for assembly, so this is the
                 # only place the write is visible. Key the sink by the slot
                 # literal/expr; slot->named-var resolution is a separate concern.
                 slot = str(arguments[0]) if arguments else "unknown"
-                out.append(("state_write", f"assembly_storage:{slot}", None))
+                out.append(("state_write", f"assembly_storage:{slot}", None, None))
             elif function_name.startswith("delegatecall("):
                 # Inline-assembly delegatecall, e.g. an EIP-1967 proxy fallback.
                 # Signature: delegatecall(gas, addr, inOff, inLen, outOff, outLen).
                 target = str(arguments[1]) if len(arguments) > 1 else "assembly_delegatecall"
-                out.append(("delegatecall", f"assembly_delegatecall:{target}", None))
+                out.append(("delegatecall", f"assembly_delegatecall:{target}", None, None))
     return out
 
 
@@ -537,23 +789,28 @@ def _walk_unit_for_sinks(
     unit: Any,
     visited: set[Any],
     origin: str,
-) -> list[tuple[str, str, str | None, str]]:
-    """Recursively gather ``(kind, target, selector, origin)`` sink tuples
-    from ``unit`` and any internal/library/modifier callees. ``origin``
+    entry_param_ids: dict[int, int],
+) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None]]:
+    """Recursively gather ``(kind, target, selector, origin, receiver)`` sink
+    tuples from ``unit`` and any internal/library/modifier callees. ``origin``
     flips to ``guard`` the moment the walk steps through a modifier call and
     stays there for the rest of that subtree. De-dup happens at the caller
-    level so distinct indices are preserved."""
+    level so distinct indices are preserved.
+
+    ``entry_param_ids`` is the ENTRY point's and is threaded down unchanged —
+    the recursion is exactly what makes a callee's formal parameter NOT an ABI
+    slot of the record being built."""
     unit_key = getattr(unit, "canonical_name", None) or getattr(unit, "full_name", None) or id(unit)
     if unit_key in visited:
         return []
     visited.add(unit_key)
 
-    found: list[tuple[str, str, str | None, str]] = []
+    found: list[tuple[str, str, str | None, str, ReceiverDescriptor | None]] = []
     for node in getattr(unit, "nodes", []) or []:
         for var_name in _node_kind_state_writes(node):
-            found.append(("state_write", var_name, None, origin))
-        for kind, target, selector in _classify_node_irs(node):
-            found.append((kind, target, selector, origin))
+            found.append(("state_write", var_name, None, origin, None))
+        for kind, target, selector, receiver in _classify_node_irs(node, unit, entry_param_ids):
+            found.append((kind, target, selector, origin, receiver))
         # Recurse into internal/library callees so transitive writes
         # surface on the entry-point's record.
         for ir in _node_irs(node):
@@ -564,7 +821,7 @@ def _walk_unit_for_sinks(
             if callee is None or not getattr(callee, "nodes", None):
                 continue
             child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-            found.extend(_walk_unit_for_sinks(callee, visited, child_origin))
+            found.extend(_walk_unit_for_sinks(callee, visited, child_origin, entry_param_ids))
     return found
 
 
@@ -573,14 +830,23 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
     deduped while preserving order. A sink reachable through both the body
     and a guard keeps ``origin=body`` (a real effect wins). The selector
     field is per-sink: only ``external_call`` sinks carry one, and only
-    when Slither exposes the called function's canonical signature."""
+    when Slither exposes the called function's canonical signature.
+
+    The receiver descriptor is COLLECTED per key and folded once, after the
+    walk, so a conflict between two sites that share a record is sticky."""
     function_name = _function_full_name(function)
-    quads = _walk_unit_for_sinks(function, set(), "body")
+    entry_param_ids = {
+        id(parameter): position for position, parameter in enumerate(getattr(function, "parameters", []) or [])
+    }
+    quints = _walk_unit_for_sinks(function, set(), "body", entry_param_ids)
 
     out: list[SinkRecord] = []
     index: dict[tuple[str, str, str | None], int] = {}
-    for kind, target, selector, origin in quads:
+    receivers: dict[tuple[str, str, str | None], list[ReceiverDescriptor]] = {}
+    for kind, target, selector, origin, receiver in quints:
         key = (kind, target, selector)
+        if receiver is not None:
+            receivers.setdefault(key, []).append(receiver)
         if key in index:
             if origin == "body":
                 out[index[key]]["origin"] = "body"
@@ -596,6 +862,10 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
         }
         index[key] = idx
         out.append(record)
+    for key, idx in index.items():
+        folded = _fold_receivers(receivers.get(key, []))
+        if folded is not None:
+            out[idx]["receiver"] = folded
     return out
 
 
@@ -927,7 +1197,7 @@ def _base_name(name: Any) -> str | None:
 # aliasing to attribute the write back to its origin var (a real setter), and
 # only fall back to indeterminate for the aliases we genuinely cannot resolve.
 # Memoized per contract for the build pass.
-_SETTER_VARS: WeakKeyDictionary[Any, set[str]] = WeakKeyDictionary()
+_SETTER_VARS: WeakKeyDictionary[Any, dict[str, list[str]]] = WeakKeyDictionary()
 _SETTER_SCAN_COMPLETE: WeakKeyDictionary[Any, bool] = WeakKeyDictionary()
 _ALIASED_WRITES: WeakKeyDictionary[Any, tuple[set[str], set[str], bool]] = WeakKeyDictionary()
 
@@ -935,11 +1205,26 @@ _ALIASED_WRITES: WeakKeyDictionary[Any, tuple[set[str], set[str], bool]] = WeakK
 _STORAGE_ALIAS_DEPTH = 6
 
 
-def _setter_state_vars(contract: Any) -> set[str]:
+def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
+    """``{state var name: the signatures that write it}`` for this contract.
+
+    The KEY SET is what classifies (``_state_var_target_kind`` asks only
+    membership), and it is built exactly as before — every non-constructor
+    function's attributed writes, plus the storage-pointer-aliased origins. The
+    values are the writer identities that were already in hand at the loop and
+    were previously discarded.
+
+    ``all_state_variables_written`` is transitive, so an internal helper's write
+    also lands on every function that reaches it: the value list therefore
+    already CONTAINS every externally callable writer, and is a floor on who
+    can redirect the variable, never a closed set. An aliased-only origin gets
+    an EMPTY list — the write is real but this pass attributed no signature to
+    it — which is why the projection omits the key rather than publishing
+    ``[]`` there (``[]`` is reserved for a completed scan that found none)."""
     cached = _SETTER_VARS.get(contract)
     if cached is not None:
         return cached
-    setters: set[str] = set()
+    setters: dict[str, set[str]] = {}
     for fn in getattr(contract, "functions", []) or []:
         if getattr(fn, "is_constructor", False):
             continue
@@ -947,15 +1232,29 @@ def _setter_state_vars(contract: Any) -> set[str]:
             written = fn.all_state_variables_written()
         except Exception:  # pragma: no cover - slither edge
             written = []
+        signature = _function_full_name(fn)
+        # Slither synthesises ``slitherConstructorVariables`` /
+        # ``slitherConstructorConstantVariables`` to hold declaration-site
+        # initialisers. They MUST keep contributing membership — dropping them
+        # would turn a var with an inline initialiser and no setter into a
+        # proven "fixed destination" it was never proven to be — but they are
+        # not callable, so publishing one as a writer whose principal can
+        # redirect the destination names a function nobody can invoke.
+        synthetic = getattr(fn, "is_constructor_variables", False)
         for var in written or []:
             name = getattr(var, "name", None)
-            if name:
-                setters.add(name)
+            if not name:
+                continue
+            attributed = setters.setdefault(name, set())
+            if not synthetic:
+                attributed.add(signature)
     # Storage-pointer-aliased writes Slither did not attribute, resolved back to
     # their origin state var — these are real, redirecting setters.
-    setters |= _aliased_storage_writes(contract)[0]
-    _SETTER_VARS[contract] = setters
-    return setters
+    for name in _aliased_storage_writes(contract)[0]:
+        setters.setdefault(name, set())
+    resolved = {name: sorted(signatures) for name, signatures in setters.items()}
+    _SETTER_VARS[contract] = resolved
+    return resolved
 
 
 def _arg_is_param(arg: Any, param: Any) -> bool:
@@ -1172,7 +1471,7 @@ class _UnitCtx:
         self,
         bundle: _EngineBundle,
         state_vars_by_name: dict[str, Any],
-        setters: set[str],
+        setters: dict[str, list[str]],
         alias_indeterminate: set[str],
         setter_scan_complete: bool,
         nested: bool,
@@ -1292,7 +1591,7 @@ def _build_unit_ctx(
     unit: Any,
     is_entry: bool,
     state_vars_by_name: dict[str, Any],
-    setters: set[str],
+    setters: dict[str, list[str]],
     alias_indeterminate: set[str],
     setter_scan_complete: bool,
     param_bindings: dict[str, tuple[str, ...]] | None = None,
@@ -2514,6 +2813,47 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     return (kind, tier)
 
 
+# The ``target_kind`` values that name a state variable of the analysed unit —
+# the only ones for which a ``target_variable`` exists to be published.
+_STATE_VAR_TARGET_KINDS = frozenset({"constant", "immutable", "storage_setter", "storage_no_setter"})
+
+# ``writer_surface_closed`` has exactly one admissible value. Declared as a
+# literal-typed constant so the type checker, not a reviewer, is what rejects a
+# ``True`` — there is no migration here and so no CHECK constraint to lean on.
+_WRITER_SURFACE_CLOSED: Literal["not_determined"] = "not_determined"
+
+
+def _target_state_var_name(operand: Any, ctx: _UnitCtx) -> str | None:
+    """The ONE state variable a destination operand reads, or ``None``.
+
+    Mirrors :func:`_classify_site`'s decision path exactly, guard for guard, so
+    the name can never disagree with the kind published beside it. In
+    particular an ELEMENT read declines: ``tokens[id]`` classifies by its base's
+    mutability, but the base is not the destination, and publishing its name
+    would say one address where there is one per key."""
+    if operand is None:
+        return None
+    if _element_kind(operand, ctx, amount=False) is not None:
+        return None
+    if _reaches_merged_local(operand, ctx):
+        return None
+    call = _call_origin(operand, ctx, amount=False)
+    if call is not None:
+        return call[1] if call[0] == "state_variable" and len(call) > 1 else None
+    srcs = ctx.engine._sources_for_value(operand)
+    if not srcs or is_top(srcs):
+        return None
+    forwarded = _forwarded_param_sources(srcs, ctx)
+    if forwarded is not None:
+        origins = {_single_param_origin(s, ctx) for s in forwarded}
+    else:
+        origins = {_source_neutral_origin(s, ctx) for s in srcs if s.kind != "computed"}
+    if len(origins) != 1:
+        return None
+    origin = next(iter(origins))
+    return origin[1] if origin and origin[0] == "state_variable" and len(origin) > 1 else None
+
+
 def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
     """Collapse every contributing IR site's (kind, tier) to one classification.
     Tier is the weaker of the contributing sites — one traced site makes the
@@ -2923,6 +3263,14 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
     target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
     amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
+    # Per destination site: the state variable it names (or None), the writer
+    # signatures for that variable IN THE SITE'S OWN classification context, and
+    # that context's scan completeness. Carried per site rather than looked up at
+    # the fold because a routed walk classifies against the CALLEE's contract,
+    # whose setters are a different set from the entry's.
+    target_variable_sites: dict[
+        tuple[str, str | None, str, bool, str], list[tuple[str | None, tuple[str, ...], bool]]
+    ] = {}
     # Per routed-flow key: the ``(selector, bare name)`` identities of the ops
     # that carry the move (see ``ValueFlow.router_ops``). Only ever populated
     # for ``value_router`` flows; identity-less sites simply record nothing,
@@ -2937,9 +3285,9 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     # crossing a HighLevelCall rebuilds it for the CALLEE's contract so
     # ``address(this)``, state-var mutability, and self-detection are read against
     # the contract whose body is actually running, not the router's.
-    ctx_tuple_cache: dict[int, tuple[dict[str, Any], set[str], set[str], bool]] = {}
+    ctx_tuple_cache: dict[int, tuple[dict[str, Any], dict[str, list[str]], set[str], bool]] = {}
 
-    def contract_ctx_tuple(contract: Any) -> tuple[dict[str, Any], set[str], set[str], bool]:
+    def contract_ctx_tuple(contract: Any) -> tuple[dict[str, Any], dict[str, list[str]], set[str], bool]:
         cache_key = id(contract)
         cached = ctx_tuple_cache.get(cache_key)
         if cached is not None:
@@ -2947,7 +3295,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         state_vars_by_name: dict[str, Any] = {
             getattr(v, "name", "") or "": v for v in (_all_state_variables(contract) if contract is not None else [])
         }
-        setters = _setter_state_vars(contract) if contract is not None else set()
+        setters = _setter_state_vars(contract) if contract is not None else {}
         alias_indeterminate = _aliased_storage_writes(contract)[1] if contract is not None else set()
         scan_complete = _setter_scan_complete(contract) if contract is not None else False
         result = (state_vars_by_name, setters, alias_indeterminate, scan_complete)
@@ -3042,6 +3390,14 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         # nobody asked and publish the answer under the name "amount".
         amount_site = amount_override or _classify_site(amount, ctx, amount=True)
         amount_sites.setdefault(key, []).append(amount_site)
+        target_variable_name = _target_state_var_name(target, ctx)
+        target_variable_sites.setdefault(key, []).append(
+            (
+                target_variable_name,
+                tuple(ctx.setters.get(target_variable_name, ())) if target_variable_name is not None else (),
+                ctx.setter_scan_complete,
+            )
+        )
         target_indexes.setdefault(key, []).append(_operand_param_index(target, ctx))
         # A ``param_derived`` amount is a call RESULT, so the slot to publish is
         # the one feeding the call, resolved from its arguments instead.
@@ -3315,6 +3671,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
             index = _fold_param_index(target, target_indexes.get(key, []))
             if index is not None:
                 flow["target_param_index"] = index
+            _attach_target_variable(flow, target, target_variable_sites.get(key, []))
         if amount is not None:
             flow["amount_kind"] = amount
             breakdown = _site_breakdown(amount_sites.get(key, []))
@@ -3324,6 +3681,45 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
             if index is not None:
                 flow["amount_param_index"] = index
     return flows
+
+
+def _attach_target_variable(
+    flow: ValueFlow,
+    target: KindTier,
+    sites: list[tuple[str | None, tuple[str, ...], bool]],
+) -> None:
+    """Publish the destination's variable identity, its in-unit writers, and
+    the two gates that bound what either may be read to mean.
+
+    Requires the folded kind to NAME a state variable at all — a ``param`` or
+    ``msg_sender`` destination has no variable, and an ``indeterminate`` fold
+    has no single one. Sites naming different variables publish the member list
+    and no scalar: two setter-backed variables both fold to ``storage_setter``,
+    so agreement on the KIND is not agreement on the destination.
+
+    The writer list rides with BOTH its gates or not at all. ``[]`` is emitted
+    only under ``storage_no_setter``, where the kind itself is the completed-scan
+    negative; a ``storage_setter`` whose writes were attributed only through a
+    storage alias has a real writer this pass cannot name, so its key is omitted
+    rather than published empty."""
+    if target["kind"] not in _STATE_VAR_TARGET_KINDS or not sites:
+        return
+    names = {name for name, _, _ in sites if name is not None}
+    if len(names) > 1:
+        flow["target_variables"] = sorted(names)
+        return
+    if len(names) != 1 or any(name is None for name, _, _ in sites):
+        return
+    flow["target_variable"] = next(iter(names))
+    # Never ``true``, and never derived: the closed-surface question is not
+    # answerable from one compilation unit. Published wherever the variable is,
+    # so even a row carrying no writer list still carries the bound.
+    flow["writer_surface_closed"] = _WRITER_SURFACE_CLOSED
+    writers = sorted({signature for _, signatures, _ in sites for signature in signatures})
+    if not writers and target["kind"] != "storage_no_setter":
+        return
+    flow["target_writer_signatures"] = writers
+    flow["target_writer_scan_complete"] = all(complete for _, _, complete in sites)
 
 
 def _fold_param_index(kind: KindTier, indexes: list[int | None]) -> int | None:

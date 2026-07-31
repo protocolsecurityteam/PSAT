@@ -2900,3 +2900,77 @@ and its enrollment call, nothing in the witness itself.
 probed node. **Nothing here calibrates any rule, weight or threshold** — every
 field is cite / gate / three-state. (The node population itself is ≥26, but that
 changes nothing: no rule is calibrated on it either.)
+
+### B20. Flow asset identity and destination identity — the two names a name could not give (D2 + D3 / Unit 6)
+
+Two sibling gaps, one instrument: a published string carried an *identifier* where
+the consumer needed an *identity*. `witness.sink_ids` named the receiver of every
+ERC-20 move (217 entries, **0 of them an address**) and a `storage_setter`
+destination named nothing at all. Both facts were derived by the static stage and
+discarded one line later. Neither is recovered by resolving the name — that is
+inv.2 — and neither publishes an address on this plane.
+
+#### B20.1 Receiver identity — `claims[].witness.sink_receivers{}` / `sinks[].receiver`
+
+Keyed **by sink id**, not listed per flow: one flow key (kind, selector,
+direction, `from_is_self`, origin) can cover two sinks moving two different
+assets, and a bare list leaves the consumer unable to say which receiver carried
+which move. The map's keys are always a subset of the same witness's `sink_ids`,
+so the join never dangles. Emitted for the high-level/library call arm only —
+the one that resolves its head past casts; a low-level `.call` sink and every
+non-call sink leave the key **absent**, which means *never computed* and fails
+every precondition below exactly as `not_determined` does.
+
+| field | status | three-state | failure / revert / absence path |
+|---|---|---|---|
+| `binding` | **GATE** | `parameter` \| `state_variable` \| `local` \| `not_determined` | **`not_determined` is reached by four distinct paths**, all of them fail-closed: the cast walk never resolved the head (temporary / mapping or array element / tuple); the head is a kind this plane does not describe (`SolidityVariable`, a literal `Constant`); Slither raised while reading the declaration; or two contributing sites **disagreed**. `not_determined_reason` separates them. Decided by `isinstance`, **never by `visibility`** — a `LocalVariable` answers `visibility="internal"`, `is_immutable=False`, `is_constant=False` identically to an internal state variable, so visibility would publish a caller's argument as this contract's storage |
+| `param_scope` | **GATE** | `entry_point` \| `internal_helper`; NULL unless `binding=parameter` | the sink walk is transitive. A formal of an internal helper is a real parameter of the unit walked but **occupies no ABI slot of the entry point**, and whether the entry's own argument reaches it is a dataflow question this walk does not ask. Measured live on 3 of the 18 rows (`AssetRecovery._recoverERC20/_recoverERC721` behind `WeETH.recoverERC20/recoverERC721`, `EETH.recoverERC721`) |
+| `param_index` | **CONF (cite)** | the entry's ABI slot; NULL otherwise | emitted **only** under `param_scope=entry_point`. A guessed slot addresses the wrong argument |
+| `mutability` | **CONF** | `constant` \| `immutable_in_implementation` \| `mutable`; NULL unless `binding=state_variable` | a **DECLARATION CLASS**, explicitly NOT "a writer exists" — that is B20.2's question, answered on its own evidence. `immutable_in_implementation` is spelled the long way because an `immutable` is inlined into the IMPLEMENTATION's bytecode: behind a proxy it is **not** an invariant of the address a consumer prices against, and 7 of the 10 state-variable rows are proxied |
+| `visibility` | **CONF** | Slither's declared visibility; NULL unless `binding=state_variable` | descriptive only. It may not decide anything — see `binding` |
+| `auto_getter_selector` | **GATE** | keccak4 of the accessor solc mints; NULL otherwise | emitted only when `binding=state_variable` **AND** `visibility="public"` **AND** the getter takes **no arguments**, decided from the **declared type** (`solidity_signature`, solc's own `export_nested_types_from_variable` rule) and never from the identifier. `uint256[] public amounts` is read by `amounts(uint256)`=`0x45f0a44f` while `amounts()` hashes to `0x6beaeeae`; `mapping(address=>uint256) public balances` is `balances(address)`=`0x27e235e3` against `balances()`'s `0x7bb98a68`. **A library call's receiver is its first argument and may be any type**, so this arm is reachable, and four bytes collide. A parameterised getter cannot be read without choosing a key, and choosing one is not a witness — so it yields NULL |
+| `variable` | **CONF (display / identity only)** | the AST identifier | **BANNED as a resolution basis.** `variable + "()"` is precisely the inv.2 shape this descriptor replaces; the selector above is licensed by the type, and by nothing else |
+| `asset_identity` | **GATE** | `caller_named` \| `contract_state_unresolved` \| `not_determined` | `caller_named` requires `binding=parameter AND param_scope=entry_point`; it describes the RECEIVER's provenance and asserts nothing about the receiver being an asset. `contract_state_unresolved` is structural — this plane resolves **no address**, so the token carries its own incompleteness rather than sitting next to a selector that looks like a resolution |
+| `not_determined_reason` | **CONF (diagnostic, no consumption obligation)** | `unresolved_head` \| `unsupported_variable_kind` \| `fold_disagreement`; key absent otherwise | so that "the sites conflicted" and "the head never resolved" stop being the same published value, and a future editor cannot resolve the ambiguity by guessing |
+
+**Consumption obligation — FIELDS §3's `token_identity` precondition becomes
+decidable rather than assumed.** It is satisfied ONLY by
+`asset_identity = contract_state_unresolved` **plus** a resolved address **plus**
+an `asset_identity_invariant` that is not `not_determined` — none of which this
+plane publishes. It **FAILS** for `caller_named` (there is no single asset to
+price against), for `not_determined`, and for an absent `receiver` key. The 4
+entry-parameter rows therefore lose any pricing resting on a single-asset
+assumption. That is a demotion, in the honest direction.
+
+**No address, and no `asset_identity_invariant`, is published here.** Resolving
+`auto_getter_selector` by a pinned `eth_call` needs a resolution-plane writer
+that also knows whether `deployment_address` is a proxy; until that exists, an
+address would have to be published without the bound that makes it readable.
+
+#### B20.2 Destination identity — `claims[].witness.flows[].target_*`
+
+| field | status | three-state | failure / revert / absence path |
+|---|---|---|---|
+| `target_variable` | **CONF (cite)** | the AST identifier of the state variable the destination reads | published only when `target_kind.kind` NAMES a state variable (`constant`, `immutable`, `storage_setter`, `storage_no_setter`) **and** every contributing site named the same one. A mapping/array **element** never emits one: it classifies by its base's mutability, but the base is one address where there is one per key |
+| `target_variables` | **CONF** | the distinct members when the sites named more than one | two setter-backed variables both fold to `storage_setter`, so agreement on the KIND is not agreement on the destination. Present **exactly** where the scalar is absent for that reason, so no member can be read as the whole |
+| `target_writer_signatures` | **CONF (cite) — a FLOOR** | the signatures WITHIN the analysed compilation unit that write `target_variable` | the derived claim is "redirectable **at least by** these writers' principals" — **never** the closed set. `[]` is emitted **only** under `storage_no_setter`, where the kind itself is the completed-scan negative; the key is **ABSENT** when no callable writer was attributed (a storage-pointer-aliased origin, or a variable written only by Slither's synthetic declaration-site initialiser). Absent and `[]` are different and must not be conflated |
+| `target_writer_scan_complete` | **GATE** | mirrors the existing setter-scan soundness flag | published in the SAME dict and at the same time as the payload it qualifies, never separately. `false` means an assembly `sstore`, a `delegatecall`, or an unresolved alias made the write attribution non-exhaustive — the listed writers are *some* of them |
+| `writer_surface_closed` | **GATE** | **the string `not_determined`, and no other value** | type-enforced (`Literal["not_determined"]` on the producing TypedDict, rejected by the type checker CI runs) rather than DB-enforced, because this unit has no migration to hang a CHECK on. **It cannot become dynamic here**: this stage analyses ONE compilation unit while the deployed address may be a proxy (upgrade-extensible write surface) or one of several implementations (a sibling's writers are outside the unit). Both D3 rows are exactly that — ef 423's `deployment_address` `0x8f08b704…` ≠ `contracts.address` `0xd2b8c78a…` (a secondary implementation of `contracts.id` 461), ef 2748's `0x89e45081…` ≠ `0x6bf6acd4…`. A dynamic value needs a resolution-plane writer that can prove neither holds |
+
+**Slither's synthetic `slitherConstructorVariables` /
+`slitherConstructorConstantVariables` keep contributing setter MEMBERSHIP and are
+never published as writers.** Dropping them from membership would turn a variable
+with a declaration-site initialiser and no setter into a proven "fixed
+destination" it was never proven to be — a newly minted earned negative.
+Publishing one as a writer would name a function nobody can invoke as the
+principal that can redirect the destination. Membership is therefore
+**byte-identical** to before this unit; only the value list is new.
+
+**Small populations (B14).** D2: the entry-parameter bucket is **4 rows** (423,
+2194, 2328, 2578) — below the ~5 bar once the 3 helper-formal rows are correctly
+excluded; `local` is **1** (2310, no provable arm, publishes `not_determined`);
+`fold_disagreement` is **0** on the 18 (measured). Populations are per SINK once
+the descriptor rides every high-level call, and the `constant` class is **not**
+empty at that granularity — a `bytes32`/`private` constant receiver was measured
+on a real transitive walk. D3: **2 rows**. Everything here is gate / cite /
+three-state; **nothing calibrates a rule, weight or threshold.**

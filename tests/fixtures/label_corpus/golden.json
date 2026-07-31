@@ -439,7 +439,17 @@
             {
               "target": "authority.canCall",
               "selector": "0xb7009613",
-              "origin": "guard"
+              "origin": "guard",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xbf7e214f",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "authority",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -484,7 +494,17 @@
             {
               "target": "authority.canCall",
               "selector": "0xb7009613",
-              "origin": "guard"
+              "origin": "guard",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xbf7e214f",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "authority",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -529,7 +549,17 @@
             {
               "target": "authority.canCall",
               "selector": "0xb7009613",
-              "origin": "guard"
+              "origin": "guard",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xbf7e214f",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "authority",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -574,7 +604,17 @@
             {
               "target": "authority.canCall",
               "selector": "0xb7009613",
-              "origin": "guard"
+              "origin": "guard",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xbf7e214f",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "authority",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -620,7 +660,17 @@
             {
               "target": "authority.canCall",
               "selector": "0xb7009613",
-              "origin": "guard"
+              "origin": "guard",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xbf7e214f",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "authority",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -812,7 +862,17 @@
             {
               "target": "hook.beforeTransfer",
               "selector": "0xabd626b0",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x7f5a7c7b",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "hook",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -855,7 +915,17 @@
             {
               "target": "hook.beforeTransfer",
               "selector": "0xabd626b0",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x7f5a7c7b",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "hook",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1166,12 +1236,23 @@
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.functionCall",
               "selector": "0xa0b5ffb0",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1231,7 +1312,19 @@
                 "sink_ids": [
                   "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom",
                   "payGateway(IERC20,uint256):sink1:external_call:TMP_9.call"
-                ]
+                ],
+                "sink_receivers": {
+                  "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1256,19 +1349,32 @@
                   "selector": "0x5beae096",
                   "callee": "safeTransferFrom"
                 }
-              ]
+              ],
+              "target_variable": "gateway",
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "TMP_9.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.safeTransferFrom",
               "selector": "0x5beae096",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1329,7 +1435,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "payGatewayDirect(IERC20,address,uint256):sink0:external_call:token.transferFrom"
-                ]
+                ],
+                "sink_receivers": {
+                  "payGatewayDirect(IERC20,address,uint256):sink0:external_call:token.transferFrom": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1354,14 +1472,26 @@
                   "selector": "0x23b872dd",
                   "callee": "transferFrom"
                 }
-              ]
+              ],
+              "target_variable": "gateway",
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "token.transferFrom",
               "selector": "0x23b872dd",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1405,7 +1535,19 @@
                 "sink_ids": [
                   "pull(IERC20,address,uint256):sink0:external_call:token.safeTransferFrom",
                   "pull(IERC20,address,uint256):sink1:external_call:TMP_9.call"
-                ]
+                ],
+                "sink_receivers": {
+                  "pull(IERC20,address,uint256):sink0:external_call:token.safeTransferFrom": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1431,12 +1573,23 @@
             {
               "target": "TMP_9.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.safeTransferFrom",
               "selector": "0x5beae096",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1495,7 +1648,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "recoverERC721(IERC721,address,uint256):sink0:external_call:collection.safeTransferFrom"
-                ]
+                ],
+                "sink_receivers": {
+                  "recoverERC721(IERC721,address,uint256):sink0:external_call:collection.safeTransferFrom": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "collection",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1521,7 +1686,17 @@
             {
               "target": "collection.safeTransferFrom",
               "selector": "0x42842e0e",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "collection",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1610,7 +1785,19 @@
                 "sink_ids": [
                   "splitPay(IERC20,address,uint256,uint256):sink0:external_call:token.safeTransfer",
                   "splitPay(IERC20,address,uint256,uint256):sink1:external_call:TMP_2.call"
-                ]
+                ],
+                "sink_receivers": {
+                  "splitPay(IERC20,address,uint256,uint256):sink0:external_call:token.safeTransfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1645,12 +1832,23 @@
             {
               "target": "TMP_2.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.safeTransfer",
               "selector": "0xd0c407e1",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1706,7 +1904,19 @@
                 "sink_ids": [
                   "sweep(IERC20):sink1:external_call:token.safeTransfer",
                   "sweep(IERC20):sink2:external_call:TMP_2.call"
-                ]
+                ],
+                "sink_receivers": {
+                  "sweep(IERC20):sink1:external_call:token.safeTransfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1724,24 +1934,47 @@
               "amount_kind": {
                 "kind": "indeterminate",
                 "tier": "static_trace"
-              }
+              },
+              "target_variable": "treasury",
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "TMP_2.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.balanceOf",
               "selector": "0x70a08231",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             },
             {
               "target": "token.safeTransfer",
               "selector": "0xd0c407e1",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1803,7 +2036,19 @@
                 "sink_ids": [
                   "sweepTo(IERC20,address,uint256):sink0:external_call:token.safeTransfer",
                   "sweepTo(IERC20,address,uint256):sink1:external_call:TMP_2.call"
-                ]
+                ],
+                "sink_receivers": {
+                  "sweepTo(IERC20,address,uint256):sink0:external_call:token.safeTransfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -1830,12 +2075,23 @@
             {
               "target": "TMP_2.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "token.safeTransfer",
               "selector": "0xd0c407e1",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1880,7 +2136,17 @@
             {
               "target": "vault.exit",
               "selector": "0x18457e61",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfbfa77cf",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "vault",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -1966,7 +2232,17 @@
             {
               "target": "vault.enter",
               "selector": "0x39d6ba32",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfbfa77cf",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "vault",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -2054,7 +2330,17 @@
             {
               "target": "vault.enter",
               "selector": "0x39d6ba32",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfbfa77cf",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "vault",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -2145,17 +2431,47 @@
             {
               "target": "accountant.getRateInQuoteSafe",
               "selector": "0x820973da",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x4fb3ccc5",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "accountant",
+                "visibility": "public"
+              }
             },
             {
               "target": "shareAmount.mulDivDown",
               "selector": "0xb67bee04",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 2,
+                "param_scope": "entry_point",
+                "variable": "shareAmount",
+                "visibility": null
+              }
             },
             {
               "target": "vault.exit",
               "selector": "0x18457e61",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfbfa77cf",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "vault",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -2246,7 +2562,8 @@
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2324,7 +2641,8 @@
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2405,7 +2723,8 @@
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2483,7 +2802,8 @@
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2554,14 +2874,21 @@
                 "kind": "param",
                 "tier": "static_trace"
               },
-              "amount_param_index": 0
+              "amount_param_index": 0,
+              "target_variable": "governor",
+              "target_writer_signatures": [
+                "setGovernor(address)"
+              ],
+              "target_writer_scan_complete": true,
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2632,14 +2959,21 @@
                 "kind": "param",
                 "tier": "static_trace"
               },
-              "amount_param_index": 0
+              "amount_param_index": 0,
+              "target_variable": "governor",
+              "target_writer_signatures": [
+                "setGovernor(address)"
+              ],
+              "target_writer_scan_complete": true,
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2710,14 +3044,17 @@
                 "kind": "param",
                 "tier": "static_trace"
               },
-              "amount_param_index": 0
+              "amount_param_index": 0,
+              "target_variable": "treasury",
+              "writer_surface_closed": "not_determined"
             }
           ],
           "external_calls": [
             {
               "target": "TMP_15.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2809,7 +3146,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "deposit(uint256):sink1:external_call:token.transferFrom"
-                ]
+                ],
+                "sink_receivers": {
+                  "deposit(uint256):sink1:external_call:token.transferFrom": {
+                    "asset_identity": "not_determined",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": null,
+                    "param_scope": "internal_helper",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -2835,12 +3184,32 @@
             {
               "target": "reserveAsset.safeTransferFrom",
               "selector": "0x5beae096",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xf85cb5c8",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "reserveAsset",
+                "visibility": "public"
+              }
             },
             {
               "target": "token.transferFrom",
               "selector": "0x23b872dd",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": "internal_helper",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -2894,7 +3263,8 @@
             {
               "target": "REF_4.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -2928,7 +3298,17 @@
             {
               "target": "reserveAsset.shares",
               "selector": "0xce7c2ac2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xf85cb5c8",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "reserveAsset",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -2989,7 +3369,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "payAllowlisted(IERC20,address,uint256):sink0:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "payAllowlisted(IERC20,address,uint256):sink0:external_call:token.transfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -3016,7 +3408,17 @@
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3074,7 +3476,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "payAnyone(IERC20,address,uint256):sink0:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "payAnyone(IERC20,address,uint256):sink0:external_call:token.transfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -3101,7 +3515,17 @@
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3163,7 +3587,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "payCommitted(IERC20,address,uint256,bytes32):sink0:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "payCommitted(IERC20,address,uint256,bytes32):sink0:external_call:token.transfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -3190,7 +3626,17 @@
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3253,7 +3699,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "payTreasuryOnly(IERC20,address,uint256):sink0:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "payTreasuryOnly(IERC20,address,uint256):sink0:external_call:token.transfer": {
+                    "asset_identity": "caller_named",
+                    "auto_getter_selector": null,
+                    "binding": "parameter",
+                    "mutability": null,
+                    "param_index": 0,
+                    "param_scope": "entry_point",
+                    "variable": "token",
+                    "visibility": null
+                  }
+                }
               }
             }
           ],
@@ -3280,7 +3738,17 @@
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "token",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3581,7 +4049,17 @@
             {
               "target": "module.functionDelegateCall",
               "selector": "0xee33b7e2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xb86d5298",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "module",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [
@@ -3826,7 +4304,17 @@
             {
               "target": "t.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "local",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": null,
+                "variable": "t",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3876,7 +4364,17 @@
             {
               "target": "t.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "local",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": null,
+                "variable": "t",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3929,7 +4427,17 @@
             {
               "target": "to.compose",
               "selector": "0xa9803dcc",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 1,
+                "param_scope": "entry_point",
+                "variable": "to",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -3983,12 +4491,23 @@
             {
               "target": "fallbackRoute.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x5ef32cc6",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "fallbackRoute",
+                "visibility": "public"
+              }
             },
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -4044,12 +4563,23 @@
             {
               "target": "fallbackRoute.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x5ef32cc6",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "fallbackRoute",
+                "visibility": "public"
+              }
             },
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -4105,12 +4635,23 @@
             {
               "target": "data.send",
               "selector": "0x202d45d3",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 1,
+                "param_scope": "entry_point",
+                "variable": "data",
+                "visibility": null
+              }
             },
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             }
           ],
           "delegatecall_sinks": [],
@@ -4164,7 +4705,17 @@
             {
               "target": "target.callContract",
               "selector": "0x24d78c05",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "target",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4268,12 +4819,23 @@
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "target.functionCallWithValue",
               "selector": "0x2a011594",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "target",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4325,12 +4887,23 @@
             {
               "target": "target.call",
               "selector": "",
-              "origin": "body"
+              "origin": "body",
+              "receiver": null
             },
             {
               "target": "target.functionCall",
               "selector": "0xa0b5ffb0",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "target",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4381,7 +4954,17 @@
             {
               "target": "a.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "caller_named",
+                "auto_getter_selector": null,
+                "binding": "parameter",
+                "mutability": null,
+                "param_index": 0,
+                "param_scope": "entry_point",
+                "variable": "a",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4431,7 +5014,17 @@
             {
               "target": "t.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "local",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": null,
+                "variable": "t",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4464,7 +5057,17 @@
             {
               "target": "swapper.swap",
               "selector": "0x119943f7",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x2b3297f9",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "swapper",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4517,7 +5120,17 @@
             {
               "target": "t.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "local",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": null,
+                "variable": "t",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4568,12 +5181,32 @@
             {
               "target": "fallbackRoute.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x5ef32cc6",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "fallbackRoute",
+                "visibility": "public"
+              }
             },
             {
               "target": "t.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "not_determined",
+                "auto_getter_selector": null,
+                "binding": "local",
+                "mutability": null,
+                "param_index": null,
+                "param_scope": null,
+                "variable": "t",
+                "visibility": null
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4624,7 +5257,17 @@
             {
               "target": "fallbackRoute.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x5ef32cc6",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "fallbackRoute",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -4658,12 +5301,32 @@
             {
               "target": "fallbackRoute.exec",
               "selector": "0xbe6002c2",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x5ef32cc6",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "fallbackRoute",
+                "visibility": "public"
+              }
             },
             {
               "target": "swapper.swap",
               "selector": "0x119943f7",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x2b3297f9",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "swapper",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5065,7 +5728,17 @@
             {
               "target": "vault.deposit",
               "selector": "0xb6b55f25",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfbfa77cf",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "vault",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5112,7 +5785,17 @@
             {
               "target": "recovery.sweepTo",
               "selector": "0x0aeef8c8",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xddceafa9",
+                "binding": "state_variable",
+                "mutability": "mutable",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "recovery",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5228,7 +5911,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "withdrawDecoy(address,uint256):sink1:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "withdrawDecoy(address,uint256):sink1:external_call:token.transfer": {
+                    "asset_identity": "contract_state_unresolved",
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
               }
             }
           ],
@@ -5255,12 +5950,32 @@
             {
               "target": "decoyLimiter.consume",
               "selector": "0x483f31ab",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x761ea860",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "decoyLimiter",
+                "visibility": "public"
+              }
             },
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "token",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5319,7 +6034,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "withdrawLimited(address,uint256):sink1:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "withdrawLimited(address,uint256):sink1:external_call:token.transfer": {
+                    "asset_identity": "contract_state_unresolved",
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
               }
             },
             {
@@ -5384,12 +6111,32 @@
             {
               "target": "limiter.consume",
               "selector": "0xb87a8ecd",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x74b87f67",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "limiter",
+                "visibility": "public"
+              }
             },
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "token",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5448,7 +6195,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "withdrawTokenLimited(address,uint256):sink1:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "withdrawTokenLimited(address,uint256):sink1:external_call:token.transfer": {
+                    "asset_identity": "contract_state_unresolved",
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
               }
             },
             {
@@ -5513,12 +6272,32 @@
             {
               "target": "limiter.consumeToken",
               "selector": "0xc0d5f68a",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0x74b87f67",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "limiter",
+                "visibility": "public"
+              }
             },
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "token",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
@@ -5577,7 +6356,19 @@
                 "kind": "value_flow",
                 "sink_ids": [
                   "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer"
-                ]
+                ],
+                "sink_receivers": {
+                  "withdrawUnlimited(address,uint256):sink0:external_call:token.transfer": {
+                    "asset_identity": "contract_state_unresolved",
+                    "auto_getter_selector": "0xfc0c546a",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "variable": "token",
+                    "visibility": "public"
+                  }
+                }
               }
             }
           ],
@@ -5604,7 +6395,17 @@
             {
               "target": "token.transfer",
               "selector": "0xa9059cbb",
-              "origin": "body"
+              "origin": "body",
+              "receiver": {
+                "asset_identity": "contract_state_unresolved",
+                "auto_getter_selector": "0xfc0c546a",
+                "binding": "state_variable",
+                "mutability": "immutable_in_implementation",
+                "param_index": null,
+                "param_scope": null,
+                "variable": "token",
+                "visibility": "public"
+              }
             }
           ],
           "delegatecall_sinks": [],
