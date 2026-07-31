@@ -23,21 +23,29 @@ def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvi
         return None
 
     selectors = {f.get("selector") for f in flows if f.get("selector")}
-    sink_ids = [
-        s["id"]
+    sinks = [
+        s
         for s in _facts.body_sinks(ctx, function)
         if s.get("kind") == "external_call" and (s.get("selector") in selectors or _is_value_call(s))
     ]
+    sink_ids = [s["id"] for s in sinks]
+    # Keyed BY SINK ID, not listed per flow: one flow key can cover two sinks
+    # with the same selector and different receivers (two different tokens moved
+    # by one function), and a bare list gives the consumer no way to say which
+    # receiver belongs to which move. Guarded the ``router_ops`` way — a missing
+    # or empty map leaves the key absent, and absence fails every downstream
+    # precondition rather than licensing one.
+    sink_receivers = {s["id"]: s["receiver"] for s in sinks if s.get("receiver")}
     exact = any(f.get("kind") == "callee_erc20_selector" for f in flows)
-    return ClaimEvidence(
-        tier="standard_exact" if exact else "idiom_structural",
-        witness={
-            "kind": "value_flow",
-            "direction": direction,
-            "flows": [_flow_entry(ctx, function, f) for f in flows],
-            "sink_ids": sorted(set(sink_ids)),
-        },
-    )
+    witness: dict[str, Any] = {
+        "kind": "value_flow",
+        "direction": direction,
+        "flows": [_flow_entry(ctx, function, f) for f in flows],
+        "sink_ids": sorted(set(sink_ids)),
+    }
+    if sink_receivers:
+        witness["sink_receivers"] = sink_receivers
+    return ClaimEvidence(tier="standard_exact" if exact else "idiom_structural", witness=witness)
 
 
 def _flow_entry(ctx: ClaimContext, function: str, f: dict[str, Any]) -> dict[str, Any]:
