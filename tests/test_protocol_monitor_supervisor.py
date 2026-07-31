@@ -24,6 +24,7 @@ import pytest
 
 from db.queue import (
     HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
 )
@@ -256,7 +257,7 @@ def test_run_poll_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_default_mode_spawns_exactly_three_named_threads():
+def test_default_mode_spawns_exactly_four_named_threads():
     sup = _build_default_supervisor("http://stub", 3600.0)
     # Pre-set stop so each supervised thread returns before invoking the real
     # loop (no RPC, no DB work) — we only assert the thread set here.
@@ -269,9 +270,10 @@ def test_default_mode_spawns_exactly_three_named_threads():
                 f"supervise-{HEARTBEAT_PROTOCOL_SCANNER}",
                 f"supervise-{HEARTBEAT_PROTOCOL_POLLER}",
                 f"supervise-{HEARTBEAT_PROTOCOL_TVL}",
+                f"supervise-{HEARTBEAT_PROTOCOL_RESTAKING}",
             ]
         )
-        assert len(sup._threads) == 3
+        assert len(sup._threads) == 4
     finally:
         sup.join()
 
