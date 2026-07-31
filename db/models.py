@@ -1477,13 +1477,16 @@ def exactness_eligible_cursor_clause():
     """SQL form of :func:`enrollment_basis_permits_exactness`, for the readers
     that ask "does a usable cursor exist" without loading the row.
 
-    Kept beside the Python predicate so the two cannot drift into disagreeing
-    about which rows may support an exact empty.
+    Derived from the same frozenset the Python predicate reads, so the two
+    cannot drift into disagreeing about which rows may support an exact empty.
     """
-    return or_(
-        IndexedEventCursor.enrollment_basis.is_(None),
-        IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT,
-    )
+    non_null = sorted(b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None)
+    clauses = []
+    if None in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES:
+        clauses.append(IndexedEventCursor.enrollment_basis.is_(None))
+    if non_null:
+        clauses.append(IndexedEventCursor.enrollment_basis.in_(non_null))
+    return or_(*clauses)
 
 
 class WorkerHeartbeat(Base):

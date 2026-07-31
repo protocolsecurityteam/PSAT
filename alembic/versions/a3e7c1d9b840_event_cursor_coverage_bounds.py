@@ -25,11 +25,8 @@ basis unknown". The one UPDATE stamps ``window_stats_basis`` with
 windows were fetched before any count was recorded and can never be promoted),
 never toward a claim.
 
-REBASE MARKER — WAVE-2 CHAIN POSITION 3 of 5:
-U4 (c1a4b7e02f18) -> U8 (c4f8a1d92b07) -> U10A (this) -> U10B -> U7B.
-``down_revision`` is authored against this worktree's own head (b6d5e1c07a94)
-because U4's and U8's revisions do not exist in this tree. The orchestrator
-repoints it to c4f8a1d92b07 at assembly.
+Wave-2 migration chain position 3: it follows the upgrade-executor-fold
+revision (``c4f8a1d92b07``) and precedes the restaking-position revision.
 """
 
 from __future__ import annotations
@@ -41,7 +38,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a3e7c1d9b840"
-down_revision: Union[str, Sequence[str], None] = "b6d5e1c07a94"
+down_revision: Union[str, Sequence[str], None] = "c4f8a1d92b07"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -1037,6 +1037,15 @@ def enroll_from_tracked_topics(
         .order_by(MonitoredContract.id.asc())
         .limit(scan_limit)
     ).all()
+    if len(rows) == scan_limit:
+        # The scan is truncated, so the tail of the fleet is unreachable this
+        # pass AND every later one — the drain counter would read zero while
+        # those addresses stay permanently unenrolled. Loud, because the
+        # shortfall is otherwise indistinguishable from a drained fleet.
+        logger.warning(
+            "tracked-topic enrolment scan hit its row limit; fleet tail unreachable",
+            extra={"scan_limit": scan_limit, "scanned": len(rows)},
+        )
     inserted = 0
     worked = 0
     seed_cache: dict[tuple[int, str], int | None] = {}
