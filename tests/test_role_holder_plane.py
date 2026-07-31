@@ -41,6 +41,7 @@ from db.models import (  # noqa: E402
     RoleHolderPlane,
 )
 from services.resolution import role_holder_plane as rhp  # noqa: E402
+from utils.chains import DEFAULT_CONFIRMATION_DEPTH  # noqa: E402
 from utils.rpc import EthCallResult  # noqa: E402
 
 REGISTRY = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
@@ -622,6 +623,81 @@ def test_tracked_topics_basis_is_recorded_not_depended_on(db_session, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# The pinned probe block itself (R2) — previously monkeypatched away everywhere
+# ---------------------------------------------------------------------------
+
+
+HEAD = 25643312
+
+
+def _rpc_stub(calls: list[tuple[str, list[Any]]], *, head=hex(HEAD), block=None, fail_hash=False, fail_head=False):
+    def fake(rpc_url, method, params, *a, **kw):
+        calls.append((method, params))
+        if method == "eth_blockNumber":
+            if fail_head:
+                raise RuntimeError("upstream down")
+            return head
+        if method == "eth_getBlockByNumber":
+            if fail_hash:
+                raise RuntimeError("no block")
+            return block if block is not None else {"hash": "0x" + "cd" * 32}
+        raise AssertionError(f"unexpected method {method}")
+
+    return fake
+
+
+def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
+    """The height is head − DEFAULT_CONFIRMATION_DEPTH, and the block is asked
+    for by NUMBER. A bare head can be reorged out from under a persisted
+    `as_of_block`, and ``"latest"`` would make the citation unrepeatable."""
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
+    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
+    assert pinned is not None
+    assert pinned.number == HEAD - DEFAULT_CONFIRMATION_DEPTH
+    assert pinned.number == 25643300
+    assert pinned.block_hash is not None
+    assert pinned.block_hash == bytes.fromhex("cd" * 32)
+    assert len(pinned.block_hash) == 32
+    assert calls[1][0] == "eth_getBlockByNumber"
+    assert calls[1][1] == [hex(HEAD - DEFAULT_CONFIRMATION_DEPTH), False]
+    assert all("latest" not in str(params) for _, params in calls), "never latest"
+
+
+def test_probe_block_survives_an_unreadable_hash(monkeypatch):
+    """The height stands on its own; only replay-after-reorg is weaker.
+
+    This is why the register says the hash is persisted WHEN READABLE rather
+    than unconditionally.
+    """
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_hash=True))
+    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
+    assert pinned is not None
+    assert pinned.number == HEAD - DEFAULT_CONFIRMATION_DEPTH
+    assert pinned.block_hash is None
+
+
+def test_probe_block_hash_absent_from_payload_is_not_invented(monkeypatch):
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={}))
+    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
+    assert pinned is not None and pinned.block_hash is None
+
+
+def test_unreadable_head_yields_no_probe_block(monkeypatch):
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_head=True))
+    assert rhp.pin_probe_block("http://stub", chain_id=1) is None
+
+
+def test_chain_shallower_than_confirmation_depth_yields_no_probe_block(monkeypatch):
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, head=hex(DEFAULT_CONFIRMATION_DEPTH)))
+    assert rhp.pin_probe_block("http://stub", chain_id=1) is None
+
+
+# ---------------------------------------------------------------------------
 # The bans, enforced by the database
 # ---------------------------------------------------------------------------
 
@@ -729,6 +805,7 @@ def _withheld_orm_row(**overrides: Any) -> dict[str, Any]:
         coverage="partial",
         candidate_count=None,
         unconfirmed_candidate_count=None,
+        fold_chain_disagreements=None,
         **overrides,
     )
 
@@ -758,12 +835,14 @@ def _raw_insert(session, holders_sql: str, **cols: str) -> None:
     defaults = {
         "holders_basis": "'not_determined'",
         "holder_set_exhaustive": "'not_determined'",
+        "cursor_first_indexed_block": "NULL",
         "cursor_first_indexed_block_basis": "'not_determined'",
         "cursor_enrollment_bases": "'{}'::jsonb",
         "cursor_page_completeness": "'not_determined'",
         "coverage": "'partial'",
         "role_name_basis": "'not_determined'",
-        "fold_chain_disagreements": "'[]'::jsonb",
+        # NULL, matching the withheld shape these raw inserts build.
+        "fold_chain_disagreements": "NULL",
     }
     defaults.update(cols)
     names = ", ".join(["chain_id", "registry_address", "role_hash", "holders", *defaults])
@@ -804,12 +883,98 @@ def test_jsonb_scalar_null_cannot_carry_a_proven_basis(db_session):
         session.rollback()
 
 
+def test_withheld_row_cannot_claim_no_disagreement(db_session):
+    """R4 — ``[]`` on a withheld row is an unearned negative.
+
+    On an all-reverting registry nothing was read, so "no disagreement" is
+    not_determined. On an all-false registry disagreements WERE observed, and
+    publishing ``[]`` there would suppress them. Both must be NULL.
+    """
+    session = db_session
+    with pytest.raises(IntegrityError):
+        _raw_insert(session, "NULL", fold_chain_disagreements="'[]'::jsonb")
+    session.rollback()
+
+
+def test_published_row_must_carry_a_disagreement_log(db_session):
+    """The converse: a published floor may not omit the log that qualifies it."""
+    session = db_session
+    with pytest.raises(IntegrityError):
+        session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=None)))
+        session.flush()
+    session.rollback()
+
+
+def test_published_empty_disagreement_log_is_allowed(db_session):
+    """On a published row ``[]`` is earned — scoped to the candidates whose
+    reads completed, with ``unconfirmed_candidate_count`` carrying the rest."""
+    session = db_session
+    session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=[])))
+    session.flush()
+    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
+    assert stored is not None and stored.fold_chain_disagreements == []
+    session.rollback()
+
+
+def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
+    session = db_session
+    _seed(session)
+    for verdicts in ({}, {(r, a): FALSE_WORD for r in (ZERO_ROLE, PAUSER) for a in (ADMIN_HOLDER, REVOKED_A)}):
+        for row in _run(session, monkeypatch, verdicts):
+            if row["holders"] is None:
+                assert row["fold_chain_disagreements"] is None
+
+
+@pytest.mark.parametrize(
+    "cols",
+    [
+        pytest.param({"cursor_page_completeness": "'bogus'"}, id="page_completeness_domain"),
+        pytest.param({"cursor_first_indexed_block_basis": "'bogus'"}, id="lower_bound_basis_domain"),
+        pytest.param(
+            {"cursor_first_indexed_block_basis": "'explicit_seed'"},
+            id="explicit_seed_is_not_storable",
+        ),
+        pytest.param(
+            {"cursor_first_indexed_block_basis": "'creation_block_minus_one'"},
+            id="witnessed_basis_without_a_block",
+        ),
+    ],
+)
+def test_cursor_bound_columns_are_domain_checked(db_session, cols):
+    """R1 + R3 — gates that lived only in code, now in the schema.
+
+    A basis of ``creation_block_minus_one`` with no block claims a height it
+    cannot cite; ``explicit_seed`` is a caller's number and the writer
+    normalises it away, so it must not be storable as a witness either.
+    """
+    session = db_session
+    with pytest.raises(IntegrityError):
+        _raw_insert(session, "NULL", **cols)
+    session.rollback()
+
+
+def test_lower_bound_block_without_a_basis_is_rejected(db_session):
+    session = db_session
+    with pytest.raises(IntegrityError):
+        _raw_insert(session, "NULL", cursor_first_indexed_block="999")
+    session.rollback()
+
+
 def test_non_array_holders_are_rejected(db_session):
     """A jsonb string or object is neither a holder set nor a withheld marker."""
     session = db_session
     for payload in ("'\"0xabc\"'::jsonb", "'{}'::jsonb", "'7'::jsonb"):
         with pytest.raises(IntegrityError):
-            _raw_insert(session, payload, holders_basis="'pinned_has_role_confirmed'")
+            _raw_insert(
+                session,
+                payload,
+                holders_basis="'pinned_has_role_confirmed'",
+                as_of_block="25643300",
+                candidate_count="1",
+                unconfirmed_candidate_count="0",
+                coverage="'lower_bound'",
+                fold_chain_disagreements="'[]'::jsonb",
+            )
         session.rollback()
 
 
@@ -825,22 +990,11 @@ def test_valid_row_round_trips(db_session):
 
 def test_withheld_row_round_trips(db_session):
     session = db_session
-    session.add(
-        RoleHolderPlane(
-            **_valid_row(
-                holders=None,
-                holders_basis="not_determined",
-                as_of_block=None,
-                as_of_block_hash=None,
-                coverage="partial",
-                candidate_count=None,
-                unconfirmed_candidate_count=None,
-            )
-        )
-    )
+    session.add(RoleHolderPlane(**_withheld_orm_row()))
     session.flush()
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
     assert stored is not None and stored.holders is None
+    assert stored.fold_chain_disagreements is None
 
 
 def test_persist_upserts(db_session, monkeypatch):

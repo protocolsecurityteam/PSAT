@@ -321,11 +321,19 @@ def _withheld_row(
 ) -> dict[str, Any]:
     """A row that publishes no lower bound.
 
-    Every counter is NULL. A cold surface, an all-reverting registry and a
-    registry where every read completed and confirmed nobody are the SAME row
-    here, on purpose: distinguishing them would let a reader reconstruct "N
-    probed, all completed, none held" — the banned empty set, spelled out in
-    columns.
+    Every counter is NULL, and so is the disagreement log. A cold surface, an
+    all-reverting registry and a registry where every read completed and
+    confirmed nobody are the SAME row here, on purpose: distinguishing them
+    would let a reader reconstruct "N probed, all completed, none held" — the
+    banned empty set, spelled out in columns.
+
+    The disagreement log is NULL rather than ``[]`` for a second, independent
+    reason. On an all-reverting registry nothing was read, so "no disagreement
+    was observed" is not_determined, not an earned negative. On an all-false
+    registry disagreements genuinely WERE observed, and they are withheld along
+    with the floor they qualify rather than silently dropped. Either way ``[]``
+    would assert something unproven — an unearned negative one column over from
+    the empty set the table makes unrepresentable.
     """
     return {
         "chain_id": chain_id,
@@ -346,7 +354,7 @@ def _withheld_row(
         "role_name_basis": role_name_basis,
         "candidate_count": None,
         "unconfirmed_candidate_count": None,
-        "fold_chain_disagreements": [],
+        "fold_chain_disagreements": None,
     }
 
 

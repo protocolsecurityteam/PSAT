@@ -1833,6 +1833,10 @@ ROLE_NAME_BASIS_NOT_DETERMINED = "not_determined"
 # constraints below stop discriminating exactly where it matters. Enforced from
 # the other side too, by ``holders_is_array_or_absent``, so the two can't drift.
 HOLDERS_WITHHELD_SQL = "(holders IS NULL OR jsonb_typeof(holders) = 'null')"
+# The same two spellings for the disagreement log. It travels with ``holders``:
+# on a withheld row nothing was read, or what was read is not published, so
+# "no disagreement was observed" is not_determined rather than an empty list.
+DISAGREEMENTS_WITHHELD_SQL = "(fold_chain_disagreements IS NULL OR jsonb_typeof(fold_chain_disagreements) = 'null')"
 
 
 class RoleHolderPlane(Base):
@@ -1924,7 +1928,18 @@ class RoleHolderPlane(Base):
     # attributed between "the fold missed a log" and "the state changed after
     # the cursor stopped". Permitted keys are fixed by the writer; no key
     # naming a cause may be added.
-    fold_chain_disagreements: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    #
+    # NULL exactly when ``holders`` is, and for the same reason the counters are:
+    # an empty list asserts "we looked and found none", which on a withheld row
+    # is either untrue (an all-reverting registry read nothing to compare) or
+    # suppression (an all-false registry DID observe disagreements). Publishing
+    # ``[]`` there would be an unearned negative one column over from the empty
+    # set the constraints below make unrepresentable. On a PUBLISHED row ``[]``
+    # is earned, and its scope is the candidates whose reads completed —
+    # ``unconfirmed_candidate_count`` carries the rest.
+    fold_chain_disagreements: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
@@ -1966,6 +1981,35 @@ class RoleHolderPlane(Base):
         CheckConstraint(
             f"NOT {HOLDERS_WITHHELD_SQL} OR coverage = 'partial'",
             name="ck_role_holder_planes_null_holders_are_partial",
+        ),
+        # The disagreement log travels with the holder set: withheld together,
+        # published together. Without this a withheld row could carry ``[]`` —
+        # "we looked and found none" over reads that either never happened or
+        # are not being published.
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = {DISAGREEMENTS_WITHHELD_SQL}",
+            name="ck_role_holder_planes_disagreements_match_holders",
+        ),
+        CheckConstraint(
+            f"{DISAGREEMENTS_WITHHELD_SQL} OR jsonb_typeof(fold_chain_disagreements) = 'array'",
+            name="ck_role_holder_planes_disagreements_are_array_or_absent",
+        ),
+        # A witnessed lower bound and its basis are one fact. Split, the row can
+        # claim a height it cannot cite, or discard a height it proved.
+        CheckConstraint(
+            "(cursor_first_indexed_block IS NULL) = (cursor_first_indexed_block_basis = 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_matches_basis",
+        ),
+        # ``explicit_seed`` is deliberately NOT in the stored domain: the writer
+        # normalises a seed to NULL + not_determined, because a number a caller
+        # supplied is not a witness and must not be storable as one.
+        CheckConstraint(
+            "cursor_first_indexed_block_basis IN ('creation_block_minus_one', 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_basis_domain",
+        ),
+        CheckConstraint(
+            "cursor_page_completeness IN ('complete', 'incomplete', 'not_determined')",
+            name="ck_role_holder_planes_page_completeness_domain",
         ),
         CheckConstraint(
             "(role_name IS NULL) = (role_name_basis = 'not_determined')",

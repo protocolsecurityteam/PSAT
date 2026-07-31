@@ -323,19 +323,20 @@ protocol-1) correctly produce no rows, and `hasRole` reverts on all four.
 
 | field | pop. | status | notes |
 |---|--:|---|---|
-| `holders` | 11 keys / 3 registries | REQ | a **floor**. `len(holders)` is never a count. NULL = `not_determined`; **`[]` is unrepresentable** (DB CHECK). Revert, transport failure, cold cursor, unpinnable block, or zero confirmations all ⇒ NULL |
+| `holders` | 11 keys / 3 registries | REQ | a JSON array of **plain lowercase `0x` address strings** — no per-element block, because `as_of_block` is a row column and every member shares it. A **floor**. `len(holders)` is never a count. NULL = `not_determined`; **`[]` is unrepresentable** (DB CHECK). Revert, transport failure, cold cursor, unpinnable block, or zero confirmations all ⇒ NULL |
 | `holders_basis` | 11 | GATE | `pinned_has_role_confirmed` / `not_determined` |
 | `holder_set_exhaustive` | 11 | GATE | **always `not_determined`**, CHECK-pinned. Never read `holders` as complete. Deferral **with cause**: `getRoleMemberCount`/`getRoleMember` both revert 4/4 and `supportsInterface(0x5a05180f)` is false 4/4, so the enumerable arm has population 0 (B14). Stricter than plan §6 on purpose — revisit deliberately |
-| `as_of_block` + `as_of_block_hash` | 11 | REQ | pinned at `head − 12`, hash persisted so a reorg is detectable. Never `"latest"`; an unpinnable height withholds the probe |
+| `as_of_block` | 11 | REQ | pinned at `head − DEFAULT_CONFIRMATION_DEPTH` (12) and asked for by number. Never `"latest"`; an unpinnable height withholds the probe entirely |
+| `as_of_block_hash` | best-effort | CONF | the pinned block's hash **when readable; NULL otherwise**. A failed hash read keeps the height — only replay-after-reorg is weaker |
 | `cursor_first_indexed_block` (+ basis) | **0/11 witnessed** | GATE | citable only at basis `creation_block_minus_one`. `explicit_seed` is a caller's number, not evidence ⇒ NULL + `not_determined` |
 | `cursor_last_indexed_block` | 11 | CONF | upper bound only, the weaker of the two topics. **Never a lower-bound witness** |
 | `cursor_enrollment_bases` | 11 | CONF | recorded per topic, **not depended on**: the exactness allow-list governs exact empties and this plane claims none, so a `tracked_topics_asserted` cursor still supports a floor |
 | `cursor_page_completeness` | `not_determined` on all | GATE | from U10A `page_completeness` — the unquantified residual |
 | `coverage` | 11 | GATE | `lower_bound` / `partial`. **`complete` does not exist here.** Cold or missing cursor on either topic ⇒ `partial` and no floor |
-| `role_name` | 8/11 | **CONF** | proves *a preimage of `role_hash` is the string S* — a total mathematical fact — **not** that this registry declares a constant named S. Cite only; never gates, never keys. NULL = key absent |
+| `role_name` | **10/11** (8 keccak + 2 literal; only `0x5f58e3a2` TIMELOCK_ADMIN_ROLE unnamed) | **CONF** | proves *a preimage of `role_hash` is the string S* — a total mathematical fact — **not** that this registry declares a constant named S. Cite only; never gates, never keys. NULL = key absent |
 | `role_name_basis` | 11 | GATE | `keccak_preimage` / `accesscontrol_default_admin_literal` / `not_determined`. The zero-word arm additionally requires an **answered** `hasRole`, and is withheld entirely on a withheld row |
 | `candidate_count`, `unconfirmed_candidate_count` | 11 | CONF | the floor's visible residual. **NULL whenever `holders` is NULL** — populated they would spell out `[]` |
-| `fold_chain_disagreements` | 11 | CONF | keys exactly `{registry, role_hash, address, fold_state, chain_state}`. Recorded, **never diagnosed** — `as_of_block` is above the cursor head, so cause is `not_determined` |
+| `fold_chain_disagreements` | 11 | CONF | keys exactly `{registry, role_hash, address, fold_state, chain_state}`. Recorded, **never diagnosed** — `as_of_block` is above the cursor head, so cause is `not_determined`. Array = observed among the candidates whose reads COMPLETED; **NULL on a withheld row, never `[]`** (nothing was read, or what was read is withheld with the floor it qualifies) |
 
 **Banned, with cause:**
 
@@ -344,7 +345,7 @@ protocol-1) correctly produce no rows, and `hasRole` reverts on all four.
 | `holders` as an **exhaustive set** | absence-as-witness with no proven recording-surface coverage. DB CHECK pins `holder_set_exhaustive` |
 | `holders = []` | reads as "nobody holds this role"; a direct storage write the surface never saw would not appear. DB CHECK makes it unrepresentable |
 | `role_name` by **keccak mismatch** | inv.2 name inference. The hash is the identity; the name must be its proven preimage |
-| minting rows from `spec_by_topic0()` / `STANDARDS` | it also carries Solady `RoleSet` (`role_topic_index=2` vs OZ's 1). Measured: 125 logs / 5 cursors / 40 role words on one protocol-1 registry ⇒ the plane would go 11 → 51 keys, and each Solady key's `hasRole` **succeeds** returning the mapping's **zero default** — a completed read witnessing nothing. Topic gate is LITERAL |
+| minting rows from `spec_by_topic0()` / `STANDARDS` | it also carries Solady `RoleSet` (`role_topic_index=2` vs OZ's 1). Measured: 125 logs / 40 role words / ONE `RoleSet` cursor on that protocol-1 registry (the corpus's 5 `RoleSet` cursors sit on 5 different addresses) ⇒ the plane would go 11 → 51 keys, and each Solady key's `hasRole` **succeeds** returning the mapping's **zero default** — a completed read witnessing nothing. Topic gate is LITERAL |
 | distinguishing all-false from all-revert | reconstructs the banned empty set. Those rows are byte-identical by design |
 | adding `TIMELOCK_ADMIN_ROLE` to a name list | it has no `role_definitions` row, so no preimage candidate exists and its name is absent. B0b's anti-decoy credit stays CONF — do not "fix" this |
 
@@ -355,3 +356,17 @@ including all 6 revoked ones.
 **Small populations (B14 — cite/gate/three-state only, never calibrate):**
 emitters 3 (protocol-1), `OPERATING_ADMIN_ROLE` holders 1, `TIMELOCK_ADMIN_ROLE`
 evidence 1 grant log, enumerable registries 0. No ratio or threshold is derived.
+
+**Not wired — populations are MEASURED, NOT PERSISTED.** Nothing calls
+`resolve_role_holder_planes` / `persist_role_holder_planes` outside tests, and
+`role_holder_planes` is empty in every environment. Every count above was
+measured by running the resolver in-process against the local replica plus
+pinned chain reads. A **deferral with cause**: plan §1.1 forbids running the
+orchestrator, so a worker wiring could not be validated end-to-end and an
+unexercised writer was not put on a production path. **An absent row is a
+statement about wiring, not about roles.**
+
+**`role_name` can be GAINED later** when an unrelated contract declaring a
+matching constant is analysed — an addition, not a correction, because absence
+is `not_determined` throughout and a proven preimage never stops being true. Do
+not cache its absence.

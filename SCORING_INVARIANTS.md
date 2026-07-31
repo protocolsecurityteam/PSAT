@@ -2733,16 +2733,17 @@ primary key.
 | `holders` | `role_holder_planes.holders` | 11 protocol-1 `(registry, role_hash)` keys / 3 registries | **REQUIRED** | proven-present = a **LOWER BOUND**, each member independently witnessed / proven-absent **unreachable by design** / `not_determined` = NULL | revert, transport failure, cold-or-missing cursor on either topic, unpinnable probe block, or zero confirmations ⇒ **NULL**. **Never `[]`** — a DB CHECK makes the empty array unrepresentable | three-state + cite. **`len(holders)` is a FLOOR, never a count** |
 | `holders_basis` | `.holders_basis` | 11 | **GATE** | `pinned_has_role_confirmed` / `not_determined` | any failure ⇒ `not_determined` | gate |
 | `holder_set_exhaustive` | `.holder_set_exhaustive` | 11 | **GATE** | **always `not_determined`**, CHECK-pinned | unconditional | gate. A consumer may **never** read `holders` as complete |
-| `as_of_block` (+ `as_of_block_hash`) | `.as_of_block` | 11 | **REQUIRED** | present iff `holders` non-NULL | `holders` NULL ⇒ NULL | cite (inv.10 — a mutable now-fact carries its height) |
+| `as_of_block` | `.as_of_block` | 11 | **REQUIRED** | present iff `holders` non-NULL | `holders` NULL ⇒ NULL | cite (inv.10 — a mutable now-fact carries its height) |
+| `as_of_block_hash` | `.as_of_block_hash` | best-effort | **CONF** | the pinned block's hash **when readable** | the hash read failing leaves the height standing and the hash **NULL** — only replay-after-reorg is weaker | cite |
 | `cursor_first_indexed_block` (+ basis) | `.cursor_first_indexed_block` | **0/11 witnessed** | **GATE** | proven only at basis `creation_block_minus_one` | NULL, `not_determined` **or `explicit_seed`** ⇒ NULL + `not_determined` | cite |
 | `cursor_last_indexed_block` | `.cursor_last_indexed_block` | 11 | **CONF** | upper bound only; the weaker of the two topics | missing cursor ⇒ NULL + `coverage: partial` | cite. **Never a lower-bound witness** |
 | `cursor_enrollment_bases` | `.cursor_enrollment_bases` | 11 | **CONF** | recorded verbatim per topic | — | cite. Recorded, **not depended on** — see below |
 | `cursor_page_completeness` | `.cursor_page_completeness` | **`not_determined` on all** | **GATE** | from U10A `page_completeness` | — | cite (the residual) |
 | `coverage` | `.coverage` | 11 | **GATE** | `lower_bound` / `partial`. **Never `complete`** | cold cursor or NULL holders ⇒ `partial` | gate |
-| `role_name` | `.role_name` | 8/11 | **CONFIDENCE** | proven-present = a proven preimage / NULL = key absent, `not_determined` | keccak mismatch, or the zero-word arm without an answered `hasRole` ⇒ NULL | **cite only. Never gates, never keys anything** |
+| `role_name` | `.role_name` | **10/11** (8 `keccak_preimage` + 2 `accesscontrol_default_admin_literal`) | **CONFIDENCE** | proven-present = a proven preimage / NULL = key absent, `not_determined` | keccak mismatch, or the zero-word arm without an answered `hasRole` ⇒ NULL | **cite only. Never gates, never keys anything** |
 | `role_name_basis` | `.role_name_basis` | 11 | **GATE** | `keccak_preimage` / `accesscontrol_default_admin_literal` / `not_determined` | mismatch ⇒ `not_determined` | gate on `role_name` |
 | `candidate_count`, `unconfirmed_candidate_count` | `.candidate_count` … | 11 | **CONF** | integers, or **NULL when `holders` is NULL** | — | cite (the floor's visible residual) |
-| `fold_chain_disagreements` | `.fold_chain_disagreements` | 11 | **CONF** | recorded, **never diagnosed** | — | cite. Cause is `not_determined` |
+| `fold_chain_disagreements` | `.fold_chain_disagreements` | 11 | **CONF** | array = the disagreements observed among the candidates whose reads COMPLETED / **NULL = `not_determined`** | withheld row ⇒ **NULL, never `[]`** | cite. Cause is `not_determined` |
 
 **What `holders` proves, stated exactly:** *this address's own `hasRole`
 predicate returned true at `as_of_block`.* That is a behavioural read of deployed
@@ -2763,12 +2764,23 @@ is only a generator. It is also why the pool safely contains D6-reject's
 mis-parsed ERC-7201 pointers, which persist until their contract is re-analysed —
 their hashes match nothing.
 
+**A role may GAIN a name later, and that is not instability in a proven field.**
+The pool is whatever `role_definitions` currently holds, so analysing an
+unrelated contract that declares a matching constant can move a row from
+`role_name_basis: not_determined` to `keccak_preimage`. Nothing already
+published changes: a name, once attached, is a proven preimage and stays true,
+and the hash — the identity — never moves. The absence is honestly
+`not_determined` throughout, never "this role is unnamed", which is exactly the
+state that makes a later arrival an addition rather than a correction. A
+consumer must therefore not cache `role_name`'s ABSENCE as a fact.
+
 **Identity is the hash, and only one hash space is in play.** Rows are minted
 from the OZ topic pair **literally**, not from
 `role_store_standards.spec_by_topic0()`. That map also carries Solady's
 `RoleSet(address,uint256,bool)` (`0xaddc47d7…`, `role_topic_index=2` where OZ
-uses 1), measured at **125 logs / 5 warm cursors on `0x62247d29…` (contract 507,
-protocol-1), 40 distinct role words**. Folding it here would have widened the
+uses 1), measured at **125 logs and 40 distinct role words on `0x62247d29…`
+(contract 507, protocol-1), which carries ONE `RoleSet` cursor** (the 5 warm
+`RoleSet` cursors in the corpus are spread across 5 different addresses). Folding it here would have widened the
 plane from 11 keys to 51 — and the failure is not a mere miscount: on that
 registry `hasRole(bytes32,address)` **succeeds**, returning a genuine zero word
 (while `hasAnyRole`/`rolesOf` revert), because a Solady `uint256` role cast into
@@ -2821,8 +2833,9 @@ equal, non-attribution must still survive on principle — a cursor is an upper
 bound on what was **read**, never a proof of what was **emitted**.
 
 **Replay.** `as_of_block` is pinned at `head − DEFAULT_CONFIRMATION_DEPTH` (12)
-and its **block hash is persisted**, so the height is checkable after a reorg
-rather than merely trusted. This also closes plan §9's carry-forward that
+and its **block hash is persisted when readable** (a failed hash read keeps the
+height and stores NULL — it is best-effort, not guaranteed), so a reorg is
+detectable rather than merely trusted where the hash landed. This also closes plan §9's carry-forward that
 `_resolve_probe_block` persists nothing. An unpinnable height withholds the probe
 entirely; it is never retried against `"latest"`.
 
@@ -2833,6 +2846,21 @@ reported 12/12 over the active set only). The four corpus registries carrying
 warm role cursors and **zero** role logs — `0x5585996e` and `0xd5edf773`
 (both protocol-1), USDC `0xa0b86991`, `0xb8765ed7` — have `hasRole` **reverting
 on all four**, and correctly yield **no rows at all**.
+
+**Not wired, and the populations are MEASURED, NOT PERSISTED.** Nothing calls
+`resolve_role_holder_planes` or `persist_role_holder_planes` outside the tests;
+`RoleHolderPlane` has no producer in `workers/` or `services/` and the table is
+empty in every environment. Every count in this entry — 11 keys / 3 registries,
+10/11 named, 20/20 pinned agreement — was measured by running the resolver
+in-process against the local replica and the pinned chain reads, **not** read
+back out of the table. This is a **deferral with cause**: plan §1.1 forbids
+running the orchestrator or a full pipeline, so a worker wiring could not be
+validated end-to-end here, and shipping an unvalidated call site would put an
+unexercised writer on a production path. The schema, the resolver and the
+constraints are complete and exercised; only the invocation is outstanding, and
+it must arrive with its own single-phase verification. **Until then no consumer
+may treat an absent row as evidence of anything** — the table being empty is a
+statement about wiring, not about roles.
 
 **Flips:** none. This plane only adds rows; no existing published fact changes.
 `services/chat/data.py::role_holders` is a *different* plane (function-authority

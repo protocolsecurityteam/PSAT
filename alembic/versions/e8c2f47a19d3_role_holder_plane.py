@@ -19,8 +19,8 @@ One table, not a parent plus a holders child. A child table would hand a reader
 addresses with no exhaustiveness qualifier attached, and it would make the
 empty-set constraint below impossible to express.
 
-Eleven CHECKs carry the invariants that code must not be able to route around.
-Two are the unit's hard bans:
+Seventeen CHECKs carry the invariants that code must not be able to route
+around. Two are the unit's hard bans:
 
 * ``no_empty_set`` — an empty ``holders`` array is unrepresentable. Absence of a
   proven holder is NULL (not_determined), never ``[]``, because ``[]`` reads as
@@ -68,6 +68,7 @@ from alembic import op
 # and the jsonb scalar ``null`` — a bare ``holders IS NULL`` misses the second,
 # which is what a write of a Python None stores unless the column forbids it.
 HOLDERS_WITHHELD_SQL = "(holders IS NULL OR jsonb_typeof(holders) = 'null')"
+DISAGREEMENTS_WITHHELD_SQL = "(fold_chain_disagreements IS NULL OR jsonb_typeof(fold_chain_disagreements) = 'null')"
 
 revision: str = "e8c2f47a19d3"
 down_revision: Union[str, Sequence[str], None] = "a3e7c1d9b840"
@@ -104,7 +105,15 @@ def upgrade() -> None:
         sa.Column("role_name_basis", sa.String(length=48), nullable=False),
         sa.Column("candidate_count", sa.Integer(), nullable=True),
         sa.Column("unconfirmed_candidate_count", sa.Integer(), nullable=True),
-        sa.Column("fold_chain_disagreements", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        # Nullable, and NULL exactly when ``holders`` is: an empty list asserts
+        # "we looked and found none", which on a withheld row is either untrue
+        # (nothing was read) or suppression (disagreements were observed and are
+        # being withheld with the floor they qualify).
+        sa.Column(
+            "fold_chain_disagreements",
+            postgresql.JSONB(astext_type=sa.Text(), none_as_null=True),
+            nullable=True,
+        ),
         sa.Column("observed_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("chain_id", "registry_address", "role_hash"),
         sa.CheckConstraint(
@@ -138,6 +147,26 @@ def upgrade() -> None:
         sa.CheckConstraint(
             f"NOT {HOLDERS_WITHHELD_SQL} OR coverage = 'partial'",
             name="ck_role_holder_planes_null_holders_are_partial",
+        ),
+        sa.CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = {DISAGREEMENTS_WITHHELD_SQL}",
+            name="ck_role_holder_planes_disagreements_match_holders",
+        ),
+        sa.CheckConstraint(
+            f"{DISAGREEMENTS_WITHHELD_SQL} OR jsonb_typeof(fold_chain_disagreements) = 'array'",
+            name="ck_role_holder_planes_disagreements_are_array_or_absent",
+        ),
+        sa.CheckConstraint(
+            "(cursor_first_indexed_block IS NULL) = (cursor_first_indexed_block_basis = 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_matches_basis",
+        ),
+        sa.CheckConstraint(
+            "cursor_first_indexed_block_basis IN ('creation_block_minus_one', 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_basis_domain",
+        ),
+        sa.CheckConstraint(
+            "cursor_page_completeness IN ('complete', 'incomplete', 'not_determined')",
+            name="ck_role_holder_planes_page_completeness_domain",
         ),
         sa.CheckConstraint(
             "(role_name IS NULL) = (role_name_basis = 'not_determined')",
