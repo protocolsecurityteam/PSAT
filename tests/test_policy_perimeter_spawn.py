@@ -50,6 +50,10 @@ ROLE_GRANT = "semantic_capability:role_grant"
 # 0x66aae0ee… `vault()` -> 0x86b5780b… (BoringGovernance), whose `manage` it gates.
 MANAGER = "0x66aae0ee1f68c658401c7d8d6e417202a99545d7"
 VAULT = "0x86b5780b606940eb59a062aa85a07959518c0161"
+# A LayerZeroTeller, NOT a manager, whose vault() IS 0x86b5780b… — re-measured at
+# 25643300, control passing. One of the TEN non-managers among the 20 pairs that
+# publish `true`.
+TELLER = "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b"
 PINNED_BLOCK = 25643300
 
 
@@ -383,6 +387,109 @@ def test_resolution_site_keeps_its_unbudgeted_behaviour(db_session, seed, monkey
     assert child.request["discovered_by"] == "resolution"
 
 
+def test_partial_spawn_still_yields_a_ledger(db_session, seed, monkeypatch):
+    """FALSIFIER (E1): ``create_job`` raises on the 3rd of 5 nodes. The two
+    children already committed must still be recorded.
+
+    The walker used to BUILD the ledger and return it, so a raise part-way
+    through discarded it entirely — leaving committed children with no record,
+    which is the silent-drop failure in its most damaging form (the jobs exist,
+    the accounting does not).
+    """
+    from services.discovery import perimeter as perimeter_module
+    from services.discovery.perimeter import new_spawn_result
+
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    _protocol_id, parent, address_factory = seed
+    addrs = [address_factory() for _ in range(5)]
+
+    real_create = perimeter_module.create_job
+    calls = {"n": 0}
+
+    def flaky_create_job(session, request, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("simulated create_job failure")
+        return real_create(session, request, **kwargs)
+
+    monkeypatch.setattr(perimeter_module, "create_job", flaky_create_job)
+
+    ledger = new_spawn_result(site="policy_refresh", budget=8)
+    with pytest.raises(RuntimeError, match="simulated create_job failure"):
+        _spawn(
+            db_session,
+            parent,
+            _graph(parent.address, [_node(a) for a in addrs]),
+            budget=8,
+            depth_cap=2,
+            result=ledger,
+        )
+
+    assert len(ledger["queued"]) == 2
+    assert ledger["budget_used"] == 2
+    assert [q["address"] for q in ledger["queued"]] == addrs[:2]
+
+
+def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, seed, monkeypatch):
+    """FALSIFIER (E2): an ABSENT ledger must never be ambiguous between "the
+    refresh did not happen" and "the refresh happened and omitted nothing".
+
+    An empty graph still publishes the artifact, so absence means exactly one
+    thing: this job predates the ledger.
+    """
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    _protocol_id, parent, _address_factory = seed
+    from db.queue import get_artifact
+    from services.discovery.perimeter import new_spawn_result
+    from workers.policy_worker import _persist_spawn_summary
+
+    ledger = new_spawn_result(site="policy_refresh", budget=8)
+    _persist_spawn_summary(db_session, parent, ledger)
+
+    stored = get_artifact(db_session, parent.id, "perimeter_spawn_summary")
+    assert stored == {
+        "site": "policy_refresh",
+        "budget": 8,
+        "budget_used": 0,
+        "spawn_depth": 0,
+        "queued": [],
+        "omitted": [],
+        "out_of_population": [],
+    }
+
+
+def test_ledger_survives_a_poisoned_session(db_session, seed, monkeypatch):
+    """The `finally` must not itself be defeated by the failure that triggered
+    it: a mid-loop raise usually leaves the primary transaction aborted, so the
+    write retries on a fresh session."""
+    from db.queue import get_artifact
+    from services.discovery.perimeter import new_spawn_result
+    from workers.policy_worker import _persist_spawn_summary
+
+    _protocol_id, parent, _address_factory = seed
+    ledger = new_spawn_result(site="policy_refresh", budget=8)
+    ledger["queued"].append({"address": "0xabc", "name": "n", "job_id": "j"})
+
+    calls = {"n": 0}
+    import workers.policy_worker as pw
+
+    real_store = pw.store_artifact
+
+    def flaky_store(session, job_id, name, data=None, text_data=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transaction aborted")
+        return real_store(session, job_id, name, data=data, text_data=text_data)
+
+    monkeypatch.setattr(pw, "store_artifact", flaky_store)
+    _persist_spawn_summary(db_session, parent, ledger)
+
+    assert calls["n"] == 2  # primary failed, fresh session retried
+    stored = get_artifact(db_session, parent.id, "perimeter_spawn_summary")
+    assert isinstance(stored, dict)
+    assert stored["queued"] == [{"address": "0xabc", "name": "n", "job_id": "j"}]
+
+
 # ---------------------------------------------------------------------------
 # The back-link witness
 # ---------------------------------------------------------------------------
@@ -444,27 +551,47 @@ def test_backlink_confirms_the_pairing(monkeypatch):
     assert out == {
         "probe_block": PINNED_BLOCK,
         "backlink_getter": "vault()",
+        "gated_contract_address": VAULT,
         "backlink_address": VAULT,
         "negative_control": "passed",
         "declared_vault_matches_gated_contract": True,
     }
 
 
-def test_mismatched_vault_is_not_determined_never_the_assumed_pairing(monkeypatch):
-    """A DIFFERENT vault() answer yields ``not_determined`` — never the pairing
-    the projection assumed, and never a disproof of it. The non-matching address
-    is deliberately withheld so a consumer cannot reconstruct the mismatch and
-    read it as an earned negative."""
+def test_mismatch_payload_is_byte_identical_to_the_never_read_payload(monkeypatch):
+    """FALSIFIER (the mismatch oracle). A DIFFERENT ``vault()`` answer must
+    produce a payload byte-for-byte EQUAL to the one produced when the getter
+    does not answer at all.
+
+    The first cut of this probe recorded the control verdict before testing the
+    equality. Because the control is fired only once a decodable address is in
+    hand, that made ``negative_control`` a perfect mismatch oracle:
+    ``(negative_control == "passed" AND matches == "not_determined")`` was
+    reachable ONLY by "M declares a vault and it is not V" — precisely the
+    earned negative this witness refuses, published one key over. Withholding
+    ``backlink_address`` alone did not close it. Byte-identity is the assertion
+    that does, because it admits no leaking key.
+    """
     from services.resolution.tracking import probe_declared_vault_backlink
 
     other = "0x1111111111111111111111111111111111111111"
-    _wire_backlink(monkeypatch, vault_return=_word(other))
-    out = probe_declared_vault_backlink("https://rpc.example", MANAGER, VAULT)
-    assert out is not None
 
-    assert out["declared_vault_matches_gated_contract"] == "not_determined"
-    assert out["backlink_address"] == "not_determined"
-    assert other not in str(out)
+    _wire_backlink(monkeypatch, vault_return=_word(other))
+    mismatch = probe_declared_vault_backlink("https://rpc.example", MANAGER, VAULT)
+
+    _wire_backlink(monkeypatch, vault_return="revert")
+    never_read = probe_declared_vault_backlink("https://rpc.example", MANAGER, VAULT)
+
+    assert mismatch == never_read
+    assert mismatch == {
+        "probe_block": PINNED_BLOCK,
+        "backlink_getter": "vault()",
+        "gated_contract_address": VAULT,
+        "backlink_address": "not_determined",
+        "negative_control": "not_determined",
+        "declared_vault_matches_gated_contract": "not_determined",
+    }
+    assert other not in str(mismatch)
 
 
 def test_reverting_getter_is_not_determined(monkeypatch):
@@ -507,13 +634,19 @@ def test_unpinnable_height_suppresses_the_whole_witness(monkeypatch):
 
 
 def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch):
-    """FALSIFIER (A3): a non-manager (measured: 0x35dd2463…, a LayerZeroTeller)
-    whose ``vault()`` returns the same V publishes ``True`` exactly as a manager
-    does. The field therefore earns only the PAIRING, never the TYPE — nothing
-    downstream may read it as "M is the manager"."""
+    """FALSIFIER: a non-manager whose ``vault()`` returns the same V publishes
+    ``True`` exactly as a manager does, so the field earns only the PAIRING,
+    never the TYPE.
+
+    This is not an anecdote. Re-measured over all 37 (M, V) pairs the probe sees
+    at 25643300: 20 publish ``True`` and **10 of those 20 are not managers** —
+    Tellers, solvers and vaults. Reading this key as "M is the manager" would
+    mis-type half the positive population. ``TELLER`` is one of the ten and DOES
+    publish ``true`` on chain today.
+    """
     from services.resolution.tracking import probe_declared_vault_backlink
 
-    teller = "0x35dd2463d67f7d0da22c4c4f6c96b7d0e6ff08b1"
+    teller = TELLER
     _wire_backlink(monkeypatch, vault_return=_word(VAULT))
     out = probe_declared_vault_backlink("https://rpc.example", teller, VAULT)
     assert out is not None
@@ -525,6 +658,7 @@ def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch)
     assert set(out) == {
         "probe_block",
         "backlink_getter",
+        "gated_contract_address",
         "backlink_address",
         "negative_control",
         "declared_vault_matches_gated_contract",

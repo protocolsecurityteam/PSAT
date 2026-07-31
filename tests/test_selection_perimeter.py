@@ -291,6 +291,38 @@ def test_chain_disabled_candidate_is_recorded_and_consumes_no_budget(db_session,
     assert [c["address"] for c in summary["child_jobs"]] == [enabled]
 
 
+def test_below_cut_chain_disabled_reports_the_gate_not_the_budget(db_session, worker, seed, monkeypatch):
+    """FALSIFIER (ordering). A chain-disabled candidate ranked BELOW the cut must
+    report ``chain_not_enabled``, not ``budget_exhausted``.
+
+    With the budget checked first, every below-the-cut candidate read
+    `budget_exhausted` regardless of why it was really ineligible. Nothing was
+    dropped silently — but the recorded cause was wrong, and the cause is the
+    entire value of the ledger. Here the disabled row ranks LAST, so the budget
+    would have rejected it first if the order were wrong.
+    """
+    protocol_id, company, address_factory = seed
+    top, disabled = address_factory(), address_factory()
+    _add_contract(db_session, protocol_id=protocol_id, address=top, sources=["inventory"], confidence=0.95)
+    _add_contract(
+        db_session,
+        protocol_id=protocol_id,
+        address=disabled,
+        sources=["inventory"],
+        confidence=0.5,
+        chain="base",
+    )
+
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=1)
+    _run(worker, db_session, job)
+
+    summary = _summary(db_session, job.id)
+    assert [c["address"] for c in summary["child_jobs"]] == [top]
+    dropped = {r["address"]: r["reason"] for r in summary["not_selected"]}
+    assert dropped[disabled] == "chain_not_enabled"
+
+
 def test_no_candidates_still_publishes_both_ledgers(db_session, worker, seed):
     """The empty run publishes both keys. A consumer must never have to treat an
     ABSENT ledger as an empty one — absence would mean "this producer predates

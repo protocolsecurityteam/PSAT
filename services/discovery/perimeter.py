@@ -197,6 +197,26 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     return parent_owns_high, structural_rel_by_addr
 
 
+def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> PerimeterSpawnResult:
+    """An empty ledger, constructed by the CALLER so it survives a raise.
+
+    The walker fills this in place. If ``create_job`` raises on the third of
+    five nodes, the caller's ``finally`` still holds — and can still persist —
+    the two children that were already committed. Building the ledger inside
+    the walker and returning it made a partial spawn indistinguishable from no
+    spawn: the children were committed, the artifact was never written.
+    """
+    return {
+        "site": site,
+        "budget": budget,
+        "budget_used": 0,
+        "spawn_depth": spawn_depth,
+        "queued": [],
+        "omitted": [],
+        "out_of_population": [],
+    }
+
+
 def queue_discovered_contracts(
     session: Session,
     job: Job,
@@ -207,23 +227,21 @@ def queue_discovered_contracts(
     chain_name: str,
     budget: int | None = None,
     depth_cap: int | None = None,
+    result: PerimeterSpawnResult | None = None,
 ) -> PerimeterSpawnResult:
     """Queue analysis jobs for contracts in *resolved_graph* that have none.
 
     ``budget=None`` (the resolution stage) means no cut: the walk's own
     ``max_depth`` already bounds it. An int (the policy stage) caps this
     stage's spawns and records every candidate it drops.
+
+    Pass *result* (from :func:`new_spawn_result`) to keep the ledger reachable
+    if this raises part-way through.
     """
     spawn_depth = spawn_depth_of(job)
-    result: PerimeterSpawnResult = {
-        "site": site,
-        "budget": budget,
-        "budget_used": 0,
-        "spawn_depth": spawn_depth,
-        "queued": [],
-        "omitted": [],
-        "out_of_population": [],
-    }
+    if result is None:
+        result = new_spawn_result(site=site, budget=budget, spawn_depth=spawn_depth)
+    result["spawn_depth"] = spawn_depth
 
     parent_company = _parent_company(session, job)
     parent_owns_high, structural_rel_by_addr = _structural_ownership(session, job)

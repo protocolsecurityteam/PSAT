@@ -333,9 +333,6 @@ class SelectionWorker(BaseWorker):
         force = bool(request.get("force"))
         selected: list[dict] = []
         for entry in ranked:
-            if len(selected) >= remaining:
-                _drop(entry, "budget_exhausted", analyze_limit=analyze_limit, existing_children=already_used)
-                continue
             addr = entry["__row_address"]
             # Coalesce NULL→"ethereum" (legacy convention): the dedup helpers
             # below skip chain filtering entirely for chain=None, so a legacy
@@ -368,6 +365,15 @@ class SelectionWorker(BaseWorker):
                         "reason": "proxy_upgrade_recheck",
                     },
                 )
+            # Budget LAST, so a candidate the chain gate or the dedup arm would
+            # have rejected anyway is reported with the reason that actually
+            # applies. Checking it first made every below-the-cut candidate read
+            # `budget_exhausted` — no silent drop, but the wrong cause, and the
+            # ledger's whole value is the cause. It also consumes no budget, for
+            # the same reason the spawn walker spends its budget at create_job.
+            if len(selected) >= remaining:
+                _drop(entry, "budget_exhausted", analyze_limit=analyze_limit, existing_children=already_used)
+                continue
             selected.append(entry)
 
         child_ids: list[dict] = []

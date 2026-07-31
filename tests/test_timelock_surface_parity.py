@@ -188,15 +188,18 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
     session.add.assert_not_called()
 
 
-def test_openness_is_not_asserted_from_the_twins(compiled):
-    """The refusal, made executable.
+def test_static_producer_mints_no_openness_verdict(compiled):
+    """The refusal, made executable — and SCOPED: this covers the STATIC
+    producer only.
 
-    `authority_openness` is a POLICY-stage projection over a resolved capability
-    tree; with no resolver output there are no principal rows, so nothing here
-    can earn `restricted`. This asserts the honest offline state — the fixture
-    yields no capability verdict at all — so that a future edit which starts
-    minting `restricted` from source alone fails HERE rather than shipping the
-    twins' role holders as this contract's.
+    `authority_openness` has no static writer at all. Every writer is
+    policy-stage (`effective_permissions_writer.py:119,318,332`;
+    `effective_permissions.py:652,801,821`), so what this test can catch is a
+    static regression that starts minting a capability verdict from source
+    alone. It is **structurally blind to the more realistic failure**: the
+    semantic resolver minting `restricted` for id=11 from a fold that did not
+    happen. That one is only observable once the resolver runs, i.e. in the live
+    run — it is not covered here and must not be reported as covered.
     """
     _subject, effects = compiled
     for record in (effects.get("functions") or {}).values():
