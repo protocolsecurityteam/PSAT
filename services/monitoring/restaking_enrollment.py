@@ -157,25 +157,33 @@ def enroll_restaking_fold(
             event_address=address,
             topic0=PUBKEY_LINKED_TOPIC0,
             start_block=creation - 1,
+            enrollment_basis=RESTAKING_FOLD_ENROLLMENT_BASIS,
         ):
             created += 1
     return created
 
 
-def node_addresses_from_fold(session: Session, *, chain_id: int) -> list[str]:
+def node_addresses_from_fold(session: Session, *, chain_id: int, event_address: str | None = None) -> list[str]:
     """Distinct node addresses folded so far, sorted.
 
     A LOWER BOUND on the node set, never the set. Callers publish
     ``node_set_completeness = 'not_determined'`` beside anything derived from it,
     and an empty result means "none folded yet", never "this protocol has no
     nodes".
+
+    ``event_address`` narrows the fold to one proven emitter. A caller that
+    attributes what it publishes to an enumerating contract must pass it: the
+    chain-wide result mixes every emitter's nodes, so pinning a single
+    ``manager_contract_id`` over it would name a contract that did not enumerate
+    the node — provenance by proximity rather than by witness.
     """
-    rows = session.execute(
-        select(IndexedEventLog.topics).where(
-            IndexedEventLog.chain_id == chain_id,
-            func.lower(IndexedEventLog.topic0) == PUBKEY_LINKED_TOPIC0,
-        )
-    ).all()
+    filters = [
+        IndexedEventLog.chain_id == chain_id,
+        func.lower(IndexedEventLog.topic0) == PUBKEY_LINKED_TOPIC0,
+    ]
+    if event_address is not None:
+        filters.append(func.lower(IndexedEventLog.event_address) == event_address.lower())
+    rows = session.execute(select(IndexedEventLog.topics).where(*filters)).all()
     nodes: set[str] = set()
     for (topics,) in rows:
         # ``topics[2]`` is the indexed node. A log whose topic list is short is
