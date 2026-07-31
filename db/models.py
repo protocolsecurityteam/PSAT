@@ -2030,6 +2030,220 @@ def exactness_eligible_cursor_clause():
     return or_(*clauses)
 
 
+# ``role_holder_planes`` vocabulary. Each token names the evidence that put the
+# row in that state; there is no token meaning "we looked and there is nobody".
+HOLDERS_BASIS_PINNED_HAS_ROLE = "pinned_has_role_confirmed"
+HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED = "not_determined"
+ROLE_COVERAGE_LOWER_BOUND = "lower_bound"
+ROLE_COVERAGE_PARTIAL = "partial"
+ROLE_NAME_BASIS_KECCAK = "keccak_preimage"
+ROLE_NAME_BASIS_AC_DEFAULT_ADMIN = "accesscontrol_default_admin_literal"
+ROLE_NAME_BASIS_NOT_DETERMINED = "not_determined"
+
+# "No holder set was published", as SQL. A bare ``holders IS NULL`` is NOT this:
+# a JSONB column also accepts the jsonb scalar ``null``, which is what a write of
+# a Python None stores unless the column says otherwise, and which every SQL null
+# test reads as a present payload. Both spellings must count as withheld or the
+# constraints below stop discriminating exactly where it matters. Enforced from
+# the other side too, by ``holders_is_array_or_absent``, so the two can't drift.
+HOLDERS_WITHHELD_SQL = "(holders IS NULL OR jsonb_typeof(holders) = 'null')"
+# The same two spellings for the disagreement log. It travels with ``holders``:
+# on a withheld row nothing was read, or what was read is not published, so
+# "no disagreement was observed" is not_determined rather than an empty list.
+DISAGREEMENTS_WITHHELD_SQL = "(fold_chain_disagreements IS NULL OR jsonb_typeof(fold_chain_disagreements) = 'null')"
+
+
+class RoleHolderPlane(Base):
+    """Who a ``(chain_id, registry_address, role_hash)`` is PROVEN to include.
+
+    ``holders`` is a **lower bound**, never a membership set. Every member was
+    independently confirmed by a pinned ``hasRole(bytes32,address)`` read at
+    ``as_of_block`` — the event fold only proposed the candidates, and a fold
+    that is arbitrarily wrong still yields a true lower bound because no member
+    rests on it. What the fold's incompleteness costs is completeness, and that
+    is published separately and permanently as ``holder_set_exhaustive``.
+
+    The gate travels in the same ROW as the payload. A child holders table was
+    rejected for exactly this reason: it would expose addresses to a reader that
+    never joined back to the qualifier, and it would make the empty-set check
+    below inexpressible.
+
+    Four states a naive schema conflates, kept apart here:
+
+    * a proven lower bound — ``holders`` non-empty, ``holders_basis`` the pinned
+      arm, ``as_of_block`` set;
+    * every candidate's read completed and confirmed nobody;
+    * every candidate's read reverted or failed in transport;
+    * the recording surface was cold, so no candidate was even enumerable.
+
+    The last three all publish ``holders = NULL`` and are **deliberately
+    indistinguishable at row level**. Telling them apart would reconstruct the
+    banned empty set: "N probed, every read completed, none confirmed" is ``[]``
+    written in three columns. So the residual counters, which qualify a
+    published lower bound, are NULL whenever there is no lower bound to qualify.
+    """
+
+    __tablename__ = "role_holder_planes"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    registry_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    # The 32-byte role identity, and the ONLY identity. A name is decoration
+    # attached downstream and never keys anything. Rows are minted solely from
+    # the OZ AccessControl ``RoleGranted``/``RoleRevoked`` topic pair, so every
+    # hash in this column lives in one identity space; Solady's ``RoleSet``
+    # carries a ``uint256`` role in a different space and mints no row here.
+    role_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    # NULL means not_determined. It never means "nobody holds this role", and
+    # an empty array — which a reader could mistake for that — cannot be stored.
+    # ``none_as_null`` is load-bearing: JSONB's default is to store Python None
+    # as the JSON literal ``'null'``, which is NOT SQL NULL. Every biconditional
+    # below would then read the withheld row as if it carried a holder set, and
+    # the checks that make the empty set unrepresentable would not fire.
+    holders: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    holders_basis: Mapped[str] = mapped_column(String(48), nullable=False)
+    # Pinned to ``not_determined`` by CHECK. 0 of the 4 role registries in the
+    # corpus implement the AccessControlEnumerable getter, so under B14 an
+    # exhaustiveness arm has population 0 and may not be built. This is a
+    # DEFERRAL WITH CAUSE, not a permanent impossibility: a registry that
+    # implements ``getRoleMemberCount``/``getRoleMember``, or a proven inverse
+    # index over the recording surface, would each license a real value here.
+    # A future unit must revisit the constraint deliberately rather than assume
+    # it was derived from something weaker.
+    holder_set_exhaustive: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED
+    )
+    # The block every read in ``holders`` was pinned at, plus that block's hash.
+    # A membership fact is mutable, so it is meaningless without its height; the
+    # hash is what makes the height replayable across a reorg.
+    as_of_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    as_of_block_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    # The cursor bounds, copied from ``indexed_event_cursors`` so the candidate
+    # source's coverage is legible without a join. The LOWER bound is citable
+    # only where U10A witnessed it (basis ``creation_block_minus_one``); an
+    # ``explicit_seed`` is a caller's number, not evidence, and lands here as
+    # NULL + not_determined.
+    cursor_first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursor_first_indexed_block_basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    cursor_last_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursor_enrollment_bases: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    cursor_page_completeness: Mapped[str] = mapped_column(String(16), nullable=False)
+    coverage: Mapped[str] = mapped_column(String(16), nullable=False)
+    # NULL means the key is absent — no preimage was proven. It never means the
+    # role is unnamed. ``keccak_preimage`` is a total mathematical fact about
+    # the hash, independent of which contract offered the candidate string.
+    role_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role_name_basis: Mapped[str] = mapped_column(String(48), nullable=False)
+    # How many addresses the fold proposed, and how many of those could not be
+    # read at all. Both NULL exactly when ``holders`` is NULL (see class doc).
+    candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unconfirmed_candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Where the fold and the chain read disagreed, recorded and NEVER diagnosed.
+    # ``as_of_block`` sits above the cursor head, so a disagreement cannot be
+    # attributed between "the fold missed a log" and "the state changed after
+    # the cursor stopped". Permitted keys are fixed by the writer; no key
+    # naming a cause may be added.
+    #
+    # NULL exactly when ``holders`` is, and for the same reason the counters are:
+    # an empty list asserts "we looked and found none", which on a withheld row
+    # is either untrue (an all-reverting registry read nothing to compare) or
+    # suppression (an all-false registry DID observe disagreements). Publishing
+    # ``[]`` there would be an unearned negative one column over from the empty
+    # set the constraints below make unrepresentable. On a PUBLISHED row ``[]``
+    # is earned, and its scope is the candidates whose reads completed —
+    # ``unconfirmed_candidate_count`` carries the rest.
+    fold_chain_disagreements: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        # The two hard bans, enforced where code cannot route around them.
+        # NOT NULL on every discriminator is load-bearing for these: a CHECK
+        # that evaluates to NULL PASSES in Postgres, so a nullable column would
+        # make each of them satisfiable by omission.
+        # ``holders`` is a withheld marker or an array — never a jsonb string,
+        # number or object, which would satisfy a naive "is it set?" read while
+        # naming no addresses at all.
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} OR jsonb_typeof(holders) = 'array'",
+            name="ck_role_holder_planes_holders_is_array_or_absent",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} OR jsonb_array_length(holders) > 0",
+            name="ck_role_holder_planes_no_empty_set",
+        ),
+        CheckConstraint(
+            "holder_set_exhaustive = 'not_determined'",
+            name="ck_role_holder_planes_never_exhaustive",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (holders_basis = 'not_determined')",
+            name="ck_role_holder_planes_basis_matches_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (as_of_block IS NULL)",
+            name="ck_role_holder_planes_block_matches_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (candidate_count IS NULL)",
+            name="ck_role_holder_planes_candidates_match_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (unconfirmed_candidate_count IS NULL)",
+            name="ck_role_holder_planes_unconfirmed_match_holders",
+        ),
+        CheckConstraint(
+            f"NOT {HOLDERS_WITHHELD_SQL} OR coverage = 'partial'",
+            name="ck_role_holder_planes_null_holders_are_partial",
+        ),
+        # The disagreement log travels with the holder set: withheld together,
+        # published together. Without this a withheld row could carry ``[]`` —
+        # "we looked and found none" over reads that either never happened or
+        # are not being published.
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = {DISAGREEMENTS_WITHHELD_SQL}",
+            name="ck_role_holder_planes_disagreements_match_holders",
+        ),
+        CheckConstraint(
+            f"{DISAGREEMENTS_WITHHELD_SQL} OR jsonb_typeof(fold_chain_disagreements) = 'array'",
+            name="ck_role_holder_planes_disagreements_are_array_or_absent",
+        ),
+        # A witnessed lower bound and its basis are one fact. Split, the row can
+        # claim a height it cannot cite, or discard a height it proved.
+        CheckConstraint(
+            "(cursor_first_indexed_block IS NULL) = (cursor_first_indexed_block_basis = 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_matches_basis",
+        ),
+        # ``explicit_seed`` is deliberately NOT in the stored domain: the writer
+        # normalises a seed to NULL + not_determined, because a number a caller
+        # supplied is not a witness and must not be storable as one.
+        CheckConstraint(
+            "cursor_first_indexed_block_basis IN ('creation_block_minus_one', 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_basis_domain",
+        ),
+        CheckConstraint(
+            "cursor_page_completeness IN ('complete', 'incomplete', 'not_determined')",
+            name="ck_role_holder_planes_page_completeness_domain",
+        ),
+        CheckConstraint(
+            "(role_name IS NULL) = (role_name_basis = 'not_determined')",
+            name="ck_role_holder_planes_name_matches_basis",
+        ),
+        CheckConstraint(
+            "holders_basis IN ('pinned_has_role_confirmed', 'not_determined')",
+            name="ck_role_holder_planes_holders_basis_domain",
+        ),
+        CheckConstraint(
+            "coverage IN ('lower_bound', 'partial')",
+            name="ck_role_holder_planes_coverage_domain",
+        ),
+        CheckConstraint(
+            "role_name_basis IN ('keccak_preimage', 'accesscontrol_default_admin_literal', 'not_determined')",
+            name="ck_role_holder_planes_name_basis_domain",
+        ),
+    )
+
+
 class WorkerHeartbeat(Base):
     """Liveness + last-known work summary for a background daemon that drains
     its own table instead of the ``jobs`` queue (coverage-verify, audit
