@@ -1337,10 +1337,54 @@ def main():
                     # normativity clause makes REQUIRED-when-present. It is the
                     # documented fix for "$0 reach on a zero-balance router that can
                     # move millions", so it is wired even at population 0.
+                    #
+                    # B4/§2: the floor is REQUIRED-when-present *gated on*
+                    # ``reach_indeterminate``, which the same witness dict carries.
+                    # The key is emitted only beside ``reach_indeterminate: true``
+                    # (recipes.py:1706-1707 writes the pair), so it is the acting
+                    # deployment's own balance out of the B1/B2 balance plane, never a
+                    # measurement of what this call moved. And ``0.0`` there is "no
+                    # proven bound", never a measured zero: no path on that plane
+                    # publishes a proven zero -- an absent ``deployment_balance`` key
+                    # defaults to 0.0 at selection.py:1369 and an all-unpriced sheet
+                    # collapses to 0.0 in ``coalesce(sum(usd_value), 0)`` (B8.1a).
                     fl_usd = _f(obs.get("observed_reach_floor_usd"))
-                    inst_val = fl_usd
-                    val_basis = "observed_reach_floor_usd(>= floor)"
-                    citations.append({"field": "observed_reach_floor_usd", "value": fl_usd, "direction": "lower_bound"})
+                    fl_gated = str(obs.get("reach_indeterminate")).lower() == "true"
+                    if fl_gated and fl_usd is not None and fl_usd > 0.0:
+                        inst_val = fl_usd
+                        val_basis = "observed_reach_floor_usd(>= floor, reach_indeterminate)"
+                        citations.append(
+                            {
+                                "field": "observed_reach_floor_usd",
+                                "value": fl_usd,
+                                "direction": "lower_bound",
+                                "gate": "reach_indeterminate=true",
+                            }
+                        )
+                    else:
+                        inst_val = None
+                        val_basis = (
+                            "observed_reach_floor_usd_zero(not_determined)"
+                            if fl_gated
+                            else "observed_reach_floor_usd_ungated(not_determined)"
+                        )
+                        warnings.append(
+                            {
+                                "kind": "reach_floor_not_a_bound",
+                                **ctx,
+                                "capability": cid,
+                                "floor_usd": fl_usd,
+                                "reach_indeterminate": obs.get("reach_indeterminate"),
+                                "note": (
+                                    "a 0.00 floor is 'no proven bound', not a proven "
+                                    "zero -- it is the acting deployment's own balance "
+                                    "off the B1/B2 plane, where an unfetched and an "
+                                    "unpriced sheet are both 0.00; a floor without "
+                                    "reach_indeterminate is not the registered shape"
+                                ),
+                                "missing_witness": "a positive floor beside reach_indeterminate=true",
+                            }
+                        )
                 elif priced is not None:
                     # 16a/inv.9: a proven partial FLOOR. Raises, never caps.
                     inst_val = priced
