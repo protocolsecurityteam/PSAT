@@ -286,20 +286,32 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
 
 #: How many nodes ONE ``(contract, deployment)`` anchor may mint per pass.
 #:
-#: A NAMED MODEL CHOICE, not a calibrated threshold — the same discipline
-#: ``PERIMETER_SPAWN_LIMIT`` states. It is ~3x the observed mean of 4.98 distinct
-#: principals per anchor on the PR-161 corpus, so the typical anchor is never
-#: cut, and it composes with ``PERIMETER_SPAWN_LIMIT=8`` (at most 16 new
-#: candidates reach a walker that will spawn at most 8). The two anchors above it
-#: (17 and 31 distinct principals; 27 unminted at the largest) are a DELAY, not a
-#: loss: ``existing_node`` is checked BEFORE the budget, so an already-minted
-#: address consumes none of it and the next pass drains the next 16. Every cut
-#: lands in ``omitted[]`` with ``budget_exhausted``.
-FP_MATERIALIZE_LIMIT = int(os.getenv("PSAT_FP_MATERIALIZE_LIMIT", "16"))
-
-#: The node ``label``. A description of the basis, not an identity claim, and
-#: never read as one: nothing keys on it (see the idempotence key below).
-_MINTED_NODE_LABEL = "capability principal"
+#: **A HARD CAP WITH A PERMANENT TAIL, not a delay.** An earlier draft of this
+#: constant claimed a cut candidate would be picked up by the next pass, because
+#: ``existing_node`` is checked before the budget. That is FALSE in production
+#: and the sequence is what refutes it: every job rewrites this
+#: ``(contract, deployment)`` scope wholesale (resolution stage, then the policy
+#: stage) BEFORE the mint runs, so no minted row survives into the next pass for
+#: ``existing_node`` to find. The candidate order is ``sorted(candidates)``, so
+#: each pass re-mints the same lexicographic prefix and drops the same tail —
+#: permanently, until the cap is raised. Replayed 3 jobs deep on the PR-161
+#: corpus at a cap of 16: one anchor over budget (27 candidates), 11 addresses
+#: permanently invisible, 3 of them contract-typed job candidates appearing at no
+#: other anchor.
+#:
+#: The default is therefore sized to leave NO LIVE TAIL rather than to be a
+#: tuning knob: 64 is 2x the observed per-anchor maximum of 31 distinct
+#: principals (0 of 83 corpus anchors exceed it; 2 exceed 16). It is a BACKSTOP
+#: against a pathological anchor, and a NAMED MODEL CHOICE — no number here is
+#: claimed to be derived from the corpus, which is also why it is not pinned at
+#: 31 or 32. Fan-out is bounded elsewhere and unchanged: ``PERIMETER_SPAWN_LIMIT``
+#: (8) caps jobs per policy refresh and ``PERIMETER_SPAWN_DEPTH_CAP`` (2) caps
+#: generations; this cap bounds ROW growth only, and minting costs no RPC.
+#:
+#: Lowering it re-introduces a permanent tail. Every cut still lands in
+#: ``omitted[]`` with ``budget_exhausted``, so the tail is always named — but it
+#: must be read as a loss, not a queue.
+FP_MATERIALIZE_LIMIT = int(os.getenv("PSAT_FP_MATERIALIZE_LIMIT", "64"))
 
 
 def _address_node_id(address: str) -> str:
@@ -360,7 +372,11 @@ def materialize_fp_principal_nodes(
     **Idempotence key:** ``(chain, lower(address), contract_id,
     deployment_scope(deployment_address))``. Never the name, label or origin —
     ``origin`` is a single constant on 1,200/1,200 corpus rows and would key
-    nothing.
+    nothing. The ``existing_node`` arm it drives dedups against whatever nodes
+    the scope currently holds — the walk's own, and this pass's earlier work
+    within one transaction. It does NOT carry state across jobs: the rewrite
+    below empties the scope first. See ``FP_MATERIALIZE_LIMIT`` for what that
+    means for a budget cut.
 
     **Rewrite survival.** ``replace_control_graph_rows`` deletes wholesale
     within exactly this ``(contract_id, deployment)`` scope, so a minted row
@@ -369,7 +385,9 @@ def materialize_fp_principal_nodes(
     the last rewrite that can occur in the job's stage sequence (the policy
     stage's rewrite, which itself runs after the resolution stage's), and the
     pass is idempotent, so a rewrite from any later re-analysis is always
-    followed by another mint. A wiped node is never a silently lost one.
+    followed by another mint. A wiped node is never a silently lost one — but a
+    node the BUDGET cut is, because the wipe also destroys the record that would
+    let a later pass resume. See ``FP_MATERIALIZE_LIMIT``.
 
     *deployment_address* is the caller's own scope value — the same one it
     passes to ``replace_control_graph_rows`` — so the mint scope, the rewrite
@@ -381,7 +399,13 @@ def materialize_fp_principal_nodes(
     artifact, which is the walk's output and must not acquire nodes no walk
     produced.
 
-    Does not commit; the caller owns the transaction boundary.
+    **Commits per mint, and the ledger is written only after the commit.** Not a
+    style choice: the ledger is persisted from the caller's ``finally``, on a
+    FRESH session when the primary one is poisoned, so a rollback after the loop
+    would publish ``minted[]`` and ``budget_used`` naming rows that do not
+    exist — a positive fact about a row nothing wrote. ``queue_discovered_contracts``
+    commits after each ``create_job`` for exactly this reason, and the claimed
+    equivalence with it requires the same boundary here.
     """
     # Lazy: module-level would re-create the resolution↔policy package cycle
     # this file's callers already tiptoe around.
@@ -500,8 +524,9 @@ def materialize_fp_principal_nodes(
         if len(types) > 1:
             # The FP plane holds two types for one principal at one anchor and
             # never resolved them. Picking one would mint a type nothing proved;
-            # 0 of 413 corpus anchors reach this, and a first occurrence should
-            # surface as a refusal, not as a coin flip.
+            # 0 of the corpus's 413 (anchor, address) PAIRS — across 83 anchors
+            # — reach this, and a first occurrence should surface as a refusal,
+            # not as a coin flip.
             _out(addr, "resolved_type_conflict")
             continue
         if addr in existing:
@@ -529,7 +554,12 @@ def materialize_fp_principal_nodes(
                 address=addr,
                 node_type=node_type,
                 resolved_type=resolved_type,
-                label=_MINTED_NODE_LABEL,
+                # NULL, deliberately. A label is display copy, and this plane
+                # has none to witness — but ``Job.name`` and the overview's
+                # display sites fall back to it, so any constant here would be
+                # published as the principal's IDENTITY on every spawned child.
+                # ``resolved_type`` already carries the only noun that is proven.
+                label=None,
                 contract_name=None,
                 depth=minted_depth,
                 analyzed=False,
@@ -551,8 +581,14 @@ def materialize_fp_principal_nodes(
             )
         )
 
-        # Budget is spent HERE and only here, so every earlier gate provably
-        # consumes none of it.
+        # Commit BEFORE the ledger records the mint. The ledger is persisted
+        # from the caller's ``finally``, on a fresh session if this one is
+        # poisoned, so recording first would let a rollback publish a row that
+        # does not exist.
+        session.commit()
+
+        # Budget is spent HERE and only here — at the committed INSERT — so
+        # every earlier gate provably consumes none of it.
         result["budget_used"] += 1
         result["minted"].append(
             {
@@ -570,7 +606,7 @@ def materialize_fp_principal_nodes(
                 "address": addr,
                 "node_type": node_type,
                 "resolved_type": resolved_type,
-                "label": _MINTED_NODE_LABEL,
+                "label": None,
                 "contract_name": None,
                 "depth": minted_depth,
                 "analyzed": False,
