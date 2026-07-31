@@ -1310,8 +1310,7 @@
                 ],
                 "kind": "value_flow",
                 "sink_ids": [
-                  "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom",
-                  "payGateway(IERC20,uint256):sink1:external_call:TMP_9.call"
+                  "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom"
                 ],
                 "sink_receivers": {
                   "payGateway(IERC20,uint256):sink0:external_call:token.safeTransferFrom": {
@@ -2201,7 +2200,21 @@
                   }
                 ],
                 "kind": "value_flow",
-                "sink_ids": []
+                "sink_ids": [
+                  "deposit(IERC20,uint256):sink0:external_call:vault.enter"
+                ],
+                "sink_receivers": {
+                  "deposit(IERC20,uint256):sink0:external_call:vault.enter": {
+                    "auto_getter_selector": "0xfbfa77cf",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
+                    "variable": "vault",
+                    "visibility": "public"
+                  }
+                }
               }
             }
           ],
@@ -2298,7 +2311,21 @@
                   }
                 ],
                 "kind": "value_flow",
-                "sink_ids": []
+                "sink_ids": [
+                  "depositFor(IERC20,uint256,address):sink0:external_call:vault.enter"
+                ],
+                "sink_receivers": {
+                  "depositFor(IERC20,uint256,address):sink0:external_call:vault.enter": {
+                    "auto_getter_selector": "0xfbfa77cf",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
+                    "variable": "vault",
+                    "visibility": "public"
+                  }
+                }
               }
             }
           ],
@@ -2399,7 +2426,21 @@
                   }
                 ],
                 "kind": "value_flow",
-                "sink_ids": []
+                "sink_ids": [
+                  "redeem(address,IERC20,uint256):sink2:external_call:vault.exit"
+                ],
+                "sink_receivers": {
+                  "redeem(address,IERC20,uint256):sink2:external_call:vault.exit": {
+                    "auto_getter_selector": "0xfbfa77cf",
+                    "binding": "state_variable",
+                    "mutability": "immutable_in_implementation",
+                    "param_index": null,
+                    "param_scope": null,
+                    "receiver_provenance": "contract_state_unresolved",
+                    "variable": "vault",
+                    "visibility": "public"
+                  }
+                }
               }
             }
           ],
