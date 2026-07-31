@@ -423,6 +423,7 @@ def test_library_constant_is_not_this_contract_s_storage(foreign):
     deployment address would revert or fall through to a fallback. The
     declaration's owner, not its type, is what refuses it."""
     receiver = _receiver(foreign["LibConstUser"], "pay(address,uint256)", "T.transfer")
+    assert receiver is not None
     assert receiver == {
         "binding": "not_determined",
         "param_scope": None,
