@@ -823,10 +823,18 @@ def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
     session = db_session
     session.add(RoleHolderPlane(**_withheld_orm_row()))
     session.flush()
-    typeof = session.execute(
-        text("SELECT jsonb_typeof(holders) FROM role_holder_planes WHERE role_hash = :r"), {"r": PAUSER}
-    ).scalar()
+    typeof, disagreements_typeof = session.execute(
+        text(
+            "SELECT jsonb_typeof(holders), jsonb_typeof(fold_chain_disagreements) "
+            "FROM role_holder_planes WHERE role_hash = :r"
+        ),
+        {"r": PAUSER},
+    ).one()
     assert typeof is None, "a withheld row must be SQL NULL, not the jsonb scalar 'null'"
+    # The disagreement ledger needs the same guard and cannot borrow the one above:
+    # its withheld predicate deliberately counts the scalar null, so the CHECKs stay
+    # satisfied while every naive IS NULL consumer reads the row as carrying evidence.
+    assert disagreements_typeof is None, "a withheld disagreement ledger must be SQL NULL too"
     session.rollback()
 
 

@@ -305,7 +305,7 @@ missing row as any polarity.
 | `authorising_eoa` | **0/68 ever** | **BAN** | always `not_determined`, published as the literal string so the refusal reaches the consumer |
 | `timelock_is_decoy` | **0/24 ever** | **BAN** | always `not_determined`; no column, no computation |
 
-## 14. Role holder plane — `role_holder_planes` (D6-accept / Unit 7B)
+## 15. Role holder plane — `role_holder_planes` (D6-accept / Unit 7B)
 
 Per `(chain_id, registry_address, role_hash)`. Normative entry:
 `SCORING_INVARIANTS.md` **B18**.

@@ -46,10 +46,7 @@ which is a diagnosis this plane refuses to publish.
 
 Wave-2 migration chain position 5 of 5 (LAST).
 
-REBASE MARKER: authored with ``down_revision = a3e7c1d9b840`` (U10A) because the
-restaking-position revision U10B (``d5b9e0c31f72``) is not present in this
-worktree. AT ASSEMBLY, REPOINT ``down_revision`` TO ``d5b9e0c31f72``. Intended
-order: c1a4b7e02f18 (U4) -> c4f8a1d92b07 (U8) -> a3e7c1d9b840 (U10A) ->
+Order: c1a4b7e02f18 (U4) -> c4f8a1d92b07 (U8) -> a3e7c1d9b840 (U10A) ->
 d5b9e0c31f72 (U10B) -> e8c2f47a19d3 (this).
 """
 
@@ -71,7 +68,7 @@ HOLDERS_WITHHELD_SQL = "(holders IS NULL OR jsonb_typeof(holders) = 'null')"
 DISAGREEMENTS_WITHHELD_SQL = "(fold_chain_disagreements IS NULL OR jsonb_typeof(fold_chain_disagreements) = 'null')"
 
 revision: str = "e8c2f47a19d3"
-down_revision: Union[str, Sequence[str], None] = "a3e7c1d9b840"
+down_revision: Union[str, Sequence[str], None] = "d5b9e0c31f72"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
