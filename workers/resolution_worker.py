@@ -36,11 +36,17 @@ from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
 )
+from services.resolution.flow_asset_plane import (
+    collect_asset_receivers,
+    count_resolved,
+    resolve_flow_asset_addresses,
+)
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.role_holder_plane import (
     ACCESS_CONTROL_TOPIC0S,
     persist_role_holder_planes,
+    pin_probe_block,
     resolve_role_holder_planes,
 )
 from services.resolution.tracking import build_control_snapshot
@@ -345,6 +351,33 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
+        # Isolated on the same terms as the two steps above, and for the same
+        # reason: this plane can only ADD addresses to sinks that had none, so a
+        # failure here costs pricing coverage and proves nothing false. It must
+        # never fail a stage that already resolved a control graph.
+        try:
+            self._resolve_flow_asset_addresses(
+                session,
+                job,
+                chain_id=chain_id,
+                rpc_url=rpc_url,
+                deployment_address=proxy_address or job.address,
+                proven_proxied=bool(proxy_address),
+            )
+        except Exception as exc:
+            session.rollback()
+            record_degraded(
+                phase="resolution_flow_asset_plane",
+                exc=exc,
+                context={"address": job.address or "0x0"},
+            )
+            logger.warning(
+                "Job %s: flow asset address resolution failed: %s",
+                job.id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+
         self.update_detail(
             session,
             job,
@@ -411,6 +444,75 @@ class ResolutionWorker(BaseWorker):
             extra={"registry_address": registry_address, "role_holder_planes": written},
         )
         return written
+
+    def _resolve_flow_asset_addresses(
+        self,
+        session: Session,
+        job: Job,
+        *,
+        chain_id: int,
+        rpc_url: str,
+        deployment_address: str | None,
+        proven_proxied: bool,
+    ) -> int:
+        """Dereference this job's flow-sink asset getters. Returns rows published.
+
+        The address read at is the RUNTIME one — the proxy for an implementation
+        in proxy context, else the job's own address. That is also the sole basis
+        for ``proven_proxied``: an implementation job carries its proxy in the
+        request, and that is an earned fact about where this code executes. A job
+        with no proxy in its request is NOT thereby proven unproxied, which is
+        exactly why the invariant's other value is ``not_determined``.
+
+        The height comes from ``pin_probe_block`` — confirmation-depth-deep and
+        hash-witnessed. When it cannot be pinned nothing is read: falling back to
+        ``"latest"`` would publish an address at an unrecorded, unrepeatable
+        height, and every row here is a now-fact that lives or dies by its block.
+        """
+        if not deployment_address:
+            return 0
+        effects = get_artifact(session, job.id, "effects")
+        if not isinstance(effects, dict):
+            return 0
+        receivers = collect_asset_receivers(effects)
+        if not receivers:
+            return 0
+        probe_block = pin_probe_block(rpc_url, chain_id=chain_id)
+        if probe_block is None:
+            logger.warning(
+                "Job %s: could not pin a probe block; flow asset addresses withheld",
+                job.id,
+            )
+            return 0
+        payload = resolve_flow_asset_addresses(
+            receivers,
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            deployment_address=deployment_address,
+            proven_proxied=proven_proxied,
+            probe_block=probe_block,
+        )
+        # Upsert on (job_id, name): a re-run replaces the payload wholesale at a
+        # new pinned height rather than accumulating, so no stale address ever
+        # sits beside a fresh one pretending to share its block.
+        store_artifact(session, job.id, "flow_asset_addresses", data=payload)
+        session.commit()
+        resolved = count_resolved(payload)
+        record_stage_metric("flow_asset_addresses", resolved)
+        logger.info(
+            "Job %s: flow asset plane resolved %d/%d receiver(s) at block %d",
+            job.id,
+            resolved,
+            len(receivers),
+            probe_block.number,
+            extra={
+                "deployment_address": deployment_address,
+                "flow_asset_receivers": len(receivers),
+                "flow_asset_addresses": resolved,
+                "probe_block": probe_block.number,
+            },
+        )
+        return len(receivers)
 
     def _fetch_balances(
         self,
