@@ -1326,7 +1326,7 @@ shapes (universals, argued from the source); simulation can only PROVE
 |---|--:|---|---|
 | `claims[].witness.flows[].target_kind.{kind,tier}` | 127 entries on flow.out+value_router, 100% populated. flow.out: `param` 53, **`immutable` 18**, `msg_sender` 6, `several` 4, `indeterminate` 3, `storage_setter` 2 | **REQUIRED** | the static destination shape. `dispositive_ast` = the operand *is* a StateVariable/param/`msg.sender`/literal (Tier 1); `static_trace` = recovered via SSA provenance (Tier 2, still deterministic). Both admissible; only `indeterminate` is not (`effects.py:2460-2552`, `:104`). |
 | `claims[].witness.flows[].amount_kind.{kind,tier}` | 152 entries, 100%. Bounded kinds on **19 of 86** flow.out entries: `capped_by_balance` 6, `bounded_by_storage` 5, `balance_delta` 4, `msg_value` 2, `token_identity` 2 | **REQUIRED** | the **amount bound** inv.2 already demands. `capped_by_balance` = *"provably ≤ this contract's own balance… a real upper bound / mitigation"* (`effects.py:144-158`). `token_identity` = exactly one non-fungible token moves — **forbids pricing the row off a fungible balance sheet**. |
-| `claims[].witness.flows[].target_constraint.{state,guard,binding,pins,leaf_path}` | 63 entries. flow.out: `not_determined` 43, `constrained` 6 (`external_call_revert` 4, `hash_commitment` 2), `unconstrained_proven` 4. value_router: `unconstrained_proven` 5, `constrained`/`hash_commitment` 5 | **REQUIRED** | three-valued and earned in both directions. Per `flows.py:75-80` **only `unconstrained_proven` licenses the caller-chosen (theft-shaped) reading**; `_facts.py:624-628` — *"a missing tree is NOT proof that no gate exists."* `guard` separates a self-enforcing merkle/hash commitment from `external_call_revert` (only as strong as the external contract). |
+| `claims[].witness.flows[].target_constraint.{state,guard,binding,pins,leaf_path}` | 63 entries. flow.out: `not_determined` 43, `constrained` 6 (`external_call_revert` 4, `hash_commitment` 2), `unconstrained_proven` 4. value_router: `unconstrained_proven` 5, `constrained`/`hash_commitment` 5 | **REQUIRED** | three-valued and earned in both directions. Per `flows.py:136-137` **only `unconstrained_proven` licenses the caller-chosen (theft-shaped) reading**; `_facts.py:624-628` — *"a missing tree is NOT proof that no gate exists."* `guard` separates a self-enforcing merkle/hash commitment from `external_call_revert` (only as strong as the external contract). |
 | `claims[].witness.flows[].from_is_self` | 145/145 (T 89, F 56) | **REQUIRED** | inv.2 already mandates it. Note: **zero `flow.out` flows have `from_is_self=false`** — all 56 sit on `value_router` / `flow.in`, so there is no lever here today. |
 | `claims[].witness.flows[].router_ops[].{selector,callee}` | applicable = the 41 `value_router` claims (41 flow entries). **0/41 populated in this snapshot**; the projection lands with U5/D5 and the stored rows gain the key only when the claims stage re-runs — **and only if that re-run actually recomputes `build_claims`**: a claims stage served from the `ANALYSIS_SCHEMA_VERSION = 5` materialization cache (`db/contract_materializations.py:147`) republishes the stored claims unchanged and leaves the count at 0, so the backfill needs explicit invalidation or a forced rebuild. Producer side already 73/73 routed flows (81 op entries); label corpus 5/5 routed flows, now 5/5 on the claims plane too | **CONFIDENCE** (obligation: **cite**) | **the identity of the call(s) that carry a routed move** — the only identity there is, because a routed flow's own `selector` names the CALLEE's inner transfer, not the call this function makes. Each op is `{selector = keccak4 of the signature the AST records — ABI-canonical where the parameter types lower, the DECLARED interface-typed signature otherwise, callee = the bare AST function name}` (`effects.py:_bare_callee_name` :410-418; emitted at `:3305-3307`). Both shapes are in the pinned data: `enter`/`exit` lower to the EVM selectors `0x39d6ba32`/`0x18457e61`, while `safeTransferFrom(IERC20,address,address,uint256)` stays declared and hashes to **`0x5beae096`**, not the canonical `0xd9fc4b61`. **`callee` is an INTRA-UNIT AST identity and never a resolved on-chain target** — the name is carried precisely because that unlowered case hashes to a selector no dispatch will match, so a consumer may join it to this unit's own functions and to nothing else. |
 | `claims[].witness.configures` (+ `set_vars`, `hook_pointer`) | 8/8 `transfer_policy.configure` | **REQUIRED** | the contract the policy **affects**. All 8 name BoringVault (**$1,392,349**) while living on a Teller holding **$0**. Re-points VaS. **Direction: raises.** |
@@ -1338,7 +1338,7 @@ shapes (universals, argued from the source); simulation can only PROVE
 inference, no default, no name classification anywhere in the derivation).
 **Key absent = `not_determined`**, and it is the single reachable failure state:
 the producer recorded nothing, the artifact predates the field, or the flow is
-not routed at all — `flows.py:92-93` guards on truthiness, so a missing field and
+not routed at all — `flows.py:147-148` guards on truthiness, so a missing field and
 an empty list collapse into the same key-absent shape and **`[]` is never
 emitted**. That matters because an empty list of ops reads as "this routed flow
 crosses no call", which would license exactly the transparency the absence
@@ -2157,7 +2157,7 @@ nothing but a `record_stage_metric` count to show for it. The targeted fix is
 |---|---|---|---|---|
 | `not_selected[]` | artifact `selection_summary` | **REQUIRED** (cite) | one `{address, chain, rank_score, reason}` per **ranked** candidate that did not become a child. `reason` ∈ `budget_exhausted` \| `chain_not_enabled` \| `existing_job` \| `in_cascade_dedupe` | `[]` means "no ranked candidate was dropped" — proven, because the producer enumerates every non-selected ranked entry, including on the budget-already-full early return |
 | `pre_rank_excluded[]` | artifact `selection_summary` | **REQUIRED** (cite) | one `{address, chain, reason[, effective_confidence]}` per row removed **before** ranking. `reason` ∈ `below_confidence_threshold` \| `superseded_impl_anchor` | `[]` means "no row was removed upstream of the ranking" |
-| `perimeter_spawn_summary` | artifact, policy stage | **REQUIRED** (cite) | `{site, budget, budget_used, spawn_depth, queued[], omitted[], out_of_population[]}` | `omitted` reasons ∈ `budget_exhausted` \| `depth_exhausted` \| `chain_not_enabled` \| `zero_address` \| `invalid_address` |
+| `perimeter_spawn_summary` | artifact, policy stage | **REQUIRED** (cite) | `{site, budget, budget_used, spawn_depth, queued[], omitted[], out_of_population[], walked}` | `omitted` reasons ∈ `budget_exhausted` \| `depth_exhausted` \| `chain_not_enabled` \| `zero_address` \| `invalid_address`. `walked=false` ⇒ the three lists are a PREFIX, not a partition — read no absence from them |
 
 **Consumption obligation.** Cite. These are what make a population invariant
 expressible as **"zero UNLOGGED omissions"** rather than "zero omissions" — a
@@ -2178,11 +2178,25 @@ does NOT support it: two filters run upstream of the ranking (the
 predicate), and before this unit the first survived only as a count and the
 second was applied in SQL, so neither left an enumerable trace.
 
-**The three spawn dispositions PARTITION the node list** — `queued` +
-`omitted` + `out_of_population` == every node — and `out_of_population`
-(`root_node`, `not_analyzed`, `not_contract_node`, `existing_job`) is the
-fail-closed/dedup set, which is NOT an omission and must never be counted as
-one.
+**The three spawn dispositions PARTITION the node list ONLY WHEN
+`walked == true`** — then `queued` + `omitted` + `out_of_population` == every
+node — and `out_of_population` (`root_node`, `not_analyzed`,
+`not_contract_node`, `existing_job`) is the fail-closed/dedup set, which is NOT
+an omission and must never be counted as one.
+
+**`walked` (Unit 9 correction, 2026-07-30).** The ledger is built by the caller
+and written from a `finally`, so it is persisted on three histories: the walk
+completed, the walk raised part-way, and the walk never ran (the policy stage
+skips it when the refresh produced no graph — `resolved_control_graph` is not a
+dict). All three previously serialized identically whenever nothing was queued,
+so an all-empty ledger asserted "walked, omitted nothing" for two histories in
+which nothing was walked at all — an unearned negative of exactly the shape this
+entry exists to prevent. `walked` is set at LOOP EXIT and nowhere else.
+`walked == true` licenses the partition claim above; `walked == false` says the
+three lists are a prefix — each entry in them is still individually true, but
+their emptiness proves nothing and a consumer must read the ledger as
+`not_determined` for coverage. A ledger with no `walked` key predates this
+correction and is likewise `not_determined`, never `true`.
 
 **Budget accounting.** The budget decrements at `create_job` and nowhere else
 (spawn walker), and the budget check is evaluated **after** the chain and dedup
@@ -2263,10 +2277,16 @@ run.
     correctly `NOT_SCORED` today, but the router plane cannot be scored later
     without a projection change.
     **↳ Half-closed (U5/D5, 2026-07-30): the projection now publishes
-    `router_ops` (`flows.py:92-93`) — see B2/R-ROUTEROPS for the registered
+    `router_ops` (`flows.py:147-148`) — see B2/R-ROUTEROPS for the registered
     field and its three-state. The measured `0 of 152` stands for this snapshot;
-    the 41 applicable rows gain the key on re-analysis, not retroactively. The
-    `sink_ids=[]` half is untouched and still open.**
+    the 41 applicable rows gain the key on re-analysis, not retroactively.**
+    **↳ `sink_ids` half closed (2026-07-30, fix 7): `sink_ids`/`sink_receivers`
+    on a routed claim now join on the SAME `router_ops` identity rather than the
+    bare move selector (`flows.py:_carries`). The bare-selector join was not
+    merely empty — on a body carrying both a routed move and a same-selector
+    DIRECT call it attached the direct call's receiver to the routed claim. A
+    routed flow with no recorded `router_ops` names no carrier and matches
+    nothing, so the keys stay absent = `not_determined`.**
 
 ### B11. Traps — present, plausible-looking, not witnesses
 
@@ -2820,10 +2840,10 @@ failure domain. **Readers:** `upgrade_action_counts` /
 | field | JSON / column path | pop. (PR-161 replica) | status | three-state | failure path |
 |---|---|--:|---|---|---|
 | `governance_action_id` | `(upgrade_transactions.chain_id, .tx_hash)` — the PAIR, returned by `governance_actions_for` as `set[tuple[int, str]]` | 68 tx / 120 events | **REQ** (arithmetic) | present = this action's id · — · absent row = no receipt fact | no row. The bare hash is **not** the id: the same 32 bytes can name a different transaction on another chain, and a bare-hash union across contracts merges them (the aliasing class #158 closed). A contract whose chain resolves to nothing contributes no pair — a chain-scoped key cannot be minted without a chain — while its per-contract COUNT is unaffected |
-| `executor_kind` | `.executor_kind` | 3-valued, never NULL | **REQ** (gate + cite) | `timelock_routed` / `safe_direct` are each proven · there is no proven-absent polarity · `not_determined` carries every other case | **`not_determined`** on: receipt unfetchable · `status=0x0` · neither marker · marker emitter unclassified · planes disagreeing · two distinct marker emitters · log set not provably complete |
+| `executor_kind` | `.executor_kind` | 3-valued, never NULL | **REQ** (gate + cite) | `timelock_routed` / `safe_direct` are each proven · there is no proven-absent polarity · `not_determined` carries every other case | **`not_determined`** on: receipt unfetchable · `status=0x0` · neither marker · marker emitter unclassified **on the receipt's own chain** · planes disagreeing **within that chain** · two distinct marker emitters · log set not provably complete. **Chain scoping (2026-07-30):** every plane read joins `contract_id → Contract.chain` and keeps only rows resolving to the receipt's `chain_id`, because an address is an identity only within a chain — a CREATE2 twin typed `safe` on mainnet must not mint `safe_direct` on a Base transaction. A row whose contract carries no resolvable chain is dropped, never assumed local |
 | `executor_address` | `.executor_address` | populated iff kind positive | **REQ** (cite) | the marker's emitter · — · NULL | NULL |
 | `executor_classification_source` / `executor_classified_type` | `.executor_classification_*` | populated iff kind positive | **GATE** | which persisted plane typed the emitter, and as what · — · NULL | NULL. A CHECK constraint makes the gate **inseparable** from the payload |
-| `executor_classification_block` | `.executor_classification_block` | **0 rows today** | **REQ** (three-state) | the height the classifier probed at · — · NULL = not determined | NULL. Populated going forward by B10.1a's `safe_protection.probe_block` |
+| `executor_classification_block` | `.executor_classification_block` | **0 rows today** | **REQ** (three-state) | the height the classifier probed at · — · NULL = not determined | NULL. Populated going forward by B10.1a's `safe_protection.probe_block`, **taken only from SAME-CHAIN rows** — a height measured on another chain is no citation for this row and the field stays NULL |
 | `executor_call_targets` | `.executor_call_targets` (JSONB) | gated on `timelock_routed` | **REQ** (cite) | the `target` word of each `CallExecuted` · — · SQL NULL | NULL — and `executor_call_targeted_proxy()` returns `not_determined`, never `false`, for a `safe_direct` tx |
 | `receipt_log_set_complete_for_tx` | `.receipt_log_set_complete_for_tx` | computed per row | **GATE** | `true` = the receipt carries every stored `Upgraded` for this tx, AND its `logsBloom` is **usable** (present, well-formed, and confirming an `Upgraded` log the array actually carries — the positive control that rules out an all-zero bloom), AND that usable bloom agrees with the array about `CallExecuted` · `false` = any of the three fails · — | **An absent, malformed or all-zero bloom is `false`, not a pass.** The bloom is a REQUIRED witness for the absence arm, not a consistency check that silence satisfies: with no bloom there is nothing to contradict, and a contradiction-only rule mints `safe_direct` from a receipt whose logs were pruned. `false` withdraws every marker-**absence** inference, which is the entire basis of `safe_direct` |
 | `is_contract_creation` / `created_contract_address` / `receipt_to` / `receipt_from` | `.` same | 68/68 | **GATE** | verbatim receipt facts; `receipt_to IS NULL` is the FACT "contract creation", told apart from "unknown" by the row existing | absent row |
@@ -2894,7 +2914,7 @@ observed heights (10743414–25533308) are final beyond any plausible reorg dept
 and `block_hash` is stored so a reorg is *detectable* rather than merely trusted.
 (b) The classification plane carries no height on any current row, so
 `executor_kind` asserts "the emitter is typed a Safe/timelock **by our
-classifier**", **not** "…and it was one at the upgrade's block" — proving that
+classifier, on this chain**", **not** "…and it was one at the upgrade's block" — proving that
 would need an archive `eth_getCode` at 2023-2026 blocks, which is out of scope
 here. (c) **The migration backfills no `chain_id` at all.** `upgrade_events.chain_id`
 is written only by the fold, and only for transactions whose receipt fact row
@@ -2941,7 +2961,7 @@ primary key.
 | `holders_basis` | `.holders_basis` | 11 | **GATE** | `pinned_has_role_confirmed` / `not_determined` | any failure ⇒ `not_determined` | gate |
 | `holder_set_exhaustive` | `.holder_set_exhaustive` | 11 | **GATE** | **always `not_determined`**, CHECK-pinned | unconditional | gate. A consumer may **never** read `holders` as complete |
 | `as_of_block` | `.as_of_block` | 11 | **REQUIRED** | present iff `holders` non-NULL | `holders` NULL ⇒ NULL | cite (inv.10 — a mutable now-fact carries its height) |
-| `as_of_block_hash` | `.as_of_block_hash` | best-effort | **CONF** | the pinned block's hash **when readable** | the hash read failing leaves the height standing and the hash **NULL** — only replay-after-reorg is weaker | cite |
+| `as_of_block_hash` | `.as_of_block_hash` | best-effort | **CONF** | the pinned block's hash **when readable AND a full 32 bytes** | the hash read failing — or returning `"0x"`, a short/over-long word, or non-hex — leaves the height standing and the hash **NULL**; only replay-after-reorg is weaker. **Never `b""`**: `bytes.fromhex("")` is an empty citation a replaying reader cannot tell from one it never got | cite |
 | `cursor_first_indexed_block` (+ basis) | `.cursor_first_indexed_block` | **0/11 witnessed** | **GATE** | proven only at basis `creation_block_minus_one` | NULL, `not_determined` **or `explicit_seed`** ⇒ NULL + `not_determined` | cite |
 | `cursor_last_indexed_block` | `.cursor_last_indexed_block` | 11 | **CONF** | upper bound only; the weaker of the two topics | missing cursor ⇒ NULL + `coverage: partial` | cite. **Never a lower-bound witness** |
 | `cursor_enrollment_bases` | `.cursor_enrollment_bases` | 11 | **CONF** | recorded verbatim per topic | — | cite. Recorded, **not depended on** — see below |
@@ -2950,7 +2970,7 @@ primary key.
 | `role_name` | `.role_name` | **10/11** (8 `keccak_preimage` + 2 `accesscontrol_default_admin_literal`) | **CONFIDENCE** | proven-present = a proven preimage / NULL = key absent, `not_determined` | keccak mismatch, or the zero-word arm without an answered `hasRole` ⇒ NULL | **cite only. Never gates, never keys anything** |
 | `role_name_basis` | `.role_name_basis` | 11 | **GATE** | `keccak_preimage` / `accesscontrol_default_admin_literal` / `not_determined` | mismatch ⇒ `not_determined` | gate on `role_name` |
 | `candidate_count`, `unconfirmed_candidate_count` | `.candidate_count` … | 11 | **CONF** | integers, or **NULL when `holders` is NULL** | — | cite (the floor's visible residual) |
-| `fold_chain_disagreements` | `.fold_chain_disagreements` | 11 | **CONF** | array = the disagreements observed among the candidates whose reads COMPLETED / **NULL = `not_determined`** | withheld row ⇒ **NULL, never `[]`** | cite. Cause is `not_determined` |
+| `fold_chain_disagreements` | `.fold_chain_disagreements` | 11 | **CONF** | array = the disagreements observed among the candidates whose reads COMPLETED / **NULL = `not_determined`** | withheld row ⇒ **NULL, never `[]`**. **A read "completed" only when it returned a FULL 32-byte word** (2026-07-30): `eth_call_batch` reports an unreadable node result as success-with-`"0x"`, and `decode_bool_word("0x")` is False, so a call that returned NO DATA used to publish `chain_state: "false"` and satisfy `has_role_answered`. Such a candidate is now `unconfirmed` | cite. Cause is `not_determined` |
 
 **What `holders` proves, stated exactly:** *this address's own `hasRole`
 predicate returned true at `as_of_block`.* That is a behavioural read of deployed
