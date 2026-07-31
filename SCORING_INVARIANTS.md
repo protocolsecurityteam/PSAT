@@ -2703,3 +2703,200 @@ the row's only handle on its own transaction — to preserve referential
 tidiness. NO ACTION instead refuses to delete a receipt fact that events still
 reference; the normal lifecycle never needs to (`Contract` deletes cascade to
 the events, i.e. the child side).
+
+### B19. Per-node restaking position — `restaking_positions` (D1 / Unit 10B)
+
+Per **enumerated node instance**, at a recorded block. Not per `contracts` row,
+and never on the beacon implementation. Every figure below is a read pinned at
+block **25643300**, reproduced independently three times.
+
+**The plane is separate from `contract_balances` on purpose, and structurally.**
+The live EtherFiNode instances are BeaconProxy deployments with **no `contracts`
+row** (measured: zero for the probed node and for its pod), while
+`contract_balances.contract_id` is `NOT NULL`. Delivering this witness as balance
+rows would have required minting a `contracts` row per node, after which
+`services/effects/selection.py::_asset_holdings_by_deployment` would read the
+share quantity as a **holding of a deployment** and `build_authority_graph` would
+sum it — closing one gap by widening another. Every spot-balance reader joins
+`contract_balances(_latest).contract_id` to `contracts.id`, so a restaking row is
+invisible to all seven of them by construction rather than by filter.
+`contract_balances`, `contract_balance_fetches` and `contract_balances_latest`
+are **unchanged**; **no reader was modified**, and a test asserts that no module
+outside this plane imports the model.
+
+**There is no USD column anywhere on this plane**, so a share quantity cannot
+enter a dollar figure even by accident.
+
+#### What a published `0` means — and what it does not
+
+`eigenlayer_beacon_shares_wei = 0` under basis `eigenlayer_beacon_shares` means
+**zero EigenLayer beaconChainETH withdrawable shares** at `block_number`. It is
+**not** "this node holds nothing". Measured over the 26 enumerated nodes at
+25643300: every one has an EigenPod and reads **0 shares**, while those 26 pods
+hold **374.148164612 ETH** between them — pod
+`0x7474b357106e509918cd1db47c40a7d0d775d4c7` (node `0xf538ac2790…`) holding
+**exactly 320 ETH**. Summing this column over the whole enumerated set yields
+**0 wei** against that. Node and pod **execution-layer native balances are
+`not_determined` on this plane**, and the consensus-layer residual is
+`not_determined` and **unbounded above** (post-Pectra a validator may hold up to
+2048 ETH). The column carries its scope in its name for exactly this reason, and
+the meaning is stored as a `COMMENT ON COLUMN`, not only here.
+
+#### Field register
+
+| field | status | three-state | failure / revert / absence path |
+|---|---|---|---|
+| `block_number` | **REQ** | always present; every read of the row was ISSUED at it | head unresolvable ⇒ **no row is written at all**. There is no unpinned path on this plane |
+| `block_hash` | **REQ** | the reorg witness (inv.11/12) | header unreadable ⇒ no row. Without it a replay "at block N" cannot tell it is on the same chain history |
+| `eigenpod_basis` | **GATE** | `proven_pod_cross_read` — `getEigenPod()` and `ownerToPod()` both decode a full 66-char word, both non-zero and **equal**, AND `hasPod()` decodes to **exactly 1**; `no_eigenpod_proven` — **all three** legs decode a full word and are zero/zero/false; `not_determined` | `"0x"`, `success=false`, a return that is not 66 chars, a `hasPod` word that is neither 0 nor 1, or any disagreement, on **any** leg ⇒ `not_determined`. **Two of three legs never suffices**: `proven_pod_cross_read` is requirement (i) of the shares arm and every downstream gate keys off it |
+| `eigenpod` | **CONF** | the cross-read address; NULL under either other basis | DB-enforced both ways (`ck_rp_no_pod_has_no_address`, `ck_rp_pod_cross_read_has_address`) |
+| `eigenlayer_beacon_shares_wei` | **REQ** | integer (may be 0) under `eigenlayer_beacon_shares`; **0** under `no_eigenpod_proven` (a distinct proven-zero); NULL = not_determined | any transport/decode failure ⇒ `read_failed` + NULL; any unlicensed shape ⇒ `not_determined` + NULL. **Never 0** |
+| `shares_basis` | **GATE** | `eigenlayer_beacon_shares` \| `no_eigenpod_proven` (both OBSERVING) \| `read_failed` \| `not_determined` (both NON-OBSERVING, NULL quantity) | `read_failed` = transport or decode failed; `not_determined` = transport succeeded but the evidence does not license a value. Reading the quantity without this column is **non-conformant** |
+| `shares_strategy` | **GATE** | the strategy read from `EigenPodManager.beaconChainETHStrategy()` **at the same block**; NULL under every non-observing basis | strategy read fails ⇒ **no shares read is licensed at all** ⇒ `not_determined`. A literal is **BANNED**: the near-miss `0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` answers `[0]/[0]` with success, indistinguishable from the true `0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0` in any elided form |
+| `deposit_shares_wei` | **CONF** | `EigenPodManager.podOwnerDepositShares`, **`int256`, may be negative**, stored signed and unclamped; NULL = not_determined | verified on EPM implementation `0xd22dd829779adbf3869fb224f703452f7f95e9db`. `stakerDepositShares` is the `uint256` one — do not confuse them. Unsigned decoding of a negative publishes ~1.15e77 |
+| `cross_read_agreement` | **GATE** | `agree` — withdrawable == DM deposit == EPM deposit; `disagree_within_invariant` — withdrawable ≤ every present deposit leg (publishes **with the flag**: slashing and queued withdrawals produce this legitimately); `inconsistent` — withdrawable above a present deposit leg, or a negative deposit beside a positive withdrawable ⇒ **the quantity is SUPPRESSED**; `not_determined` | an **absent** deposit leg is `not_determined`, never `inconsistent`: absence is not disagreement, and conflating them would suppress a proven read |
+| `active_validator_count`, `last_checkpoint_timestamp` | **CONF** | integers; NULL = not_determined | **NULL unless `eigenpod_basis = 'proven_pod_cross_read'`** (DB-enforced). Without that gate a `last_checkpoint_timestamp` of 0 — a real "never checkpointed" witness — could be minted against an address never proven to have a pod. A returned `0` under a proven pod **is** a witness and is stored as `0` |
+| `consensus_layer_residual` | **BAN-as-number** | **always present, always the string `not_determined`** | unreachable by any other value, DB-enforced. Consuming it as `0`, or omitting the key, is non-conformant |
+| `node_set_completeness` | **GATE** | **`not_determined` only**, DB-enforced | the fold proves a node EXISTS and can never prove one does not. Any cross-node aggregate is a **floor** (`>= X wei`), never a total, and no earned negative is licensed |
+| `manager_contract_id` | **CONF** | the `contracts` row whose **ADDRESS EQUALS** the emitting `event_address` — the proxy (`0x8b71140a…`, `contracts.id 531`), **not** the implementation row that carries the manager's name (`0xcf5928ea…`, id 591) | pinning to the implementation would repeat the implementation-vs-proxy keying defect B8.1a documents. Provenance only: never "this contract holds the position" |
+
+#### The four-way partition, and the two arms that are deliberate under-claims
+
+A **zero** is admitted only under full three-way agreement, because zero is
+exactly what a wrong input manufactures. Two consequences are intended, and are
+recorded so a later reader does not "fix" them:
+
+1. **Zero with a failed EPM deposit leg** ⇒ requirement (iii) is unevaluable ⇒
+   `not_determined`. A `0` cannot be published.
+2. **Withdrawable 0 against a positive deposit leg** (the fully-slashed shape)
+   fails the equality and publishes nothing.
+
+A **nonzero** with a failed EPM leg is the opposite call: it publishes as a
+single-source quantity with `deposit_shares_wei` NULL and
+`cross_read_agreement = not_determined`. `inconsistent` does **not** fire there.
+
+`disagree_within_invariant` paired with a `0` is **unreachable by construction**
+(a zero requires `agree`), and a test pins that.
+
+**What requirement (iii) does NOT do.** It is defence-in-depth, not the guard
+against the wrong-strategy or non-staker shapes: measured, a wrong strategy on
+any of the 26 returns 0/0/0 and a non-staker (`0x…deadbeef`) returns DM `[0,0]`
+with EPM `0` — equality **holds** in both. What actually rejects them is **(i)**,
+the identity cross-read (a non-staker is codeless, so `getEigenPod()` returns
+`"0x"` and fails the 66-char rule) together with the **witnessed strategy**.
+
+#### `restaking_positions_latest` — the read surface
+
+Per **`(chain_id, node_address)`** — the chain is in the key because the same
+address on two chains is two entities (#158) — the most recent **OBSERVING** row
+wins, ordered `block_number DESC, id DESC` so the order is **total**. Both
+non-observing bases are excluded from winning: letting `read_failed` **or**
+`not_determined` win would withdraw a proven position on the strength of a
+non-observation.
+
+**Absence from this view is `not_determined`, never "no position".** With both
+failure classes excluded, a node whose every row is non-observing does not appear
+at all — so a consumer that read a missing row as `0` would reintroduce, at the
+projection layer, the absent-row-as-`$0` shape B8.1a exists to close.
+
+Retention (`PSAT_RESTAKING_HISTORY_DEPTH`, default 10, **rejects < 1**) bounds
+insert-only growth and **never prunes the latest observing read**.
+
+#### Constraints are a backstop, not control flow
+
+`services/monitoring/restaking_reads.py` decides the basis first and maps every
+violating shape to NULL / `not_determined` **before** a row is constructed; a
+CHECK firing in production would be a producer bug. Two Postgres traps are
+handled deliberately: a CHECK evaluating to NULL **passes**, so every arm is
+written NULL-safe; and one level up, the OR-joined arms are fail-closed **only
+because `shares_basis`, `eigenpod_basis` and `cross_read_agreement` are NOT
+NULL** — a NULL basis would make every arm NULL, and an OR of NULLs is NULL.
+`ck_rp_basis_matches_value` is **one arm per basis**, each pinning the basis AND
+the value together, so an unrecognised basis satisfies no arm.
+
+#### Enumeration
+
+A cold event fold with its own cursor:
+`(chain_id, 0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f, PubkeyLinked(bytes32,address,uint256,bytes))`,
+topic0 `0x5e525a525cf73653f769c8305dc71a68b85b0e62e3cc5258fe187ff9fd3e5cb9`,
+node in `topics[2]`. Measured: 33 logs / **26 distinct nodes** in the 200,000
+blocks before 25643300. `EigenPodManager.PodDeployed` is not usable — it is
+EigenLayer-wide (`numPods()` = 34,704) and scoped to no protocol; BeaconProxy
+creation emits nothing. The emitter is identified by a **log witness** (one
+`eth_getLogs` carrying the protocol's whole address set and the topic filter),
+never by `contract_name` and never by an ABI declaration. Enrollment is
+**code-asserted**, so the cursor carries the `tracked_topics_asserted` coverage
+ceiling: enrolled, never complete, licensing no absence claim.
+
+**Stated deferral (measured).** `0x8b71140a…` already carries two warm cursors at
+block 25641245 with `backfill_complete = true`, on
+`UserAllowedForwardedEigenpodCallsUpdated` (`0x1bb6cfc6…`) and
+`UserAllowedForwardedExternalCallsUpdated` (`0x2a1547b8…`) — the forwarded-call
+allowlist topics for `effective_functions.id` 1184 and 2038.
+`index_event_group_step` takes `start = min(last_indexed_block)` over the group's
+**active** cursors, so a cold cursor seeded at 17174452 (proxy creation 17174453)
+drags the shared window back over **8,468,848 blocks = 17 windows** at a
+500,000-block span — roughly **one pass** at the 50-window per-cursor budget. The
+siblings do **not** regress (the advance is guarded by `window_end > last`) and
+`backfill_complete` is cleared only by a reorg rewind; the cost is that those two
+stop **advancing** for that period while still reporting themselves complete —
+the stale-warm shape. Accepted as a bounded, measured deferral rather than
+papered over with a later seed no read witnesses. A test asserts the
+no-regression and no-reset properties.
+
+#### Consumption obligation, and the one banned consumption
+
+**Cite and three-state only.** No arithmetic into any USD total, any
+`value_at_stake`, or any reach floor. A cross-node aggregate is a floor carrying
+its direction (`>= X wei`), its `shares_basis` and `node_set_completeness`.
+
+`effective_functions.id` **1184** (`EtherFiNode.forwardExternalCall`,
+`contracts.id 569` — **the beacon implementation**, whose own `getEigenPod()`
+returns a 32-byte zero) and **2038** (`EtherFiNodesManager.forwardExternalCall`)
+**stay `reach = not_determined`**. This unit writes nothing to
+`effective_functions`, `recipes.py`, or any reach projection.
+
+Licensing that consumption needs a **destination witness** that
+`forwardExternalCall` reaches the EigenLayer withdrawal path. **Neither row has
+one, but they do not have the same state, and the difference matters enough to
+state exactly.** Measured on the replica:
+
+* ef **1184** — `witness.destination_constraint` is `{"state": "not_determined"}`;
+* ef **2038** — `{"state": "constrained", "guard": "external_call_revert",
+  "binding": "operand", "leaf_path": [1], "pins": null}`.
+
+`constrained` on 2038 is **not** a destination witness. The guard is
+`external_call_revert`: it witnesses that the function propagates a failure of
+the call it makes, which constrains what happens *if* the call reverts. It says
+nothing about **where** the call goes — `pins` is `null`, so no destination is
+pinned at all, and a revert-propagation guard is compatible with every possible
+callee. The conclusion is therefore unchanged for both rows, and this paragraph
+previously asserted `not_determined` for both, which was false for 2038.
+
+Attaching the position to either row is **inv.16a's sweepETH error — the
+5,188× over-valuation — recurring in a new place**.
+
+#### Deferral: the plane has no production writer yet
+
+**Stated with its cause.** Nothing in this repository calls `read_positions`,
+`persist_positions` or `enroll_restaking_fold` on a schedule; every public symbol
+of both new modules has exactly two references, its definition and its
+`__all__`. No `PubkeyLinked` cursor exists on the replica, and **no row of this
+plane is published anywhere today**.
+
+That is deliberate, not an oversight. Wiring a periodic writer is the one part of
+this unit that cannot be verified under the constraint that forbids running the
+orchestrator or a full pipeline end-to-end, so shipping it would have meant
+shipping the only unexercised code in the unit. The strictly-smaller provable
+core is the witness and its schema, both of which ARE exercised. The
+consequence to state plainly: the "3 reads/node/cycle steady-state" and "its own
+cursor" in the unit's spec describe a cycle that **does not yet run**, and the
+structural exclusion from every spot-balance reader is currently absolute for the
+trivial reason that the plane is empty. The remaining work is the periodic step
+and its enrollment call, nothing in the witness itself.
+
+**Small populations (B14).** 1 `EtherFiNode` `contracts` row (569); 2
+`forwardExternalCall` consumer rows (1184, 2038); the lane's original single
+probed node. **Nothing here calibrates any rule, weight or threshold** — every
+field is cite / gate / three-state. (The node population itself is ≥26, but that
+changes nothing: no rule is calibrated on it either.)

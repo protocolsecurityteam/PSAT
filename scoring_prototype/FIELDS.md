@@ -43,7 +43,7 @@ Two rules that apply to every field below:
 | **`selection.build_authority_graph` $0.00 keys** | 22 of 60 | GATE | `coalesce(sum(usd_value),0)` collapses "all current rows unpriced" into the same `$0.00` as "proven to hold nothing" — `contracts.id 563` among them. The INNER join defends only the NO-ROW case. `observed_reach_floor_usd` publishes such a key as a floor |
 | `contracts.is_proxy / implementation / admin / beacon` | admin 1 of 24; impl 25 | REQ | entity collapse. `is_proxy` is **not** a reliable is-a-proxy predicate (the one beacon row has `is_proxy=false`); `admin`'s emptiness is `not_determined`, not "no admin exists" |
 | `tvl_snapshots.defillama_tvl` | 3 distinct values | CONF | if used as a denominator, **state which snapshot** — the answer moves $53M. Contains a wrapped-position overlap vs `sum(usd_value)`; publish the caveat |
-| **missing: restaking / position value** | — | gap | `EtherFiNode` has zero balance rows, so `forwardExternalCall` floors. **The only under-scoring gap in the register** — unbounded from local data |
+| **restaking / position value** | — | **CLOSED IN PART (D1 / Unit 10B)** | see §14. The EigenLayer beaconChainETH share leg is a pinned read on its own plane (`restaking_positions`); the consensus-layer residual stays `not_determined` and unbounded above. `forwardExternalCall` (ef 1184 / 2038) **still floors** — the position may not be attached to it without a destination witness |
 
 ## 2. Extraction magnitude
 
@@ -304,3 +304,35 @@ missing row as any polarity.
 | `direct_upgrade_witnessed_at_block` | per proxy | CONF | "a direct-Safe path WAS exercised at block B". Says nothing about now |
 | `authorising_eoa` | **0/68 ever** | **BAN** | always `not_determined`, published as the literal string so the refusal reaches the consumer |
 | `timelock_is_decoy` | **0/24 ever** | **BAN** | always `not_determined`; no column, no computation |
+
+## 14. Per-node restaking position — `restaking_positions` (D1 / Unit 10B)
+
+Per **enumerated node instance** at a pinned block, on its own plane. Normative
+entry: `SCORING_INVARIANTS.md` **B19**.
+
+**Separate from `contract_balances` by construction, not by filter.** Nodes are
+BeaconProxy deployments with no `contracts` row; every spot-balance reader joins
+`contract_balances(_latest).contract_id` to `contracts.id`. No reader was
+modified and **no USD column exists on this plane**.
+
+**What a `0` means:** zero EigenLayer beaconChainETH **withdrawable shares** — not
+"holds nothing". Measured at 25643300: the 26 enumerated nodes read 0 shares each
+while their pods hold **374.148164612 ETH**, one of them exactly **320 ETH**.
+Node/pod execution-layer native balances are `not_determined` here.
+
+| field | pop. | status | notes |
+|---|--:|---|---|
+| `block_number` + `block_hash` | new plane | REQ | every read ISSUED at this height; the hash is the reorg witness. Head or header unreadable ⇒ **no row at all**. No unpinned path exists |
+| `eigenpod_basis` | new plane | GATE | `proven_pod_cross_read` needs **all three** legs: `getEigenPod()` == `ownerToPod()`, both non-zero full words, AND `hasPod()` **exactly 1**. `no_eigenpod_proven` needs all three zero/zero/false. Anything else ⇒ `not_determined`. **Two of three never suffices** |
+| `eigenlayer_beacon_shares_wei` | new plane | REQ | integer (may be 0) or **0** under `no_eigenpod_proven` (a distinct proven-zero); NULL = not_determined. **A failed read is NULL, never 0** |
+| `shares_basis` | new plane | GATE | `eigenlayer_beacon_shares` / `no_eigenpod_proven` (OBSERVING) vs `read_failed` / `not_determined` (NON-OBSERVING, NULL quantity). Reading the quantity without this is non-conformant |
+| `shares_strategy` | new plane | GATE | witnessed from `EigenPodManager.beaconChainETHStrategy()` at the SAME block. A **literal is banned**: the near-miss `0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` answers `[0]/[0]` with success, as does a non-staker |
+| `deposit_shares_wei` | new plane | CONF | `podOwnerDepositShares`, **`int256`**, stored signed and unclamped. `stakerDepositShares` is the `uint256` one |
+| `cross_read_agreement` | new plane | GATE | `agree` / `disagree_within_invariant` (publishes **with** the flag) / `inconsistent` (**suppresses** the quantity) / `not_determined`. An **absent** deposit leg is `not_determined`, never `inconsistent` |
+| `active_validator_count`, `last_checkpoint_timestamp` | new plane | CONF | NULL unless the pod is proven (DB-enforced), else a `0` "never checkpointed" could be minted against an address never proven to have a pod |
+| `consensus_layer_residual` | new plane | **BAN** as a number | always present, always the string `not_determined`. Unbounded above post-Pectra (up to 2048 ETH per validator). Consuming it as `0` is non-conformant |
+| `node_set_completeness` | new plane | GATE | **`not_determined` only**, DB-enforced. The fold proves existence, never absence — any cross-node aggregate is a floor (`>= X wei`), never a total |
+| `manager_contract_id` | new plane | CONF | the `contracts` row whose ADDRESS EQUALS the emitting `event_address` (proxy `0x8b71140a…`, id **531**), never the implementation row that carries the name (id 591). Provenance only |
+| `restaking_positions_latest` | view | REQ | **the read surface.** Per `(chain_id, node_address)`, latest OBSERVING row wins under a total order. **Absence from the view is `not_determined`, never "no position"** — reading a missing row as `0` reintroduces the absent-row-as-`$0` shape §1 closes |
+| **reach on ef 1184 / 2038** | 2 rows | **BAN** | both stay `reach = not_determined`. Attaching the position without a destination witness is inv.16a's sweepETH error (5,188×) in a new place. Row 1184 is the beacon **implementation**, whose own `getEigenPod()` is a 32-byte zero. **The two rows differ:** 1184's `destination_constraint` is `{"state":"not_determined"}`; 2038's is `{"state":"constrained","guard":"external_call_revert","binding":"operand","pins":null}` — a revert-propagation guard pins no destination, so it is not a destination witness either |
+| **production writer** | **0 rows published** | **deferral** | the plane has no scheduled writer: nothing calls `read_positions` / `persist_positions` / `enroll_restaking_fold`, and no `PubkeyLinked` cursor exists. Stated with cause in B19 — the periodic step is the one part that cannot be verified without an end-to-end run |
