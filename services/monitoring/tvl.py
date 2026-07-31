@@ -345,7 +345,7 @@ def refresh_contract_balances(
                 )
             )
             usd = tok.get("usd_value")
-            if usd:
+            if usd is not None:
                 contract_total += usd
                 tokens.append(
                     {
@@ -453,7 +453,7 @@ def _read_existing_balances(session: Session, protocol_id: int) -> tuple[dict[st
         tokens: list[dict] = []
         for b in rows_by_cid.get(contract.id, []):
             usd = float(b.usd_value) if b.usd_value is not None else None
-            if usd:
+            if usd is not None:
                 contract_total += usd
                 tokens.append({"symbol": b.token_symbol, "usd_value": round(usd, 2)})
         # Composite entity token — see the twin-collapse note in

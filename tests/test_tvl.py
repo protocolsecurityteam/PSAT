@@ -34,6 +34,8 @@ _ADDR_PREFIX = {
     "twin": "0x0000000000000000000000000000000000009",
     "ethfail": "0x000000000000000000000000000000000000a",
     "failfetch": "0x000000000000000000000000000000000000b",
+    "pzero": "0x000000000000000000000000000000000000c",
+    "readpz": "0x000000000000000000000000000000000000d",
 }
 
 
@@ -210,6 +212,58 @@ class TestRefreshContractBalances:
         balances = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
         assert len(balances) == 2
         assert {b.token_symbol for b in balances} == {"ETH", "USDC"}
+
+    def test_priced_zero_is_published_unpriced_is_not(self, db_session, monkeypatch, _cleanup):
+        """A priced ``usd_value == 0.0`` is a witnessed zero and enters the
+        breakdown; an unpriced ``usd_value: None`` does not — the two must be
+        distinguishable (readiness §2.3). Row storage is unaffected either way."""
+        protocol = Protocol(name="TestProto_priced_zero")
+        db_session.add(protocol)
+        db_session.flush()
+
+        addr = _addr("pzero", "a1")
+        contract = Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="Vault")
+        db_session.add(contract)
+        db_session.commit()
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 1_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr(
+            "utils.etherscan.get_token_balances_page",
+            lambda address, chain_id=1: page(
+                [
+                    {
+                        "token_address": "0x" + "ee" * 20,
+                        "token_name": "ZeroCoin",
+                        "token_symbol": "ZERO",
+                        "decimals": 6,
+                        "balance": 0,
+                        "price_usd": 1.0,
+                        "usd_value": 0.0,
+                    },
+                    {
+                        "token_address": "0x" + "ff" * 20,
+                        "token_name": "NoPriceCoin",
+                        "token_symbol": "NOPRICE",
+                        "decimals": 18,
+                        "balance": 123,
+                        "price_usd": None,
+                        "usd_value": None,
+                    },
+                ]
+            ),
+        )
+
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
+
+        assert partial is False
+        key = _entity_key("ethereum", addr)
+        assert breakdown[key]["total_usd"] == 2000.0
+        published = {t["symbol"]: t["usd_value"] for t in breakdown[key]["tokens"]}
+        assert published == {"ETH": 2000.0, "ZERO": 0.0}
+
+        balances = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
+        assert {b.token_symbol for b in balances} == {"ETH", "ZERO", "NOPRICE"}
 
     def test_handles_balance_failure_gracefully(self, db_session, monkeypatch, _cleanup):
         """Both reads fail ⇒ the contract is OMITTED and the cycle is partial.
@@ -728,6 +782,50 @@ class TestContractBreakdownCompositeKey:
         assert breakdown[base_key]["total_usd"] == 4000.0
         # These are legacy-shaped rows (no fetch recorded), and the view still
         # publishes them: an absent fetch plane is not a failed one.
+        assert partial is False
+
+    def test_read_existing_priced_zero_is_published_unpriced_is_not(self, db_session, _cleanup):
+        """Same distinction as the refresh branch (readiness §2.3): a stored
+        priced zero is a witnessed holding of nothing and publishes as 0.0;
+        a NULL ``usd_value`` stays out of the served figures."""
+        protocol = Protocol(name="TestProto_read_pzero")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("readpz", "a1")
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="Vault"))
+        db_session.commit()
+        contract = _get_protocol_addresses(db_session, protocol.id)[0]
+        db_session.add(
+            ContractBalance(
+                contract_id=contract.id,
+                token_address="0x" + "ee" * 20,
+                token_name="ZeroCoin",
+                token_symbol="ZERO",
+                decimals=6,
+                raw_balance="0",
+                price_usd=1.0,
+                usd_value=0.0,
+            )
+        )
+        db_session.add(
+            ContractBalance(
+                contract_id=contract.id,
+                token_address="0x" + "ff" * 20,
+                token_name="NoPriceCoin",
+                token_symbol="NOPRICE",
+                decimals=18,
+                raw_balance="123",
+                price_usd=None,
+                usd_value=None,
+            )
+        )
+        db_session.commit()
+
+        breakdown, partial = _read_existing_balances(db_session, protocol.id)
+
+        key = _entity_key("ethereum", addr)
+        assert breakdown[key]["total_usd"] == 0.0
+        assert {t["symbol"]: t["usd_value"] for t in breakdown[key]["tokens"]} == {"ZERO": 0.0}
         assert partial is False
 
     def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup):
