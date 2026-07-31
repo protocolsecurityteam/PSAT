@@ -183,6 +183,10 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+    # The perimeter walk moved to services/discovery/perimeter; the resolution
+    # worker still imports create_job for its dependency-provider spawn, so both
+    # bindings are stubbed and the assertions below are unchanged.
+    monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
     monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_control_snapshot)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_control_graph)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
@@ -470,6 +474,10 @@ class TestQueueDiscoveredContracts:
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(
             nodes=[
@@ -496,10 +504,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -516,10 +527,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -537,10 +551,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(id=uuid.uuid4())
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -559,10 +576,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -584,10 +604,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         # Node address matches root
         graph = _resolved_graph(
@@ -605,10 +628,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -627,10 +653,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -679,6 +708,10 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -702,6 +735,10 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -840,10 +877,13 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         session.get = lambda model, pid: None  # parent not found
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
@@ -885,6 +925,10 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
@@ -1277,10 +1321,13 @@ class TestStructuralOwnershipPropagation:
         job = _job(id=real_job.id, request={"rpc_url": "rpc"})
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1308,10 +1355,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1377,10 +1427,13 @@ class TestStructuralOwnershipPropagation:
         job = _job(id=real_job.id, request={"rpc_url": "rpc"})
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1414,10 +1467,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1450,10 +1506,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")

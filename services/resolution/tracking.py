@@ -612,6 +612,104 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     return out
 
 
+#: The getter the back-link probe reads. A selector, fired with a negative
+#: control — NOT a name match on the principal. The published fact is an address
+#: EQUALITY at a pinned height; the getter's name contributes nothing to it.
+_BACKLINK_GETTER_SIG = "vault()"
+
+
+def probe_declared_vault_backlink(
+    rpc_url: str,
+    principal_address: str,
+    gated_contract_address: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int | None = None,
+) -> dict[str, object] | None:
+    """Does *principal_address* itself declare *gated_contract_address* as its
+    ``vault()``, at a pinned height, with the duck-typing control passed?
+
+    The narrow fact this earns, and the only one it may be read as: **M declares
+    V as its vault() at ``probe_block``, with the nonsense-selector control
+    passed.** That corroborates the (M, V) PAIRING the projection already
+    asserts, from a structural read rather than from the
+    ``ManagerWithMerkleVerification`` label string (inv.2).
+
+    It earns NOTHING about what M *is*, and on this corpus that is not a corner
+    case: of the 20 pairs that publish ``True`` at 25643300, **10 are not
+    managers at all** — Tellers, solvers and vaults whose ``vault()`` happens to
+    be the contract they gate. Half the positive population would be
+    mis-typed by anyone reading this as "M is the manager".
+
+    Returns ``None`` — the witness is wholly ABSENT, not falsified — when the
+    height cannot be pinned: two facts on one node row may not carry different
+    unstated heights, so an unpinnable read publishes nothing at all.
+
+    ``declared_vault_matches_gated_contract`` is ``True`` or ``"not_determined"``
+    and has **no false state**, because a mismatch is not a disproof: a pairing
+    established by some other mechanism is not refuted by this getter answering
+    differently.
+
+    **The non-match payload is byte-identical to the never-read payload.** This
+    is load-bearing and was got wrong once. Publishing the control verdict
+    before the equality test made ``negative_control`` a perfect mismatch
+    oracle: the control can only be fired after a decodable address is in hand,
+    so ``negative_control == "passed"`` alongside
+    ``declared_vault_matches_gated_contract == "not_determined"`` was reachable
+    ONLY by "M declares a vault and it is not V" — the earned negative this
+    function refuses, reconstructable one key over. The control verdict is
+    therefore committed to the payload only on the arm that publishes a
+    positive. Withholding it is NOT a claim that the mismatch is unknowable —
+    ``control_graph_edges.relation='controller_value'`` with ``label='vault'``
+    already publishes the raw address for any consumer that wants it (32 rows /
+    25 contracts on this corpus, with ``controller_values.block_number``). It is
+    a statement about what THIS witness asserts.
+    """
+    probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
+    if probe_block is None:
+        return None
+    pinned = hex(probe_block)
+    # ``gated_contract_address`` is structural — it names the subject of the
+    # verdict, so the row is self-describing and a later graph merge cannot
+    # silently reattribute the witness to a different V.
+    out: dict[str, object] = {
+        "probe_block": probe_block,
+        "backlink_getter": _BACKLINK_GETTER_SIG,
+        "gated_contract_address": (gated_contract_address or "").lower(),
+        "backlink_address": _NOT_DETERMINED,
+        "negative_control": _NOT_DETERMINED,
+        "declared_vault_matches_gated_contract": _NOT_DETERMINED,
+    }
+
+    declared = _try_eth_call_decoded(
+        rpc_url, principal_address, _BACKLINK_GETTER_SIG, "address", pinned, chain_id=chain_id
+    )
+    if not isinstance(declared, str):
+        # Revert, empty return, non-32-byte return, decode failure, transport
+        # error. No control is fired: nothing positive is on the table for it to
+        # gate.
+        return out
+
+    if declared.lower() != (gated_contract_address or "").lower():
+        # Byte-identical to the branch above, deliberately. Firing the control
+        # here and recording its verdict would republish the mismatch.
+        return out
+
+    control = _negative_control_probe(rpc_url, principal_address, pinned, chain_id=chain_id)
+    if control != "passed":
+        # A catch-all fallback answers everything, so the matching vault() answer
+        # is worthless. Recording the verdict is safe on this arm: it is reached
+        # only when the address MATCHED, so it discriminates nothing about the
+        # pairing.
+        out["negative_control"] = control
+        return out
+
+    out["negative_control"] = control
+    out["backlink_address"] = declared.lower()
+    out["declared_vault_matches_gated_contract"] = True
+    return out
+
+
 def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
     """The ERC-1967 implementation slot: an implementation address when the
     slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -26,6 +26,12 @@ from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
+from services.discovery.perimeter import (
+    PERIMETER_SPAWN_DEPTH_CAP,
+    PERIMETER_SPAWN_LIMIT,
+    new_spawn_result,
+    queue_discovered_contracts,
+)
 from services.effects.config import effects_stage_enabled
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
@@ -190,6 +196,51 @@ def _chain_name_for_job(job: Job) -> str:
         return chain_by_id(_chain_id_for_job(job)).name
     except UnknownChainError:
         return "ethereum"
+
+
+def _persist_spawn_summary(session: Session, job: Job, spawn_result: Mapping[str, Any]) -> None:
+    """Write the perimeter ledger, including after the walk raised.
+
+    Best-effort by design, and it must never mask the exception that brought us
+    here. When the walk raised mid-loop the primary session is usually poisoned
+    (a failed INSERT aborts the transaction), so the write is retried on a fresh
+    session — the same pattern ``BaseWorker._persist_stage_errors`` uses, and for
+    the same reason: the record of what happened has to outlive the transaction
+    that failed.
+    """
+    try:
+        store_artifact(session, job.id, "perimeter_spawn_summary", data=spawn_result)
+        session.commit()
+        return
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            logger.debug("Job %s: rollback before spawn-summary retry failed", job.id, exc_info=True)
+    fresh = SessionLocal()
+    try:
+        store_artifact(fresh, job.id, "perimeter_spawn_summary", data=spawn_result)
+        fresh.commit()
+    except Exception as exc:
+        # A lost ledger is a real degradation, not a cosmetic one: an absent
+        # `perimeter_spawn_summary` is defined to mean "this job predates the
+        # ledger", so silently failing to write it would publish that false
+        # meaning. Surface it rather than let the artifact's absence lie.
+        record_degraded(
+            phase="perimeter_spawn_summary",
+            exc=exc,
+            context={"job_id": str(job.id)},
+        )
+        logger.warning(
+            "Job %s: could not persist perimeter_spawn_summary (non-fatal)",
+            job.id,
+            exc_info=True,
+        )
+    finally:
+        try:
+            fresh.close()
+        except Exception:
+            logger.debug("spawn-summary fresh session close failed", exc_info=True)
 
 
 def _root_artifacts(
@@ -722,6 +773,38 @@ class PolicyWorker(BaseWorker):
             ph["graph_nodes"] = (
                 len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0
             )
+        # Bring the refresh's newly-discovered contracts inside the analysis
+        # perimeter. Without this, a node FIRST seen here — every role principal,
+        # since role principals need the effective_permissions computed this
+        # stage — could never be analysed: the only other spawn site runs
+        # earlier, in the resolution stage. Budgeted, because this path is
+        # recursive (an analysed manager projects its own role principals and
+        # spawns again), and every cut is recorded rather than dropped.
+        #
+        # Runs on EVERY policy job, outside the `if refreshed_graph:` above, and
+        # the ledger is written in a `finally`. Both are deliberate. Writing it
+        # only when the refresh produced a graph made an ABSENT artifact
+        # ambiguous between "the refresh did not happen" and "the refresh
+        # happened and omitted nothing" — the exact asymmetry the selection
+        # ledger exists to avoid. And returning the ledger from the walker meant
+        # a `create_job` raise part-way through left children committed with no
+        # record of them at all.
+        spawn_result = new_spawn_result(site="policy_refresh", budget=PERIMETER_SPAWN_LIMIT)
+        try:
+            if isinstance(resolved_control_graph, dict):
+                queue_discovered_contracts(
+                    session,
+                    job,
+                    resolved_control_graph,
+                    rpc_url,
+                    site="policy_refresh",
+                    chain_name=_chain_name_for_job(job),
+                    budget=PERIMETER_SPAWN_LIMIT,
+                    depth_cap=PERIMETER_SPAWN_DEPTH_CAP,
+                    result=spawn_result,
+                )
+        finally:
+            _persist_spawn_summary(session, job, spawn_result)
 
         # Label principals
         self.update_detail(session, job, "Labeling principals")

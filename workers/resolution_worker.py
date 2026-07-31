@@ -23,8 +23,9 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, find_existing_job_for_address, get_artifact, store_artifact
+from db.queue import create_job, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from services.discovery.perimeter import queue_discovered_contracts
 from services.monitoring.balance_reads import (
     native_status_for,
     pinned_native_balances,
@@ -526,207 +527,19 @@ class ResolutionWorker(BaseWorker):
         logger.info("Job %s: stored %d balance(s) for %s", job.id, total, target_address)
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
-        """Queue analysis jobs for contracts found during resolution that have no existing job."""
-        from db.models import Contract, ContractDependency
-        from services.discovery.source_confidence import asserts_ownership
+        """Queue analysis jobs for contracts found during resolution that have no existing job.
 
-        request = job.request if isinstance(job.request, dict) else {}
-        parent_company = job.company
-
-        # Walk up parent chain to find company if not set on this job
-        if not parent_company:
-            seen: set[str] = set()
-            current_req = request
-            while not parent_company:
-                parent_id = current_req.get("parent_job_id")
-                if not isinstance(parent_id, str) or parent_id in seen:
-                    break
-                seen.add(parent_id)
-                parent_job = session.get(Job, parent_id)
-                if parent_job is None:
-                    break
-                if parent_job.company:
-                    parent_company = parent_job.company
-                    break
-                current_req = parent_job.request if isinstance(parent_job.request, dict) else {}
-
-        # Structural-ownership lookup. The resolved control graph spawns
-        # children for any analyzed node, but the discovery gate only
-        # wants to grant ownership to children that are *structural*
-        # same-protocol components (impl / proxy / beacon) of the parent.
-        #
-        # ``cd.relationship_type`` alone isn't sufficient — it's the
-        # classifier's verdict on what kind of contract the dep IS, not
-        # the edge semantics. A HIGH ether.fi contract calling Lido
-        # stETH has ``relationship_type='proxy'`` because stETH is a
-        # proxy — that doesn't make stETH ether.fi's structural proxy.
-        # We require the proxy/impl/beacon fields on the Contract row
-        # to actually link the two:
-        #   * impl edge   → parent.implementation == dep.address
-        #   * proxy edge  → dep.implementation == parent.address
-        #   * beacon edge → parent.beacon == dep.address
-        #
-        # Best-effort structural-propagation lookup: a failure here
-        # falls back to "no propagation" (the safe default) rather than
-        # blocking discovery. Transient DB errors are logged + swallowed
-        # so the resolution stage still completes.
-        parent_owns_high = False
-        structural_rel_by_addr: dict[str, str] = {}
-        try:
-            parent_contract = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
-            ).scalar_one_or_none()
-        except Exception as exc:
-            logger.debug("Job %s: structural-propagation parent lookup failed: %s", job.id, exc)
-            parent_contract = None
-        if parent_contract is not None:
-            parent_sources = getattr(parent_contract, "discovery_sources", None)
-            parent_owns_high = asserts_ownership(list(parent_sources) if parent_sources else None)
-            parent_id = getattr(parent_contract, "id", None)
-            parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
-            parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
-            parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
-            if parent_id is not None:
-                try:
-                    dep_rows = list(
-                        session.execute(
-                            select(ContractDependency).where(ContractDependency.contract_id == parent_id)
-                        ).scalars()
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Job %s: structural-propagation dep-rows lookup failed: %s",
-                        job.id,
-                        exc,
-                    )
-                    dep_rows = []
-                # For proxy-direction edges we need to verify the dep's
-                # Contract.implementation back-links to the parent.
-                # Batch the lookup so the loop stays O(deps) not O(deps×SELECTs).
-                proxy_edge_addrs = [
-                    row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"
-                ]
-                dep_impl_by_addr: dict[str, str | None] = {}
-                if proxy_edge_addrs:
-                    try:
-                        dep_contract_rows = session.execute(
-                            select(Contract).where(Contract.address.in_(proxy_edge_addrs))
-                        ).scalars()
-                        for dc in dep_contract_rows:
-                            dep_impl_by_addr[dc.address.lower()] = (dc.implementation or "").lower() or None
-                    except Exception as exc:
-                        logger.debug(
-                            "Job %s: structural-propagation dep-contract back-link lookup failed: %s",
-                            job.id,
-                            exc,
-                        )
-                        dep_impl_by_addr = {}
-
-                for row in dep_rows:
-                    rel = row.relationship_type
-                    if rel not in ("implementation", "proxy", "beacon"):
-                        continue
-                    dep_addr = (row.dependency_address or "").lower()
-                    if not dep_addr:
-                        continue
-                    structurally_linked = False
-                    if rel == "implementation":
-                        structurally_linked = parent_impl is not None and parent_impl == dep_addr
-                    elif rel == "proxy":
-                        dep_impl = dep_impl_by_addr.get(dep_addr)
-                        structurally_linked = (
-                            dep_impl is not None and parent_addr_lower is not None and dep_impl == parent_addr_lower
-                        )
-                    else:  # rel == "beacon"
-                        structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
-                    if structurally_linked:
-                        structural_rel_by_addr[dep_addr] = rel
-
-        nodes = resolved_graph.get("nodes", [])
-        root_address = resolved_graph.get("root_contract_address", "").lower()
-        queued_count = 0
-
-        for node in nodes:
-            addr = (node.get("address") or "").lower()
-            if not addr or not addr.startswith("0x") or len(addr) != 42:
-                continue
-            if addr == "0x0000000000000000000000000000000000000000":
-                # An unset controller/dependency resolves to the zero address;
-                # queuing it spawns a discovery job that can only fail with
-                # "No verified source code for 0x000…000".
-                continue
-            if addr == root_address:
-                continue
-            # Only queue contracts that were analyzed during resolution
-            if not node.get("analyzed"):
-                continue
-            if node.get("node_type") != "contract":
-                continue
-
-            # Always stamp the child's chain from the job's first-class chain:
-            # a chainless parent request must not leave the child
-            # chain-less, which would write Contract.chain=NULL and dedup-collide.
-            child_chain = _chain_name_for_job(job)
-
-            # Skip if a job already exists for this address on THIS chain —
-            # case-insensitive (a checksummed admin submission is the same
-            # contract) and chain-scoped so a same-address twin on another
-            # chain doesn't suppress this chain's child.
-            existing = find_existing_job_for_address(session, addr, chain=child_chain)
-            if existing:
-                continue
-
-            contract_name = node.get("contract_name") or node.get("label") or addr
-            child_request = {
-                "address": addr,
-                "name": contract_name,
-                "rpc_url": rpc_url,
-                "parent_job_id": str(job.id),
-                "discovered_by": "resolution",
-            }
-            child_request["chain"] = child_chain
-            # Defense in depth: discovered contracts share the parent's
-            # chain (chain-as-island), so a gated parent already implies a gated
-            # child — but a disabled chain must never spawn analysis work, so the
-            # gate is asserted here too.
-            if not chain_enabled(child_chain):
-                logger.info(
-                    "Skipping discovered contract: chain not enabled for this deployment",
-                    extra={
-                        "address": addr,
-                        "chain": child_chain,
-                        "reason": "chain_not_enabled",
-                        "site": "resolution_discovered",
-                    },
-                )
-                continue
-            structural_rel = structural_rel_by_addr.get(addr)
-            if structural_rel is not None:
-                child_request["discovery_relationship"] = structural_rel
-                child_request["parent_owns_high"] = parent_owns_high
-
-            child_job = create_job(session, child_request, initial_stage=JobStage.discovery)
-            if parent_company:
-                child_job.company = parent_company
-            if job.protocol_id:
-                child_job.protocol_id = job.protocol_id
-            session.commit()
-
-            queued_count += 1
-            logger.info(
-                "Job %s: queued discovered contract %s (%s) as job %s",
-                job.id,
-                contract_name,
-                addr,
-                child_job.id,
-            )
-
-        if queued_count:
-            logger.info(
-                "Job %s: queued %d contracts discovered during resolution",
-                job.id,
-                queued_count,
-            )
+        No budget: the walk's own ``max_depth`` already bounds this graph. The
+        policy-stage refresh, which is recursive, passes one.
+        """
+        queue_discovered_contracts(
+            session,
+            job,
+            resolved_graph,
+            rpc_url,
+            site="resolution",
+            chain_name=_chain_name_for_job(job),
+        )
 
     def _emit_dependency_edges_from_predicate_trees(
         self,
