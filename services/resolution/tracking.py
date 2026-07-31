@@ -729,12 +729,16 @@ def probe_declared_vault_backlink(
 def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
     """The ERC-1967 implementation slot: an implementation address when the
     slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
-    ``_PROBE_ERROR`` when the read did not dispositively happen."""
+    ``_PROBE_ERROR`` when the read did not dispositively happen.
+
+    The word must be exactly 64 nibbles before any interpretation: "slot is
+    zero" is a typing verdict (not a proxy), so it is earned only by a full
+    zero word — a short return is a transport artifact and stays an error."""
     try:
         raw = _get_storage_at(rpc_url, address, _ERC1967_IMPLEMENTATION_SLOT, block_tag, chain_id=chain_id)
     except Exception:
         return _PROBE_ERROR
-    word = raw[2:].lower().rjust(64, "0")
+    word = raw[2:].lower()
     if len(word) != 64 or set(word) - set("0123456789abcdef"):
         return _PROBE_ERROR
     if set(word) == {"0"}:
