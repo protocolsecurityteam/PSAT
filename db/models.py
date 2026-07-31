@@ -29,6 +29,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -1386,6 +1387,28 @@ CURSOR_BASIS_NOT_DETERMINED = "not_determined"
 # ``enrollment_basis`` — whether the row carries a variable attribution.
 ENROLLMENT_BASIS_PREDICATE_HINT = "predicate_tree_hint"
 ENROLLMENT_BASIS_TRACKED_TOPICS = "tracked_topics_asserted"
+# ALLOW-LIST, deliberately, and it is the whole point of the column. Exactness —
+# a zero-row fold published as "this event never fired" — is permitted only for a
+# basis that is known to carry a variable attribution. A deny-list on the one
+# token we happened to invent would fail OPEN on every other value, and there is
+# already such a value in the schema: ``enroll_event_cursor`` stores the literal
+# ``not_determined`` whenever a caller omits the argument, which is precisely the
+# case that must not license anything. NULL is included because it means "row
+# predates this column", and those 80 rows were folding before the column existed;
+# demoting them is a separate change with its own blast radius.
+EXACTNESS_ELIGIBLE_ENROLLMENT_BASES = frozenset({None, ENROLLMENT_BASIS_PREDICATE_HINT})
+
+
+def enrollment_basis_permits_exactness(basis: str | None) -> bool:
+    """Whether a cursor with this ``enrollment_basis`` may support an exact empty.
+
+    Anything unrecognised — a future token, a hand-written value, the
+    ``not_determined`` default — answers False. New enrolment sources are
+    therefore inert until someone deliberately adds them here.
+    """
+    return basis in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES
+
+
 # ``window_stats_basis`` — neither token ever means "measured and incomplete";
 # that is expressed by a count at or above the cap that gated it.
 WINDOW_STATS_CONTINUOUS = "continuous_from_first_indexed_block"
@@ -1425,14 +1448,19 @@ class IndexedEventCursor(Base):
     # see.
     first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     first_indexed_block_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # How this cursor came to exist. ``predicate_tree_hint`` = a static
-    # ``enumeration_hint`` named this (chain, address, topic0) as a writer of a
-    # specific storage variable. ``tracked_topics_asserted`` = the row was minted
-    # from ``monitored_contracts.monitoring_config->tracked_topics``, which names
-    # topics an emitter CAN emit and attributes them to no variable — enough to
-    # gather evidence, never enough to license an exact-empty. NULL = predates the
-    # column. Read at the ``_cursor_state`` choke point in
-    # ``services/resolution/repos/event_logs_pg.py``.
+    # How this cursor came to exist, and — through the ALLOW-LIST
+    # ``enrollment_basis_permits_exactness`` — whether it may ever support an
+    # exact empty. ``predicate_tree_hint`` = a static ``enumeration_hint`` named
+    # this (chain, address, topic0) as a writer of a specific storage variable;
+    # eligible. NULL = predates the column; eligible, because those rows folded
+    # before it existed. Everything else is INELIGIBLE, including
+    # ``tracked_topics_asserted`` (minted from a tracking plan, which names topics
+    # an emitter CAN emit and attributes them to no variable), the literal
+    # ``not_determined`` that ``enroll_event_cursor`` stores when a caller omits
+    # the argument, and any token added later. Read at the ``_cursor_state`` choke
+    # point in ``services/resolution/repos/event_logs_pg.py`` and by the two
+    # out-of-band cursor readers (``_authority_has_role_store_cursor``,
+    # ``_authority_backfilled``).
     enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Largest ``eth_getLogs`` page this cursor has ever accepted, the result cap
     # in force when those pages were fetched, and whether the record is continuous
@@ -1443,6 +1471,19 @@ class IndexedEventCursor(Base):
     max_window_log_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_stats_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_stats_basis: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+
+def exactness_eligible_cursor_clause():
+    """SQL form of :func:`enrollment_basis_permits_exactness`, for the readers
+    that ask "does a usable cursor exist" without loading the row.
+
+    Kept beside the Python predicate so the two cannot drift into disagreeing
+    about which rows may support an exact empty.
+    """
+    return or_(
+        IndexedEventCursor.enrollment_basis.is_(None),
+        IndexedEventCursor.enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT,
+    )
 
 
 class WorkerHeartbeat(Base):

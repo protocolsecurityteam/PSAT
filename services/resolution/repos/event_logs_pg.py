@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import ENROLLMENT_BASIS_TRACKED_TOPICS, IndexedEventCursor, IndexedEventLog
+from db.models import IndexedEventCursor, IndexedEventLog, enrollment_basis_permits_exactness
 from services.resolution.adapters import EnumerationResult
 from utils.logging import record_stage_metric
 
@@ -488,17 +488,24 @@ class PostgresEventLogRepo:
 
         Every exactness gate in this repo funnels through here, and a zero-row
         fold under a complete state is published as an EXACT EMPTY — an earned
-        negative asserting the event never fired. A cursor enrolled from a
-        monitoring tracking plan cannot support that: the plan names topics an
-        emitter can emit and attributes them to no state variable, so a warm
-        cursor over one of them proves that THAT TOPIC never fired, never that the
-        variable behind it was never written by some other topic nobody enrolled.
-        Such a cursor is held at ``complete=False``, which routes callers to the
-        inline fallback exactly as a cold cursor does — it still indexes, it just
-        never licenses the negative.
+        negative asserting the event never fired. Whether a cursor may support
+        that is decided by an ALLOW-LIST over ``enrollment_basis``
+        (``enrollment_basis_permits_exactness``), never by excluding the tokens we
+        happened to think of: an unrecognised basis, a future enrolment source, or
+        the literal ``not_determined`` that ``enroll_event_cursor`` stores when a
+        caller omits the argument all answer "not eligible" without anyone having
+        to remember to add them.
 
-        Rows predating ``enrollment_basis`` are NULL, which is not the token, so
-        the 80 pre-existing cursors keep folding exactly as before.
+        A cursor enrolled from a monitoring tracking plan is the concrete case:
+        the plan names topics an emitter can emit and attributes them to no state
+        variable, so a warm cursor over one proves that THAT TOPIC never fired,
+        never that the variable behind it was never written by some other topic
+        nobody enrolled. An ineligible cursor is held at ``complete=False``, which
+        routes callers to the inline fallback exactly as a cold cursor does — it
+        still indexes, it just never licenses the negative.
+
+        Rows predating ``enrollment_basis`` are NULL and stay eligible, so the 80
+        pre-existing cursors keep folding exactly as before.
         """
         row = self.session.execute(
             select(
@@ -512,7 +519,7 @@ class PostgresEventLogRepo:
         ).first()
         if row is None:
             return None, False
-        if row[2] == ENROLLMENT_BASIS_TRACKED_TOPICS:
+        if not enrollment_basis_permits_exactness(row[2]):
             return row[0], False
         return row[0], bool(row[1])
 

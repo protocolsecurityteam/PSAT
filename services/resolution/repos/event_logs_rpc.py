@@ -65,11 +65,17 @@ class FetchWindowStat:
     nothing — the page may have been complete or may have been truncated by an
     upstream whose limit we do not know. Only a stat with a non-None ``cap`` and
     ``returned_log_count < cap`` witnesses a whole page.
+
+    ``returned_log_count is None`` means the response was not a countable page at
+    all (``result: null``, an object, anything but a list). That is NOT a page of
+    zero logs: a malformed 200-OK recorded as 0 would read as a proven empty
+    window, which is the strongest possible claim minted from the least
+    information. It downgrades the cursor's window record instead.
     """
 
     from_block: int
     to_block: int
-    returned_log_count: int
+    returned_log_count: int | None
     cap: int | None
 
 
@@ -106,7 +112,13 @@ class RpcEventLogFetcher:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
         self.min_bisect_span = max(1, min_bisect_span)
-        self.result_cap = default_result_cap() if result_cap is None else result_cap
+        # Default None — no cap, so no caller acquires the bisect-and-raise
+        # behaviour by omission. The environment default is applied by the
+        # DURABLE INDEXER's fetcher builder alone, because only it persists the
+        # counts the cap gates; the live monitoring watcher constructs a fetcher
+        # here too and must keep returning pages an operator's env var would
+        # otherwise turn into a raise at the bisect floor.
+        self.result_cap = result_cap
         # Declared so ``rpc_request`` can assert the eRPC URL routes this chain
         # (inv. 7). None keeps the guard a no-op for callers that lack a chain.
         self.chain_id = chain_id
@@ -194,8 +206,11 @@ class RpcEventLogFetcher:
         # raises TypeError, which is not RuntimeError and would escape the bisect
         # entirely, taking the whole scan down instead of narrowing the window.
         cap = self.result_cap
-        count = len(raw_logs) if isinstance(raw_logs, list) else 0
-        if cap is not None and count >= cap:
+        # A response that is not a list is not a page of zero logs — it is a page
+        # we could not read. Recording 0 would turn a malformed payload into a
+        # proven empty window.
+        count = len(raw_logs) if isinstance(raw_logs, list) else None
+        if cap is not None and count is not None and count >= cap:
             span = to_block - from_block + 1
             if span <= self.min_bisect_span:
                 raise RuntimeError(

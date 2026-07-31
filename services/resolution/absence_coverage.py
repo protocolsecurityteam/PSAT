@@ -45,6 +45,7 @@ from db.models import (
     FIRST_INDEXED_BASIS_CREATION,
     WINDOW_STATS_CONTINUOUS,
     IndexedEventCursor,
+    enrollment_basis_permits_exactness,
 )
 from services.resolution.repos.event_logs_rpc import default_result_cap
 
@@ -100,9 +101,16 @@ def _range_lower_bound(cursors: Sequence[IndexedEventCursor]) -> tuple[int | Non
 
 
 def _normalize_topics(topics: Iterable[str] | None) -> list[str] | None:
+    """Lower-case FIRST, then test the prefix.
+
+    Testing ``startswith("0x")`` on the raw string silently drops an uppercase
+    ``0X…`` topic, which would shorten ``missing`` — the caller would be told a
+    writer is covered because its topic was thrown away on the way in.
+    """
     if topics is None:
         return None
-    return sorted({str(t).lower() for t in topics if isinstance(t, str) and t.startswith("0x")})
+    lowered = (str(t).lower() for t in topics if isinstance(t, str))
+    return sorted({t for t in lowered if t.startswith("0x")})
 
 
 def absence_coverage(
@@ -127,7 +135,19 @@ def absence_coverage(
         ).scalars()
     )
     enrolled = sorted(str(row.topic0).lower() for row in rows)
-    warm = sorted(str(row.topic0).lower() for row in rows if bool(row.backfill_complete))
+    # ``warm`` means "this cursor could support an absence claim", so it must
+    # agree with what the resolution gate actually does. A cursor the gate
+    # refuses is reported under its own key rather than counted as warm — read as
+    # warm it would say the recording surface is covered by a cursor that folds
+    # as cold.
+    warm = sorted(
+        str(row.topic0).lower()
+        for row in rows
+        if bool(row.backfill_complete) and enrollment_basis_permits_exactness(row.enrollment_basis)
+    )
+    exactness_ineligible = sorted(
+        str(row.topic0).lower() for row in rows if not enrollment_basis_permits_exactness(row.enrollment_basis)
+    )
     asserted = _normalize_topics(write_surface_topics)
 
     reasons: list[str] = [REASON_NO_INVERSE_INDEX]
@@ -164,6 +184,9 @@ def absence_coverage(
         "write_surface_asserted": asserted,
         "enrolled": enrolled,
         "warm": warm,
+        # Enrolled and possibly backfilled, but refused by the resolution gate:
+        # indexing history, licensing nothing.
+        "exactness_ineligible": exactness_ineligible,
         "missing": missing,
         "range_lower_bound": lower_bound,
         "range_lower_bound_basis": lower_bound_basis,

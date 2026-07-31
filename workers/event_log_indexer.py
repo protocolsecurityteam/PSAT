@@ -32,6 +32,7 @@ from db.models import (
     MonitoredContract,
     SessionLocal,
     derive_job_chain_id,
+    exactness_eligible_cursor_clause,
 )
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.resolution.deferred_reconciler import reconcile_deferred_resolutions, reconcile_role_set_drift
@@ -79,11 +80,16 @@ DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
 DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
-# Monitored contracts inspected per pass when enrolling cursors from tracking
-# plans. Every cursor it mints is a cold backfill from the emitter's deploy
-# block, so the surface is drained across passes and the scan budget above still
-# bounds the work each pass actually does.
+# Monitored contracts that still NEED a cursor, worked per pass when enrolling
+# from tracking plans. Every cursor it mints is a cold backfill from the
+# emitter's deploy block, so the work is spread across passes. Addresses already
+# fully enrolled cost one indexed lookup each and do not consume this budget, so
+# the fleet drains from the front and then settles at zero work per pass.
 DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_LIMIT", "50"))
+# How many active monitored contracts a single pass will look at at all. Purely a
+# memory/latency bound on the scan; it is NOT a work budget, and it must stay
+# comfortably above the fleet size or the tail becomes unreachable again.
+DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_SCAN_LIMIT", "5000"))
 # When a pass stops on its window budget there's more backfill pending, so the
 # backfill loop re-runs after this short pause instead of the full poll interval
 # — a cold fleet drains at throughput rather than idling 60s between every
@@ -168,15 +174,24 @@ _ALL_ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
 def _authority_has_role_store_cursor(session: Session, chain_id: int, authority: str) -> bool:
-    """True iff a role-store grant/revoke cursor is already enrolled for
-    ``authority``. When it is, standard detection — an ``eth_getCode`` per gate
-    descriptor, ~250/pass at steady state on the paid RPC — can be skipped
-    entirely: the cursor exists and ``enroll_event_cursor`` would only no-op."""
+    """True iff an EXACTNESS-ELIGIBLE role-store grant/revoke cursor is already
+    enrolled for ``authority``. When one is, standard detection — an
+    ``eth_getCode`` per gate descriptor, ~250/pass at steady state on the paid
+    RPC — can be skipped entirely: the cursor exists and ``enroll_event_cursor``
+    would only no-op.
+
+    The eligibility filter is what keeps that true. A cursor minted from a
+    tracking plan can sit on the same (address, topic0) while being refused by
+    the resolution gate, so counting it here would skip the detection that would
+    have enrolled the attributed cursor — the address would index forever and
+    never resolve.
+    """
     row = session.execute(
         select(IndexedEventCursor.event_address)
         .where(IndexedEventCursor.chain_id == chain_id)
         .where(func.lower(IndexedEventCursor.event_address) == authority.lower())
         .where(IndexedEventCursor.topic0.in_(_ALL_ROLE_STORE_TOPIC0S))
+        .where(exactness_eligible_cursor_clause())
         .limit(1)
     ).first()
     return row is not None
@@ -994,7 +1009,9 @@ def enroll_from_completed_jobs(session: Session, *, limit: int = 500) -> int:
     return inserted
 
 
-def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
+def enroll_from_tracked_topics(
+    session: Session, *, limit: int = 500, scan_limit: int = DEFAULT_TRACKED_TOPIC_SCAN_LIMIT
+) -> int:
     """Enrol durable cursors for the topics a monitoring tracking plan already
     names, which nothing enrolled before.
 
@@ -1018,12 +1035,21 @@ def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
         .where(MonitoredContract.is_active.is_(True))
         .order_by(MonitoredContract.id.asc())
-        .limit(limit)
+        .limit(scan_limit)
     ).all()
     inserted = 0
+    worked = 0
     seed_cache: dict[tuple[int, str], int | None] = {}
     witness_cache: dict[tuple[int, str], tuple[int | None, str]] = {}
     for address, chain, config in rows:
+        # ``limit`` bounds the addresses that still NEED a cursor, not the rows
+        # inspected. Bounding the rows would re-inspect the same head of the
+        # ordering every pass and never reach the tail — the surface would look
+        # like it was draining while ranks past the limit stayed permanently
+        # unenrolled, and which addresses those are would depend on an id
+        # ordering nothing records.
+        if worked >= limit:
+            break
         if not _is_enrollable_event_address(address):
             continue
         try:
@@ -1038,6 +1064,7 @@ def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
         if not isinstance(specs, list):
             continue
         seen: set[str] = set()
+        wanted: list[str] = []
         for spec in specs:
             topic0 = spec.get("topic0") if isinstance(spec, dict) else None
             if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
@@ -1045,6 +1072,15 @@ def enroll_from_tracked_topics(session: Session, *, limit: int = 500) -> int:
             if topic0.lower() in seen:
                 continue
             seen.add(topic0.lower())
+            wanted.append(topic0)
+        # An address whose every tracked topic already has a cursor is skipped
+        # without spending the budget or a single RPC read, so successive passes
+        # advance through the fleet instead of re-walking its head.
+        pending = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
+        if not pending:
+            continue
+        worked += 1
+        for topic0 in pending:
             if _enroll_witnessed(
                 session,
                 chain_id=chain_id,
@@ -1079,9 +1115,17 @@ def _fold_window_stats(cursor: IndexedEventCursor, stats: list[FetchWindowStat])
         # window record is no longer continuous and cannot be repaired.
         cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
         return
+    counts = [stat.returned_log_count for stat in stats if stat.returned_log_count is not None]
+    if len(counts) != len(stats):
+        # At least one window came back as something other than a list of logs.
+        # It cannot be counted, so the range it covers cannot be proven whole —
+        # and it is emphatically not a window of zero logs.
+        cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
+        if not counts:
+            return
     observed_caps = {stat.cap for stat in stats}
     observed_cap = observed_caps.pop() if len(observed_caps) == 1 else None
-    highest = max(stat.returned_log_count for stat in stats)
+    highest = max(counts)
     prior_max = cursor.max_window_log_count
     cursor.max_window_log_count = highest if prior_max is None else max(int(prior_max), highest)
     if observed_cap is None or (cursor.window_stats_cap is not None and int(cursor.window_stats_cap) != observed_cap):
@@ -1422,9 +1466,17 @@ def _build_indexer_fetchers(
     API and rejects JSON-RPC — here it is only the coverage signal, never a
     fetcher URL.
     """
-    from services.resolution.repos.event_logs_rpc import RpcBlockHashFetcher, RpcEventLogFetcher, RpcHeadBlockFetcher
+    from services.resolution.repos.event_logs_rpc import (
+        RpcBlockHashFetcher,
+        RpcEventLogFetcher,
+        RpcHeadBlockFetcher,
+        default_result_cap,
+    )
 
     registry_chains = all_chains() if chains is None else chains
+    # The indexer is the only fetcher that persists per-window counts, so it is
+    # the only one that may act on a configured result cap.
+    result_cap = default_result_cap()
     fetchers: dict[int, LogFetcher] = {}
     head_fetchers: dict[int, HeadBlockFetcher] = {}
     block_hash_fetchers: dict[int, BlockHashFetcher] = {}
@@ -1432,7 +1484,7 @@ def _build_indexer_fetchers(
         if info.hypersync_url is None:
             continue
         rpc_url = require_rpc_url(chain_id=info.chain_id)
-        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url, chain_id=info.chain_id)
+        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url, chain_id=info.chain_id, result_cap=result_cap)
         head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=info.chain_id)
         block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=info.chain_id)
     return fetchers, head_fetchers, block_hash_fetchers

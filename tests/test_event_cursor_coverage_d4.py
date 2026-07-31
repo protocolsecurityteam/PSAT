@@ -30,7 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy import func, select, text  # noqa: E402
 
 from db.models import (  # noqa: E402
     ENROLLMENT_BASIS_PREDICATE_HINT,
@@ -51,6 +51,7 @@ from services.resolution.absence_coverage import (  # noqa: E402
     REASON_PAGE_RESIDUAL,
     absence_coverage,
 )
+from services.resolution.deferred_reconciler import _authority_backfilled  # noqa: E402
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo  # noqa: E402
 from services.resolution.repos.event_logs_rpc import (  # noqa: E402
     FetchWindowStat,
@@ -59,6 +60,8 @@ from services.resolution.repos.event_logs_rpc import (  # noqa: E402
 )
 from tests.conftest import requires_postgres  # noqa: E402
 from workers.event_log_indexer import (  # noqa: E402
+    _ALL_ROLE_STORE_TOPIC0S,
+    _authority_has_role_store_cursor,
     _witness_seed_block,
     enroll_event_cursor,
     enroll_from_tracked_topics,
@@ -95,6 +98,22 @@ def _row(session, address: str = _ADDR, topic0: str = _TOPIC_ALLOW_TO) -> Indexe
         .where(IndexedEventCursor.event_address == address.lower())
         .where(IndexedEventCursor.topic0 == topic0.lower())
     ).scalar_one()
+
+
+_KEY_SOURCES = [{"source": "msg_sender"}]
+
+
+def _fold(session, topic0: str, *, block: int = 24_000_000):
+    return PostgresEventLogRepo(session).fold_event_writes(
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=topic0,
+        topics_to_keys={0: 0},
+        data_to_keys={},
+        key_sources=_KEY_SOURCES,
+        direction="add",
+        block=block,
+    )
 
 
 def _provenance(cursor: IndexedEventCursor) -> dict[str, Any]:
@@ -175,13 +194,18 @@ def test_enrol_persists_the_witnessed_lower_bound_byte_exactly(db_session):
 def test_enrol_without_provenance_defaults_to_not_determined(db_session):
     """Arm 2, fail-closed. ``start_block``'s ``= 0`` default sits directly above
     the provenance arguments; omitting them must NOT inherit it as a claim that
-    the range is covered from genesis."""
+    the range is covered from genesis — and the resulting row must actually be
+    refused downstream, not merely labelled."""
     assert enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
+    db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000"))
     db_session.commit()
     cursor = _row(db_session)
     assert cursor.first_indexed_block is None
     assert cursor.first_indexed_block_basis == "not_determined"
     assert cursor.enrollment_basis == "not_determined"
+    # The label is worth nothing unless the gate acts on it.
+    result = _fold(db_session, _TOPIC_ALLOW_TO)
+    assert (result.confidence, result.partial_reason) == ("partial", "no_index_cursor")
 
 
 def test_witness_requires_all_three_reads_to_agree(stub_rpc):
@@ -265,13 +289,20 @@ def test_migration_left_legacy_rows_unmeasured_not_measured_empty(db_session):
 # ---------------------------------------------------------------------------
 
 
-def _monitored(db_session, topics: list[str], *, chain: str = "ethereum", active: bool = True) -> None:
-    protocol = Protocol(name=f"d4-{chain}-{int(active)}")
+def _monitored(
+    db_session,
+    topics: list[str],
+    *,
+    chain: str = "ethereum",
+    active: bool = True,
+    address: str = _ADDR,
+) -> None:
+    protocol = Protocol(name=f"d4-{chain}-{int(active)}-{address[-6:]}")
     db_session.add(protocol)
     db_session.flush()
     db_session.add(
         MonitoredContract(
-            address=_ADDR,
+            address=address,
             chain=chain,
             protocol_id=protocol.id,
             is_active=active,
@@ -279,6 +310,27 @@ def _monitored(db_session, topics: list[str], *, chain: str = "ethereum", active
         )
     )
     db_session.commit()
+
+
+@requires_postgres
+def test_enrolment_drains_the_whole_fleet_across_passes(db_session, stub_rpc):
+    """R2. The per-pass budget bounds addresses that still NEED a cursor, not
+    rows inspected. Bounding rows would re-walk the same head of the ordering
+    every pass, leaving the tail permanently unenrolled while the counter
+    reported progress — and which addresses those are would depend on an id
+    ordering nothing records."""
+    stub_rpc()
+    # From 1: ``0x0…0`` is correctly refused by ``_is_enrollable_event_address``
+    # (no creation block, so it would seed at genesis), and counting it here would
+    # make the arm test the guard rather than the draining.
+    for i in range(1, 61):
+        _monitored(db_session, [_TOPIC_DENY_TO], address="0x" + f"{i:040x}")
+    assert enroll_from_tracked_topics(db_session, limit=50) == 50
+    # Second pass must reach ranks 51-60, not re-inspect the first 50.
+    assert enroll_from_tracked_topics(db_session, limit=50) == 10
+    assert db_session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one() == 60
+    # Settled: a fully enrolled fleet costs no budget and no RPC.
+    assert enroll_from_tracked_topics(db_session, limit=50) == 0
 
 
 @requires_postgres
@@ -395,48 +447,48 @@ def test_cold_asserted_cursor_is_named_as_such(db_session):
 # ---------------------------------------------------------------------------
 
 
-_KEY_SOURCES = [{"source": "msg_sender"}]
-
-
 @requires_postgres
-def test_tracked_topics_cursor_cannot_mint_an_exact_empty(db_session):
-    """A1 falsifier. Warm, at head, zero matching rows — the exact shape that
-    publishes "this event never fired". A tracking plan attributes its topics to
-    no variable, so this cursor may index history but must never license the
-    negative."""
+@pytest.mark.parametrize(
+    "basis",
+    [
+        ENROLLMENT_BASIS_TRACKED_TOPICS,
+        # The literal default ``enroll_event_cursor`` writes when a caller omits
+        # the argument. A deny-list on the tracking-plan token alone would have
+        # folded this one enumerable — the fail-open was already in the schema.
+        "not_determined",
+        # Any token nobody has thought of yet. A new enrolment source is inert
+        # until someone deliberately adds it to the allow-list.
+        "code_asserted_pubkey_fold",
+    ],
+)
+def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
+    """R1 falsifier. Warm, at head, zero matching rows — the exact shape that
+    publishes "this event never fired". Only an allow-listed basis may support
+    it; every other value, recognised or not, folds partial."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
         event_address=_ADDR,
         topic0=_TOPIC_DENY_TO,
         start_block=_SEED,
-        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+        enrollment_basis=basis,
     )
     db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000"))
     db_session.commit()
     assert db_session.execute(select(IndexedEventLog)).first() is None
+    assert _row(db_session, topic0=_TOPIC_DENY_TO).enrollment_basis == basis
 
-    repo = PostgresEventLogRepo(db_session)
-    result = repo.fold_event_writes(
-        chain_id=1,
-        event_address=_ADDR,
-        topic0=_TOPIC_DENY_TO,
-        topics_to_keys={0: 0},
-        data_to_keys={},
-        key_sources=_KEY_SOURCES,
-        direction="add",
-        block=24_000_000,
-    )
+    result = _fold(db_session, _TOPIC_DENY_TO)
     assert (result.confidence, result.partial_reason) == ("partial", "no_index_cursor")
     assert result.members == []
 
 
 @requires_postgres
 def test_legacy_and_hint_cursors_still_fold_enumerable(db_session):
-    """A1 companion. The gate keys on one token, so rows that predate the column
-    (NULL) and rows enrolled from a static hint keep folding exactly as before —
-    the deferral of the wider lower-bound gate is not silently broken here."""
-    repo = PostgresEventLogRepo(db_session)
+    """R1 companion. The allow-list admits exactly two shapes, so rows that
+    predate the column (NULL) and rows enrolled from a static hint keep folding
+    exactly as before — inverting the gate did not demote them, and the deferral
+    of the wider lower-bound gate is not silently broken here."""
     for topic, basis in ((_TOPIC_ALLOW_TO, None), (_TOPIC_ALLOW_FROM, ENROLLMENT_BASIS_PREDICATE_HINT)):
         enroll_event_cursor(
             db_session, chain_id=1, event_address=_ADDR, topic0=topic, start_block=_SEED, enrollment_basis=basis
@@ -448,18 +500,72 @@ def test_legacy_and_hint_cursors_still_fold_enumerable(db_session):
     )
     db_session.commit()
     for topic in (_TOPIC_ALLOW_TO, _TOPIC_ALLOW_FROM):
-        result = repo.fold_event_writes(
-            chain_id=1,
-            event_address=_ADDR,
-            topic0=topic,
-            topics_to_keys={0: 0},
-            data_to_keys={},
-            key_sources=_KEY_SOURCES,
-            direction="add",
-            block=24_000_000,
-        )
+        result = _fold(db_session, topic)
         assert result.confidence == "enumerable", topic
         assert result.partial_reason is None
+
+
+@requires_postgres
+def test_refused_cursor_is_not_reported_warm(db_session):
+    """R7. ``warm`` must agree with what the gate does. A refused cursor reported
+    as warm would say the recording surface is covered by a cursor that folds as
+    cold."""
+    enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=_TOPIC_DENY_TO,
+        start_block=_SEED,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true"))
+    db_session.commit()
+    report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_DENY_TO])
+    assert report["enrolled"] == [_TOPIC_DENY_TO]
+    assert report["warm"] == []
+    assert report["exactness_ineligible"] == [_TOPIC_DENY_TO]
+    assert REASON_COLD_CURSORS in report["blocking_reasons"]
+
+
+@requires_postgres
+def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
+    """R7. Lower-casing after the ``0x`` prefix test threw away an uppercase
+    topic, shortening ``missing`` — the caller would be told a writer is covered
+    because its topic never survived the door."""
+    report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_DENY_TO.upper()])
+    assert report["write_surface_asserted"] == [_TOPIC_DENY_TO]
+    assert report["missing"] == [_TOPIC_DENY_TO]
+
+
+@requires_postgres
+def test_out_of_band_readers_ignore_refused_cursors(db_session):
+    """R5. Both readers answer "is there a usable cursor here". A refused cursor
+    that counted would skip the detection that enrols the attributed one, and
+    would tell the reconciler the index caught up while the fold still reads
+    cold — a permanently-skipped upgrade and a per-pass re-enqueue thrash."""
+    # A real role-STORE topic (AccessControl RoleGranted family) — the set
+    # ``_authority_has_role_store_cursor`` actually looks at.
+    role_topic = _ALL_ROLE_STORE_TOPIC0S[0]
+    enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=role_topic,
+        start_block=_SEED,
+        enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS,
+    )
+    db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true"))
+    db_session.commit()
+    assert _authority_has_role_store_cursor(db_session, 1, _ADDR) is False
+    assert _authority_backfilled(db_session, 1, _ADDR) is False
+
+    db_session.execute(
+        text("UPDATE indexed_event_cursors SET enrollment_basis = :b"),
+        {"b": ENROLLMENT_BASIS_PREDICATE_HINT},
+    )
+    db_session.commit()
+    assert _authority_has_role_store_cursor(db_session, 1, _ADDR) is True
+    assert _authority_backfilled(db_session, 1, _ADDR) is True
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +650,81 @@ def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
     fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=9_999, window_stats=stats)
     assert rpc.windows == [(0, 9_999)]
     assert stats[0].cap is None
+
+
+@pytest.mark.parametrize("payload", [None, {}, "0x", 0])
+def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
+    """R3. A 200-OK body that is not a list is a page we could not read, not a
+    page of zero logs. Counting it as 0 would mint a proven empty window out of
+    a malformed payload."""
+
+    def _rpc(url, method, params, chain_id=None):
+        return payload
+
+    fetcher = _fetcher(monkeypatch, _rpc, min_bisect_span=10_000, result_cap=100)
+    stats: list[FetchWindowStat] = []
+    logs = fetcher.fetch_logs(
+        event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=9_999, window_stats=stats
+    )
+    assert logs == []
+    assert [s.returned_log_count for s in stats] == [None]
+    assert not any(s.returned_log_count == 0 for s in stats)
+
+
+@requires_postgres
+@pytest.mark.parametrize("payload", [None, {}])
+def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monkeypatch, payload):
+    """R3. The downgrade has to reach the cursor, or the malformed window is
+    invisible to the completeness verdict and the range reads proven."""
+
+    class _BadFetcher:
+        def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
+            if window_stats is not None:
+                window_stats.append(
+                    FetchWindowStat(from_block=from_block, to_block=to_block, returned_log_count=None, cap=100)
+                )
+            return []
+
+    enroll_event_cursor(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topic0=_TOPIC_DENY_TO,
+        start_block=_SEED,
+        first_indexed_block=_SEED,
+        first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+    )
+    db_session.commit()
+    index_event_group_step(
+        db_session,
+        chain_id=1,
+        event_address=_ADDR,
+        topics=[_TOPIC_DENY_TO],
+        fetcher=_BadFetcher(),
+        target=_SEED + 5_000,
+        block_hash_fetcher=_NoHash(),
+        max_block_span=1_000,
+    )
+    db_session.commit()
+    cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
+    assert cursor.max_window_log_count is None
+    assert cursor.window_stats_basis == "not_determined"
+    report = absence_coverage(db_session, chain_id=1, address=_ADDR, configured_cap=100)
+    assert report["page_completeness"] == "not_determined"
+
+
+def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
+    """R8. ``_fetch_range`` is shared with the monitoring watcher, which does not
+    persist window counts and must keep returning pages. Setting the indexer's
+    cap must not silently give the watcher bisect-and-raise behaviour."""
+    monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
+    assert default_result_cap() == 50_000
+    # The watcher's construction shape (services/monitoring/unified_watcher.py).
+    watcher_fetcher = RpcEventLogFetcher("http://stub", max_block_range=10_000, min_bisect_span=1_000, chain_id=1)
+    assert watcher_fetcher.result_cap is None
+    # The indexer's builder is the one place that opts in.
+    assert RpcEventLogFetcher("http://stub", chain_id=1, result_cap=default_result_cap()).result_cap == 50_000
 
 
 def test_default_result_cap_is_unset_and_ignores_junk(monkeypatch):
