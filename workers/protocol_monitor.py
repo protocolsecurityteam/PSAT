@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 
 from db.queue import (
     HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
     record_heartbeat,
@@ -177,7 +178,13 @@ class Supervisor:
 
 
 def _build_default_supervisor(rpc_url: str, interval: float | None) -> Supervisor:
-    """Build (but do not start) the three-thread default-mode Supervisor."""
+    """Build (but do not start) the default-mode Supervisor.
+
+    The restaking plane is a sibling loop, not a phase of the TVL refresh: the
+    Supervisor's per-loop isolation is what keeps a restaking read failure out of
+    the balance cycle's failure domain.
+    """
+    from services.monitoring.restaking_cycle import DEFAULT_RESTAKING_INTERVAL, run_restaking_loop
     from services.monitoring.tvl import DEFAULT_TVL_INTERVAL, run_tvl_loop
     from services.monitoring.unified_watcher import (
         DEFAULT_POLL_INTERVAL,
@@ -189,11 +196,13 @@ def _build_default_supervisor(rpc_url: str, interval: float | None) -> Superviso
     scan_interval = interval if interval is not None else DEFAULT_SCAN_INTERVAL
     poll_interval = interval if interval is not None else DEFAULT_POLL_INTERVAL
     tvl_interval = interval if interval is not None else DEFAULT_TVL_INTERVAL
+    restaking_interval = interval if interval is not None else DEFAULT_RESTAKING_INTERVAL
 
     loops: list[tuple[str, LoopTarget]] = [
         (HEARTBEAT_PROTOCOL_SCANNER, lambda ev: run_scan_loop(rpc_url, scan_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_POLLER, lambda ev: run_poll_loop(rpc_url, poll_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_TVL, lambda ev: run_tvl_loop(tvl_interval, stop_event=ev)),
+        (HEARTBEAT_PROTOCOL_RESTAKING, lambda ev: run_restaking_loop(restaking_interval, stop_event=ev)),
     ]
     return Supervisor(loops)
 
