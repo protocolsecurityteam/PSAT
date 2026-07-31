@@ -83,6 +83,28 @@ PERIMETER_SPAWN_DEPTH_CAP = int(os.getenv("PSAT_PERIMETER_SPAWN_DEPTH_CAP", "2")
 #: Request key carrying the spawn generation. Absent ⇒ generation 0.
 PERIMETER_DEPTH_KEY = "perimeter_spawn_depth"
 
+#: ``control_graph_nodes.details`` key naming what produced a node. Written only
+#: by the FP materialization pass; the walk's own nodes do not carry it.
+CONTROL_GRAPH_BASIS_KEY = "control_graph_basis"
+
+#: The one value of :data:`CONTROL_GRAPH_BASIS_KEY` this module admits.
+FP_MATERIALIZATION_BASIS = "fp_materialization"
+
+
+def _fp_materialized(node: Mapping[str, Any]) -> bool:
+    """Whether *node* was minted from a ``function_principals`` row rather than
+    produced by the resolution walk.
+
+    The marker is a WITNESS, not a name: it is written only where an FP row
+    proves the address is a resolved principal of a gated function on the anchor
+    contract (``services.governance.control_graph_types``). Nothing else may
+    write it, and a node that merely looks like a principal does not carry it.
+    """
+    details = node.get("details")
+    if not isinstance(details, dict):
+        return False
+    return details.get(CONTROL_GRAPH_BASIS_KEY) == FP_MATERIALIZATION_BASIS
+
 
 class OmissionRecord(TypedDict):
     address: str
@@ -247,6 +269,58 @@ def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> 
     }
 
 
+#: Ledger site of the FP→control-graph materialization pass.
+FP_MATERIALIZATION_SITE = "fp_materialization"
+
+
+class FpMaterializationResult(PerimeterSpawnResult):
+    """The FP materialization pass's ledger. Same machinery, TWO planes.
+
+    The inherited three dispositions keep their meaning verbatim — they
+    partition every FP principal considered, on the one question the perimeter
+    also asks: **will this address be offered to the walker as an analysis
+    candidate?**
+
+    * ``queued`` — offered. Minted, analyzable type, so ``node_type='contract'``.
+    * ``omitted`` — could have been offered and was not: ``budget_exhausted``,
+      ``chain_not_enabled``.
+    * ``out_of_population`` — never offerable: ``not_analyzable_type`` (a safe /
+      EOA: the node IS minted, the job never happens), ``existing_node``,
+      ``zero_address``, ``invalid_address``, ``no_contract_anchor``,
+      ``resolved_type_not_determined``, ``resolved_type_conflict``.
+
+    ``minted`` is the ORTHOGONAL plane and is why it is a separate list rather
+    than a fourth disposition: minting a node and offering a job are different
+    acts, and the whole point of this pass is that a safe gets the first without
+    the second. Folding them into one axis would force one of the two to lie.
+    Its members are exactly ``queued`` ∪ the ``not_analyzable_type`` entries.
+
+    ``budget_used`` counts MINTS, because the budget is spent at the INSERT and
+    nowhere else — the same discipline ``queue_discovered_contracts`` applies at
+    ``create_job``, so no earlier gate's ordering can silently become
+    load-bearing.
+    """
+
+    minted: list[dict[str, Any]]
+
+
+def new_fp_materialization_result(*, budget: int | None) -> FpMaterializationResult:
+    """An empty FP-materialization ledger, constructed by the CALLER for the
+    same reason :func:`new_spawn_result` is: it has to survive a raise in the
+    middle of the mint loop and still say which nodes were already committed."""
+    return {
+        "site": FP_MATERIALIZATION_SITE,
+        "budget": budget,
+        "budget_used": 0,
+        "spawn_depth": 0,
+        "queued": [],
+        "omitted": [],
+        "out_of_population": [],
+        "walked": False,
+        "minted": [],
+    }
+
+
 def queue_discovered_contracts(
     session: Session,
     job: Job,
@@ -309,8 +383,25 @@ def queue_discovered_contracts(
         if addr == root_address:
             _out(addr, "root_node")
             continue
-        # Only queue contracts that were analyzed during the walk.
-        if not node.get("analyzed"):
+        # Only queue contracts that were analyzed during the walk — with one
+        # declared exception. ``analyzed`` is the walk's own gate and it is
+        # correct for walk-produced nodes: an unanalysed one was reached, and
+        # not analysing it was a decision this stage already recorded.
+        #
+        # An FP-materialized node was never OFFERED to the walk. It exists
+        # because a ``function_principals`` row proves the address is a resolved
+        # principal of a gated function on this contract, while the walk's only
+        # principal ingresses (``authority_roles[].principals`` and
+        # ``controllers[].principals``) never saw it — 73 addresses / 411 of
+        # 1,200 FP rows on the PR-161 corpus, 72 of them with no ``contracts``
+        # row at all. Reading its ``analyzed=false`` as "this stage chose not to
+        # analyse it" would restate the very defect: unanalysed is its
+        # DEFINITION, not a verdict, and it is exactly the population that needs
+        # analysis. Admitting it changes no other gate — ``node_type``,
+        # ``existing_job``, ``chain_enabled``, depth and budget all still apply
+        # below, which is what keeps safes and EOAs out (they mint
+        # ``node_type='principal'``).
+        if not node.get("analyzed") and not _fp_materialized(node):
             _out(addr, "not_analyzed")
             continue
         if node.get("node_type") != "contract":
