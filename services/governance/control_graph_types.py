@@ -296,8 +296,10 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
 #: each pass re-mints the same lexicographic prefix and drops the same tail —
 #: permanently, until the cap is raised. Replayed 3 jobs deep on the PR-161
 #: corpus at a cap of 16: one anchor over budget (27 candidates), 11 addresses
-#: permanently invisible, 3 of them contract-typed job candidates appearing at no
-#: other anchor.
+#: permanently invisible, 2 of them contract-typed job candidates appearing at
+#: no other anchor (0xc4922d64…, 0xfd78ee91…) — a residual of 35 rather than
+#: 37. The boundary is inclusive of the cap slot: rank 16 mints, because the
+#: budget gate only bites after the 16th insert.
 #:
 #: The default is therefore sized to leave NO LIVE TAIL rather than to be a
 #: tuning knob: 64 is 2x the observed per-anchor maximum of 31 distinct
