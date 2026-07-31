@@ -63,7 +63,7 @@ BLOCK_HASH = "0x" + "ab" * 32
 # The witnessed strategy, written in FULL. The near-miss below answers 0 with
 # success and is eyeball-identical in any elided form.
 STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0"
-NEAR_MISS_STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+NEAR_MISS_STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 NODE_WITH_SHARES = "0x53e1eb2fa5ec3c5097e67265e33ea4e53ab61b79"
 POD_WITH_SHARES = "0xb274d6b6f7e02e43b9978625dcd6c84047482d56"

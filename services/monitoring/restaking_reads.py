@@ -26,7 +26,7 @@ the execution-layer native balances of the node and its pod are
   the real 26/26 answer. The strategy is therefore witnessed from
   ``EigenPodManager.beaconChainETHStrategy()`` at the same block rather than
   written as a literal — the near-miss
-  ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`` is eyeball-identical to the true
+  ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`` is eyeball-identical to the true
   ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0`` and answers 0 just as happily.
 * ``EigenPodManager.podOwnerDepositShares`` is ``int256``, not ``uint256``
   (verified on implementation ``0xd22dd829779adbf3869fb224f703452f7f95e9db``;
@@ -133,9 +133,14 @@ def _hex_word_value(body: str) -> int | None:
     if len(body) != 64:
         return None
     try:
-        return int.from_bytes(bytes.fromhex(body), "big")
+        data = bytes.fromhex(body)
     except ValueError:
         return None
+    # ``bytes.fromhex`` ignores ASCII whitespace too, so a 62-nibble body with
+    # two trailing spaces passes the length check above and decodes to 31 bytes.
+    if len(data) != 32:
+        return None
+    return int.from_bytes(data, "big")
 
 
 def decode_word(raw: object) -> int | None:

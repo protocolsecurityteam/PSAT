@@ -51,12 +51,9 @@ from utils.restaking_status import (
 )
 
 revision = "d5b9e0c31f72"
-# REBASE MARKER — Wave-2 migration chain position 4 of 5:
-#   U4 c1a4b7e02f18 -> U8 c4f8a1d92b07 -> U10A a3e7c1d9b840 -> *THIS* -> U7B
-# Authored on a worktree containing U4 and U8 but NOT U10A, so this points at the
-# alembic head that exists here. Repoint ``down_revision`` to a3e7c1d9b840 at
-# assembly; do not merge with this value.
-down_revision = "c4f8a1d92b07"
+# Wave-2 migration chain position 4: it follows the event-cursor coverage
+# revision (a3e7c1d9b840) and precedes the role-holder plane.
+down_revision = "a3e7c1d9b840"
 branch_labels = None
 depends_on = None
 
