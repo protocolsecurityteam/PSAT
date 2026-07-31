@@ -30,6 +30,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -1702,6 +1703,46 @@ class IndexedEventLog(Base):
     )
 
 
+# ``indexed_event_cursors`` provenance vocabulary. It lives here, with the
+# columns, because the writer (the indexer worker) and the reader (the resolution
+# repo) must agree on the exact tokens and neither may import the other.
+#
+# ``first_indexed_block_basis`` — only CREATION licenses citing the lower bound.
+FIRST_INDEXED_BASIS_CREATION = "creation_block_minus_one"
+FIRST_INDEXED_BASIS_EXPLICIT = "explicit_seed"
+CURSOR_BASIS_NOT_DETERMINED = "not_determined"
+# ``enrollment_basis`` — whether the row carries a variable attribution.
+ENROLLMENT_BASIS_PREDICATE_HINT = "predicate_tree_hint"
+ENROLLMENT_BASIS_TRACKED_TOPICS = "tracked_topics_asserted"
+# ALLOW-LIST, deliberately, and it is the whole point of the column. Exactness —
+# a zero-row fold published as "this event never fired" — is permitted only for a
+# basis that is known to carry a variable attribution. A deny-list on the one
+# token we happened to invent would fail OPEN on every other value, and there is
+# already such a value in the schema: ``enroll_event_cursor`` stores the literal
+# ``not_determined`` whenever a caller omits the argument, which is precisely the
+# case that must not license anything. NULL is included because it means "row
+# predates this column", and those 80 rows were folding before the column existed;
+# demoting them is a separate change with its own blast radius.
+EXACTNESS_ELIGIBLE_ENROLLMENT_BASES = frozenset({None, ENROLLMENT_BASIS_PREDICATE_HINT})
+
+
+def enrollment_basis_permits_exactness(basis: str | None) -> bool:
+    """Whether a cursor with this ``enrollment_basis`` may support an exact empty.
+
+    Anything unrecognised — a future token, a hand-written value, the
+    ``not_determined`` default — answers False. New enrolment sources are
+    therefore inert until someone deliberately adds them here.
+    """
+    return basis in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES
+
+
+# ``window_stats_basis`` — neither token ever means "measured and incomplete";
+# that is expressed by a count at or above the cap that gated it.
+WINDOW_STATS_CONTINUOUS = "continuous_from_first_indexed_block"
+WINDOW_STATS_UNMEASURED_LEGACY = "unmeasured_legacy"
+WINDOW_STATS_NOT_DETERMINED = CURSOR_BASIS_NOT_DETERMINED
+
+
 class IndexedEventCursor(Base):
     """One scan cursor per ``(chain_id, event_address, topic0)``."""
 
@@ -1722,6 +1763,57 @@ class IndexedEventCursor(Base):
     # consult this flag (not the block number) before trusting the durable index;
     # until it flips True they fall back to an inline fetch.
     backfill_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Lower bound of the range this cursor's logs cover, and what proves it.
+    # ``backfill_complete`` is an UPPER-bound flag only; nothing here bounds the
+    # range from below, so absence of a log below ``first_indexed_block`` is
+    # proven only when the basis is ``creation_block_minus_one`` — which requires
+    # all three pinned reads of ``_witness_seed_block`` to agree. NULL/NULL means
+    # the row predates these columns (lower bound unknown); a populated block with
+    # basis ``explicit_seed`` is a seed a caller supplied, NOT a witness; basis
+    # ``not_determined`` means the witness was attempted and failed, and the block
+    # is NULL because a number no consumer may cite is a number no consumer should
+    # see.
+    first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    first_indexed_block_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # How this cursor came to exist, and — through the ALLOW-LIST
+    # ``enrollment_basis_permits_exactness`` — whether it may ever support an
+    # exact empty. ``predicate_tree_hint`` = a static ``enumeration_hint`` named
+    # this (chain, address, topic0) as a writer of a specific storage variable;
+    # eligible. NULL = predates the column; eligible, because those rows folded
+    # before it existed. Everything else is INELIGIBLE, including
+    # ``tracked_topics_asserted`` (minted from a tracking plan, which names topics
+    # an emitter CAN emit and attributes them to no variable), the literal
+    # ``not_determined`` that ``enroll_event_cursor`` stores when a caller omits
+    # the argument, and any token added later. Read at the ``_cursor_state`` choke
+    # point in ``services/resolution/repos/event_logs_pg.py`` and by the two
+    # out-of-band cursor readers (``_authority_has_role_store_cursor``,
+    # ``_authority_backfilled``).
+    enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Largest ``eth_getLogs`` page this cursor has ever accepted, the result cap
+    # in force when those pages were fetched, and whether the record is continuous
+    # from ``first_indexed_block``. A page returned at the cap may have been
+    # truncated by the upstream, so "no such log exists" is proven only when every
+    # window came back strictly under a cap that was actually enforced. All three
+    # are NULL on rows whose windows predate the columns.
+    max_window_log_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_basis: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+
+def exactness_eligible_cursor_clause():
+    """SQL form of :func:`enrollment_basis_permits_exactness`, for the readers
+    that ask "does a usable cursor exist" without loading the row.
+
+    Derived from the same frozenset the Python predicate reads, so the two
+    cannot drift into disagreeing about which rows may support an exact empty.
+    """
+    non_null = sorted(b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None)
+    clauses = []
+    if None in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES:
+        clauses.append(IndexedEventCursor.enrollment_basis.is_(None))
+    if non_null:
+        clauses.append(IndexedEventCursor.enrollment_basis.in_(non_null))
+    return or_(*clauses)
 
 
 class WorkerHeartbeat(Base):
