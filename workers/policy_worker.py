@@ -29,10 +29,12 @@ from schemas.effective_permissions import PrincipalResolution
 from services.discovery.perimeter import (
     PERIMETER_SPAWN_DEPTH_CAP,
     PERIMETER_SPAWN_LIMIT,
+    new_fp_materialization_result,
     new_spawn_result,
     queue_discovered_contracts,
 )
 from services.effects.config import effects_stage_enabled
+from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
@@ -198,7 +200,13 @@ def _chain_name_for_job(job: Job) -> str:
         return "ethereum"
 
 
-def _persist_spawn_summary(session: Session, job: Job, spawn_result: Mapping[str, Any]) -> None:
+def _persist_spawn_summary(
+    session: Session,
+    job: Job,
+    spawn_result: Mapping[str, Any],
+    *,
+    artifact_name: str = "perimeter_spawn_summary",
+) -> None:
     """Write the perimeter ledger, including after the walk raised.
 
     Best-effort by design, and it must never mask the exception that brought us
@@ -207,9 +215,14 @@ def _persist_spawn_summary(session: Session, job: Job, spawn_result: Mapping[str
     session — the same pattern ``BaseWorker._persist_stage_errors`` uses, and for
     the same reason: the record of what happened has to outlive the transaction
     that failed.
+
+    *artifact_name* selects which ledger: the perimeter's own spawn summary, or
+    ``fp_materialization_summary`` (the FP→control-graph mint pass). Both carry
+    the same absence semantics, so both need the same survive-a-poisoned-session
+    write.
     """
     try:
-        store_artifact(session, job.id, "perimeter_spawn_summary", data=spawn_result)
+        store_artifact(session, job.id, artifact_name, data=spawn_result)
         session.commit()
         return
     except Exception:
@@ -219,21 +232,22 @@ def _persist_spawn_summary(session: Session, job: Job, spawn_result: Mapping[str
             logger.debug("Job %s: rollback before spawn-summary retry failed", job.id, exc_info=True)
     fresh = SessionLocal()
     try:
-        store_artifact(fresh, job.id, "perimeter_spawn_summary", data=spawn_result)
+        store_artifact(fresh, job.id, artifact_name, data=spawn_result)
         fresh.commit()
     except Exception as exc:
         # A lost ledger is a real degradation, not a cosmetic one: an absent
-        # `perimeter_spawn_summary` is defined to mean "this job predates the
-        # ledger", so silently failing to write it would publish that false
-        # meaning. Surface it rather than let the artifact's absence lie.
+        # ledger artifact is defined to mean "this job predates the ledger", so
+        # silently failing to write it would publish that false meaning.
+        # Surface it rather than let the artifact's absence lie.
         record_degraded(
-            phase="perimeter_spawn_summary",
+            phase=artifact_name,
             exc=exc,
             context={"job_id": str(job.id)},
         )
         logger.warning(
-            "Job %s: could not persist perimeter_spawn_summary (non-fatal)",
+            "Job %s: could not persist %s (non-fatal)",
             job.id,
+            artifact_name,
             exc_info=True,
         )
     finally:
@@ -773,6 +787,44 @@ class PolicyWorker(BaseWorker):
             ph["graph_nodes"] = (
                 len(resolved_control_graph.get("nodes", [])) if isinstance(resolved_control_graph, dict) else 0
             )
+        # Materialize the ``function_principals`` rows that never reached the
+        # graph at all. The walk's only principal ingresses are
+        # ``authority_roles[].principals`` and ``controllers[].principals``; an
+        # address in neither has no node, and with no node no spawn site can
+        # ever see it — 73 addresses / 411 of 1,200 FP rows on the PR-161
+        # corpus. This is the INSERT half ``reconcile_control_graph_types``
+        # (UPDATE-only) never had.
+        #
+        # HERE, and not at the enrollment call site, for three reasons that are
+        # all data-flow, not preference:
+        #  1. It is strictly AFTER the ``replace_control_graph_rows`` above —
+        #     the last wholesale delete+insert of this (contract, deployment)
+        #     scope in the job's stage sequence — so the re-mint strategy the
+        #     pass documents is guaranteed, not hoped for.
+        #  2. It is strictly BEFORE the perimeter, so a minted node is a
+        #     candidate in the SAME job rather than one run later.
+        #  3. ``write_effective_function_rows`` committed this contract's FP
+        #     rows earlier in this same stage, so the input plane is populated.
+        #     Enrollment runs later still, is protocol-scoped, and only fires
+        #     for protocol jobs.
+        # Outside the ``if refreshed_graph:`` above for the same reason the
+        # spawn is: a refresh that produced no graph must not silently skip the
+        # mint, and an absent ledger must keep meaning "predates the ledger".
+        fp_nodes: list[dict[str, Any]] = []
+        if contract_row is not None:
+            fp_ledger = new_fp_materialization_result(budget=FP_MATERIALIZE_LIMIT)
+            try:
+                _, fp_nodes = materialize_fp_principal_nodes(
+                    session,
+                    contract_id=contract_row.id,
+                    deployment_address=deployment_address,
+                    budget=FP_MATERIALIZE_LIMIT,
+                    result=fp_ledger,
+                )
+                session.commit()
+            finally:
+                _persist_spawn_summary(session, job, fp_ledger, artifact_name="fp_materialization_summary")
+
         # Bring the refresh's newly-discovered contracts inside the analysis
         # perimeter. Without this, a node FIRST seen here — every role principal,
         # since role principals need the effective_permissions computed this
@@ -792,10 +844,22 @@ class PolicyWorker(BaseWorker):
         spawn_result = new_spawn_result(site="policy_refresh", budget=PERIMETER_SPAWN_LIMIT)
         try:
             if isinstance(resolved_control_graph, dict):
+                # A LOCAL view, not the artifact. The minted nodes must reach
+                # the walker (that is the whole point), but the persisted
+                # ``resolved_control_graph`` is the WALK's output and must not
+                # acquire nodes no walk produced — every artifact consumer would
+                # then read a minted node as walk-witnessed. The nodes' own
+                # plane is ``control_graph_nodes`` plus the
+                # ``fp_materialization_summary`` ledger.
+                perimeter_graph: Mapping[str, Any] = (
+                    {**resolved_control_graph, "nodes": [*(resolved_control_graph.get("nodes") or []), *fp_nodes]}
+                    if fp_nodes
+                    else resolved_control_graph
+                )
                 queue_discovered_contracts(
                     session,
                     job,
-                    resolved_control_graph,
+                    perimeter_graph,
                     rpc_url,
                     site="policy_refresh",
                     chain_name=_chain_name_for_job(job),
