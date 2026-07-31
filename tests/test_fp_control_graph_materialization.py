@@ -147,6 +147,37 @@ def _nodes(db_session, contract, address=None):
     return q.all()
 
 
+def _rewrite_the_scope(db_session, contract):
+    """What every job does to this ``(contract, deployment)`` scope before the
+    mint runs: the resolution stage's wholesale ``replace_control_graph_rows``,
+    then the policy stage's. Modelled with the walk's root node only, which is
+    the state a mint actually starts from."""
+    from services.resolution.graph_tables import replace_control_graph_rows
+
+    replace_control_graph_rows(
+        db_session,
+        contract_id=contract.id,
+        deployment_address=None,
+        resolved_graph={
+            "max_depth": 6,
+            "nodes": [
+                {
+                    "id": f"address:{contract.address}",
+                    "address": contract.address,
+                    "node_type": "contract",
+                    "resolved_type": "contract",
+                    "label": "root",
+                    "depth": 0,
+                    "analyzed": True,
+                    "details": {},
+                }
+            ],
+            "edges": [],
+        },
+    )
+    db_session.commit()
+
+
 def _edges(db_session, contract, relation=None):
     q = db_session.query(ControlGraphEdge).filter_by(contract_id=contract.id)
     if relation is not None:
@@ -181,7 +212,11 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
     node = minted[0]
     assert node.node_type == "contract"
     assert node.resolved_type == "timelock"
-    assert node.label == "capability principal"
+    # NULL, not a constant: ``Job.name`` and the overview's display sites fall
+    # back to ``label``, so any string here is published as the principal's
+    # identity on every spawned child. ``resolved_type`` carries the only
+    # proven noun.
+    assert node.label is None
     assert node.contract_name is None
     assert node.analyzed is False
     assert node.analysis_state is None
@@ -322,6 +357,7 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
         site="policy_refresh",
         chain_name="ethereum",
         budget=8,
+        fp_materialized_addresses=[p["address"] for p in payloads],
     )
 
     assert calls == []
@@ -366,6 +402,7 @@ def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session,
         chain_name="ethereum",
         budget=8,
         depth_cap=2,
+        fp_materialized_addresses=[p["address"] for p in payloads],
     )
 
     assert [q["address"] for q in spawn["queued"]] == [timelock]
@@ -420,6 +457,74 @@ def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, mon
     assert spawn["out_of_population"] == [{"address": other, "reason": "not_analyzed"}]
 
 
+def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkeypatch):
+    """FALSIFIER. Admission is membership of the caller's minted SET, never a
+    field on the node.
+
+    ``details`` is free-form JSONB and the walk copies it VERBATIM out of
+    upstream principal payloads with no key allowlist, so a provenance marker
+    inside it is forgeable by anything that can put a key in a principal's
+    details. A hand-crafted node carrying the exact marker, absent from the
+    minted set, must still book ``not_analyzed`` and create no job.
+    """
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    from services.discovery.perimeter import CONTROL_GRAPH_BASIS_KEY, FP_MATERIALIZATION_BASIS
+
+    _protocol, contract = anchor
+    forged = _addr()
+    job = Job(
+        stage=JobStage.policy,
+        status=JobStatus.processing,
+        address=contract.address,
+        chain_id=1,
+        request={"address": contract.address, "chain": "ethereum"},
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    forged_node = {
+        "id": f"address:{forged}",
+        "address": forged,
+        "node_type": "contract",
+        "resolved_type": "timelock",
+        "label": None,
+        "contract_name": None,
+        "depth": 1,
+        "analyzed": False,
+        "details": {CONTROL_GRAPH_BASIS_KEY: FP_MATERIALIZATION_BASIS},
+    }
+    graph = {"root_contract_address": contract.address, "max_depth": 6, "nodes": [forged_node], "edges": []}
+
+    spawn = queue_discovered_contracts(
+        db_session,
+        job,
+        graph,
+        "https://rpc.example",
+        site="policy_refresh",
+        chain_name="ethereum",
+        budget=8,
+        fp_materialized_addresses=[],
+    )
+
+    assert spawn["queued"] == []
+    assert spawn["out_of_population"] == [{"address": forged, "reason": "not_analyzed"}]
+    assert db_session.query(Job).filter(Job.address == forged).all() == []
+
+    # The same node, named by the caller's set, IS admitted — so the refusal
+    # above is the set doing the work, not some unrelated gate.
+    admitted = queue_discovered_contracts(
+        db_session,
+        job,
+        graph,
+        "https://rpc.example",
+        site="policy_refresh",
+        chain_name="ethereum",
+        budget=8,
+        fp_materialized_addresses=[forged],
+    )
+    assert [q["address"] for q in admitted["queued"]] == [forged]
+
+
 # ---------------------------------------------------------------------------
 # Idempotence, and the rewrite hinge
 # ---------------------------------------------------------------------------
@@ -446,6 +551,44 @@ def test_mint_is_idempotent(db_session, anchor, monkeypatch):
     assert second["out_of_population"] == [{"address": timelock, "reason": "existing_node"}]
     assert second["budget_used"] == 0
     assert payloads == []
+
+
+def test_the_ledger_never_names_an_uncommitted_row(db_session, anchor, monkeypatch):
+    """The ledger is persisted from the caller's ``finally``, on a FRESH session
+    when the primary one is poisoned — so a rollback after the loop would publish
+    ``minted[]`` and ``budget_used`` naming rows that do not exist.
+
+    The mint therefore commits before recording. Pinned by rolling back the
+    caller's session after the pass and reading the rows back on a session that
+    never saw the transaction: every address the ledger names is really there.
+    """
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session as SASession
+
+    from tests.conftest import DATABASE_URL
+
+    _protocol, contract = anchor
+    timelock = _addr()
+    _fp(db_session, contract, timelock, resolved_type="timelock")
+
+    ledger, _payloads = materialize_fp_principal_nodes(db_session, contract_id=contract.id, deployment_address=None)
+    db_session.rollback()
+
+    assert [m["address"] for m in ledger["minted"]] == [timelock]
+    assert ledger["budget_used"] == 1
+
+    other = SASession(create_engine(DATABASE_URL))
+    try:
+        seen = (
+            other.execute(select(ControlGraphNode.address).where(ControlGraphNode.contract_id == contract.id))
+            .scalars()
+            .all()
+        )
+    finally:
+        other.close()
+    for entry in ledger["minted"]:
+        assert entry["address"] in {a.lower() for a in seen}
 
 
 def test_the_idempotence_key_ignores_origin_and_label(db_session, anchor, monkeypatch):
@@ -491,8 +634,6 @@ def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monk
     restores it identically.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    from services.resolution.graph_tables import replace_control_graph_rows
-
     _protocol, contract = anchor
     timelock = _addr()
     _fp(db_session, contract, timelock, resolved_type="timelock", count=2)
@@ -502,28 +643,7 @@ def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monk
     before_details = dict(before.details)
     assert first["budget_used"] == 1
 
-    replace_control_graph_rows(
-        db_session,
-        contract_id=contract.id,
-        deployment_address=None,
-        resolved_graph={
-            "max_depth": 6,
-            "nodes": [
-                {
-                    "id": f"address:{contract.address}",
-                    "address": contract.address,
-                    "node_type": "contract",
-                    "resolved_type": "contract",
-                    "label": "root",
-                    "depth": 0,
-                    "analyzed": True,
-                    "details": {},
-                }
-            ],
-            "edges": [],
-        },
-    )
-    db_session.commit()
+    _rewrite_the_scope(db_session, contract)
     assert _nodes(db_session, contract, timelock) == []
     assert _edges(db_session, contract, EDGE_RELATION_CAPABILITY_PRINCIPAL) == []
 
@@ -571,23 +691,66 @@ def test_budget_cut_is_recorded_never_silent(db_session, anchor, monkeypatch):
     assert ledger["walked"] is True
 
 
-def test_the_budget_cut_drains_on_the_next_pass(db_session, anchor, monkeypatch):
-    """A cut is a DELAY, not a loss. ``existing_node`` precedes the budget gate,
-    so the already-minted address consumes none of it and the next pass reaches
-    the one that was cut."""
+def test_the_budget_tail_is_permanent_under_the_production_sequence(db_session, anchor, monkeypatch):
+    """REGRESSION for a REFUTED claim: a cut is a **permanent loss**, not a delay.
+
+    An earlier draft asserted the tail drains, on the reasoning that
+    ``existing_node`` precedes the budget gate so a minted address consumes none
+    of it. It was tested with two bare mints back to back — which is NOT the
+    production sequence. Every job rewrites this ``(contract, deployment)``
+    scope wholesale BEFORE the mint runs, so no minted row survives for
+    ``existing_node`` to find, and ``sorted(candidates)`` re-mints the same
+    lexicographic prefix and drops the same tail forever.
+
+    This replays the real sequence three jobs deep. If the drain claim were
+    true, ``second`` would appear by job 2.
+    """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     first, second = sorted([_addr(), _addr()])
     _fp(db_session, contract, first, resolved_type="timelock", name="a")
     _fp(db_session, contract, second, resolved_type="timelock", name="b")
 
-    _mint(db_session, contract, budget=1)
-    ledger, _payloads = _mint(db_session, contract, budget=1)
+    ledgers = []
+    for _job in range(3):
+        _rewrite_the_scope(db_session, contract)
+        ledger, _payloads = _mint(db_session, contract, budget=1)
+        ledgers.append(ledger)
 
-    assert ledger["queued"] == [{"address": second, "resolved_type": "timelock"}]
-    assert ledger["out_of_population"] == [{"address": first, "reason": "existing_node"}]
+    for ledger in ledgers:
+        assert ledger["queued"] == [{"address": first, "resolved_type": "timelock"}]
+        assert ledger["omitted"] == [{"address": second, "reason": "budget_exhausted"}]
+        # The refuted mechanism: ``existing_node`` never fires, because the
+        # rewrite emptied the scope first.
+        assert ledger["out_of_population"] == []
+
+    assert _nodes(db_session, contract, second) == []
+    assert len(_nodes(db_session, contract, first)) == 1
+
+
+def test_the_shipped_budget_leaves_no_live_tail_on_the_observed_maximum(db_session, anchor, monkeypatch):
+    """Because the tail is permanent, the default is sized to be a BACKSTOP.
+
+    31 distinct principals is the observed per-anchor maximum on the PR-161
+    corpus (0 of 83 anchors exceed 64; 2 exceed 16). At the shipped default an
+    anchor of that size is minted whole and ``omitted`` is empty.
+    """
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT
+
+    assert FP_MATERIALIZE_LIMIT >= 31
+
+    _protocol, contract = anchor
+    principals = sorted(_addr() for _ in range(31))
+    for i, principal in enumerate(principals):
+        _fp(db_session, contract, principal, resolved_type="timelock", name=f"f{i}_")
+
+    ledger, payloads = _mint(db_session, contract)
+
     assert ledger["omitted"] == []
-    assert len(_nodes(db_session, contract)) == 3  # the root + both mints
+    assert len(ledger["minted"]) == 31
+    assert len(payloads) == 31
+    assert sorted(m["address"] for m in ledger["minted"]) == principals
 
 
 def test_an_earlier_gate_consumes_no_budget(db_session, anchor, monkeypatch):

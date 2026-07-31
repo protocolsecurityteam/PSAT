@@ -821,7 +821,9 @@ class PolicyWorker(BaseWorker):
                     budget=FP_MATERIALIZE_LIMIT,
                     result=fp_ledger,
                 )
-                session.commit()
+                # No commit here: the pass commits each mint before recording
+                # it, so the ledger written below can never name a row a
+                # rollback removed.
             finally:
                 _persist_spawn_summary(session, job, fp_ledger, artifact_name="fp_materialization_summary")
 
@@ -866,6 +868,11 @@ class PolicyWorker(BaseWorker):
                     budget=PERIMETER_SPAWN_LIMIT,
                     depth_cap=PERIMETER_SPAWN_DEPTH_CAP,
                     result=spawn_result,
+                    # The set this stage actually minted, passed explicitly.
+                    # The walker must not infer it from the node payload: a
+                    # provenance marker inside ``details`` is forgeable, since
+                    # the walk copies principal details through verbatim.
+                    fp_materialized_addresses=[n["address"] for n in fp_nodes],
                 )
         finally:
             _persist_spawn_summary(session, job, spawn_result)
