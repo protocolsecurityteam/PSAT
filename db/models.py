@@ -37,6 +37,31 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 
 from utils.balance_status import NATIVE_STATUS_PROVEN_ZERO
 from utils.chains import UnknownChainError, chain_by_name
+from utils.restaking_status import (
+    CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
+    CROSS_READ_AGREE,
+    CROSS_READ_AGREEMENTS,
+    EIGENPOD_BASES,
+    EIGENPOD_BASIS_NO_EIGENPOD_PROVEN,
+    EIGENPOD_BASIS_PROVEN_CROSS_READ,
+    NODE_SET_COMPLETENESS_NOT_DETERMINED,
+    NON_OBSERVING_SHARES_BASES,
+    SHARES_BASES,
+    SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
+    SHARES_BASIS_NO_EIGENPOD_PROVEN,
+    SHARES_COLUMN_COMMENT,
+)
+
+
+def _sql_tuple(values: tuple[str, ...]) -> str:
+    """A SQL ``IN`` list built from the vocabulary module.
+
+    The constraint text and the producer must name the same strings; spelling
+    them twice is how a domain check drifts into permitting a value the writer
+    can no longer produce (or refusing one it can).
+    """
+    return "(" + ", ".join(f"'{value}'" for value in values) + ")"
+
 
 logger = logging.getLogger(__name__)
 
@@ -1610,6 +1635,188 @@ class ContractBalanceLatest(Base):
     block_number: Mapped[int | None] = mapped_column(BigInteger)
     price_block_number: Mapped[int | None] = mapped_column(BigInteger)
     fetch_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class RestakingPosition(Base):
+    """One node's EigenLayer beaconChainETH position at ONE pinned height.
+
+    A separate plane from ``contract_balances`` on purpose, and the separation is
+    structural rather than a filter. Every spot-balance reader joins
+    ``contract_balances(_latest).contract_id`` to ``contracts.id``; the live
+    EtherFiNode instances are BeaconProxy deployments with NO ``contracts`` row
+    (measured: zero), and ``contract_balances.contract_id`` is ``NOT NULL``. So a
+    restaking row cannot be written into that table at all without first minting
+    a ``contracts`` row per node — which would make
+    ``services.effects.selection`` read the share quantity as a HOLDING of a
+    deployment and sum it into the authority graph. That is the shape the
+    balance-provenance unit exists to close, in a new place.
+
+    There is deliberately **no USD column anywhere on this plane**, so a share
+    quantity cannot be added to a dollar figure even by accident.
+
+    ``eigenlayer_beacon_shares_wei`` is named for its scope because a bare
+    "position" would be read as the node's money. Measured at block 25643300
+    over the 26 enumerated nodes: every one reads 0 shares, while their pods hold
+    374.148164612 ETH between them — one of them exactly 320 ETH. Summing this
+    column over the enumerated set yields 0 wei against that. The node's and the
+    pod's execution-layer native balances are ``not_determined`` here, and the
+    consensus-layer residual is ``not_determined`` and unbounded above.
+    """
+
+    __tablename__ = "restaking_positions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # PROVENANCE ONLY: the ``contracts`` row whose ADDRESS EQUALS the address the
+    # enumerating log was emitted at — the proxy, not the implementation row that
+    # shares the manager's name. Never "this contract holds the position".
+    manager_contract_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("contracts.id", ondelete="SET NULL"), nullable=True
+    )
+    protocol_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
+    )
+    # Every read of a row is ISSUED at this height. There is no unpinned path on
+    # this plane: without a height nothing is written at all.
+    block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The reorg witness (inv.11/12). Without it a replay "at block N" cannot tell
+    # it is on the same chain history; the event indexer stamps
+    # ``last_indexed_block_hash`` for the same reason.
+    block_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    eigenpod: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    eigenpod_basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    eigenlayer_beacon_shares_wei: Mapped[Any | None] = mapped_column(
+        Numeric(80, 0), nullable=True, comment=SHARES_COLUMN_COMMENT
+    )
+    shares_basis: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Read from ``EigenPodManager.beaconChainETHStrategy()`` at the SAME block.
+    # A literal would be indefensible: the near-miss
+    # ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`` answers 0 with success, as
+    # does a nonexistent staker, byte-identical to the real 26/26 answer.
+    shares_strategy: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # ``int256`` on EigenPodManager and genuinely able to go negative. Stored
+    # signed and unclamped.
+    deposit_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0), nullable=True)
+    cross_read_agreement: Mapped[str] = mapped_column(String(30), nullable=False)
+    active_validator_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_checkpoint_timestamp: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    consensus_layer_residual: Mapped[str] = mapped_column(String(20), nullable=False)
+    node_set_completeness: Mapped[str] = mapped_column(String(20), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # The basis columns are NOT NULL for a load-bearing reason, not tidiness: the
+    # OR-joined arms below are only fail-closed while they are. A NULL basis
+    # makes every arm NULL, an OR of NULLs is NULL, and a CHECK that evaluates to
+    # NULL PASSES in Postgres — so a nullable basis would readmit every shape
+    # these constraints exist to reject.
+    __table_args__ = (
+        Index("ix_rp_node_block", "chain_id", "node_address", "block_number", "id"),
+        CheckConstraint(
+            "shares_basis IN " + _sql_tuple(SHARES_BASES),
+            name="ck_rp_basis_domain",
+        ),
+        CheckConstraint(
+            "eigenpod_basis IN " + _sql_tuple(EIGENPOD_BASES),
+            name="ck_rp_pod_basis_domain",
+        ),
+        CheckConstraint(
+            "cross_read_agreement IN " + _sql_tuple(CROSS_READ_AGREEMENTS),
+            name="ck_rp_agreement_domain",
+        ),
+        # ONE ARM PER BASIS, OR-joined, each arm pinning the basis AND the value
+        # together. An arm naming only the basis, or only the value, is vacuous.
+        # An unrecognised basis satisfies no arm, so the expression is FALSE.
+        CheckConstraint(
+            "("
+            f"  shares_basis = '{SHARES_BASIS_EIGENLAYER_BEACON_SHARES}'"
+            "   AND eigenlayer_beacon_shares_wei IS NOT NULL"
+            f"  AND eigenpod_basis = '{EIGENPOD_BASIS_PROVEN_CROSS_READ}'"
+            "   AND shares_strategy IS NOT NULL"
+            f"  AND (eigenlayer_beacon_shares_wei <> 0 OR cross_read_agreement = '{CROSS_READ_AGREE}')"
+            ") OR ("
+            f"  shares_basis = '{SHARES_BASIS_NO_EIGENPOD_PROVEN}'"
+            "   AND eigenlayer_beacon_shares_wei IS NOT DISTINCT FROM 0"
+            f"  AND eigenpod_basis = '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}'"
+            "   AND shares_strategy IS NULL"
+            ") OR ("
+            "   shares_basis IN " + _sql_tuple(NON_OBSERVING_SHARES_BASES) + ""
+            "   AND eigenlayer_beacon_shares_wei IS NULL"
+            "   AND shares_strategy IS NULL"
+            ")",
+            name="ck_rp_basis_matches_value",
+        ),
+        CheckConstraint(
+            f"eigenpod_basis <> '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}' OR eigenpod IS NULL",
+            name="ck_rp_no_pod_has_no_address",
+        ),
+        CheckConstraint(
+            f"eigenpod_basis <> '{EIGENPOD_BASIS_PROVEN_CROSS_READ}' OR eigenpod IS NOT NULL",
+            name="ck_rp_pod_cross_read_has_address",
+        ),
+        # Pod-derived facts require the proven pod. Without this a
+        # ``last_checkpoint_timestamp`` of 0 — a real "never checkpointed"
+        # witness — could be minted against an address never proven to have one.
+        CheckConstraint(
+            f"eigenpod_basis = '{EIGENPOD_BASIS_PROVEN_CROSS_READ}'"
+            " OR (active_validator_count IS NULL AND last_checkpoint_timestamp IS NULL)",
+            name="ck_rp_pod_facts_require_pod",
+        ),
+        CheckConstraint(
+            f"consensus_layer_residual = '{CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED}'",
+            name="ck_rp_cl_residual_not_determined",
+        ),
+        CheckConstraint(
+            f"node_set_completeness = '{NODE_SET_COMPLETENESS_NOT_DETERMINED}'",
+            name="ck_rp_node_set_completeness",
+        ),
+    )
+
+
+class RestakingPositionLatest(Base):
+    """READ-ONLY mapping of the ``restaking_positions_latest`` VIEW.
+
+    Per ``(chain_id, node_address)`` — the chain is part of the key because the
+    same address on two chains is two different entities — the most recent
+    OBSERVING row wins, ordered ``block_number DESC, id DESC`` so the order is
+    total and two rows at one height resolve deterministically.
+
+    Both non-observing bases are excluded from winning. ``read_failed`` is a
+    transport or decode failure; ``not_determined`` is a transport success whose
+    evidence does not license a value. Letting either win would withdraw a proven
+    position on the strength of a non-observation.
+
+    **Absence from this view is ``not_determined``, never "no position".** A node
+    whose every row is non-observing does not appear at all, so a consumer that
+    read a missing row as zero would reintroduce, at the projection layer, the
+    absent-row-as-``$0`` shape the balance-provenance unit exists to close.
+
+    Not autogenerate-visible: :func:`include_object` filters it on the
+    ``info={"is_view": True}`` marker, as it does the balance view.
+    """
+
+    __tablename__ = "restaking_positions_latest"
+    __table_args__ = {"info": {"is_view": True}}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer)
+    node_address: Mapped[str] = mapped_column(String(42))
+    manager_contract_id: Mapped[int | None] = mapped_column(Integer)
+    protocol_id: Mapped[int | None] = mapped_column(Integer)
+    block_number: Mapped[int] = mapped_column(BigInteger)
+    block_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
+    eigenpod: Mapped[str | None] = mapped_column(String(42))
+    eigenpod_basis: Mapped[str] = mapped_column(String(32))
+    eigenlayer_beacon_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0))
+    shares_basis: Mapped[str] = mapped_column(String(40))
+    shares_strategy: Mapped[str | None] = mapped_column(String(42))
+    deposit_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0))
+    cross_read_agreement: Mapped[str] = mapped_column(String(30))
+    active_validator_count: Mapped[int | None] = mapped_column(Integer)
+    last_checkpoint_timestamp: Mapped[int | None] = mapped_column(BigInteger)
+    consensus_layer_residual: Mapped[str] = mapped_column(String(20))
+    node_set_completeness: Mapped[str] = mapped_column(String(20))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class DAppInteraction(Base):
