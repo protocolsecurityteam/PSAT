@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from db.models import Contract, ContractBalance, Protocol, TvlSnapshot
+from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol, TvlSnapshot
 from services.aggregations.company_overview import _entity_key
 from services.monitoring.tvl import (
     _get_protocol_addresses,
@@ -18,6 +18,7 @@ from services.monitoring.tvl import (
 )
 from tests.conftest import requires_postgres
 from tests.support.balance_stubs import page
+from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, NATIVE_STATUS_FETCH_FAILED
 
 # Unique address helpers — each test class gets its own prefix to avoid
 # unique-constraint collisions across tests sharing the same DB.
@@ -32,6 +33,7 @@ _ADDR_PREFIX = {
     "native_fail": "0x0000000000000000000000000000000000008",
     "twin": "0x0000000000000000000000000000000000009",
     "ethfail": "0x000000000000000000000000000000000000a",
+    "failfetch": "0x000000000000000000000000000000000000b",
 }
 
 
@@ -210,6 +212,14 @@ class TestRefreshContractBalances:
         assert {b.token_symbol for b in balances} == {"ETH", "USDC"}
 
     def test_handles_balance_failure_gracefully(self, db_session, monkeypatch, _cleanup):
+        """Both reads fail ⇒ the contract is OMITTED and the cycle is partial.
+
+        It used to be published with ``total_usd: 0.0``, which is the same value
+        a contract that genuinely holds nothing gets, and which enters
+        ``TvlSnapshot.total_usd`` and the served breakdown with no discriminator
+        — a failed read turned into a measured money figure. Same rule as the
+        sibling read-existing branch (``_read_existing_balances``).
+        """
         protocol = Protocol(name="TestProto_failure")
         db_session.add(protocol)
         db_session.flush()
@@ -226,11 +236,17 @@ class TestRefreshContractBalances:
         monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances_page", _raise)
 
-        breakdown, _ = refresh_contract_balances(db_session, protocol.id)
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         key = _entity_key("ethereum", addr)
-        assert key in breakdown
-        assert breakdown[key]["total_usd"] == 0.0
+        assert key not in breakdown
+        assert breakdown == {}
+        assert partial is True
+        # The failure still has its durable trace in the fetch plane.
+        fetches = db_session.query(ContractBalanceFetch).filter(ContractBalanceFetch.contract_id == contract.id).all()
+        assert len(fetches) == 1
+        assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
+        assert fetches[0].asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
 
 
 @requires_postgres
@@ -622,8 +638,10 @@ class TestEthPriceDegradationDB:
         with caplog.at_level(logging.WARNING, logger="services.monitoring.tvl"):
             breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
-        # All contracts should still appear but with $0 ETH value
-        assert len(breakdown) == 2
+        # Both contracts hold 5 ETH that could not be valued. Neither appears:
+        # an unpriced holding is not a holding worth $0, and $0 is what the
+        # breakdown would have carried into the headline figure.
+        assert breakdown == {}
 
         # The log message should mention the number of contracts affected
         assert any("2 contract(s)" in r.message for r in caplog.records), (
@@ -752,12 +770,15 @@ class TestMainnetEthQuoteFailurePartial:
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         # Balance row still written (behavior preserved), but with NULL price...
-        assert _entity_key("ethereum", addr) in breakdown
         rows = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
         assert rows[0].price_usd is None and rows[0].usd_value is None
         # ...and the cycle is flagged partial.
         assert partial is True
+        # The 3 ETH it holds has no USD figure, so the contract is omitted from
+        # the breakdown rather than published at ``total_usd: 0.0`` — the same
+        # omission the non-ETH branch already does when its native quote fails.
+        assert _entity_key("ethereum", addr) not in breakdown
 
     def test_cycle_heartbeat_flags_partial(self, db_session, monkeypatch, _cleanup):
         protocol = Protocol(name="EthQuoteFailCycle")
@@ -784,3 +805,110 @@ class TestMainnetEthQuoteFailurePartial:
         assert len(cycles) == 1
         assert cycles[0]["partial"] is True
         assert cycles[0]["note"] == "1_partial"
+
+
+@requires_postgres
+class TestFailedReadIsNotAMeasuredZero:
+    """A contract whose reads failed must not reach the snapshot as ``0.0``.
+
+    The failure was recorded only in the fetch plane and the cycle's ``partial``
+    flag; ``TvlSnapshot.total_usd`` and the served ``contract_breakdown``
+    (routers/protocols.py) carry no discriminator, so a published ``0.0`` is
+    read downstream as "this contract holds nothing" — an absence turned into a
+    money figure. The sibling read-existing branch was already fixed for exactly
+    this; this pins the refresh branch.
+    """
+
+    @staticmethod
+    def _one_good_one_failing(monkeypatch, good_addr: str, bad_addr: str):
+        def _balance(address, chain_id=1):
+            if address.lower() == bad_addr.lower():
+                raise RuntimeError("RPC failed")
+            return 1_000_000_000_000_000_000
+
+        def _tokens(address, chain_id=1):
+            if address.lower() == bad_addr.lower():
+                raise RuntimeError("Etherscan failed")
+            return page([])
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", _balance)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
+
+    def test_snapshot_omits_the_failed_contract_and_totals_only_the_measured_one(
+        self, db_session, monkeypatch, _cleanup
+    ):
+        protocol = Protocol(name="FailedReadProto")
+        db_session.add(protocol)
+        db_session.flush()
+        good = _addr("failfetch", "a1")
+        bad = _addr("failfetch", "b2")
+        db_session.add(Contract(address=good, chain="ethereum", protocol_id=protocol.id, contract_name="GoodVault"))
+        db_session.add(Contract(address=bad, chain="ethereum", protocol_id=protocol.id, contract_name="BadVault"))
+        db_session.commit()
+
+        monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
+        self._one_good_one_failing(monkeypatch, good, bad)
+
+        snapshot, partial = take_tvl_snapshot(db_session, protocol.id)
+
+        assert snapshot is not None
+        assert partial is True
+        breakdown = snapshot.contract_breakdown or {}
+        assert _entity_key("ethereum", bad) not in breakdown
+        assert breakdown[_entity_key("ethereum", good)]["total_usd"] == 2000.0
+        # The headline number is the ONE measured contract, not that contract
+        # plus a fabricated zero.
+        assert snapshot.total_usd is not None and float(snapshot.total_usd) == 2000.0
+
+    def test_a_genuine_zero_is_still_published(self, db_session, monkeypatch, _cleanup):
+        """Recall pin: a contract that really holds nothing keeps its ``0.0``.
+
+        Omission must mean "not measured", so a measured empty contract has to
+        stay in the breakdown or the two states collapse again from the other
+        side.
+        """
+        protocol = Protocol(name="GenuineZeroProto")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("failfetch", "c3")
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="EmptyVault"))
+        db_session.commit()
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
+
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
+
+        assert partial is False
+        assert breakdown[_entity_key("ethereum", addr)]["total_usd"] == 0.0
+        assert breakdown[_entity_key("ethereum", addr)]["tokens"] == []
+
+    def test_token_read_failure_alone_also_omits(self, db_session, monkeypatch, _cleanup):
+        """One unpublishable row class is enough — the same rule
+        ``contracts_missing_current_rows`` applies on the sibling branch. A total
+        built from the native leg only would understate the contract while
+        looking measured."""
+        protocol = Protocol(name="TokenFailOnlyProto")
+        db_session.add(protocol)
+        db_session.flush()
+        addr = _addr("failfetch", "d4")
+        db_session.add(Contract(address=addr, chain="ethereum", protocol_id=protocol.id, contract_name="Vault"))
+        db_session.commit()
+
+        def _raise_tokens(address, chain_id=1):
+            raise RuntimeError("Etherscan failed")
+
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda address, chain_id=1: 1_000_000_000_000_000_000)
+        monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", _raise_tokens)
+
+        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
+
+        assert breakdown == {}
+        assert partial is True
+        # The measured native leg is still persisted; only the published total
+        # is withheld.
+        rows = db_session.query(ContractBalance).all()
+        assert len(rows) == 1 and rows[0].token_symbol == "ETH"

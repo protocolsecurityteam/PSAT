@@ -354,28 +354,55 @@ def refresh_contract_balances(
                     }
                 )
 
-        # Composite entity token ("<chain>::<address>") so a CREATE2 twin — the
-        # same address on two of the protocol's chains — keeps a distinct entry
-        # instead of colliding under a bare address (last-wins would drop one
-        # chain's balance and under-count on_chain_total).
-        breakdown[_entity_key(contract.chain, address)] = {
-            "name": contract.contract_name,
-            "total_usd": round(contract_total, 2),
-            "tokens": tokens,
-        }
+        # Whether a total over this contract measures anything. Same rule as the
+        # sibling read-existing branch (``_read_existing_balances`` via
+        # ``contracts_missing_current_rows``): a contract with no publishable
+        # figure for some row class is OMITTED and flips ``partial``, rather than
+        # emitted as ``total_usd: 0.0``. The zero is indistinguishable from a
+        # measured empty contract once it reaches ``TvlSnapshot.total_usd`` and
+        # the served breakdown, so publishing it turns a failed read into a
+        # lower money figure while the cycle looks complete.
+        #
+        # Unpriced counts as unpublishable for the same reason a failed read
+        # does: holdings we could not value are not holdings worth 0. Only the
+        # native class is checked for it here — the ETH branch above keeps
+        # writing NULL-priced rows (its non-ETH twin skips the contract
+        # outright), so this is where that asymmetry stops being published as a
+        # number. Individual unpriced ERC-20s are NOT covered; that would need a
+        # per-token witness this loop does not have.
+        native_class_failed = native_status == NATIVE_STATUS_FETCH_FAILED
+        assets_class_failed = page.status == ASSET_SET_STATUS_FETCH_FAILED
+        native_unpriced = native_price is None and eth_wei is not None and eth_wei > 0
+        if native_class_failed or assets_class_failed or native_unpriced:
+            partial = True
+        else:
+            # Composite entity token ("<chain>::<address>") so a CREATE2 twin —
+            # the same address on two of the protocol's chains — keeps a distinct
+            # entry instead of colliding under a bare address (last-wins would
+            # drop one chain's balance and under-count on_chain_total).
+            breakdown[_entity_key(contract.chain, address)] = {
+                "name": contract.contract_name,
+                "total_usd": round(contract_total, 2),
+                "tokens": tokens,
+            }
         # A failed read is a degraded cycle, and this loop has no
         # ``record_degraded`` available (it runs outside ``BaseWorker``, where
         # that call is a no-op). The persisted fetch row is the durable trace;
         # this flag is what carries it into the per-cycle heartbeat, and the log
         # below is unconditional so a failure is visible even without the DB.
-        if native_status == NATIVE_STATUS_FETCH_FAILED or page.status == ASSET_SET_STATUS_FETCH_FAILED:
-            partial = True
+        if native_class_failed or assets_class_failed:
             logger.info(
                 "balance fetch degraded for %s on chain %s: native=%s assets=%s",
                 observed_address,
                 chain_id,
                 native_status,
                 page.status,
+            )
+        elif native_unpriced:
+            logger.info(
+                "balance omitted from breakdown for %s on chain %s: native quantity unpriced",
+                observed_address,
+                chain_id,
             )
 
         prune_balance_fetches(session, contract.id, observed_address)

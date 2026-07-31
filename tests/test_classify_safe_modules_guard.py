@@ -439,3 +439,115 @@ def test_resolve_pinned_block_rejects_an_unrecognised_tag(monkeypatch):
     monkeypatch.setattr(tracking, "_current_block_number", lambda *_a, **_k: PROBE_BLOCK)
     assert _resolve_pinned_block("https://rpc", "0xnothex") is None
     assert _resolve_pinned_block("https://rpc", "") is None
+
+
+# --- strict word decoding --------------------------------------------------
+#
+# ``eth_getStorageAt`` answering something that is not a 32-byte word is not an
+# observation of storage. The decode is delegated to
+# ``restaking_reads.decode_word`` so that a short, empty, whitespace-bearing or
+# underscore-bearing body reaches ``not_determined`` for the WHOLE probe. Under a
+# left-pad-then-length-check decoder none of these can be rejected: ``"0x"``
+# padded is the zero word ("guard proven_zero") and ``"0x1"`` padded is the
+# modules sentinel ("module_set: []", which licenses a k/n reading).
+
+_ALL_NOT_DETERMINED = {
+    "modules_head": "not_determined",
+    "module_set": "not_determined",
+    "module_set_basis": "not_determined",
+    "protection_is_upper_bound": "not_determined",
+    "guard": "not_determined",
+}
+
+
+def _malformed(monkeypatch, word: str) -> dict:
+    tracking.clear_classify_cache()
+    _, details, _ = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=word,
+        guard_word=word,
+    )
+    return _protection(details)
+
+
+def test_empty_storage_return_is_not_a_zero_word(monkeypatch):
+    """``"0x"`` is what a node returns when it gave us nothing. Padded, it is the
+    zero word — i.e. "no guard is set" on a release that has the feature."""
+    protection = _malformed(monkeypatch, "0x")
+    assert protection["guard"] == "not_determined"
+    assert protection["guard"] != "proven_zero"
+    assert "guard_address" not in protection
+    for key, value in _ALL_NOT_DETERMINED.items():
+        assert protection[key] == value
+
+
+def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
+    """``"0x1"`` left-padded IS ``address(0x1)``, the modules sentinel, which is
+    the single word that earns ``module_set: []`` + a terminated-list basis."""
+    protection = _malformed(monkeypatch, "0x1")
+    assert protection["module_set"] == "not_determined"
+    assert protection["module_set"] != []
+    assert protection["module_set_basis"] != "storage_linked_list_terminated"
+    for key, value in _ALL_NOT_DETERMINED.items():
+        assert protection[key] == value
+
+
+def test_whitespace_body_is_rejected(monkeypatch):
+    """64 spaces has the right LENGTH; ``bytes.fromhex`` would ignore every one
+    of them and hand back an empty bytes."""
+    protection = _malformed(monkeypatch, "0x" + " " * 64)
+    for key, value in _ALL_NOT_DETERMINED.items():
+        assert protection[key] == value
+
+
+def test_short_body_padded_out_by_trailing_whitespace_is_rejected(monkeypatch):
+    """The shape a bare length check lets through: 63 nibbles + a newline is 64
+    characters, and 62 nibbles + two spaces decodes to a clean 31 bytes."""
+    for word in ("0x" + "0" * 62 + "1" + "\n", "0x" + "0" * 61 + "1" + "  "):
+        protection = _malformed(monkeypatch, word)
+        for key, value in _ALL_NOT_DETERMINED.items():
+            assert protection[key] == value
+
+
+def test_underscore_bearing_body_is_rejected(monkeypatch):
+    """``int("1_000...", 16)`` parses; ``bytes.fromhex`` does not. The separator
+    is why this decoder never routes through ``int``."""
+    protection = _malformed(monkeypatch, "0x" + "1_" + "0" * 62)
+    for key, value in _ALL_NOT_DETERMINED.items():
+        assert protection[key] == value
+
+
+def test_clean_sentinel_word_still_earns_the_empty_module_set(monkeypatch):
+    """Recall pin for the strict decoder: the one word that proves the list empty
+    still does, with its basis and its block."""
+    _, details, _ = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=SENTINEL_WORD,
+        guard_word=ZERO_WORD,
+    )
+    protection = _protection(details)
+    assert protection["module_set"] == []
+    assert protection["module_set_basis"] == "storage_linked_list_terminated"
+    assert protection["modules_head"] == SENTINEL_WORD
+    assert protection["probe_block"] == PROBE_BLOCK
+    assert protection["guard"] == "proven_zero"
+
+
+def test_uppercase_hex_digits_still_decode(monkeypatch):
+    """A full-width word whose digits are uppercase is well-formed; the published
+    address is normalised to lowercase, as before."""
+    guard_addr = "0x" + "ab" * 20
+    _, details, _ = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=SENTINEL_WORD,
+        guard_word="0x" + "0" * 24 + "AB" * 20,
+    )
+    protection = _protection(details)
+    assert protection["guard"] == "proven_address"
+    assert protection["guard_address"] == guard_addr

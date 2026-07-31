@@ -23,6 +23,8 @@ from services.monitoring.event_topics import (  # noqa: E402
     CHANGED_GUARD_TOPIC0,
     DISABLED_MODULE_TOPIC0,
     ENABLED_MODULE_TOPIC0,
+    EXECUTION_FROM_MODULE_FAILURE_TOPIC0,
+    EXECUTION_FROM_MODULE_SUCCESS_TOPIC0,
     GOVERNANCE_EVENT_TOPICS,
     parse_any_log,
     parse_governance_log,
@@ -119,6 +121,91 @@ def test_empty_data_and_no_topic_yields_no_address():
     parsed = _parsed(log)
     assert parsed["event_type"] == "safe_module_enabled"
     assert "module" not in parsed
+
+
+# --- strict topic/data decoding --------------------------------------------
+#
+# The address published here IS the fact — "module X was enabled on this Safe",
+# "the guard became Y" (and the zero address is how "the guard was REMOVED" is
+# written). A topic or data body that is not a whole 32-byte word decodes to no
+# address at all; left-padding it to width would mint one, and on
+# ``safe_guard_changed`` the minted one is a protection withdrawal.
+
+
+def _log_with(topic0: str, *, topics_tail: list[str], data: str) -> dict:
+    return {
+        "address": SAFE,
+        "topics": [topic0, *topics_tail],
+        "data": data,
+        "blockNumber": hex(25643300),
+        "transactionHash": "0x" + "ab" * 32,
+        "logIndex": "0x0",
+    }
+
+
+def test_empty_indexed_topic_publishes_no_address():
+    """``"0x"`` in the indexed slot padded to width is ``0x0000…0000`` — a real
+    address, and on ChangedGuard the one that reads as "guard removed"."""
+    for topic0, key in (
+        (ENABLED_MODULE_TOPIC0, "module"),
+        (DISABLED_MODULE_TOPIC0, "module"),
+        (CHANGED_GUARD_TOPIC0, "guard"),
+    ):
+        parsed = _parsed(_log_with(topic0, topics_tail=["0x"], data="0x"))
+        assert key not in parsed, f"{topic0} minted {parsed.get(key)!r} from an empty topic"
+
+
+def test_empty_indexed_topic_on_module_execution_publishes_no_module():
+    for topic0 in (EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, EXECUTION_FROM_MODULE_FAILURE_TOPIC0):
+        parsed = _parsed(_log_with(topic0, topics_tail=["0x"], data="0x"))
+        assert "module" not in parsed
+
+
+def test_uppercase_0x_prefixed_data_body_is_rejected_not_missliced():
+    """``"0X"…`` is not stripped by a ``"0x"`` prefix strip, so the slice lands
+    two characters late and yields a DIFFERENT, well-formed-looking address."""
+    body = "0X" + "0" * 24 + MODULE[2:]
+    parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
+    assert "module" not in parsed
+
+
+def test_whitespace_data_body_is_rejected():
+    """Right length, no hex. ``bytes.fromhex`` ignores ASCII whitespace, so the
+    byte-length check after it is what rejects this."""
+    for body in ("0x" + " " * 64, "0x" + "0" * 62 + "  ", "0x" + "1_" + "0" * 62):
+        parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
+        assert "module" not in parsed, f"{body!r} decoded to {parsed.get('module')!r}"
+
+
+def test_partial_word_data_body_is_rejected():
+    """A body that is not a whole number of words is not an ABI encoding."""
+    for body in ("0x", "0x00", "0x" + "0" * 63, "0x" + "0" * 65):
+        parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
+        assert "module" not in parsed
+
+
+def test_word_whose_top_twelve_bytes_are_set_is_not_an_address():
+    """An ABI-encoded address is left-padded with zeros; a word that is not one
+    is not an address, and its low 20 bytes are not "the address it holds"."""
+    parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=["0x" + "ff" * 32], data="0x"))
+    assert "module" not in parsed
+
+
+def test_well_formed_logs_decode_byte_identically():
+    """Recall pin for the strict decoder: the real emitted shapes — indexed
+    (1.4.1) and non-indexed (1.1.1/1.3.0) — still yield exactly the module."""
+    for topic0, key in (
+        (ENABLED_MODULE_TOPIC0, "module"),
+        (DISABLED_MODULE_TOPIC0, "module"),
+        (CHANGED_GUARD_TOPIC0, "guard"),
+    ):
+        for indexed in (True, False):
+            parsed = _parsed(_log(topic0, indexed=indexed))
+            assert parsed[key] == MODULE
+    # And the zero address, when a well-formed word actually carries it, is
+    # still published — "guard removed" is a real event.
+    parsed = _parsed(_log_with(CHANGED_GUARD_TOPIC0, topics_tail=["0x" + "0" * 64], data="0x"))
+    assert parsed["guard"] == "0x" + "0" * 40
 
 
 def test_write_targets_gate_on_watch_safe_modules():
