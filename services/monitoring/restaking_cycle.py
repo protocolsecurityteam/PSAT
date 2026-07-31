@@ -107,15 +107,17 @@ def refresh_restaking_plane(
     """
     started = time.monotonic()
 
-    def summarize(*, protocols: int, written: int, failures: int, note: str | None) -> int:
+    def summarize(*, protocols: int, written: int, failures: int, note: str | None, partial: bool) -> int:
         emit_monitor_cycle(
             HEARTBEAT_PROTOCOL_RESTAKING,
             started=started,
             contracts_scanned=protocols,
-            # No block range applies: the pass reads state at one pinned height.
+            # Two different ranges are in play — a fixed-span emitter probe per
+            # protocol, and position reads at one pinned height — and no single
+            # number describes both. 0 under-claims rather than over-claims.
             blocks_scanned=0,
             events_found=written,
-            partial=failures > 0,
+            partial=partial,
             note=note,
             extra_detail={"chain_id": chain_id, "protocols_failed": failures},
         )
@@ -124,17 +126,21 @@ def refresh_restaking_plane(
     managers = EIGENLAYER_MANAGERS.get(chain_id)
     if managers is None:
         # No witnessed call target for this chain, so no read is licensed. Row
-        # absence reads as not_determined, which is what it is.
-        return summarize(protocols=0, written=0, failures=0, note="no_manager_pair")
+        # absence reads as not_determined, which is what it is. A configuration
+        # absence, not a failed observation — the cycle is healthy.
+        return summarize(protocols=0, written=0, failures=0, note="no_manager_pair", partial=False)
     eigen_pod_manager, delegation_manager = managers
 
     url = rpc_url or rpc_url_for_chain_id(chain_id)
     if not url:
-        return summarize(protocols=0, written=0, failures=0, note="no_rpc_route")
+        return summarize(protocols=0, written=0, failures=0, note="no_rpc_route", partial=False)
     pinned = pinned_head(chain_id, url)
     if pinned is None:
-        # No height established, so nothing read at any height.
-        return summarize(protocols=0, written=0, failures=0, note="no_pinned_head")
+        # DEGRADED, not quiet. ``pinned_head`` returns None only when a read
+        # failed or answered inconsistently, so this is an unanswered RPC — the
+        # partial=True grounds. Reporting it healthy would let a dead route look
+        # like a protocol that simply has no nodes, forever.
+        return summarize(protocols=0, written=0, failures=0, note="no_pinned_head", partial=True)
     head, _ = pinned
     from_block = max(0, head - DEFAULT_EMITTER_PROBE_SPAN)
     fetch_logs = _log_fetcher(url, chain_id=chain_id)
@@ -190,6 +196,7 @@ def refresh_restaking_plane(
         protocols=len(protocol_ids),
         written=written,
         failures=failures,
+        partial=failures > 0,
         note=f"{failures}_failed" if failures else None,
     )
 

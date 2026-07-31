@@ -545,8 +545,10 @@ class TestRestakingStepFailClosed:
         assert refresh_restaking_plane(db_session, chain_id=8453, rpc_url="https://rpc.example") == 0
         assert spies.order == []
         # Every refusal still beats, and says which arm refused — a silent
-        # return is indistinguishable from a wedged loop.
+        # return is indistinguishable from a wedged loop. A chain with no
+        # configured pair is an absence, not a failed observation.
         assert spies.cycles[-1]["note"] == "no_manager_pair"
+        assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
 
     def test_no_rpc_url_reads_nothing(self, db_session, monkeypatch):
@@ -556,15 +558,21 @@ class TestRestakingStepFailClosed:
         assert refresh_restaking_plane(db_session, chain_id=1) == 0
         assert spies.order == []
         assert spies.cycles[-1]["note"] == "no_rpc_route"
+        # An unrouted chain is configuration, like the pair above.
+        assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
 
-    def test_no_pinned_head_reads_nothing(self, db_session, one_protocol, monkeypatch):
+    def test_no_pinned_head_beats_degraded_not_healthy(self, db_session, one_protocol, monkeypatch):
+        """``pinned_head`` returns None only when a read failed or answered
+        inconsistently. Reporting that cycle healthy would let a permanently
+        dead route look like a protocol that simply has no nodes, forever."""
         spies = _RestakingSpies(monkeypatch)
         monkeypatch.setattr(restaking_cycle, "pinned_head", lambda *_a, **_kw: None)
 
         assert refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example") == 0
         assert spies.order == []
         assert spies.cycles[-1]["note"] == "no_pinned_head"
+        assert spies.cycles[-1]["partial"] is True
         db_session.rollback()
 
     def test_no_proven_emitter_enrolls_nothing(self, db_session, one_protocol, monkeypatch):
