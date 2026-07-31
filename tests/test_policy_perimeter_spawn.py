@@ -141,7 +141,12 @@ def _jobs_for(session, address):
 def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_session, seed, monkeypatch):
     """The C3 fix. One role-grant contract node ⇒ exactly ONE child job, with
     the chain stamped from the parent and the protocol inherited — byte-exact
-    request."""
+    request.
+
+    ``name`` is the ADDRESS, not the node's ``label``. The label is display copy
+    describing the EDGE ("role principal"), and this value becomes ``Job.name``
+    — an identity for the CONTRACT. Only ``contract_name`` may fill it.
+    """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol_id, parent, address_factory = seed
     manager = address_factory()
@@ -155,16 +160,30 @@ def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_sessio
     assert child.company == "perim-co"
     assert child.request == {
         "address": manager,
-        "name": "role principal",
+        "name": manager,
         "rpc_url": "https://rpc.example",
         "parent_job_id": str(parent.id),
         "discovered_by": "policy_refresh",
         "chain": "ethereum",
         PERIMETER_DEPTH_KEY: 1,
     }
-    assert result["queued"] == [{"address": manager, "name": "role principal", "job_id": str(child.id)}]
+    assert result["queued"] == [{"address": manager, "name": manager, "job_id": str(child.id)}]
     assert result["omitted"] == []
     assert result["budget_used"] == 1
+
+
+def test_a_contract_name_still_names_the_child(db_session, seed, monkeypatch):
+    """The label leg is dropped; the ``contract_name`` leg is not. A node that
+    carries a real compiled name still passes it to the child."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    _protocol_id, parent, address_factory = seed
+    manager = address_factory()
+    node = {**_node(manager), "contract_name": "ManagerWithMerkleVerification"}
+
+    result = _spawn(db_session, parent, _graph(parent.address, [node]), budget=8)
+
+    assert result["queued"][0]["name"] == "ManagerWithMerkleVerification"
+    assert _jobs_for(db_session, manager)[0].request["name"] == "ManagerWithMerkleVerification"
 
 
 def test_spawn_is_idempotent(db_session, seed, monkeypatch):

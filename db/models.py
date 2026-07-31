@@ -867,6 +867,27 @@ EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
 # authority and no value through the closure.
 EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
 
+# A ``function_principals`` row, materialized into the graph plane by
+# ``services.governance.control_graph_types.materialize_fp_principal_nodes``.
+#
+# Deliberately NOT ``role_principal``. That relation asserts a WITNESSED ROLE
+# ("this address holds role R"), and the largest population reaching this pass
+# is precisely the one for which ``capability_role_grants`` REFUSED to assert a
+# role: a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves
+# ``effective_functions.authority_roles`` JSON null, and 127 further rows carry
+# ``authority_roles == []`` (authority proven, not role-keyed). Writing those as
+# ``role_principal`` would mint the exact claim the upstream declined to make.
+#
+# What it DOES assert is the FP row itself: this address is a resolved principal
+# of a gated function on the from-node contract. That is an authority claim, so
+# it belongs in ``CONTROL_EDGE_RELATIONS`` below. It moves NO NEW VALUE through
+# the effects closure: ``services.effects.selection.build_authority_graph``
+# already folds ``function_principals`` straight into the closure as
+# "principal -> the contract the function lives on", so this edge duplicates an
+# authority link the closure carries anyway — it makes it reachable in the TABLE
+# plane (Surface, chat, enrollment) that reads edges instead of FP rows.
+EDGE_RELATION_CAPABILITY_PRINCIPAL = "capability_principal"
+
 # Allowlist, not a denylist: a relation this set does not name contributes no
 # authority. A new relation therefore has to be classified deliberately before
 # it can move value through the authority closure, instead of being folded in
@@ -879,6 +900,7 @@ CONTROL_EDGE_RELATIONS = frozenset(
         "proxy_admin_owner",
         "role_principal",
         "mapping_member",
+        EDGE_RELATION_CAPABILITY_PRINCIPAL,
     }
 )
 

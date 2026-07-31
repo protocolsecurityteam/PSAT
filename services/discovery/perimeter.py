@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Mapping, TypedDict
+from typing import Any, Collection, Mapping, TypedDict
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -82,6 +82,23 @@ PERIMETER_SPAWN_DEPTH_CAP = int(os.getenv("PSAT_PERIMETER_SPAWN_DEPTH_CAP", "2")
 
 #: Request key carrying the spawn generation. Absent ⇒ generation 0.
 PERIMETER_DEPTH_KEY = "perimeter_spawn_depth"
+
+#: ``control_graph_nodes.details`` key recording what PRODUCED a node, persisted
+#: by the FP materialization pass. Provenance on the stored row — read by
+#: consumers of the graph plane, and NOT by the admission arm below.
+#:
+#: It cannot gate admission, and the earlier draft that used it was wrong to say
+#: nothing else may write it. ``details`` is free-form JSONB copied verbatim from
+#: upstream principal payloads by the walk (``recursive.py``: no key allowlist),
+#: so any producer that can put a key in a principal's details can forge this
+#: one — demonstrated: a hand-crafted walk node carrying the key passed the arm
+#: and spawned a job. Admission is therefore decided by an explicit set the
+#: CALLER passes (see ``fp_materialized_addresses``), which is a construction the
+#: data plane cannot reach rather than a now-fact about writers.
+CONTROL_GRAPH_BASIS_KEY = "control_graph_basis"
+
+#: The value :data:`CONTROL_GRAPH_BASIS_KEY` carries on a minted node.
+FP_MATERIALIZATION_BASIS = "fp_materialization"
 
 
 class OmissionRecord(TypedDict):
@@ -247,6 +264,63 @@ def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> 
     }
 
 
+#: Ledger site of the FP→control-graph materialization pass.
+FP_MATERIALIZATION_SITE = "fp_materialization"
+
+
+class FpMaterializationResult(PerimeterSpawnResult):
+    """The FP materialization pass's ledger. Same machinery, TWO planes.
+
+    The inherited three dispositions keep their meaning verbatim — they
+    partition every FP principal considered, on the one question the perimeter
+    also asks: **will this address be offered to the walker as an analysis
+    candidate?**
+
+    * ``queued`` — offered. Minted, analyzable type, so ``node_type='contract'``.
+    * ``omitted`` — could have been offered and was not: ``budget_exhausted``,
+      ``chain_not_enabled``.
+    * ``out_of_population`` — never offerable: ``not_analyzable_type`` (a safe /
+      EOA: the node IS minted, the job never happens), ``existing_node``,
+      ``zero_address``, ``invalid_address``, ``no_contract_anchor``,
+      ``anchor_contract``, ``resolved_type_not_determined``,
+      ``resolved_type_conflict``.
+
+    ``minted`` is the ORTHOGONAL plane and is why it is a separate list rather
+    than a fourth disposition: minting a node and offering a job are different
+    acts, and the whole point of this pass is that a safe gets the first without
+    the second. Folding them into one axis would force one of the two to lie.
+    Its members are exactly ``queued`` ∪ the ``not_analyzable_type`` entries.
+
+    ``budget_used`` counts MINTS, because the budget is spent at the COMMITTED
+    INSERT and nowhere else — the same discipline ``queue_discovered_contracts``
+    applies at ``create_job``, so no earlier gate's ordering can silently become
+    load-bearing, and no entry here can name a row a rollback removed.
+
+    ``budget_exhausted`` in ``omitted`` is a PERMANENT loss on this anchor, not a
+    queue: the scope is rewritten before every mint, so the next pass re-mints
+    the same sorted prefix and drops the same tail. See ``FP_MATERIALIZE_LIMIT``.
+    """
+
+    minted: list[dict[str, Any]]
+
+
+def new_fp_materialization_result(*, budget: int | None) -> FpMaterializationResult:
+    """An empty FP-materialization ledger, constructed by the CALLER for the
+    same reason :func:`new_spawn_result` is: it has to survive a raise in the
+    middle of the mint loop and still say which nodes were already committed."""
+    return {
+        "site": FP_MATERIALIZATION_SITE,
+        "budget": budget,
+        "budget_used": 0,
+        "spawn_depth": 0,
+        "queued": [],
+        "omitted": [],
+        "out_of_population": [],
+        "walked": False,
+        "minted": [],
+    }
+
+
 def queue_discovered_contracts(
     session: Session,
     job: Job,
@@ -258,6 +332,7 @@ def queue_discovered_contracts(
     budget: int | None = None,
     depth_cap: int | None = None,
     result: PerimeterSpawnResult | None = None,
+    fp_materialized_addresses: Collection[str] | None = None,
 ) -> PerimeterSpawnResult:
     """Queue analysis jobs for contracts in *resolved_graph* that have none.
 
@@ -267,11 +342,20 @@ def queue_discovered_contracts(
 
     Pass *result* (from :func:`new_spawn_result`) to keep the ledger reachable
     if this raises part-way through.
+
+    *fp_materialized_addresses* — lowercase addresses this caller MINTED in this
+    same job (``materialize_fp_principal_nodes``). Only these are exempt from the
+    ``analyzed`` gate. It is an explicit set, not a field on the node, because a
+    field can be forged: ``details`` is free-form JSONB the walk copies verbatim
+    from upstream principal payloads, so a provenance MARKER inside it is a
+    now-fact about writers, whereas the caller's own set is a construction the
+    graph data cannot reach.
     """
     spawn_depth = spawn_depth_of(job)
     if result is None:
         result = new_spawn_result(site=site, budget=budget, spawn_depth=spawn_depth)
     result["spawn_depth"] = spawn_depth
+    fp_minted = {a.lower() for a in (fp_materialized_addresses or ()) if a}
 
     parent_company = _parent_company(session, job)
     parent_owns_high, structural_rel_by_addr = _structural_ownership(session, job)
@@ -309,8 +393,29 @@ def queue_discovered_contracts(
         if addr == root_address:
             _out(addr, "root_node")
             continue
-        # Only queue contracts that were analyzed during the walk.
-        if not node.get("analyzed"):
+        # Only queue contracts that were analyzed during the walk — with one
+        # declared exception. ``analyzed`` is the walk's own gate and it is
+        # correct for walk-produced nodes: an unanalysed one was reached, and
+        # not analysing it was a decision this stage already recorded.
+        #
+        # An FP-materialized node was never OFFERED to the walk. It exists
+        # because a ``function_principals`` row proves the address is a resolved
+        # principal of a gated function on this contract, while the walk's only
+        # principal ingresses (``authority_roles[].principals`` and
+        # ``controllers[].principals``) never saw it — 73 addresses / 411 of
+        # 1,200 FP rows on the PR-161 corpus, 72 of them with no ``contracts``
+        # row at all. Reading its ``analyzed=false`` as "this stage chose not to
+        # analyse it" would restate the very defect: unanalysed is its
+        # DEFINITION, not a verdict, and it is exactly the population that needs
+        # analysis. Admitting it changes no other gate — ``node_type``,
+        # ``existing_job``, ``chain_enabled``, depth and budget all still apply
+        # below, which is what keeps safes and EOAs out (they mint
+        # ``node_type='principal'``).
+        #
+        # Membership of the CALLER's minted set, never a field on the node: a
+        # graph node's ``details`` is attacker-reachable through the walk's
+        # verbatim copy of upstream principal payloads.
+        if not node.get("analyzed") and addr not in fp_minted:
             _out(addr, "not_analyzed")
             continue
         if node.get("node_type") != "contract":
@@ -336,7 +441,12 @@ def queue_discovered_contracts(
             _omit(addr, "budget_exhausted")
             continue
 
-        contract_name = node.get("contract_name") or node.get("label") or addr
+        # ``label`` is deliberately NOT a fallback. It is display copy on the
+        # graph plane ("role principal", "capability principal") and this value
+        # becomes ``Job.name`` and ``request["name"]`` — an IDENTITY — for every
+        # child, so the leg published a noun describing the EDGE as the name of
+        # the CONTRACT. The address is a worse-looking but true fallback.
+        contract_name = node.get("contract_name") or addr
         child_request: dict[str, Any] = {
             "address": addr,
             "name": contract_name,

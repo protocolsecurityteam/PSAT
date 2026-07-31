@@ -44,17 +44,42 @@ never clobbered. Because a node already carrying both type and config is left
 untouched, re-running on already-typed rows backfills config a prior
 (type-only) reconcile left missing — and converges: a second run changes
 nothing.
+
+That pass is UPDATE-only, and :func:`materialize_fp_principal_nodes` below is
+the INSERT half it always lacked — see that function's docstring for the defect
+it closes.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from db.models import Contract, ControlGraphNode, EffectiveFunction, FunctionPrincipal
+from db.deployment import deployment_scope
+from db.models import (
+    EDGE_RELATION_CAPABILITY_PRINCIPAL,
+    Contract,
+    ControlGraphEdge,
+    ControlGraphNode,
+    EffectiveFunction,
+    FunctionPrincipal,
+)
+from db.queue import _mainnet_coalesced_chain
+from services.discovery.perimeter import (
+    CONTROL_GRAPH_BASIS_KEY,
+    FP_MATERIALIZATION_BASIS,
+    ZERO_ADDRESS,
+    FpMaterializationResult,
+    new_fp_materialization_result,
+)
+from utils.chains import chain_enabled
+
+logger = logging.getLogger(__name__)
 
 # FP ``resolved_type`` values folded back into CGN. These spellings are shared
 # with the CGN vocabulary verbatim. EOA / contract are intentionally excluded:
@@ -257,3 +282,349 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
             updated += 1
 
     return updated
+
+
+#: How many nodes ONE ``(contract, deployment)`` anchor may mint per pass.
+#:
+#: **A HARD CAP WITH A PERMANENT TAIL, not a delay.** An earlier draft of this
+#: constant claimed a cut candidate would be picked up by the next pass, because
+#: ``existing_node`` is checked before the budget. That is FALSE in production
+#: and the sequence is what refutes it: every job rewrites this
+#: ``(contract, deployment)`` scope wholesale (resolution stage, then the policy
+#: stage) BEFORE the mint runs, so no minted row survives into the next pass for
+#: ``existing_node`` to find. The candidate order is ``sorted(candidates)``, so
+#: each pass re-mints the same lexicographic prefix and drops the same tail —
+#: permanently, until the cap is raised. Replayed 3 jobs deep on the PR-161
+#: corpus at a cap of 16: one anchor over budget (27 candidates), 11 addresses
+#: permanently invisible, 3 of them contract-typed job candidates appearing at no
+#: other anchor.
+#:
+#: The default is therefore sized to leave NO LIVE TAIL rather than to be a
+#: tuning knob: 64 is 2x the observed per-anchor maximum of 31 distinct
+#: principals (0 of 83 corpus anchors exceed it; 2 exceed 16). It is a BACKSTOP
+#: against a pathological anchor, and a NAMED MODEL CHOICE — no number here is
+#: claimed to be derived from the corpus, which is also why it is not pinned at
+#: 31 or 32. Fan-out is bounded elsewhere and unchanged: ``PERIMETER_SPAWN_LIMIT``
+#: (8) caps jobs per policy refresh and ``PERIMETER_SPAWN_DEPTH_CAP`` (2) caps
+#: generations; this cap bounds ROW growth only, and minting costs no RPC.
+#:
+#: Lowering it re-introduces a permanent tail. Every cut still lands in
+#: ``omitted[]`` with ``budget_exhausted``, so the tail is always named — but it
+#: must be read as a loss, not a queue.
+FP_MATERIALIZE_LIMIT = int(os.getenv("PSAT_FP_MATERIALIZE_LIMIT", "64"))
+
+
+def _address_node_id(address: str) -> str:
+    """The graph's node-id convention, ``address:0x…``.
+
+    Mirrors ``services.resolution.recursive._address_node_id`` verbatim and is
+    duplicated rather than imported for the same reason every other symbol in
+    this module is lazily imported from there: a module-level import re-creates
+    the resolution↔policy package cycle. It is the identity
+    ``control_graph_edges.from_node_id`` / ``to_node_id`` are joined on
+    (``services.effects.selection._NODE_PREFIX``), so it must not drift.
+    """
+    return f"address:{address.lower()}"
+
+
+def materialize_fp_principal_nodes(
+    session: Session,
+    *,
+    contract_id: int,
+    deployment_address: str | None,
+    budget: int | None = FP_MATERIALIZE_LIMIT,
+    result: FpMaterializationResult | None = None,
+) -> tuple[FpMaterializationResult, list[dict[str, Any]]]:
+    """Mint the ``control_graph_nodes`` rows ``function_principals`` implies.
+
+    ``function_principals`` was a TERMINAL plane: nothing converted an FP row
+    into a node. The graph's only two principal ingresses are
+    ``authority_roles[].principals`` and ``controllers[].principals``, and an
+    address in neither could never enter the graph — so every node-driven spawn
+    path was structurally blind to it, and :func:`reconcile_control_graph_types`
+    (the one FP→CGN fold) is UPDATE-only and can never re-admit it. On the
+    PR-161 corpus that hid 73 addresses / 411 of 1,200 FP rows (34.3%) across 43
+    of 93 contracts, including an EtherFiTimelock with 53 rows and a monitored
+    Safe with 127; 72 of the 73 have no ``contracts`` row at all, so raising the
+    discovery ``analyze_limit`` could not reach the class. Each upstream refusal
+    was witness-correct — a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves
+    ``authority_roles`` JSON null, and ``authority_roles == []`` means authority
+    that is not role-keyed. The defect was reading "role not determined" as
+    "principal does not exist".
+
+    **What a minted node asserts, and only this:** the FP row proves this
+    address is a resolved principal of a gated function on the anchor contract.
+    Everything else stays not-determined — ``analyzed`` is False and
+    ``analysis_state`` is NULL (never stamped; stamping ``analyzed`` would make
+    the perimeter spawn on a node no walk ever produced), ``graph_max_depth`` is
+    NULL because no walk horizon covered this node, ``contract_name`` is NULL,
+    and no intrinsic config (a safe's owners, a timelock's delay) is invented
+    here — :func:`reconcile_control_graph_types` folds that in from the FP row's
+    own ``details`` on its next run, which is where that witness already lives.
+
+    **This mints NODES; it creates no jobs.** Job eligibility stays entirely
+    with ``queue_discovered_contracts``'s gates. Because ``safe`` and ``eoa``
+    are not in ``ANALYZABLE_TYPES`` they mint ``node_type='principal'``, which
+    that walker rejects as ``not_contract_node`` — node yes, job never — and
+    this ledger records the same fact from the mint side as
+    ``not_analyzable_type``.
+
+    **Idempotence key:** ``(chain, lower(address), contract_id,
+    deployment_scope(deployment_address))``. Never the name, label or origin —
+    ``origin`` is a single constant on 1,200/1,200 corpus rows and would key
+    nothing. The ``existing_node`` arm it drives dedups against whatever nodes
+    the scope currently holds — the walk's own, and this pass's earlier work
+    within one transaction. It does NOT carry state across jobs: the rewrite
+    below empties the scope first. See ``FP_MATERIALIZE_LIMIT`` for what that
+    means for a budget cut.
+
+    **Rewrite survival.** ``replace_control_graph_rows`` deletes wholesale
+    within exactly this ``(contract_id, deployment)`` scope, so a minted row
+    cannot be made durable against it. The strategy is therefore RE-MINT, made
+    sound by ORDERING rather than by hope: the caller runs this strictly after
+    the last rewrite that can occur in the job's stage sequence (the policy
+    stage's rewrite, which itself runs after the resolution stage's), and the
+    pass is idempotent, so a rewrite from any later re-analysis is always
+    followed by another mint. A wiped node is never a silently lost one — but a
+    node the BUDGET cut is, because the wipe also destroys the record that would
+    let a later pass resume. See ``FP_MATERIALIZE_LIMIT``.
+
+    *deployment_address* is the caller's own scope value — the same one it
+    passes to ``replace_control_graph_rows`` — so the mint scope, the rewrite
+    scope and the FP read scope are one scope by construction.
+
+    Returns ``(ledger, minted_node_payloads)``. The payloads are graph-shaped
+    node dicts for the caller to hand to ``queue_discovered_contracts``; they
+    are deliberately NOT written into the persisted ``resolved_control_graph``
+    artifact, which is the walk's output and must not acquire nodes no walk
+    produced.
+
+    **Commits per mint, and the ledger is written only after the commit.** Not a
+    style choice: the ledger is persisted from the caller's ``finally``, on a
+    FRESH session when the primary one is poisoned, so a rollback after the loop
+    would publish ``minted[]`` and ``budget_used`` naming rows that do not
+    exist — a positive fact about a row nothing wrote. ``queue_discovered_contracts``
+    commits after each ``create_job`` for exactly this reason, and the claimed
+    equivalence with it requires the same boundary here.
+    """
+    # Lazy: module-level would re-create the resolution↔policy package cycle
+    # this file's callers already tiptoe around.
+    from services.resolution.recursive import ANALYZABLE_TYPES
+
+    if result is None:
+        result = new_fp_materialization_result(budget=budget)
+
+    def _omit(address: str, reason: str) -> None:
+        result["omitted"].append({"address": address, "reason": reason})
+        logger.info(
+            "FP materialization omitted a candidate",
+            extra={
+                "address": address,
+                "reason": reason,
+                "site": result["site"],
+                "contract_id": contract_id,
+            },
+        )
+
+    def _out(address: str, reason: str) -> None:
+        result["out_of_population"].append({"address": address, "reason": reason})
+
+    contract = session.get(Contract, contract_id)
+    # Mainnet-coalesced: a legacy NULL chain is a mainnet row (inv. 15), and
+    # coalescing it here is what keeps a mainnet anchor from being read as a
+    # chain we cannot name. An ABSENT contract is not coalesced to anything —
+    # there is no chain to claim, so every candidate fails closed below.
+    chain = _mainnet_coalesced_chain(contract.chain) if contract is not None else None
+    # ``or None`` deliberately: a blank ``Contract.address`` is no anchor at all,
+    # and letting it through would mint an edge from the node id ``address:`` —
+    # an identity no node has. Absent and blank fail the same way.
+    anchor_address = ((contract.address or "").lower() or None) if contract is not None else None
+
+    # Every FP row in this scope, ordered so a budget cut drains in a stable
+    # sequence across passes and the ledger is byte-reproducible.
+    rows = session.execute(
+        select(
+            func.lower(FunctionPrincipal.address),
+            FunctionPrincipal.resolved_type,
+            FunctionPrincipal.origin,
+            FunctionPrincipal.principal_type,
+        )
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .where(
+            EffectiveFunction.contract_id == contract_id,
+            deployment_scope(EffectiveFunction.deployment_address, deployment_address),
+            FunctionPrincipal.address.is_not(None),
+        )
+        .order_by(func.lower(FunctionPrincipal.address), FunctionPrincipal.id)
+    ).all()
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for address, resolved_type, origin, principal_type in rows:
+        addr = (address or "").lower()
+        agg = candidates.setdefault(
+            addr,
+            {"types": set(), "origins": set(), "principal_types": set(), "functions": 0},
+        )
+        agg["functions"] += 1
+        agg["types"].add(resolved_type)
+        if origin:
+            agg["origins"].add(origin)
+        if principal_type:
+            agg["principal_types"].add(principal_type)
+
+    existing = {
+        (a or "").lower()
+        for (a,) in session.execute(
+            select(ControlGraphNode.address).where(
+                ControlGraphNode.contract_id == contract_id,
+                deployment_scope(ControlGraphNode.deployment_address, deployment_address),
+            )
+        ).all()
+    }
+
+    # Depth is the anchor contract's own node depth + 1. Absent that node we
+    # have no witnessed depth for it, so the minted node's depth stays NULL
+    # (not determined) rather than being guessed at 0 or 1.
+    anchor_depth = None
+    if anchor_address is not None:
+        anchor_depth = (
+            session.execute(
+                select(ControlGraphNode.depth).where(
+                    ControlGraphNode.contract_id == contract_id,
+                    deployment_scope(ControlGraphNode.deployment_address, deployment_address),
+                    func.lower(ControlGraphNode.address) == anchor_address,
+                )
+            )
+            .scalars()
+            .first()
+        )
+    minted_depth = anchor_depth + 1 if isinstance(anchor_depth, int) else None
+
+    payloads: list[dict[str, Any]] = []
+    for addr in sorted(candidates):
+        agg = candidates[addr]
+        if not addr.startswith("0x") or len(addr) != 42:
+            _out(addr, "invalid_address")
+            continue
+        if addr == ZERO_ADDRESS:
+            _out(addr, "zero_address")
+            continue
+        if contract is None or chain is None or anchor_address is None:
+            # No anchor contract => no chain. A node with a chain we cannot name
+            # is exactly the row this pass must never write.
+            _out(addr, "no_contract_anchor")
+            continue
+        if addr == anchor_address:
+            _out(addr, "anchor_contract")
+            continue
+        types = {t for t in agg["types"] if t}
+        if not types:
+            _out(addr, "resolved_type_not_determined")
+            continue
+        if len(types) > 1:
+            # The FP plane holds two types for one principal at one anchor and
+            # never resolved them. Picking one would mint a type nothing proved;
+            # 0 of the corpus's 413 (anchor, address) PAIRS — across 83 anchors
+            # — reach this, and a first occurrence should surface as a refusal,
+            # not as a coin flip.
+            _out(addr, "resolved_type_conflict")
+            continue
+        if addr in existing:
+            _out(addr, "existing_node")
+            continue
+        if not chain_enabled(chain):
+            _omit(addr, "chain_not_enabled")
+            continue
+        if budget is not None and result["budget_used"] >= budget:
+            _omit(addr, "budget_exhausted")
+            continue
+
+        resolved_type = types.pop()
+        node_type = "contract" if resolved_type in ANALYZABLE_TYPES else "principal"
+        details: dict[str, Any] = {
+            CONTROL_GRAPH_BASIS_KEY: FP_MATERIALIZATION_BASIS,
+            "fp_function_count": agg["functions"],
+            "fp_origins": sorted(agg["origins"]),
+            "fp_principal_types": sorted(agg["principal_types"]),
+        }
+        session.add(
+            ControlGraphNode(
+                contract_id=contract_id,
+                deployment_address=deployment_address,
+                address=addr,
+                node_type=node_type,
+                resolved_type=resolved_type,
+                # NULL, deliberately. A label is display copy, and this plane
+                # has none to witness — but ``Job.name`` and the overview's
+                # display sites fall back to it, so any constant here would be
+                # published as the principal's IDENTITY on every spawned child.
+                # ``resolved_type`` already carries the only noun that is proven.
+                label=None,
+                contract_name=None,
+                depth=minted_depth,
+                analyzed=False,
+                analysis_state=None,
+                graph_max_depth=None,
+                details=details,
+            )
+        )
+        session.add(
+            ControlGraphEdge(
+                contract_id=contract_id,
+                deployment_address=deployment_address,
+                from_node_id=_address_node_id(anchor_address),
+                to_node_id=_address_node_id(addr),
+                relation=EDGE_RELATION_CAPABILITY_PRINCIPAL,
+                label=None,
+                source_controller_id=None,
+                notes=[f"functions={agg['functions']}"],
+            )
+        )
+
+        # Commit BEFORE the ledger records the mint. The ledger is persisted
+        # from the caller's ``finally``, on a fresh session if this one is
+        # poisoned, so recording first would let a rollback publish a row that
+        # does not exist.
+        session.commit()
+
+        # Budget is spent HERE and only here — at the committed INSERT — so
+        # every earlier gate provably consumes none of it.
+        result["budget_used"] += 1
+        result["minted"].append(
+            {
+                "address": addr,
+                "node_type": node_type,
+                "resolved_type": resolved_type,
+                "contract_id": contract_id,
+                "deployment_address": deployment_address,
+                "fp_function_count": agg["functions"],
+            }
+        )
+        payloads.append(
+            {
+                "id": _address_node_id(addr),
+                "address": addr,
+                "node_type": node_type,
+                "resolved_type": resolved_type,
+                "label": None,
+                "contract_name": None,
+                "depth": minted_depth,
+                "analyzed": False,
+                "analysis_state": None,
+                "details": details,
+                "artifacts": {},
+            }
+        )
+        if node_type == "contract":
+            result["queued"].append({"address": addr, "resolved_type": resolved_type})
+        else:
+            # Minted, and structurally never a job: the walker's
+            # ``node_type == 'contract'`` gate rejects it as
+            # ``not_contract_node``. Recorded rather than skipped so the two
+            # ledgers agree from both sides.
+            _out(addr, "not_analyzable_type")
+
+    # Loop exit, and only loop exit: every candidate now sits in exactly one
+    # disposition. A raise above leaves the prefix marked incomplete.
+    result["walked"] = True
+    return result, payloads
