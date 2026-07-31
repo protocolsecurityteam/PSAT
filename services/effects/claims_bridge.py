@@ -307,6 +307,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     itself, so a scorer reading the number and ignoring the flag scored "$0
 #     reach" for a zero-balance router that can move millions — an unproven
 #     value read as a proven zero.
+#     ``observed_reach_floor_usd`` is itself THREE-STATE and its absence is the
+#     third: the key is present with a positive figure (a witnessed floor),
+#     present at ``0.0`` (a balance row was read and summed to zero — weak, and
+#     still not a measured reach), or ABSENT beside ``reach_indeterminate: True``,
+#     meaning NO balance row was witnessed for the acting deployment at all and
+#     there is no floor to state. It is never ``null``; a scorer must read the
+#     KEY's presence, never a ``.get()`` that folds absence into a zero.
 #   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
 #     observed leaving a holder and its USD is NOT determined, because at least one
 #     (holder, asset) pair that moved has no priced holding on record.

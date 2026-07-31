@@ -174,6 +174,12 @@ class Candidate:
     # across a protocol's candidates (small, immutable), so carrying it
     # per-candidate is cheap.
     #
+    # ``None`` is a THIRD state and must stay one all the way to the verdict: the
+    # balance join below is INNER precisely so a contract with no current row
+    # produces no ``deployment_balance`` key, and defaulting that absence to
+    # ``0.0`` here would hand ``_add_reach`` a floor it never witnessed. A PRESENT
+    # ``0.0`` is a witness and keeps publishing a floor.
+    #
     # PER ASSET, not per holder. This was ``(address, usd)`` — one summed
     # figure per holder — and the reach probe matched ANY ``Transfer`` out of that
     # holder against the whole sum. The weETH proxy's $3.489B is 99.99% eETH, the
@@ -192,7 +198,7 @@ class Candidate:
     # than the first and no order-dependence survives it. Whoever changes them to
     # Decimal must give the jsonb path an encoder first.
     value_holders: tuple[AssetHolding, ...] = ()
-    acting_balance_usd: float = 0.0
+    acting_balance_usd: float | None = None
     # The protocol's independently-measured TVL (``tvl_snapshots.defillama_tvl``), or
     # ``None`` when there is no snapshot. A corroborating CEILING for the reach figure:
     # no exercise of one function can reach more value than the protocol holds, and the
@@ -301,11 +307,19 @@ def build_authority_graph(session: Session, protocol_id: int) -> AuthorityGraph:
     # holding once per hour.
     #
     # The join stays INNER, deliberately. A contract with no current row produces
-    # NO ``deployment_balance`` key, and that absence is read downstream as
-    # not_determined; a LEFT JOIN would give it a 0 entry, and
+    # NO ``deployment_balance`` key, and that absence is carried to the verdict as
+    # ``Candidate.acting_balance_usd = None`` → ``reach_indeterminate: True`` with
+    # NO ``observed_reach_floor_usd`` key; a LEFT JOIN would give it a 0 entry, and
     # ``recipes._add_reach`` publishes the acting deployment's balance as
     # ``observed_reach_floor_usd`` — so a $0.00 floor indistinguishable from
     # "holds nothing" would be minted out of a failed fetch.
+    #
+    # ``coalesce(sum(usd_value), 0)`` below is the remaining collapse this does NOT
+    # defend against: a contract whose current rows exist but are ALL unpriced still
+    # yields a $0.00 key, and that key is a witnessed-looking zero. A published
+    # $0.00 floor therefore still has two causes, not three — an empty priced sheet
+    # and an all-unpriced one — so the consumer-side "0.0 is not_determined" gate
+    # stays load-bearing.
     bal_rows = session.execute(
         select(Contract.id, Contract.address, func.coalesce(func.sum(ContractBalanceLatest.usd_value), 0))
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
@@ -1353,6 +1367,7 @@ def select_candidates(
         seeds = {addr, *prins}
         deployment_addr = _addr(deployment) or ""
         acting = deployment_addr or addr
+        acting_balance = graph.deployment_balance.get(acting)
         candidates.append(
             Candidate(
                 function_id=fid,
@@ -1366,7 +1381,7 @@ def select_candidates(
                 deployment_address=deployment_addr,
                 restrict_families=families,
                 value_holders=value_holders,
-                acting_balance_usd=float(graph.deployment_balance.get(acting, _ZERO_USD)),
+                acting_balance_usd=None if acting_balance is None else float(acting_balance),
                 protocol_tvl_usd=protocol_tvl,
                 input_token_addresses=holdings.get(contract_id, ()),
                 membership_exact=_membership_exact(capability_expr),

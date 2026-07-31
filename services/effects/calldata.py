@@ -144,9 +144,11 @@ class ValueOutPlanInputs:
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
     # Downstream value-reach: the protocol's witnessed value-holders the recipe
-    # measures against, and the acting deployment's own balance floor.
+    # measures against, and the acting deployment's own balance floor. ``None`` on
+    # the floor is "no balance row was witnessed for the acting deployment", which
+    # the recipe publishes as an absent floor key — not as a zero.
     value_holders: tuple[AssetHolding, ...] = ()
-    acting_balance_usd: float = 0.0
+    acting_balance_usd: float | None = None
     protocol_tvl_usd: float | None = None
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
