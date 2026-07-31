@@ -1013,3 +1013,136 @@ def test_persist_upserts(db_session, monkeypatch):
     assert rhp.persist_role_holder_planes(session, rows) == len(rows)
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
     assert stored is not None and stored.holders == [ADMIN_HOLDER]
+
+
+# ---------------------------------------------------------------------------
+# Tolerant decoders on a registered witness plane (fix 3)
+#
+# Three instances of the same shape: a value nobody observed, padded/coerced
+# into one that looks observed. Each one published a POSITIVE fact — a role
+# name, a replay citation, "the chain answered false" — out of a read that
+# answered nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_empty_word_is_never_padded_into_the_default_admin_role():
+    """FALSIFIER: ``"0x"`` left-padded is bit-identical to
+    ``DEFAULT_ADMIN_ROLE_HASH``, so the tolerant normalizer turned a no-data
+    read into the zero role AND its convention-based name — defeating the
+    guard this file already asserts one function over."""
+    assert rhp._normalize_word("0x") is None
+    assert rhp.resolve_role_name("0x", [], has_role_answered=True) == (None, "not_determined")
+    assert rhp.resolve_role_name("0x00", [], has_role_answered=True) == (None, "not_determined")
+    assert rhp.resolve_role_name("0xzz" + "0" * 62, [], has_role_answered=True) == (None, "not_determined")
+    # RECALL: a genuine zero WORD still earns the convention name.
+    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=True) == (
+        "DEFAULT_ADMIN_ROLE",
+        "accesscontrol_default_admin_literal",
+    )
+    # RECALL: a full-width word still folds and still resolves by preimage.
+    assert rhp._normalize_word("0x" + "AB" * 32) == "0x" + "ab" * 32
+    assert rhp.resolve_role_name(PAUSER, ["PAUSER_ROLE"], has_role_answered=False) == (
+        "PAUSER_ROLE",
+        "keccak_preimage",
+    )
+
+
+def test_an_empty_word_topic_folds_to_no_candidate(db_session, monkeypatch):
+    """The fold's own entry point: a log whose role topic is ``"0x"`` must
+    contribute no role, rather than a DEFAULT_ADMIN candidate."""
+    log = _log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=1)
+    log.topics = [RG, "0x", _word(ADMIN_HOLDER)]
+    assert rhp.fold_role_candidates([log]) == {}
+
+
+def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
+    """FALSIFIER: the reorg/replay witness was decoded with ``bytes.fromhex``
+    and no length check, so ``"0x"`` published ``b""`` — a citation a replaying
+    reader cannot tell from one it never got."""
+    calls: list[tuple[str, list[Any]]] = []
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": "0x"}))
+    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
+    assert pinned is not None
+    assert pinned.block_hash is None
+    assert pinned.block_hash != b""
+
+    for truncated in ("0x" + "cd" * 31, "0x" + "cd" * 33, "0xnothex" + "0" * 58):
+        calls.clear()
+        monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": truncated}))
+        short = rhp.pin_probe_block("http://stub", chain_id=1)
+        assert short is not None and short.block_hash is None
+
+    # RECALL: a genuine 32-byte hash is still stored, at full width.
+    calls.clear()
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
+    good = rhp.pin_probe_block("http://stub", chain_id=1)
+    assert good is not None
+    assert good.block_hash is not None
+    assert good.block_hash == bytes.fromhex("cd" * 32)
+    assert len(good.block_hash) == 32
+
+
+def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch):
+    """FALSIFIER: ``eth_call_batch`` reports a result it cannot read as
+    ``EthCallResult(True, "0x", …)``. ``decode_bool_word("0x")`` is False, so a
+    call that returned NO DATA published ``chain_state: "false"`` in the
+    disagreement log AND satisfied ``has_role_answered``.
+    """
+    empty_success = EthCallResult(True, "0x", None, None)
+    assert rhp.classify_candidate(empty_success) == rhp.CANDIDATE_UNCONFIRMED
+    assert rhp.classify_candidate(EthCallResult(True, "0x0", None, None)) == rhp.CANDIDATE_UNCONFIRMED
+    assert rhp.classify_candidate(EthCallResult(True, "0x" + "00" * 31, None, None)) == rhp.CANDIDATE_UNCONFIRMED
+
+    session = db_session
+    # One GRANTED log for the zero role: the fold believes the account active,
+    # so a completed "false" would be a recorded disagreement.
+    _seed(session, logs=[_log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=3)])
+    rows = _run(session, monkeypatch, {(ZERO_ROLE, ADMIN_HOLDER): empty_success})
+
+    row = _by_role(rows)[ZERO_ROLE]
+    # Withheld, not published-false.
+    assert row["holders"] is None
+    assert row["holders_basis"] == "not_determined"
+    assert row["fold_chain_disagreements"] is None
+    # `has_role_answered` must NOT have been satisfied, so the zero-word naming
+    # convention has nothing to stand on.
+    assert row["role_name"] is None
+    assert row["role_name_basis"] == "not_determined"
+
+
+def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, monkeypatch):
+    """RECALL for the arm above: a completed read of a real 32-byte zero word
+    still records ``chain_state: "false"``. The plane loses no disagreement."""
+    session = db_session
+    _seed(
+        session,
+        logs=[
+            _log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=3),
+            _log(RG, PAUSER, PAUSER_EXTRA, block=19298625, log_index=4),
+        ],
+    )
+    rows = _by_role(
+        _run(
+            session,
+            monkeypatch,
+            {(ZERO_ROLE, ADMIN_HOLDER): FALSE_WORD, (PAUSER, PAUSER_EXTRA): TRUE_WORD},
+        )
+    )
+    disagreements = rows[PAUSER]["fold_chain_disagreements"]
+    assert disagreements == []
+    # The false read completed, so the zero-word convention IS earned here.
+    assert rows[ZERO_ROLE]["role_name"] is None  # withheld: no confirmed holder
+    assert rows[PAUSER]["holders"] == [PAUSER_EXTRA]
+
+    # And the disagreement itself, on a role whose fold/chain states differ.
+    _seed(session, logs=[_log(RR, PAUSER, PAUSER_EXTRA, block=19298626, log_index=5)], cursors=[])
+    again = _by_role(_run(session, monkeypatch, {(PAUSER, PAUSER_EXTRA): TRUE_WORD}))
+    assert again[PAUSER]["fold_chain_disagreements"] == [
+        {
+            "registry": REGISTRY,
+            "role_hash": PAUSER,
+            "address": PAUSER_EXTRA,
+            "fold_state": "inactive",
+            "chain_state": "true",
+        }
+    ]

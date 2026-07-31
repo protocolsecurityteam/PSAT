@@ -91,6 +91,11 @@ HAS_ROLE_SELECTOR = selector("hasRole(bytes32,address)")
 DEFAULT_ADMIN_ROLE_HASH = "0x" + "00" * 32
 DEFAULT_ADMIN_ROLE_NAME = "DEFAULT_ADMIN_ROLE"
 
+_HEX_DIGITS = frozenset("0123456789abcdef")
+# A 32-byte block hash, and nothing shorter. ``bytes.fromhex("")`` is ``b""``,
+# which is a value a reader cannot tell from a hash it never got.
+_BLOCK_HASH_BYTES = 32
+
 # Per-candidate probe outcomes. Three states, and the last two must never
 # collapse: a completed read returning false and a read that never happened are
 # different facts, and only the first is a read at all.
@@ -128,10 +133,24 @@ def classify_candidate(result: EthCallResult) -> str:
     word alike, so calling it without first branching on ``success`` converts
     every failed read into a proven non-holder — the exact fail-open shape this
     plane exists to avoid. The branch is here, once, so no caller can skip it.
+
+    ``success`` is necessary and NOT sufficient. ``eth_call_batch`` reports a
+    node result it cannot read as ``EthCallResult(True, "0x", …)``, and that
+    coercion is deliberate elsewhere (a simulated state-changing call whose
+    only fact IS that it succeeded). Here the fact wanted is the RETURNED BOOL,
+    so a success carrying no full word answers nothing: it is a failed read,
+    which keeps it out of ``has_role_answered`` and out of the disagreement log
+    instead of publishing ``chain_state: "false"`` for a call that returned no
+    data. Exactly one 32-byte word is required, the width ``hasRole`` returns —
+    a shorter return has no bool in it, and a longer one is not the ABI this
+    plane is decoding.
     """
     if not result.success:
         return CANDIDATE_UNCONFIRMED
-    return CANDIDATE_CONFIRMED if decode_bool_word(result.return_data) else CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
+    word = _normalize_word(result.return_data)
+    if word is None:
+        return CANDIDATE_UNCONFIRMED
+    return CANDIDATE_CONFIRMED if decode_bool_word(word) else CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
 
 
 def fold_role_candidates(rows: Iterable[Any]) -> dict[str, dict[str, bool]]:
@@ -218,7 +237,7 @@ def pin_probe_block(rpc_url: str, *, chain_id: int) -> ProbeBlock | None:
     try:
         block = rpc_request(rpc_url, "eth_getBlockByNumber", [hex(number), False], chain_id=chain_id)
         raw = block.get("hash") if isinstance(block, Mapping) else None
-        block_hash = bytes.fromhex(str(raw)[2:]) if isinstance(raw, str) and raw.startswith("0x") else None
+        block_hash = _decode_block_hash(raw)
     except Exception:
         # The height still stands on its own; only replay-after-reorg is weaker.
         logger.warning("pinned probe block %s but could not read its hash", number, exc_info=True)
@@ -513,12 +532,28 @@ def persist_role_holder_planes(session: Session, rows: Sequence[Mapping[str, Any
 
 
 def _normalize_word(raw: Any) -> str | None:
+    """A full 32-byte word, lower-cased, or ``None``.
+
+    There is deliberately no lenient path. The tolerant version of this
+    accepted anything shorter than a word and left-padded it, so ``"0x"`` —
+    the empty return of a call that answered nothing — came back as
+    ``"0x" + "00"*32``, which IS ``DEFAULT_ADMIN_ROLE_HASH``. A no-data read
+    then minted the DEFAULT_ADMIN name and the holders of the zero role, from
+    a word nobody ever observed. Every word on this plane comes off a log
+    topic or a returned word, both of which are 32 bytes on the wire, so
+    requiring the full width costs no recall.
+    """
     if not isinstance(raw, str) or not raw.startswith("0x"):
         return None
-    body = raw[2:].lower()
-    if len(body) > 64:
+    body = raw[2:]
+    if len(body) != 64:
         return None
-    return "0x" + body.rjust(64, "0")
+    lowered = body.lower()
+    # ``bytes.fromhex`` and ``int(..., 16)`` both tolerate ASCII whitespace, so
+    # the hex alphabet is checked explicitly rather than via a parse attempt.
+    if any(char not in _HEX_DIGITS for char in lowered):
+        return None
+    return "0x" + lowered
 
 
 def _word_to_address(raw: Any) -> str | None:
@@ -526,3 +561,19 @@ def _word_to_address(raw: Any) -> str | None:
     if word is None:
         return None
     return "0x" + word[-40:]
+
+
+def _decode_block_hash(raw: Any) -> bytes | None:
+    """The pinned block's hash as 32 bytes, or ``None``.
+
+    ``bytes.fromhex`` accepts the empty string and ignores ASCII whitespace, so
+    an ``eth_getBlockByNumber`` that answered ``"0x"`` used to store ``b""`` —
+    an empty citation that a reader replaying the row cannot distinguish from a
+    hash. The width is what makes the height checkable after a reorg, so a word
+    that is not exactly 32 bytes is no citation and the field goes absent.
+    """
+    word = _normalize_word(raw)
+    if word is None:
+        return None
+    digest = bytes.fromhex(word[2:])
+    return digest if len(digest) == _BLOCK_HASH_BYTES else None

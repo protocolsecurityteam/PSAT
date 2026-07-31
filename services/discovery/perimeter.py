@@ -15,7 +15,9 @@ gate here. Measured on the PR-161 corpus: 32 addresses carry
 so all 19 pass the gates below unmodified.
 
 **Every candidate that does not become a job is accounted for**, in one of three
-declared dispositions, and the three PARTITION the node list:
+declared dispositions. The three PARTITION the node list **only when the ledger
+carries ``walked: true``** — see ``walked`` below; on a ``false`` they are a
+PREFIX of it and nothing may be concluded from their emptiness:
 
 * ``queued`` — a job was created;
 * ``omitted`` — a candidate this stage COULD have analysed and chose not to
@@ -26,6 +28,17 @@ declared dispositions, and the three PARTITION the node list:
   itself, a node the walk did not analyse, a non-contract node, or an address
   that already has a job. These are the fail-closed gates and the dedup arm;
   they are NOT omissions and must not redden a population invariant.
+
+``walked`` is the discriminator that makes those dispositions readable. The
+ledger is constructed by the CALLER and persisted from a ``finally``, so it is
+written on three different histories: the walk ran to the end, the walk raised
+part-way through, and the walk never started at all (the policy stage skips it
+when the refresh produced no graph). All three used to serialize identically
+when nothing was queued, so an all-empty ledger asserted "walked, omitted
+nothing" for two histories that had walked nothing. ``walked`` is set at LOOP
+EXIT and nowhere else: ``true`` licenses the partition claim, ``false`` says
+the ledger is a prefix — its contents are still true individually, but their
+emptiness proves nothing.
 
 A budget is spent at ``create_job`` and nowhere else, so a candidate rejected by
 any earlier gate provably consumes none of it — the ordering of the gates in the
@@ -84,6 +97,10 @@ class PerimeterSpawnResult(TypedDict):
     queued: list[dict[str, Any]]
     omitted: list[OmissionRecord]
     out_of_population: list[OmissionRecord]
+    # True only after the node loop ran to completion. See the module docstring:
+    # this is what separates "walked, omitted nothing" from "never walked" and
+    # from "raised on node 3 of 5", which are otherwise the same three lists.
+    walked: bool
 
 
 def spawn_depth_of(job: Job) -> int:
@@ -205,6 +222,10 @@ def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> 
     the two children that were already committed. Building the ledger inside
     the walker and returning it made a partial spawn indistinguishable from no
     spawn: the children were committed, the artifact was never written.
+
+    ``walked`` starts ``False`` and only the walker's loop exit sets it, so a
+    ledger that reaches ``_persist_spawn_summary`` without the walk having run
+    to the end says so rather than reading as a completed empty walk.
     """
     return {
         "site": site,
@@ -214,6 +235,7 @@ def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> 
         "queued": [],
         "omitted": [],
         "out_of_population": [],
+        "walked": False,
     }
 
 
@@ -340,6 +362,11 @@ def queue_discovered_contracts(
             addr,
             child_job.id,
         )
+
+    # Loop exit, and only loop exit: every node has now been placed in exactly
+    # one disposition. A raise above skips this line and leaves the prefix
+    # marked incomplete.
+    result["walked"] = True
 
     if result["queued"] or result["omitted"]:
         logger.info(

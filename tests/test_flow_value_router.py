@@ -144,6 +144,21 @@ contract Bridger {
         feeToken.transferFrom(address(this), to, amount);
     }
 }
+
+// The two-identity-regime shape: ONE body carrying both a routed move (whose
+// flow selector is the callee's INNER transfer) and a DIRECT call on that same
+// selector. The routed claim must not adopt the direct call's sink.
+contract DecoyRouter {
+    Vault public vault;
+    IERC20 public asset;
+    IERC20 public feeToken;
+    address public feeSink;
+
+    function withdrawWithFee(uint256 amount, address to, uint256 fee) external {
+        vault.exit(to, asset, amount, msg.sender, amount);
+        feeToken.transfer(feeSink, fee);
+    }
+}
 """
 
 
@@ -366,3 +381,64 @@ def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_
         assert (flow["target_kind"]["kind"], flow["target_param_index"]) == ("param", 0)
     assert guarded["target_constraint"] == {"state": "not_determined"}
     assert open_control["target_constraint"] == {"state": "unconstrained_proven"}
+
+
+# --- the sink -> flow join (fix 7) ------------------------------------------
+#
+# ONE witness, TWO identity regimes. ``router_ops`` carries declaration
+# identity; ``sink_receivers``/``sink_ids`` used to join sinks to flows by BARE
+# MOVE-SELECTOR. On a routed claim the flow's selector is by design the
+# CALLEE's inner transfer, so a same-selector DIRECT sink in the entry attached
+# its receiver to the routed claim while ``router_ops`` named a different
+# carrying op.
+
+
+def _witness(contract_name: str, signature: str, claim_id: str, _unit) -> dict:
+    contract = _contract(_unit, contract_name)
+    claims = build_claims(contract, build_effects(contract), {})["functions"][signature]
+    return next(c for c in claims if c["claim_id"] == claim_id)["witness"]
+
+
+_DECOY_SIG = "withdrawWithFee(uint256,address,uint256)"
+_DECOY_ROUTER_SINK = f"{_DECOY_SIG}:sink0:external_call:vault.exit"
+_DECOY_DIRECT_SINK = f"{_DECOY_SIG}:sink1:external_call:feeToken.transfer"
+
+
+def test_routed_claim_does_not_adopt_a_same_selector_direct_sink(_unit):
+    """FALSIFIER: ``withdrawWithFee`` routes through ``vault.exit`` (inner move
+    ``transfer(address,uint256)``) AND calls ``feeToken.transfer`` directly in
+    the same body — the same selector, a different receiver.
+
+    Joining by that bare selector gave the routed claim the FEE TOKEN as its
+    receiver, which is a positive fact about where routed value goes minted
+    from a call that carries none of it.
+    """
+    witness = _witness("DecoyRouter", _DECOY_SIG, "value_router", _unit)
+    assert witness["flows"][0]["router_ops"] == [{"selector": "0x18457e61", "callee": "exit"}]
+
+    assert _DECOY_DIRECT_SINK not in witness["sink_ids"]
+    assert _DECOY_DIRECT_SINK not in witness.get("sink_receivers", {})
+    # The carrier ``router_ops`` names is the one that IS attached.
+    assert witness["sink_ids"] == [_DECOY_ROUTER_SINK]
+    assert witness["sink_receivers"][_DECOY_ROUTER_SINK]["variable"] == "vault"
+
+
+def test_direct_out_claim_in_the_same_body_is_unchanged(_unit):
+    """RECALL: the direct ``out`` flow beside it keeps its own sink and receiver.
+    The routed regime is the only one whose join changed."""
+    witness = _witness("DecoyRouter", _DECOY_SIG, "flow.out", _unit)
+    assert witness["sink_ids"] == [_DECOY_DIRECT_SINK]
+    assert witness["sink_receivers"][_DECOY_DIRECT_SINK]["variable"] == "feeToken"
+
+
+def test_a_routed_flow_with_no_router_ops_withholds_its_sinks():
+    """A routed flow that names no carrying op joins to nothing: the key goes
+    ABSENT rather than being filled from the bare selector. (Artifacts produced
+    before ``router_ops`` existed are exactly this case.)"""
+    from services.static.claims.matchers import flows as flows_matcher
+
+    routed = {"direction": "value_router", "selector": "0xa9059cbb"}
+    direct_sink = {"kind": "external_call", "selector": "0xa9059cbb", "target": "feeToken.transfer"}
+    assert flows_matcher._carries(direct_sink, [routed]) is False
+    # And it is not rescued by the low-level-value arm either.
+    assert flows_matcher._carries({"kind": "external_call", "selector": None, "target": "x.call"}, [routed]) is False

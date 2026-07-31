@@ -391,10 +391,22 @@ def test_the_recorded_router_op_is_projected_into_the_published_witness():
     carries the op identity through verbatim — ``selector`` is the keccak4 of
     the signature the AST records (ABI-canonical only where the parameter types
     lower) and ``callee`` its bare AST name, an intra-unit call identity and
-    never a resolved on-chain target."""
+    never a resolved on-chain target.
+
+    The sink cross-reference joins on that SAME identity: the routed flow's own
+    selector belongs to the callee's inner transfer, so ``vault.exit`` is
+    reachable only through the recorded op."""
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
-        sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
+        sinks=[
+            {
+                "id": "f(address,uint256):sink0:external_call:vault.exit",
+                "kind": "external_call",
+                "target": "vault.exit",
+                "selector": "0x18457e61",
+                "origin": "body",
+            }
+        ],
         flows=[_routed_flow(router_ops=[{"selector": "0x18457e61", "callee": "exit"}])],
     )
     evidence = flows.value_router(ctx, "f(address,uint256)")
@@ -410,7 +422,7 @@ def test_the_recorded_router_op_is_projected_into_the_published_witness():
                 "router_ops": [{"selector": "0x18457e61", "callee": "exit"}],
             }
         ],
-        "sink_ids": [],
+        "sink_ids": ["f(address,uint256):sink0:external_call:vault.exit"],
     }
 
 

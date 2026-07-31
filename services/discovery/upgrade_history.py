@@ -1058,8 +1058,26 @@ def _call_executed_targets(call_executed_logs: list[dict]) -> list[str]:
     return sorted(targets)
 
 
-def _classify_emitter(session, address: str) -> tuple[str | None, str | None, int | None]:
-    """Read the emitter's type off the PERSISTED classification planes.
+def _row_chain_id(chain_name: Any) -> int | None:
+    """The registry chain id for a stored ``Contract.chain`` name, or ``None``.
+
+    NULL, the ``"unknown"`` discovery sentinel and any name the registry does
+    not carry all resolve to ``None`` — a row whose chain is not determined can
+    never be shown to be same-chain, so it must not classify anything.
+    """
+    from utils.chains import UnknownChainError, chain_by_name
+
+    if not isinstance(chain_name, str) or not chain_name.strip():
+        return None
+    try:
+        return chain_by_name(chain_name).chain_id
+    except UnknownChainError:
+        return None
+
+
+def _classify_emitter(session, address: str, *, chain_id: int) -> tuple[str | None, str | None, int | None]:
+    """Read the emitter's type off the PERSISTED classification planes, SCOPED
+    to the chain the receipt was read on.
 
     The fold never classifies anything itself: the instrument is
     ``services.resolution.tracking``'s duck-typed probe sequence
@@ -1068,34 +1086,63 @@ def _classify_emitter(session, address: str) -> tuple[str | None, str | None, in
     a different stage entirely. Reading its output is what makes the emitter
     classification INDEPENDENT of the receipt.
 
+    An address is only an identity WITHIN a chain: a CREATE2 twin deployed at
+    the same address on two chains is two different contracts, and a plane row
+    typed on one of them says nothing about the other. Every plane read is
+    therefore joined through to ``Contract.chain`` and kept only when it
+    resolves to the receipt's ``chain_id``; a row whose contract carries no
+    resolvable chain is dropped rather than assumed local. The classification
+    block is taken from the surviving same-chain rows only, so a probe height
+    measured on one chain can never be published beside another chain's row.
+
     Returns ``(resolved_type, plane, classification_block)``. Zero planes
     answering, or two answering differently, is ``(None, None, None)`` — an
     unclassified emitter can never mint an executor verdict.
     """
     from sqlalchemy import func, select
 
-    from db.models import ControlGraphNode, FunctionPrincipal, PrincipalLabel
+    from db.models import Contract, ControlGraphNode, EffectiveFunction, FunctionPrincipal, PrincipalLabel
 
     lowered = (address or "").lower()
     if not lowered:
         return None, None, None
 
-    models = {
-        "function_principals": FunctionPrincipal,
-        "control_graph_nodes": ControlGraphNode,
-        "principal_labels": PrincipalLabel,
+    statements = {
+        "function_principals": (
+            select(FunctionPrincipal.resolved_type, FunctionPrincipal.details, Contract.chain)
+            .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+            .join(Contract, Contract.id == EffectiveFunction.contract_id)
+            .where(
+                func.lower(FunctionPrincipal.address) == lowered,
+                FunctionPrincipal.resolved_type.isnot(None),
+            )
+        ),
+        "control_graph_nodes": (
+            select(ControlGraphNode.resolved_type, ControlGraphNode.details, Contract.chain)
+            .join(Contract, Contract.id == ControlGraphNode.contract_id)
+            .where(
+                func.lower(ControlGraphNode.address) == lowered,
+                ControlGraphNode.resolved_type.isnot(None),
+            )
+        ),
+        "principal_labels": (
+            select(PrincipalLabel.resolved_type, PrincipalLabel.details, Contract.chain)
+            .join(Contract, Contract.id == PrincipalLabel.contract_id)
+            .where(
+                func.lower(PrincipalLabel.address) == lowered,
+                PrincipalLabel.resolved_type.isnot(None),
+            )
+        ),
     }
     observed: dict[str, list[tuple[str, Any]]] = {}
     for plane in _CLASSIFICATION_PLANES:
-        model = models[plane]
-        rows = session.execute(
-            select(model.resolved_type, model.details).where(
-                func.lower(model.address) == lowered,
-                model.resolved_type.isnot(None),
-            )
-        ).all()
+        rows = [
+            (str(rt), details)
+            for rt, details, chain_name in session.execute(statements[plane]).all()
+            if _row_chain_id(chain_name) == chain_id
+        ]
         if rows:
-            observed[plane] = [(str(rt), details) for rt, details in rows]
+            observed[plane] = rows
 
     kinds = {rt for rows in observed.values() for rt, _ in rows}
     if len(kinds) != 1:
@@ -1244,12 +1291,12 @@ def _decode_receipt(
     }
 
 
-def _resolve_executor(session, decoded: dict) -> dict:
+def _resolve_executor(session, decoded: dict, *, chain_id: int) -> dict:
     """The four-field executor verdict, fail-closed on every branch.
 
     A positive kind needs THREE things at once: a keccak-matched marker log, an
-    emitter the persisted classification plane independently typed, and a
-    receipt whose log set is provably complete. Anything less is
+    emitter the persisted classification plane independently typed ON THIS
+    CHAIN, and a receipt whose log set is provably complete. Anything less is
     ``not_determined``.
     """
     blank = {
@@ -1273,7 +1320,7 @@ def _resolve_executor(session, decoded: dict) -> dict:
             # executed the upgrade is not decidable from the receipt.
             return blank
         emitter = emitters.pop()
-        resolved_type, plane, block = _classify_emitter(session, emitter)
+        resolved_type, plane, block = _classify_emitter(session, emitter, chain_id=chain_id)
         if resolved_type != "timelock":
             return blank
         from db.models import EXECUTOR_KIND_TIMELOCK_ROUTED
@@ -1292,7 +1339,7 @@ def _resolve_executor(session, decoded: dict) -> dict:
         if len(emitters) != 1:
             return blank
         emitter = emitters.pop()
-        resolved_type, plane, block = _classify_emitter(session, emitter)
+        resolved_type, plane, block = _classify_emitter(session, emitter, chain_id=chain_id)
         if resolved_type != "safe":
             return blank
         from db.models import EXECUTOR_KIND_SAFE_DIRECT
@@ -1479,7 +1526,7 @@ def fold_upgrade_transactions(
         if decoded is None:
             out["tx_receipt_unusable"] += 1
             continue
-        verdict = _resolve_executor(session, decoded)
+        verdict = _resolve_executor(session, decoded, chain_id=chain_id)
 
         row = session.get(UpgradeTransaction, (chain_id, tx_hash))
         if row is None:

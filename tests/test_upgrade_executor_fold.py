@@ -175,16 +175,16 @@ def world(db_session):
     db_session.add(protocol)
     db_session.commit()
 
-    made: dict[str, Contract] = {}
+    made: dict[tuple[str, str | None], Contract] = {}
 
-    def contract(address, *, protocol_id=None):
-        key = address.lower()
+    def contract(address, *, protocol_id=None, chain="ethereum"):
+        key = (address.lower(), chain)
         if key in made:
             return made[key]
         row = Contract(
             protocol_id=protocol.id if protocol_id is None else protocol_id,
-            address=key,
-            chain="ethereum",
+            address=address.lower(),
+            chain=chain,
             contract_name="Proxy",
         )
         db_session.add(row)
@@ -206,8 +206,10 @@ def world(db_session):
         db_session.commit()
         return row
 
-    def classify(address, resolved_type, *, details=None):
-        anchor = contract(address)
+    def classify(address, resolved_type, *, details=None, chain="ethereum"):
+        # The plane row reaches its chain through the contract it is anchored
+        # to, which is exactly the join the fold scopes on.
+        anchor = contract(address, chain=chain)
         db_session.add(
             ControlGraphNode(
                 contract_id=anchor.id,
@@ -1023,3 +1025,134 @@ def test_company_overview_publishes_the_count_with_its_basis(world, wire):
     assert entry["basis"]["authorising_eoa"] == "not_determined"
     assert entry["basis"]["timelock_is_decoy"] == "not_determined"
     assert entry["basis"]["recorded_event_coverage"] == "not_determined"
+
+
+# ---------------------------------------------------------------------------
+# Chain scoping of the classification planes (fix 2)
+#
+# An address is an identity only WITHIN a chain. A CREATE2 twin sits at the same
+# 20 bytes on mainnet and on Base and is two unrelated contracts; a plane row
+# typed on one says nothing about the other. The fold reads the planes to mint a
+# POSITIVE verdict, so an unscoped read is a cross-chain fail-open of exactly
+# the class PR #158 closed elsewhere.
+# ---------------------------------------------------------------------------
+
+
+def test_off_chain_twin_does_not_classify_the_emitter(world, wire):
+    """FALSIFIER: the ONLY row typing this address is anchored to a Base
+    contract. The mainnet receipt must stay ``not_determined`` — no kind, no
+    ``executor_address``, no classification block."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](
+        SAFE_DIRECT_EMITTER,
+        "safe",
+        chain="base",
+        details={"safe_protection": {"probe_block": 24_000_000}},
+    )
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == uh.NOT_DETERMINED
+    assert row.executor_address is None
+    assert row.executor_classification_source is None
+    assert row.executor_classified_type is None
+    assert row.executor_classification_block is None
+
+
+def test_same_chain_twin_still_classifies_exactly_as_before(world, wire):
+    """RECALL: the identical seeding on the receipt's own chain reaches the same
+    ``safe_direct`` verdict this file already pins elsewhere. The scoping cuts
+    the off-chain row and nothing else."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](
+        SAFE_DIRECT_EMITTER,
+        "safe",
+        chain="ethereum",
+        details={"safe_protection": {"probe_block": 21_000_000}},
+    )
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == "safe_direct"
+    assert row.executor_address == SAFE_DIRECT_EMITTER
+    assert row.executor_classified_type == "safe"
+    assert row.executor_classification_source == "control_graph_nodes"
+    assert row.executor_classification_block == 21_000_000
+
+
+def test_classification_block_is_never_taken_from_another_chains_probe(world, wire):
+    """FALSIFIER: both chains type the address ``safe``, but only the Base row
+    carries a probe height. Publishing it beside a mainnet row would cite a
+    height measured on a chain this transaction was never on — so the field is
+    absent, not borrowed."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
+    world["classify"](
+        SAFE_DIRECT_EMITTER,
+        "safe",
+        chain="base",
+        details={"safe_protection": {"probe_block": 24_000_000}},
+    )
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == "safe_direct"
+    assert row.executor_classification_block is None
+
+
+def test_a_row_whose_contract_has_no_chain_classifies_nothing(world, wire):
+    """A contract whose chain is NULL is not determined to be on THIS chain, and
+    a not-determined chain can never license a positive verdict."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain=None)
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == uh.NOT_DETERMINED
+    assert row.executor_address is None
+
+
+def test_an_off_chain_disagreement_no_longer_blocks_a_same_chain_verdict(world, wire):
+    """The mirror of the fail-open: the unscoped read also FAILED CLOSED wrongly.
+    A Base row typing the twin ``timelock`` used to collide with the mainnet
+    ``safe`` row and blank the verdict. It is a different contract, so it is not
+    a disagreement at all."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
+    world["classify"](SAFE_DIRECT_EMITTER, "timelock", chain="base")
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == "safe_direct"
+    assert row.executor_classified_type == "safe"
+
+
+def test_same_chain_disagreement_still_blanks_the_verdict(world, wire):
+    """RECALL of the fail-closed arm: two rows on the RECEIPT'S OWN chain that
+    disagree are still an undecidable emitter."""
+    session = world["session"]
+    proxy = world["contract"](PROXY_SAFE_DIRECT)
+    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
+    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
+    world["classify"](SAFE_DIRECT_EMITTER, "timelock", chain="mainnet")  # registry alias for chain 1
+    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
+    _run_fold(session, wire, [proxy.id])
+
+    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
+    assert row.executor_kind == uh.NOT_DETERMINED
+    assert row.executor_address is None

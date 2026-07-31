@@ -17,24 +17,71 @@ from ..types import ClaimEvidence
 from . import _facts
 
 
+def _bare_sink_callee(sink: dict[str, Any]) -> str | None:
+    """The called method's bare name off a sink target (``vault.exit`` → ``exit``)."""
+    target = sink.get("target")
+    if not isinstance(target, str) or "." not in target:
+        return None
+    name = target.rsplit(".", 1)[-1].strip()
+    return name or None
+
+
+def _carries(sink: dict[str, Any], flows: list[dict[str, Any]]) -> bool:
+    """Does this body sink CARRY one of *flows*?
+
+    Two identity regimes meet here, and reading a routed flow with the direct
+    one's rule is what over-attributed. For an ``out``/``in`` flow the move
+    happens at a call in THIS body, so the flow's own selector names the sink
+    exactly. For a ``value_router`` flow the selector belongs to the CALLEE's
+    inner transfer — a selector this body may not call at all — so matching on
+    it means any same-selector DIRECT sink in the entry (a ``token.transfer``
+    beside a ``vault.exit``) is read as the carrier of the routed move and
+    lends the routed claim ITS receiver. The carrier of a routed move is named
+    by ``router_ops``, the producer's own record of the call its walk crossed;
+    that is the identity :func:`_facts.effect_sink_identities` already joins on
+    in process, so the persisted witness now reads the same way.
+
+    A routed flow with no recorded ``router_ops`` names no carrier, so it
+    matches nothing: the join is not determined and the key goes absent rather
+    than being filled from the bare selector.
+    """
+    selector = sink.get("selector")
+    for flow in flows:
+        if flow.get("direction") != "value_router":
+            if (selector is not None and selector == flow.get("selector")) or _is_value_call(sink):
+                return True
+            continue
+        for op in flow.get("router_ops") or []:
+            if not isinstance(op, dict):
+                continue
+            op_selector = op.get("selector")
+            if isinstance(op_selector, str) and op_selector and selector == op_selector:
+                return True
+            # The name travels beside the selector because an interface-typed
+            # parameter makes the DECLARED signature hash to a different one;
+            # it is the join that survives that, and ``effect_sink_identities``
+            # accepts either half for the same reason.
+            op_name = op.get("callee")
+            if isinstance(op_name, str) and op_name and _bare_sink_callee(sink) == op_name:
+                return True
+    return False
+
+
 def _flow_evidence(ctx: ClaimContext, function: str, direction: str) -> ClaimEvidence | None:
     flows = [f for f in _facts.value_flows(ctx, function) if f.get("direction") == direction]
     if not flows:
         return None
 
-    selectors = {f.get("selector") for f in flows if f.get("selector")}
-    sinks = [
-        s
-        for s in _facts.body_sinks(ctx, function)
-        if s.get("kind") == "external_call" and (s.get("selector") in selectors or _is_value_call(s))
-    ]
+    sinks = [s for s in _facts.body_sinks(ctx, function) if s.get("kind") == "external_call" and _carries(s, flows)]
     sink_ids = [s["id"] for s in sinks]
     # Keyed BY SINK ID, not listed per flow: one flow key can cover two sinks
     # with the same selector and different receivers (two different tokens moved
     # by one function), and a bare list gives the consumer no way to say which
-    # receiver belongs to which move. Guarded the ``router_ops`` way — a missing
-    # or empty map leaves the key absent, and absence fails every downstream
-    # precondition rather than licensing one.
+    # receiver belongs to which move. Only sinks ``_carries`` accepted are in
+    # here, so a routed claim can no longer adopt a direct sink's receiver.
+    # Guarded the ``router_ops`` way — a missing or empty map leaves the key
+    # absent, and absence fails every downstream precondition rather than
+    # licensing one.
     sink_receivers = {s["id"]: s["receiver"] for s in sinks if s.get("receiver")}
     exact = any(f.get("kind") == "callee_erc20_selector" for f in flows)
     witness: dict[str, Any] = {
