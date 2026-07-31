@@ -270,7 +270,7 @@ def test_no_module_outside_the_plane_imports_the_position_model():
     }
     offenders = []
     for path in root.rglob("*.py"):
-        if any(part in {".venv", "node_modules", "alembic"} for part in path.parts):
+        if any(part in {".venv", "node_modules", "alembic", ".claude"} for part in path.parts):
             continue
         if path in allowed:
             continue
