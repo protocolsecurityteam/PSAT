@@ -165,7 +165,11 @@ then staleness `NULLS FIRST`, exactly like `snapshot_all_protocols`
 `GET /api/company/{name}/score` → latest `protocol_scores` row, serving the **ledger
 payload verbatim**: `grade_lambda`, `grade_exposure`, `findings[]`,
 `earned_negatives[]`, `warnings[]`, `model_parameters`, `confidence_pct`,
-`perimeter_settled`, and the provenance block. No projection into any other shape.
+`perimeter_state`, and the provenance block. No projection into any other shape.
+(`perimeter_state` is the shipped three-state — `settled`/`unsettled`/
+`not_determined` — superseding the earlier `perimeter_settled` bool: a bool cannot
+represent an unreadable queue, and stamping "unsettled" on a failed read would be a
+positive claim with no witness. Reviewer-ratified 2026-08-01.)
 
 **Frontend is OUT OF SCOPE for this build (ruled 2026-08-01).** The existing score
 page and `site/src/protocolScore.js` will be deleted wholesale in a later session and
@@ -204,8 +208,9 @@ never defer.** When the loop computes, check for queued/processing jobs with tha
 the document. A mid-run score is a real fact about a partial perimeter — witness
 discipline says publish it labeled, not suppress it — and deferring would leave the
 endpoint empty for hours on a long run. The staleness sweep recomputes once the queue
-drains (producing a `perimeter_settled: true` row), and consumers can badge
-provisional rows. The `selection_summary` + `perimeter_spawn_summary` ledgers (which
+drains (producing a settled row), and consumers can badge provisional rows. (Shipped
+as three-state `perimeter_state` — see § Serve — with `not_determined` reserved for a
+failed queue read.) The `selection_summary` + `perimeter_spawn_summary` ledgers (which
 the register already gates coverage claims on, FIELDS §4) belong in the provenance
 block for exactly this reason.
 
@@ -437,8 +442,23 @@ because everything keys off their shape:
   entity keys) — **not resolved copies**, because the fold does the cross-contract
   resolution; the witness tiers / gate inputs the fold needs; and every field's
   three-state branch preserved (a distilled `not_determined` must stay
-  `not_determined`, never a distilled default). Insert-only, job-scoped, replaced
-  wholesale on re-analysis like the other per-job planes.
+  `not_determined`, never a distilled default).
+  **Lifecycle (corrected 2026-08-01, supersedes "insert-only, job-scoped"):** a
+  **current-state plane with contract-scoped wholesale replace**. The original
+  "job-scoped, replaced on re-analysis" wording was unimplementable — re-analysis
+  mints a NEW job (`maybe_queue_reanalysis` → `create_job`), so a job-scoped delete
+  can never remove a prior job's rows, and stale signal sets would accumulate per
+  re-analysis and double-count in the fold. Ruling: identity is
+  `(chain, deployment_address, contract_id, selector, claim_id)` — `contract_id`
+  is in the key because split-proxy secondary implementations share one
+  `deployment_address` (live on this corpus, 4 colliding selector/claim pairs);
+  the distillation writer delete+reinserts all signals for each contract it
+  distills, in one transaction (the `effective_functions` currency pattern);
+  `contract_id` is ON DELETE CASCADE so a contract removed from the perimeter
+  stops charging exposure; `job_id` remains as a provenance column only, never in
+  the identity. The fold's population query reads current rows with no
+  job-currency filtering needed. `protocol_scores` (below) remains the insert-only
+  history plane.
 - **`protocol_scores`** — insert-only base + `_latest` view (mirror
   `contract_balances_latest`). Columns per §1(4): `protocol_id`, `model_version`,
   `computed_at`, `trigger`, `grade_*`, `confidence_pct`, `perimeter_settled`, the

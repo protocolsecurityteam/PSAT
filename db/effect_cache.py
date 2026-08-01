@@ -505,6 +505,35 @@ logger = logging.getLogger(__name__)
 # v34 rows carry it. Stated here so a reader of a v34-era residue knows
 # which key set it was written under; the same unreadable-not-wrong
 # laundering applies.
+#
+# Still v35 — the ``delegatecall.execute`` destination witness gains ``self``:
+# a literal ``address(this)`` operand now publishes ``{target_kind: "self"}``
+# with a proven-constrained ``destination_constraint``
+# (``constrained``/``literal_self``/``pins: true``) where it previously fell
+# through the operand walk's catch-all to ``indeterminate``/
+# ``unresolved_operand`` and ``not_determined``. This is a witness OUTPUT-SHAPE
+# change on a claim whose two prior shape changes both bumped (v13, v17), so the
+# divergence is stated rather than implied. No bump: the claim SET is
+# byte-identical — the mint condition reads only the delegatecall sink ids and
+# the upgrade suppression, so no function gains or loses the claim — and no
+# consumer this cache serves reads the destination witness:
+# ``services/effects/selection.py`` holds ``delegatecall.execute`` in
+# ``_ENROLLMENT_TRANSPARENT_CLAIM_IDS``, keyed on the claim ID alone (the "Still
+# v17" precedent), and the probe shapes its synthesized call from the
+# ``exec.arbitrary`` / value-flow destination verdicts (the v11 argument), never
+# from this one. The candidate shape and the probe input are therefore
+# byte-identical before and after, so a cached verdict remains an answer to the
+# same probe.
+# Reading a v35-era row: ``self`` is only mintable AFTER this change, so a
+# ``self`` destination post-dates it; a literal-``address(this)`` body whose
+# destination reads ``indeterminate``/``unresolved_operand`` pre-dates it and is
+# stale rather than wrong (the operand was never claimed to be open). The two
+# are told apart only by the body, not by the row — ``unresolved_operand`` is
+# still the honest answer for genuinely unsettled operands. Locally: 8 rows
+# carry an ``indeterminate`` delegatecall destination, 7 of them
+# ``multicall(bytes[])`` (``0xac9650d8``, the OZ v5 ``Multicall`` shape this
+# recognizer settles); the 8th is an assembly ``fallback`` whose slot did not
+# fold and is untouched, as are the 2 ``storage_setter`` and 1 ``param`` rows.
 EFFECT_CACHE_SCHEMA_VERSION = 35
 
 # ``contract_surface_hash`` sentinel for kernel rows. A sentinel rather than
