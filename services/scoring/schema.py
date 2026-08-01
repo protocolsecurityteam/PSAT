@@ -270,14 +270,27 @@ class FunctionSignal:
 
     Every three-state field is a required :class:`Tri` or a required state
     string — no defaults, so a distiller that has not decided a state cannot
-    construct the row at all. The optional-looking fields below
-    (``function_id``, ``contract_id``, ``effect_verdict_id``) are plain
-    identifiers, not facts about the protocol; their ``None`` means "no such row
-    to point at", which is why they are the only ones allowed a default.
+    construct the row at all.
+
+    ``contract_id`` is required for the same reason, though it is an identifier
+    rather than a state: it is part of the signal's IDENTITY (split-proxy
+    secondary implementations share one ``deployment_address``, so it is the
+    only thing distinguishing two legitimately different contracts' signals).
+    Defaulting it to ``None`` was only survivable on the persisted path, where
+    the NOT NULL column eventually rejects it — three layers from the distiller
+    that made the mistake. On the §7.5 in-memory CLI path there is no database
+    at all, so a ``None`` would never be caught and split-proxy siblings would
+    collapse into one another in the differential oracle, diverging the two
+    feeding modes that §7.5 guarantees are identical.
+
+    ``function_id`` and ``effect_verdict_id`` do keep their defaults: they are
+    optional back-references, not identity, and their ``None`` honestly means
+    "no such row to point at".
     """
 
     job_id: Any
     protocol_id: int
+    contract_id: int
     chain: str
     deployment_address: str
     function_name: str
@@ -309,7 +322,6 @@ class FunctionSignal:
 
     selector: str = NO_SELECTOR
     function_id: int | None = None
-    contract_id: int | None = None
     effect_verdict_id: int | None = None
 
     def __post_init__(self) -> None:

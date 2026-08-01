@@ -133,6 +133,7 @@ def _signal(**overrides: Any) -> FunctionSignal:
     base: dict[str, Any] = dict(
         job_id=uuid.uuid4(),
         protocol_id=1,
+        contract_id=1,
         chain="ethereum",
         deployment_address="0xdead",
         function_name="setImplementation",
@@ -153,11 +154,32 @@ def test_every_three_state_field_must_be_named():
         FunctionSignal(  # type: ignore[call-arg]
             job_id=uuid.uuid4(),
             protocol_id=1,
+            contract_id=1,
             chain="ethereum",
             deployment_address="0xdead",
             function_name="f",
             claim_id="upgrade.implementation",
         )
+
+
+def test_contract_id_is_required_because_it_is_identity():
+    """R2-B2: split-proxy siblings are only told apart by contract_id.
+
+    On the in-memory CLI path there is no DB to reject a None, so a default
+    would let two siblings collapse into one another in the oracle.
+    """
+    fields = {
+        "job_id": uuid.uuid4(),
+        "protocol_id": 1,
+        "chain": "ethereum",
+        "deployment_address": "0xdead",
+        "function_name": "f",
+        "claim_id": "pause.set",
+        **not_determined_signal_defaults(),
+    }
+    with pytest.raises(TypeError, match="contract_id"):
+        FunctionSignal(**fields)  # type: ignore[call-arg]
+    assert FunctionSignal(contract_id=7, **fields).contract_id == 7
 
 
 def test_fully_undetermined_signal_is_constructible_and_not_scored():
@@ -1082,3 +1104,204 @@ def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
         db_session.query(ProtocolScore).filter_by(protocol_id=other.id).delete()
         db_session.query(Protocol).filter_by(id=other.id).delete()
         db_session.commit()
+
+
+# --------------------------------------------------------------------------
+# Round-2: all-or-nothing replace, cross-field agreement, grouping guard
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scoring_protocol):
+    """R2-B1: validation runs before the delete, so a bad list changes nothing.
+
+    The distillation call site is fail-forward, so it catches the raise and
+    commits anyway. If the delete had already run, that commit would persist a
+    partially replaced contract — charging a subset of its exposure with no
+    trace that the rest went missing.
+    """
+    fx = scoring_protocol
+    db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="passed to replace"):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[
+                _signal_for(fx, selector="0x00000009"),
+                _signal_for(fx, selector="0x0000000a", contract_id=fx.sibling.id),
+            ],
+            job_id=fx.later_job.id,
+        )
+    # The fail-forward caller commits regardless.
+    db_session.commit()
+
+    survivors = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
+    assert sorted(r.selector for r in survivors) == ["0x00000001", "0x00000002"]
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_a_rejected_first_element_does_not_drop_the_contract(db_session, scoring_protocol):
+    """The raise-on-first-element case: the contract must not vanish."""
+    fx = scoring_protocol
+    db_session.add(_row(fx))
+    db_session.commit()
+
+    with pytest.raises(ValueError):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[_signal_for(fx, contract_id=fx.sibling.id)],
+            job_id=fx.later_job.id,
+        )
+    db_session.commit()
+
+    assert db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).count() == 1
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_rejects_a_signal_claiming_another_protocol(db_session, scoring_protocol):
+    """N-a: a mismatched protocol_id would be read by the WRONG protocol's fold."""
+    fx = scoring_protocol
+    other = Protocol(name=f"scoretest-wrong-{uuid.uuid4().hex[:8]}")
+    db_session.add(other)
+    db_session.commit()
+    try:
+        with pytest.raises(ValueError, match="claims protocol"):
+            replace_contract_signals(
+                db_session,
+                contract_id=fx.contract.id,
+                signals=[_signal_for(fx, protocol_id=other.id)],
+                job_id=fx.job.id,
+            )
+        db_session.rollback()
+    finally:
+        db_session.query(Protocol).filter_by(id=other.id).delete()
+        db_session.commit()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_rejects_a_signal_claiming_another_chain(db_session, scoring_protocol):
+    """N-a: chain is part of the entity key; a mismatch mis-keys every value."""
+    fx = scoring_protocol
+    with pytest.raises(ValueError, match="claims chain"):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[_signal_for(fx, chain="optimism")],
+            job_id=fx.job.id,
+        )
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_accepts_chain_aliases_of_the_contracts_chain(db_session, scoring_protocol):
+    """The agreement test coalesces, so "mainnet" is not a false mismatch."""
+    fx = scoring_protocol
+    replace_contract_signals(
+        db_session,
+        contract_id=fx.contract.id,
+        signals=[_signal_for(fx, chain="mainnet")],
+        job_id=fx.job.id,
+    )
+    db_session.commit()
+    assert db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).count() == 1
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_rejects_an_uppercased_deployment_address(db_session, scoring_protocol):
+    fx = scoring_protocol
+    with pytest.raises(ValueError, match="lowercased"):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[_signal_for(fx, deployment_address=SHARED_ADDRESS.upper())],
+            job_id=fx.job.id,
+        )
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_refuses_an_unknown_contract(db_session, scoring_protocol):
+    fx = scoring_protocol
+    with pytest.raises(ValueError, match="does not exist"):
+        replace_contract_signals(db_session, contract_id=-1, signals=[], job_id=fx.job.id)
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_second_replace_of_one_contract_in_a_transaction_raises(db_session, scoring_protocol):
+    """Item-4: grouping by (contract_id, deployment_address) must not truncate.
+
+    The second call's delete would drop the first call's rows, leaving the
+    contract carrying only its last deployment group — silent recall loss.
+    """
+    fx = scoring_protocol
+    replace_contract_signals(
+        db_session,
+        contract_id=fx.contract.id,
+        signals=[_signal_for(fx, selector="0x00000001")],
+        job_id=fx.job.id,
+    )
+    with pytest.raises(ValueError, match="complete signal set"):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[_signal_for(fx, selector="0x00000002")],
+            job_id=fx.job.id,
+        )
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_the_grouping_guard_resets_between_transactions(db_session, scoring_protocol):
+    """The invariant is per-pass: the next distillation may replace again."""
+    fx = scoring_protocol
+    replace_contract_signals(
+        db_session,
+        contract_id=fx.contract.id,
+        signals=[_signal_for(fx, selector="0x00000001")],
+        job_id=fx.job.id,
+    )
+    db_session.commit()
+
+    replace_contract_signals(
+        db_session,
+        contract_id=fx.contract.id,
+        signals=[_signal_for(fx, selector="0x00000002")],
+        job_id=fx.later_job.id,
+    )
+    db_session.commit()
+
+    rows = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
+    assert [r.selector for r in rows] == ["0x00000002"]
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_siblings_may_each_be_replaced_in_one_transaction(db_session, scoring_protocol):
+    """The guard is per contract, not per pass — siblings are distinct contracts."""
+    fx = scoring_protocol
+    replace_contract_signals(db_session, contract_id=fx.contract.id, signals=[_signal_for(fx)], job_id=fx.job.id)
+    replace_contract_signals(
+        db_session,
+        contract_id=fx.sibling.id,
+        signals=[_signal_for(fx, contract_id=fx.sibling.id)],
+        job_id=fx.job.id,
+    )
+    db_session.commit()
+    assert db_session.query(FunctionScoreSignal).filter_by(protocol_id=fx.protocol.id).count() == 2
+
+
+def test_destination_bearing_claims_exist_in_the_claims_registry():
+    """N-b: a renamed or new destination-driven claim must not lose the guard."""
+    from services.static.claims.matchers import discover
+    from services.static.claims.registry import registry
+
+    discover()
+    registry_ids = set(registry())
+    unknown = [c for c in DESTINATION_BEARING_CLAIMS if c not in registry_ids]
+    assert unknown == [], (
+        f"DESTINATION_BEARING_CLAIMS names claims the registry does not define: {unknown}. "
+        "Rename them in utils/scoring_status.py or the destination guard stops firing."
+    )
