@@ -206,7 +206,16 @@ def compute_protocol_score(
         ),
     }
 
-    scored = bool(findings)
+    # The three grade figures stand or fall together. An exposure ratio with no
+    # priced denominator is not a 100 — it is a quantity that was never
+    # measured — so a protocol with findings but no priced value publishes the
+    # findings and withholds the grade, with the withheld figure in provenance.
+    scored = bool(findings) and grade_exposure is not None
+    if findings and not scored:
+        provenance["grade_withheld"] = {
+            "grade_lambda_computed": grade_lambda,
+            "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
+        }
     return ScoreDocument(
         protocol_id=protocol_id,
         model_version=MODEL_VERSION,
