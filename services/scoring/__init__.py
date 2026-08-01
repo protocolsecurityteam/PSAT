@@ -17,6 +17,8 @@ identical code.
 
 from __future__ import annotations
 
+from services.scoring.distill import distill_contract_signals, distill_job_signals
+from services.scoring.fold import compute_protocol_score
 from services.scoring.population import (
     current_signal_rows,
     current_signals_for_protocol,
@@ -43,8 +45,11 @@ __all__ = [
     "ScoreDocument",
     "Tri",
     "coalesce_chain",
+    "compute_protocol_score",
     "current_signal_rows",
     "current_signals_for_protocol",
+    "distill_contract_signals",
+    "distill_job_signals",
     "entity_key",
     "is_entity_key",
     "not_determined_signal_defaults",

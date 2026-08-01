@@ -513,8 +513,10 @@ def _exec_destination(claim_id: str, witness: dict[str, Any]) -> _Destination:
         severity = (
             K.DEST_SEVERITY_DELEGATECALL_SELF if claim_id == "delegatecall.execute" else K.DEST_SEVERITY_EXEC_SELF
         )
-        binding = constraint.get("binding")
-        notes = ("destination_self_corroborated_by_binding",) if binding in ("literal_self", "self") else ()
+        corroborated = constraint.get("binding") in ("destination_operand", "literal_self", "self") or constraint.get(
+            "guard"
+        ) in ("literal_self", "self")
+        notes = ("destination_self_corroborated_by_binding",) if corroborated else ()
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_CONSTRAINED_PROVEN, "self"),
             severity=severity,
