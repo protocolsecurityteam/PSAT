@@ -70,6 +70,20 @@ def current_signals_for_protocol(session: Session, protocol_id: int) -> list[Fun
     return [signal_from_row(row) for row in current_signal_rows(session, protocol_id)]
 
 
+def order_signals(signals: list[FunctionSignal]) -> list[FunctionSignal]:
+    """The population order, for signals that never went through the database.
+
+    The offline CLI distils every contract in memory and folds the result, so it
+    has no query to inherit an ORDER BY from. The fold's replayability rests on a
+    total order over the population, and the only order that keeps the two
+    feeding modes identical is the one :func:`current_signal_rows` pins.
+    """
+    return sorted(
+        signals,
+        key=lambda s: (s.chain, s.deployment_address, s.contract_id, s.selector, s.claim_id),
+    )
+
+
 def replace_contract_signals(
     session: Session,
     *,
