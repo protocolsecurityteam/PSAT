@@ -152,6 +152,8 @@ def test_the_corpus_has_delegatecall_execution_rows_at_all():
         "execFixedSlot(bytes)",
         "execModule(bytes)",
         "execModuleViaLibrary(bytes)",
+        "execSelf(bytes)",
+        "execSelfViaLibrary(bytes)",
         "execUserModule(bytes)",
         "fallback()",
     ]
@@ -196,6 +198,36 @@ def test_the_a8_claim_resolves_all_five_delegatecall_routes():
     assert _claim(fns["execUserModule(bytes)"], "delegatecall.execute")["witness"]["destination"]["reason"] == (
         "mapping_or_array_element"
     )
+
+
+def test_a_literal_address_this_destination_is_proven_self_on_both_routes():
+    """The corpus row for the ``self`` recognizer, and its discriminating pair is
+    the whole set above: an ``address(this)`` destination is a compile-time value
+    with no writer and no caller input, so it is PROVEN rather than one more
+    thing the walk did not settle — and the mapping-element row next to it must
+    stay ``indeterminate``, which is what keeps ``self`` from being a catch-all
+    in the other direction.
+
+    Both routes carry it because only the library one exercises the binding
+    substitution; without the direct sibling a binding regression would be
+    invisible, and without the library one the OZ v5 ``Multicall`` shape (the
+    entire production population of this destination) would be."""
+    fns = _functions(DELEGATECALL)
+    for name in ("execSelf(bytes)", "execSelfViaLibrary(bytes)"):
+        witness = _claim(fns[name], "delegatecall.execute")["witness"]
+        assert witness["destination"] == {"target_kind": "self"}, name
+        # A proven fixed destination earns a proven-constrained verdict; the
+        # unsettled kinds get ``not_determined`` and must not be told apart from
+        # this one only by the ``target_kind`` key.
+        assert witness["destination_constraint"] == {
+            "state": "constrained",
+            "guard": "literal_self",
+            "pins": True,
+            "binding": "destination_operand",
+        }, name
+    unsettled = _claim(fns["execUserModule(bytes)"], "delegatecall.execute")["witness"]
+    assert unsettled["destination"]["target_kind"] == "indeterminate"
+    assert unsettled["destination_constraint"] == {"state": "not_determined"}
 
 
 def test_a_two_site_fold_publishes_the_union_never_one_sites_answer():

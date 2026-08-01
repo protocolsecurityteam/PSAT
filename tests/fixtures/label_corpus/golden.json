@@ -4127,6 +4127,125 @@
           }
         },
         {
+          "full_name": "execSelf(bytes)",
+          "selector": "0xbebd3a90",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "self"
+                },
+                "destination_constraint": {
+                  "binding": "destination_operand",
+                  "guard": "literal_self",
+                  "pins": true,
+                  "state": "constrained"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execSelf(bytes):sink0:delegatecall:TMP_36"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [
+            {
+              "target": "TMP_36",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "execSelfViaLibrary(bytes)",
+          "selector": "0x66f17fd4",
+          "effect_labels": [
+            "delegatecall_execution"
+          ],
+          "action_summary": "Executes delegatecall-controlled logic.",
+          "claims": [
+            {
+              "claim_id": "delegatecall.execute",
+              "tier": "idiom_structural",
+              "witness": {
+                "destination": {
+                  "target_kind": "self"
+                },
+                "destination_constraint": {
+                  "binding": "destination_operand",
+                  "guard": "literal_self",
+                  "pins": true,
+                  "state": "constrained"
+                },
+                "kind": "delegatecall_sink",
+                "sink_ids": [
+                  "execSelfViaLibrary(bytes):sink1:delegatecall:target"
+                ]
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [
+            {
+              "target": "this.functionDelegateCall",
+              "selector": "0xee33b7e2",
+              "origin": "body",
+              "receiver": {
+                "auto_getter_selector": null,
+                "binding": "not_determined",
+                "mutability": null,
+                "not_determined_reason": "unsupported_variable_kind",
+                "param_index": null,
+                "param_scope": null,
+                "receiver_provenance": "not_determined",
+                "variable": null,
+                "visibility": null
+              }
+            }
+          ],
+          "delegatecall_sinks": [
+            {
+              "target": "target",
+              "origin": "body"
+            }
+          ],
+          "effect_targets": [
+            "this.functionDelegateCall"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "business"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
           "full_name": "execUserModule(bytes)",
           "selector": "0x18fb7353",
           "effect_labels": [
