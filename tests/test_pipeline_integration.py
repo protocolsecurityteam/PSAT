@@ -31,6 +31,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.support.balance_stubs import page, pinned_native_unavailable
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # offline: the dependency phase probes eth_getCode and company mode resolves the
@@ -42,10 +44,12 @@ pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_defillama_prot
 def _stub_etherscan_balances(monkeypatch):
     """Offline: the resolution worker's ``_fetch_balances`` probes ETH + token
     balances via Etherscan; benign defaults (these tests assert on address
-    rewriting / handoff, not balances)."""
+    rewriting / handoff, not balances). The same call also issues a pinned
+    native read over a separate wire, stubbed here to its unavailable outcome."""
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+    pinned_native_unavailable(monkeypatch)
 
 
 # ---------------------------------------------------------------------------

@@ -133,6 +133,21 @@ def test_topic0s_cache_dedups_detection(monkeypatch):
 _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 
 
+@pytest.fixture(autouse=True)
+def _no_creation_witness(monkeypatch):
+    """Enrollment grades its seed with three pinned chain reads before writing
+    the cursor. Nothing here asserts that grade — the subject is WHICH topics get
+    enrolled — so the wire is stubbed to the unreachable-RPC failure, whose
+    documented outcome is ``(None, not_determined)``. ``eli.rpc_request`` is the
+    witness's only user; the role-store probe's own wire is ``rss.rpc_request``,
+    stubbed separately by the tests that care."""
+
+    def _no_wire(*_a, **_kw):
+        raise RuntimeError("no rpc")
+
+    monkeypatch.setattr(eli, "rpc_request", _no_wire)
+
+
 def _can_connect() -> bool:
     if not _DB_URL:
         return False

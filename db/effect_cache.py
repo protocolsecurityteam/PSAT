@@ -859,6 +859,15 @@ DEPLOYMENT_PLANE_KEYS = (
     # bound as a severity reducer (``claimsVocab.pauseQualifier``). Not a
     # kernel-signature key either.
     "auto_expiry",
+    # The height THIS observation was taken at and the scope of the pin that fixed
+    # it (``harness._stamp_observation_height``). A world state, not a property of
+    # the bytecode: served from the cache they would tell deployment B that its
+    # verdict was observed at the block deployment A was probed at — the same
+    # fabricated-provenance shape the blast radius above had, and worse, because a
+    # replay at that height would not even reproduce B's row. A twin's plain hit
+    # publishes neither key, which reads as "no observation height of my own".
+    "block_number",
+    "block_source",
 )
 
 

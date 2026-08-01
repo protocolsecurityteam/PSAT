@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.support.balance_stubs import page, pinned_native_unavailable
+
 
 def _row(**attrs: Any) -> Any:
     """SimpleNamespace stand-in for a Job/Contract row, typed Any so call sites
@@ -200,16 +202,20 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
 
     def _tokens(addr, *, chain_id=1):
         captured["token_chain"] = chain_id
-        return []
+        return page([])
 
     def _price(chain_id=1):
         captured["price_chain"] = chain_id
         return 0.0
 
     monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", _tokens)
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
     monkeypatch.setattr("utils.etherscan.get_native_price", _price)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
+    # The chain id under test is the one on the Etherscan reads; the pinned
+    # native read is a separate wire on the same path, stubbed to its
+    # unavailable outcome so the assertions stay about Etherscan.
+    pinned_native_unavailable(monkeypatch)
 
     worker = ResolutionWorker()
     session = MagicMock()

@@ -127,6 +127,20 @@ def test_external_authority_address_wins_over_proxy():
 _DB_URL: str = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
 
 
+@pytest.fixture(autouse=True)
+def _no_creation_witness(monkeypatch):
+    """Enrollment grades its seed with three pinned chain reads before writing
+    the cursor. Nothing here asserts that grade — the subject is which ADDRESS
+    the cursor lands on — so the wire is stubbed to the unreachable-RPC failure,
+    whose documented outcome is ``(None, not_determined)``."""
+    import workers.event_log_indexer as eli
+
+    def _no_wire(*_a, **_kw):
+        raise RuntimeError("no rpc")
+
+    monkeypatch.setattr(eli, "rpc_request", _no_wire)
+
+
 def _can_connect() -> bool:
     if not _DB_URL:
         return False

@@ -249,6 +249,7 @@ def db_session():
         RoleDefinition,
         SourceFile,
         UpgradeEvent,
+        UpgradeTransaction,
         WatchedProxy,
     )
 
@@ -283,6 +284,8 @@ def db_session():
             Contract,
             Job,
             Protocol,
+            # After Contract: upgrade_events cascade from it and hold the FK.
+            UpgradeTransaction,
         ]:
             try:
                 session.query(model).delete()

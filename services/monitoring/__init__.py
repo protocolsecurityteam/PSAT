@@ -21,8 +21,10 @@ from typing import Any
 
 from db.queue import (
     HEARTBEAT_PROTOCOL_POLLER,
+    HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
+    HEARTBEAT_ROLE_HOLDER_PLANE,
     record_heartbeat,
 )
 
@@ -30,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "HEARTBEAT_PROTOCOL_POLLER",
+    "HEARTBEAT_PROTOCOL_RESTAKING",
     "HEARTBEAT_PROTOCOL_SCANNER",
     "HEARTBEAT_PROTOCOL_TVL",
+    "HEARTBEAT_ROLE_HOLDER_PLANE",
     "emit_monitor_cycle",
 ]
 

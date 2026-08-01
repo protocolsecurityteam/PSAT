@@ -564,7 +564,7 @@ def value_out(
     static_shape: str | None = None,
     static_destination: str | None = None,
     value_holders: Sequence[AssetHolding] = (),
-    acting_balance_usd: float = 0.0,
+    acting_balance_usd: float | None = None,
     protocol_tvl_usd: float | None = None,
     gate_ref: str = "",
     seeder: Seeder | None = None,
@@ -1546,7 +1546,7 @@ def _add_reach(
     concrete: dict[str, Any],
     base_call: SimCallResult,
     value_holders: Sequence[AssetHolding],
-    acting_balance_usd: float,
+    acting_balance_usd: float | None,
     protocol_tvl_usd: float | None = None,
 ) -> None:
     """Downstream value-reach. From the SAME fork execution of F, a value-holder
@@ -1572,6 +1572,13 @@ def _add_reach(
       millions** — a proven-absence sentence minted out of a non-observation. The
       floor is still recorded, under a name that says what it is, and the key that
       means "measured reach" is ABSENT.
+    * ``reach_determined: False`` + ``reach_indeterminate: True`` and NO
+      ``observed_reach_floor_usd`` — the same non-observation, and no balance row was
+      witnessed for the acting deployment either (``acting_balance_usd is None``), so
+      there is no floor to state. The floor key's ABSENCE is the witness; it is never
+      published as ``null`` and never as ``0.0``. A floor of ``0.0`` on this branch
+      means a balance row WAS read and summed to zero — a different, weaker-but-real
+      fact — which is why the two cannot share a payload.
     * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
       ``observed_reach_holders`` / ``observed_reach_assets`` /
       ``observed_reach_unvalued_pairs`` — value WAS witnessed leaving a holder and
@@ -1704,7 +1711,8 @@ def _add_reach(
     if not reach_holders:
         concrete["reach_determined"] = False
         concrete["reach_indeterminate"] = True
-        concrete["observed_reach_floor_usd"] = acting_balance_usd
+        if acting_balance_usd is not None:
+            concrete["observed_reach_floor_usd"] = acting_balance_usd
         return
     concrete["observed_reach_holders"] = sorted(reach_holders)
     concrete["observed_reach_assets"] = sorted(reach_assets)

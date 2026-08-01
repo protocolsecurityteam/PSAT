@@ -113,12 +113,21 @@ def _fn(
     return f
 
 
-def _balance(session: Session, contract_id: int, usd: float | Decimal | str) -> None:
+def _balance(
+    session: Session, contract_id: int, usd: float | Decimal | str, *, raw_balance: str = "1000000000000000000"
+) -> None:
+    """One NATIVE holdings row.
+
+    ``raw_balance`` defaults to a positive quantity because that is the only
+    shape either writer produces — both gate their native insert on ``> 0`` — and
+    a holdings row is a WITNESSED POSITIVE QUANTITY. Pass ``"0"`` to build the
+    unwitnessed shape a holdings reader must refuse.
+    """
     session.add(
         ContractBalance(
             contract_id=contract_id,
             token_address=None,  # native
-            raw_balance="0",
+            raw_balance=raw_balance,
             decimals=18,
             usd_value=usd,
         )
@@ -1290,6 +1299,11 @@ def test_appendix_a_funnel_on_dev_db():
     if eng is None:
         pytest.skip("dev psat DB not reachable")
     with Session(eng) as s:
+        # The dev DB is a snapshot of a past run and is treated as read-only, so
+        # it lags the migration chain. Skip rather than migrate it: this test is
+        # data-gated by design and a missing relation is the same "absent" case.
+        if not s.execute(text("SELECT to_regclass('public.contract_balances_latest')")).scalar_one():
+            pytest.skip("dev DB predates the balance-provenance migration")
         present = s.execute(
             text(
                 "SELECT count(*) FROM effective_functions ef "

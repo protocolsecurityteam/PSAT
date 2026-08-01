@@ -16,21 +16,46 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
     ContractBalance,
+    ContractBalanceFetch,
     ControllerValue,
     Job,
     JobStage,
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, find_existing_job_for_address, get_artifact, store_artifact
+from db.queue import create_job, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
+from services.discovery.perimeter import queue_discovered_contracts
+from services.monitoring.balance_reads import (
+    native_status_for,
+    pinned_native_balances,
+    prune_balance_fetches,
+)
+from services.monitoring.role_holder_cycle import (
+    OUTCOME_GATE_CLOSED,
+    OUTCOME_NO_REGISTRY,
+    OUTCOME_NO_ROWS,
+    OUTCOME_ROWS_WRITTEN,
+    access_control_gate_open,
+)
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
 )
+from services.resolution.flow_asset_plane import (
+    collect_asset_receivers,
+    count_resolved,
+    resolve_flow_asset_addresses,
+)
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
+from services.resolution.role_holder_plane import (
+    persist_role_holder_planes,
+    pin_probe_block,
+    resolve_role_holder_planes,
+)
 from services.resolution.tracking import build_control_snapshot
+from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from utils.rpc import require_rpc_url
@@ -306,6 +331,58 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
+        # Isolated for the same reason as the dependency edges above: this plane
+        # publishes only lower bounds, so it must never be able to fail a stage
+        # that proved something else.
+        try:
+            self._resolve_role_holder_plane(
+                session,
+                job,
+                chain_id=chain_id,
+                rpc_url=rpc_url,
+                registry_address=proxy_address or job.address,
+            )
+        except Exception as exc:
+            session.rollback()
+            record_degraded(
+                phase="resolution_role_holder_plane",
+                exc=exc,
+                context={"address": job.address or "0x0"},
+            )
+            logger.warning(
+                "Job %s: role-holder plane resolution failed: %s",
+                job.id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+
+        # Isolated on the same terms as the two steps above, and for the same
+        # reason: this plane can only ADD addresses to sinks that had none, so a
+        # failure here costs pricing coverage and proves nothing false. It must
+        # never fail a stage that already resolved a control graph.
+        try:
+            self._resolve_flow_asset_addresses(
+                session,
+                job,
+                chain_id=chain_id,
+                rpc_url=rpc_url,
+                deployment_address=proxy_address or job.address,
+                proven_proxied=bool(proxy_address),
+            )
+        except Exception as exc:
+            session.rollback()
+            record_degraded(
+                phase="resolution_flow_asset_plane",
+                exc=exc,
+                context={"address": job.address or "0x0"},
+            )
+            logger.warning(
+                "Job %s: flow asset address resolution failed: %s",
+                job.id,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+
         self.update_detail(
             session,
             job,
@@ -317,6 +394,146 @@ class ResolutionWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
+
+    def _resolve_role_holder_plane(
+        self,
+        session: Session,
+        job: Job,
+        *,
+        chain_id: int,
+        rpc_url: str,
+        registry_address: str | None,
+    ) -> int:
+        """Publish this registry's role floors. Returns the rows written.
+
+        The opportunistic fast path: it refreshes whatever this job's own
+        registry can prove while the stage is already here. The periodic
+        refresher (``services.monitoring.role_holder_cycle``) is what guarantees
+        a registry is reached at all, on a clock that does not depend on a job
+        arriving for it.
+
+        The gate is cursor EXISTENCE on both AccessControl topics, not warmth. A
+        cold cursor still mints a row whose floor is withheld (``holders`` NULL,
+        ``coverage`` partial); skipping it instead would erase the distinction
+        between a registry with no roles and a registry nothing was read from.
+        Everything past that precondition is the module's to refuse.
+
+        Every outcome is recorded — a closed gate, an open gate that resolved
+        nothing, and N rows written. They are three different facts, and a metric
+        that fires only on the third makes the first two indistinguishable from
+        the stage never running.
+
+        The registry is the RUNTIME address — the proxy an impl job's logs are
+        actually emitted at, never the implementation its ``contracts`` row is
+        keyed to.
+        """
+        if not registry_address:
+            self._record_role_plane_outcome(job, None, OUTCOME_NO_REGISTRY, 0)
+            return 0
+        if not access_control_gate_open(session, chain_id=chain_id, registry_address=registry_address):
+            self._record_role_plane_outcome(job, registry_address, OUTCOME_GATE_CLOSED, 0)
+            return 0
+
+        rows = resolve_role_holder_planes(
+            session,
+            chain_id=chain_id,
+            registry_address=registry_address,
+            rpc_url=rpc_url,
+        )
+        if not rows:
+            self._record_role_plane_outcome(job, registry_address, OUTCOME_NO_ROWS, 0)
+            return 0
+        written = persist_role_holder_planes(session, rows)
+        session.commit()
+        self._record_role_plane_outcome(job, registry_address, OUTCOME_ROWS_WRITTEN, written)
+        return written
+
+    @staticmethod
+    def _record_role_plane_outcome(job: Job, registry_address: str | None, outcome: str, written: int) -> None:
+        """One metric and one log line per pass, whatever the pass concluded."""
+        record_stage_metric("role_holder_planes", written)
+        record_stage_metric("role_holder_plane_outcome", outcome)
+        logger.info(
+            "Job %s: role-holder plane %s for registry %s (%d row(s))",
+            job.id,
+            outcome,
+            registry_address or "0x0",
+            written,
+            extra={
+                "registry_address": registry_address,
+                "outcome": outcome,
+                "role_holder_planes": written,
+            },
+        )
+
+    def _resolve_flow_asset_addresses(
+        self,
+        session: Session,
+        job: Job,
+        *,
+        chain_id: int,
+        rpc_url: str,
+        deployment_address: str | None,
+        proven_proxied: bool,
+    ) -> int:
+        """Dereference this job's flow-sink asset getters. Returns rows published.
+
+        The address read at is the RUNTIME one — the proxy for an implementation
+        in proxy context, else the job's own address. That is also the sole basis
+        for ``proven_proxied``: an implementation job carries its proxy in the
+        request, and that is an earned fact about where this code executes. A job
+        with no proxy in its request is NOT thereby proven unproxied, which is
+        exactly why the invariant's other value is ``not_determined``.
+
+        The height comes from ``pin_probe_block`` — confirmation-depth-deep and
+        hash-witnessed. When it cannot be pinned nothing is read: falling back to
+        ``"latest"`` would publish an address at an unrecorded, unrepeatable
+        height, and every row here is a now-fact that lives or dies by its block.
+        """
+        if not deployment_address:
+            return 0
+        effects = get_artifact(session, job.id, "effects")
+        if not isinstance(effects, dict):
+            return 0
+        receivers = collect_asset_receivers(effects)
+        if not receivers:
+            return 0
+        probe_block = pin_probe_block(rpc_url, chain_id=chain_id)
+        if probe_block is None:
+            logger.warning(
+                "Job %s: could not pin a probe block; flow asset addresses withheld",
+                job.id,
+            )
+            return 0
+        payload = resolve_flow_asset_addresses(
+            receivers,
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            deployment_address=deployment_address,
+            proven_proxied=proven_proxied,
+            probe_block=probe_block,
+        )
+        # Upsert on (job_id, name): a re-run replaces the payload wholesale at a
+        # new pinned height rather than accumulating, so no stale address ever
+        # sits beside a fresh one pretending to share its block.
+        store_artifact(session, job.id, "flow_asset_addresses", data=payload)
+        session.commit()
+        resolved = count_resolved(payload)
+        record_stage_metric("flow_asset_addresses", resolved)
+        logger.info(
+            "Job %s: flow asset plane resolved %d/%d receiver(s) at block %d",
+            job.id,
+            resolved,
+            len(receivers),
+            probe_block.number,
+            extra={
+                "deployment_address": deployment_address,
+                "flow_asset_receivers": len(receivers),
+                "flow_asset_addresses": resolved,
+                "probe_block": probe_block.number,
+            },
+        )
+        return len(receivers)
 
     def _fetch_balances(
         self,
@@ -332,7 +549,13 @@ class ResolutionWorker(BaseWorker):
         ``chain_id`` is required: it scopes every Etherscan v2 read to
         the job's chain so an L2 job records L2 balances/prices, not mainnet
         ones. A chainless balance fetch can no longer default to mainnet."""
-        from utils.etherscan import get_eth_balance, get_native_price, get_token_balances, parallel_get
+        from utils.etherscan import (
+            TokenBalancePage,
+            get_eth_balance,
+            get_native_price,
+            get_token_balances_page,
+            parallel_get,
+        )
 
         address = job.address
         if not address or not contract_row:
@@ -342,13 +565,19 @@ class ResolutionWorker(BaseWorker):
         target_address = request.get("proxy_address") or address
 
         self.update_detail(session, job, "Fetching token balances")
+        # One pinned native read first. A zero is only ever publishable as a
+        # PROVEN zero from here: Etherscan's ``account/balance`` is ``tag=latest``
+        # and its answer carries no height. Failure drops through to the unpinned
+        # path below, where the same zero is not_determined.
+        pinned_block, pinned_wei = pinned_native_balances([target_address], chain_id=chain_id)
+
         # Fan out the three Etherscan calls (eth balance, token balances, eth
         # price). All three serialise on the global rate lock, so threading
         # only stacks RTTs — the limiter is preserved.
         results = parallel_get(
             {
                 "eth_wei": (lambda: get_eth_balance(target_address, chain_id=chain_id)),
-                "tokens": (lambda: get_token_balances(target_address, chain_id=chain_id)),
+                "tokens": (lambda: get_token_balances_page(target_address, chain_id=chain_id)),
                 "native_price": (lambda: get_native_price(chain_id)),
             },
             heartbeat=heartbeat,
@@ -356,16 +585,18 @@ class ResolutionWorker(BaseWorker):
 
         eth_wei_raw = results.get("eth_wei")
         tokens_raw = results.get("tokens")
-        if isinstance(eth_wei_raw, BaseException) or isinstance(tokens_raw, BaseException):
-            primary_exc = eth_wei_raw if isinstance(eth_wei_raw, BaseException) else tokens_raw
+        native_failed = isinstance(eth_wei_raw, BaseException)
+        tokens_failed = isinstance(tokens_raw, BaseException)
+        if native_failed or tokens_failed:
+            primary_exc = eth_wei_raw if native_failed else tokens_raw
             assert isinstance(primary_exc, BaseException)
             record_degraded(
                 phase="balance_fetch",
                 exc=primary_exc,
                 context={
                     "address": target_address,
-                    "eth_failed": isinstance(eth_wei_raw, BaseException),
-                    "tokens_failed": isinstance(tokens_raw, BaseException),
+                    "eth_failed": native_failed,
+                    "tokens_failed": tokens_failed,
                 },
             )
             logger.warning(
@@ -374,18 +605,75 @@ class ResolutionWorker(BaseWorker):
                 eth_wei_raw,
                 tokens_raw,
             )
-            return
-        eth_wei = cast(int, eth_wei_raw)
-        tokens = cast(list, tokens_raw)
+        page = (
+            TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
+            if tokens_failed
+            else cast(TokenBalancePage, tokens_raw)
+        )
+        tokens = page.rows
 
-        # Clear old balances
-        session.query(ContractBalance).filter(ContractBalance.contract_id == contract_row.id).delete()
+        # The pinned word wins when there is one; otherwise the unpinned answer,
+        # or nothing at all when the read failed. ``eth_wei is None`` is the
+        # not-known state and never becomes a zero.
+        eth_wei: int | None
+        native_block: int | None
+        if pinned_block is not None and target_address.lower() in pinned_wei:
+            eth_wei = pinned_wei[target_address.lower()]
+            native_block = pinned_block
+        else:
+            native_block = None
+            eth_wei = None if native_failed else cast(int, eth_wei_raw)
+
+        native_status = native_status_for(
+            wei=eth_wei, pinned=native_block is not None, failed=native_failed and native_block is None
+        )
+
+        # The fetch row is written even when a half failed, so a failure leaves a
+        # persisted trace of the same shape the TVL writer leaves. The earlier
+        # early-return could not do that: it returned before touching the DB, so
+        # ``record_degraded`` was the only evidence and the balance plane showed
+        # a plain absence.
+        fetch = ContractBalanceFetch(
+            contract_id=contract_row.id,
+            chain_id=chain_id,
+            observed_address=target_address,
+            block_number=native_block,
+            native_status=native_status,
+            asset_set_status=page.status,
+            asset_page_length=page.page_length,
+            writer=BALANCE_WRITER_RESOLUTION,
+        )
+        session.add(fetch)
+        session.flush()
+
+        # THE HALVES FAIL INDEPENDENTLY, SO EACH IS PERSISTED INDEPENDENTLY.
+        # There is no early return here, and reinstating one would be a
+        # correctness bug rather than a shortcut: the fetch row's two statuses
+        # are per class, so returning on ``native_failed or tokens_failed``
+        # writes a row saying ``returned_assets`` (or ``proven_nonzero``) for the
+        # half that SUCCEEDED while persisting none of its rows. That row-less
+        # non-failed class then wins ``contract_balances_latest`` and withdraws
+        # every prior holding of it — an absence manufactured by the writer, and
+        # invisible to ``contracts_missing_current_rows``, which reads the status.
+        #
+        # The invariant every reader depends on: A NON-FAILED CLASS STATUS IS A
+        # PROMISE THAT THAT CLASS'S ROW SET WAS WRITTEN — possibly empty, when
+        # empty is what was observed (``proven_zero``, ``returned_empty``, or a
+        # page whose every entry was zero-balance), but never merely skipped.
+        #
+        # Note the pinned word is already in hand above, so a native read that
+        # succeeded on the pinned path and raised on the Etherscan path still has
+        # a quantity to persist; dropping it because the OTHER half raised would
+        # discard a witness we hold.
+        #
+        # No DELETE either: insert-only, with ``contract_balances_latest``
+        # deciding what is current per row class.
 
         # Native gas balance, valued in this chain's OWN native coin:
         # the symbol/name are the registry's native_asset, and the USD quote is
         # that coin's price — an L2/alt-L1 balance is never labeled or priced as
         # mainnet ETH.
-        if eth_wei > 0:
+        if eth_wei is not None and eth_wei > 0:
             native_asset = chain_by_id(chain_id).native_asset
             if native_asset == "ETH":
                 native_symbol, native_name = "ETH", "Ether"
@@ -416,10 +704,15 @@ class ResolutionWorker(BaseWorker):
                     raw_balance=str(eth_wei),
                     price_usd=native_price,
                     usd_value=round(native_usd, 2) if native_usd else None,
+                    observed_address=target_address,
+                    block_number=native_block,
+                    fetch_id=fetch.id,
                 )
             )
 
-        # ERC-20 token balances
+        # ERC-20 token balances. ``block_number`` stays NULL even when the native
+        # read above was pinned: these quantities come from Etherscan's unpinned
+        # page and must not inherit a height they were never read at.
         for tok in tokens:
             session.add(
                 ContractBalance(
@@ -431,215 +724,31 @@ class ResolutionWorker(BaseWorker):
                     raw_balance=str(tok["balance"]),
                     price_usd=tok.get("price_usd"),
                     usd_value=tok.get("usd_value"),
+                    observed_address=target_address,
+                    block_number=None,
+                    fetch_id=fetch.id,
                 )
             )
 
+        prune_balance_fetches(session, contract_row.id, target_address)
         session.commit()
-        total = len(tokens) + (1 if eth_wei > 0 else 0)
+        total = len(tokens) + (1 if eth_wei is not None and eth_wei > 0 else 0)
         logger.info("Job %s: stored %d balance(s) for %s", job.id, total, target_address)
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
-        """Queue analysis jobs for contracts found during resolution that have no existing job."""
-        from db.models import Contract, ContractDependency
-        from services.discovery.source_confidence import asserts_ownership
+        """Queue analysis jobs for contracts found during resolution that have no existing job.
 
-        request = job.request if isinstance(job.request, dict) else {}
-        parent_company = job.company
-
-        # Walk up parent chain to find company if not set on this job
-        if not parent_company:
-            seen: set[str] = set()
-            current_req = request
-            while not parent_company:
-                parent_id = current_req.get("parent_job_id")
-                if not isinstance(parent_id, str) or parent_id in seen:
-                    break
-                seen.add(parent_id)
-                parent_job = session.get(Job, parent_id)
-                if parent_job is None:
-                    break
-                if parent_job.company:
-                    parent_company = parent_job.company
-                    break
-                current_req = parent_job.request if isinstance(parent_job.request, dict) else {}
-
-        # Structural-ownership lookup. The resolved control graph spawns
-        # children for any analyzed node, but the discovery gate only
-        # wants to grant ownership to children that are *structural*
-        # same-protocol components (impl / proxy / beacon) of the parent.
-        #
-        # ``cd.relationship_type`` alone isn't sufficient — it's the
-        # classifier's verdict on what kind of contract the dep IS, not
-        # the edge semantics. A HIGH ether.fi contract calling Lido
-        # stETH has ``relationship_type='proxy'`` because stETH is a
-        # proxy — that doesn't make stETH ether.fi's structural proxy.
-        # We require the proxy/impl/beacon fields on the Contract row
-        # to actually link the two:
-        #   * impl edge   → parent.implementation == dep.address
-        #   * proxy edge  → dep.implementation == parent.address
-        #   * beacon edge → parent.beacon == dep.address
-        #
-        # Best-effort structural-propagation lookup: a failure here
-        # falls back to "no propagation" (the safe default) rather than
-        # blocking discovery. Transient DB errors are logged + swallowed
-        # so the resolution stage still completes.
-        parent_owns_high = False
-        structural_rel_by_addr: dict[str, str] = {}
-        try:
-            parent_contract = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
-            ).scalar_one_or_none()
-        except Exception as exc:
-            logger.debug("Job %s: structural-propagation parent lookup failed: %s", job.id, exc)
-            parent_contract = None
-        if parent_contract is not None:
-            parent_sources = getattr(parent_contract, "discovery_sources", None)
-            parent_owns_high = asserts_ownership(list(parent_sources) if parent_sources else None)
-            parent_id = getattr(parent_contract, "id", None)
-            parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
-            parent_beacon = (getattr(parent_contract, "beacon", None) or "").lower() or None
-            parent_addr_lower = (getattr(parent_contract, "address", None) or "").lower() or None
-            if parent_id is not None:
-                try:
-                    dep_rows = list(
-                        session.execute(
-                            select(ContractDependency).where(ContractDependency.contract_id == parent_id)
-                        ).scalars()
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Job %s: structural-propagation dep-rows lookup failed: %s",
-                        job.id,
-                        exc,
-                    )
-                    dep_rows = []
-                # For proxy-direction edges we need to verify the dep's
-                # Contract.implementation back-links to the parent.
-                # Batch the lookup so the loop stays O(deps) not O(deps×SELECTs).
-                proxy_edge_addrs = [
-                    row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"
-                ]
-                dep_impl_by_addr: dict[str, str | None] = {}
-                if proxy_edge_addrs:
-                    try:
-                        dep_contract_rows = session.execute(
-                            select(Contract).where(Contract.address.in_(proxy_edge_addrs))
-                        ).scalars()
-                        for dc in dep_contract_rows:
-                            dep_impl_by_addr[dc.address.lower()] = (dc.implementation or "").lower() or None
-                    except Exception as exc:
-                        logger.debug(
-                            "Job %s: structural-propagation dep-contract back-link lookup failed: %s",
-                            job.id,
-                            exc,
-                        )
-                        dep_impl_by_addr = {}
-
-                for row in dep_rows:
-                    rel = row.relationship_type
-                    if rel not in ("implementation", "proxy", "beacon"):
-                        continue
-                    dep_addr = (row.dependency_address or "").lower()
-                    if not dep_addr:
-                        continue
-                    structurally_linked = False
-                    if rel == "implementation":
-                        structurally_linked = parent_impl is not None and parent_impl == dep_addr
-                    elif rel == "proxy":
-                        dep_impl = dep_impl_by_addr.get(dep_addr)
-                        structurally_linked = (
-                            dep_impl is not None and parent_addr_lower is not None and dep_impl == parent_addr_lower
-                        )
-                    else:  # rel == "beacon"
-                        structurally_linked = parent_beacon is not None and parent_beacon == dep_addr
-                    if structurally_linked:
-                        structural_rel_by_addr[dep_addr] = rel
-
-        nodes = resolved_graph.get("nodes", [])
-        root_address = resolved_graph.get("root_contract_address", "").lower()
-        queued_count = 0
-
-        for node in nodes:
-            addr = (node.get("address") or "").lower()
-            if not addr or not addr.startswith("0x") or len(addr) != 42:
-                continue
-            if addr == "0x0000000000000000000000000000000000000000":
-                # An unset controller/dependency resolves to the zero address;
-                # queuing it spawns a discovery job that can only fail with
-                # "No verified source code for 0x000…000".
-                continue
-            if addr == root_address:
-                continue
-            # Only queue contracts that were analyzed during resolution
-            if not node.get("analyzed"):
-                continue
-            if node.get("node_type") != "contract":
-                continue
-
-            # Always stamp the child's chain from the job's first-class chain:
-            # a chainless parent request must not leave the child
-            # chain-less, which would write Contract.chain=NULL and dedup-collide.
-            child_chain = _chain_name_for_job(job)
-
-            # Skip if a job already exists for this address on THIS chain —
-            # case-insensitive (a checksummed admin submission is the same
-            # contract) and chain-scoped so a same-address twin on another
-            # chain doesn't suppress this chain's child.
-            existing = find_existing_job_for_address(session, addr, chain=child_chain)
-            if existing:
-                continue
-
-            contract_name = node.get("contract_name") or node.get("label") or addr
-            child_request = {
-                "address": addr,
-                "name": contract_name,
-                "rpc_url": rpc_url,
-                "parent_job_id": str(job.id),
-                "discovered_by": "resolution",
-            }
-            child_request["chain"] = child_chain
-            # Defense in depth: discovered contracts share the parent's
-            # chain (chain-as-island), so a gated parent already implies a gated
-            # child — but a disabled chain must never spawn analysis work, so the
-            # gate is asserted here too.
-            if not chain_enabled(child_chain):
-                logger.info(
-                    "Skipping discovered contract: chain not enabled for this deployment",
-                    extra={
-                        "address": addr,
-                        "chain": child_chain,
-                        "reason": "chain_not_enabled",
-                        "site": "resolution_discovered",
-                    },
-                )
-                continue
-            structural_rel = structural_rel_by_addr.get(addr)
-            if structural_rel is not None:
-                child_request["discovery_relationship"] = structural_rel
-                child_request["parent_owns_high"] = parent_owns_high
-
-            child_job = create_job(session, child_request, initial_stage=JobStage.discovery)
-            if parent_company:
-                child_job.company = parent_company
-            if job.protocol_id:
-                child_job.protocol_id = job.protocol_id
-            session.commit()
-
-            queued_count += 1
-            logger.info(
-                "Job %s: queued discovered contract %s (%s) as job %s",
-                job.id,
-                contract_name,
-                addr,
-                child_job.id,
-            )
-
-        if queued_count:
-            logger.info(
-                "Job %s: queued %d contracts discovered during resolution",
-                job.id,
-                queued_count,
-            )
+        No budget: the walk's own ``max_depth`` already bounds this graph. The
+        policy-stage refresh, which is recursive, passes one.
+        """
+        queue_discovered_contracts(
+            session,
+            job,
+            resolved_graph,
+            rpc_url,
+            site="resolution",
+            chain_name=_chain_name_for_job(job),
+        )
 
     def _emit_dependency_edges_from_predicate_trees(
         self,

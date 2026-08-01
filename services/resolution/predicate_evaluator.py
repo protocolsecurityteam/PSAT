@@ -46,7 +46,6 @@ from utils.logging import record_stage_metric
 from .capabilities import (
     CapabilityExpr,
     Condition,
-    EmptyReason,
     ExternalCheck,
     intersect,
     negate,
@@ -775,17 +774,56 @@ _SLOT_KEYWORD_TO_GETTER = (
 _AUTHORITY_GETTER_BASENAMES = frozenset({"owner", "governor", "authority"})
 
 
-def _live_authority_result(result_addr: str, selector: str, contract: str) -> CapabilityExpr:
-    """Build the finite_set a successful live authority read yields — identical whether the address came from
-    a fresh eth_call or the pass memo. ``""`` (zero / renounced) → empty exact set; an address → singleton,
-    matching the original inline construction (including the trace for the non-empty case)."""
-    if not result_addr:
-        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+def _live_authority_result(read_addr: str, selector: str, contract: str, block: int | None = None) -> CapabilityExpr:
+    """Build the capability a completed live authority read yields — identical whether the address came from
+    a fresh eth_call or the pass memo.
+
+    Three outcomes, each carrying the read that produced it:
+
+    * a concrete address → exact singleton;
+    * the zero word → exact EMPTY, ``owner_read_zero``. The empty set is the
+      strongest earned negative this module can publish, so it is published with
+      its provenance (which getter, on which contract, at which height) rather
+      than bare — a provenance-less exact-empty is unreconstructible after the
+      fact, and four such rows exist that nothing can explain;
+    * ``0x…dEaD`` → a ``lower_bound`` empty, ``owner_read_burn_address``. It must
+      NOT share the zero shape: ``0x0`` cannot be ``msg.sender`` on mainnet, which
+      is what makes the zero read a real "nobody", whereas ``0x…dEaD`` is an
+      ordinary address merely BELIEVED keyless. Treating a convention as proof of
+      unspendability would publish an unproven negative, so the raw address read
+      is recorded for downstream checking and the set stays a lower bound.
+
+    ``observed_at_block`` rides in the trace step and ONLY when the call was
+    pinned to a block: when it is not, the read went to ``"latest"`` and there is
+    no height to state — the key is absent (not_determined), never backfilled
+    from the head.
+    """
+    step: dict[str, Any] = {"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}
+    if isinstance(block, int) and not isinstance(block, bool):
+        step["observed_at_block"] = block
+    if not (isinstance(read_addr, str) and read_addr.startswith("0x") and len(read_addr) == 42):
+        # Not an address-shaped read: fail closed rather than canonicalizing
+        # whatever arrived into a member.
+        return CapabilityExpr.finite_set(
+            [], quality="lower_bound", confidence="partial", empty_reason="bad_input", trace=[step]
+        )
+    if _is_zero_address(read_addr):
+        return CapabilityExpr.finite_set(
+            [], quality="exact", confidence="enumerable", empty_reason="owner_read_zero", trace=[step]
+        )
+    if read_addr.lower() == _BURN_ADDRESS:
+        return CapabilityExpr.finite_set(
+            [],
+            quality="lower_bound",
+            confidence="partial",
+            empty_reason="owner_read_burn_address",
+            trace=[{**step, "read_address": read_addr.lower()}],
+        )
     return CapabilityExpr.finite_set(
-        [result_addr],
+        [read_addr],
         quality="exact",
         confidence="enumerable",
-        trace=[{"step": "live_getter_resolution", "selector": selector, "contract": contract.lower()}],
+        trace=[step],
     )
 
 
@@ -830,7 +868,10 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
     memo_key = ("live_authority", rpc_url, contract.lower(), selector, block_repr)
     if memo is not None and memo_key in memo:
         _bump_resolve_counter(outer, "live_getter_memo_hits")
-        return _live_authority_result(memo[memo_key], selector, contract)
+        # ``block`` is threaded here too: the memo key already pins the height, so
+        # a hit must reproduce the fresh read's payload byte-for-byte, including
+        # ``observed_at_block``.
+        return _live_authority_result(memo[memo_key], selector, contract, block if isinstance(block, int) else None)
 
     _bump_resolve_counter(outer, "live_getter_calls")
     try:
@@ -853,17 +894,16 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
             [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"
         )
     addr = "0x" + raw[-40:].lower()
-    result_addr = "" if (_is_zero_address(addr) or addr == _BURN_ADDRESS) else addr
+    # The RAW address is memoized, not a collapsed sentinel: zero and burn are
+    # different answers and the memo must not be the place they merge.
     if memo is not None:
-        memo[memo_key] = result_addr
-    return _live_authority_result(result_addr, selector, contract)
+        memo[memo_key] = addr
+    return _live_authority_result(addr, selector, contract, block if isinstance(block, int) else None)
 
 
 def _live_resolve_authority_slot(
     ctx: EvaluationContext | None,
     slot: str | None,
-    *,
-    zero_empty_reason: EmptyReason | None = "empty_by_design",
 ) -> CapabilityExpr | None:
     """Resolve ``msg.sender == <getter-less slot reader>`` by reading the raw
     storage slot live.
@@ -879,13 +919,20 @@ def _live_resolve_authority_slot(
     standalone impl's empty storage.
 
     Mirrors :func:`_live_resolve_authority`'s contract: ``finite_set([addr],
-    exact)`` for a non-zero slot, ``finite_set([], exact)`` for a confirmed-zero
-    slot, a labeled ``lower_bound`` when the read was attempted but unreadable, or
-    ``None`` when nothing could be attempted. ``zero_empty_reason`` labels the
-    confirmed-zero outcome: ``empty_by_design`` for a pending-transfer accept gate
-    (a read-confirmed ceiling — no transfer queued), ``None`` for a plain
-    authority var that simply reads zero (renounced/unset, like
-    :func:`_live_resolve_authority`'s clean-zero)."""
+    exact)`` for a non-zero slot, ``finite_set([], exact)`` with
+    ``slot_read_zero`` for a confirmed-zero slot, a ``lower_bound``
+    ``owner_read_burn_address`` for ``0x…dEaD``, a labeled ``lower_bound`` when
+    the read was attempted but unreadable, or ``None`` when nothing could be
+    attempted. Every outcome carries the read (slot, contract, and
+    ``observed_at_block`` when the read was pinned) in its trace.
+
+    The confirmed-zero outcome reports only what was read. It previously carried
+    ``empty_by_design`` from a DEFAULT ARGUMENT — a label asserting the gate is an
+    intentional accept-side ceiling, applied to any caller that did not opt out,
+    on a set with no trace and no block to check it against. Classifying the
+    emptiness is the caller's job and rests on the accessor's ``pending`` prefix,
+    i.e. an identifier: :func:`_pending_ceiling_capability` owns that claim and
+    discloses its basis."""
     if ctx is None or not isinstance(slot, str) or not slot.startswith("0x") or len(slot) != 66:
         return None
     outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
@@ -917,13 +964,28 @@ def _live_resolve_authority_slot(
             [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"
         )
     addr = "0x" + raw[-40:].lower()
-    if _is_zero_address(addr) or addr == _BURN_ADDRESS:
-        return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", empty_reason=zero_empty_reason)
+    step: dict[str, Any] = {"step": "live_slot_resolution", "slot": slot, "contract": contract.lower()}
+    if isinstance(block, int) and not isinstance(block, bool):
+        step["observed_at_block"] = block
+    if _is_zero_address(addr):
+        return CapabilityExpr.finite_set(
+            [], quality="exact", confidence="enumerable", empty_reason="slot_read_zero", trace=[step]
+        )
+    if addr == _BURN_ADDRESS:
+        # See :func:`_live_authority_result` — a burned slot is not a proven
+        # "nobody", so it never reaches the exact/enumerable shape.
+        return CapabilityExpr.finite_set(
+            [],
+            quality="lower_bound",
+            confidence="partial",
+            empty_reason="owner_read_burn_address",
+            trace=[{**step, "read_address": addr}],
+        )
     return CapabilityExpr.finite_set(
         [addr],
         quality="exact",
         confidence="enumerable",
-        trace=[{"step": "live_slot_resolution", "slot": slot, "contract": contract.lower()}],
+        trace=[step],
     )
 
 
@@ -937,11 +999,16 @@ def _resolve_authority_via_getters(
     answer.
 
     ``bases`` names, per candidate, WHY that selector was tried — the compiler's
-    ABI rule (``auto_getter``), a naming convention (``internal_accessor``,
-    ``slot_name_keyword``), or the operand's own recorded selector. The winning
-    candidate's basis is stamped into the returned capability's trace, so a
-    published principal that rests on an identifier says so on the wire instead
-    of looking as evidenced as one the ABI forced.
+    ABI rule (``abi_auto_getter``), an accessor-NAME match
+    (``deunderscore_convention`` / ``standard_namespaced_accessor`` /
+    ``slot_name_keyword``), or the operand's own recorded selector
+    (``callee_selector``). The winning candidate's basis is stamped into the
+    returned capability's trace, so a published principal that rests on an
+    identifier says so on the wire instead of looking as evidenced as one the ABI
+    forced. Only ``abi_auto_getter`` is stronger than the name-matched arms; those
+    are mutually UNORDERED — an ERC-7201-anchored accessor name is still a name,
+    and nothing measured establishes it as better evidence that the accessor
+    returns the authority than the 3-name convention is.
 
     Short-circuits only on a *resolved* read (``membership_quality == "exact"`` —
     a real address, or a confirmed renounced/zero), so a literal getter that
@@ -1023,17 +1090,46 @@ def _oz_v5_namespaced_authority_selector(signature: str | None) -> str | None:
     return _selector_for_signature(f"{getter}()")
 
 
-def _canonical_authority_selector_for_slot(name: str | None) -> str | None:
+def _leaf_is_keyed_set_membership(leaf: Mapping[str, Any] | None) -> bool:
+    """True iff the leaf tests membership of a keyed set — the shape in which a
+    ``bytes32`` constant operand may be a set KEY rather than a storage-layout
+    pointer.
+
+    Deliberately WIDER than the static plane's admission rule
+    (``summaries._operand_is_role_key``, which admits the in-contract
+    ``mapping_membership`` shape only — a cross-contract ``external_set``
+    descriptor names the callee from the CALLER's declared interface, which is
+    not a proven property of the deployed callee). Only the direction matters,
+    and it is safe in this direction: here the predicate WITHHOLDS a slot-locator
+    reroute, so over-matching costs a resolution that would have been published,
+    never a wrong address. The static plane MINTS a fact, so it must be strict."""
+    if not isinstance(leaf, Mapping):
+        return False
+    if leaf.get("kind") not in ("membership", "external_bool"):
+        return False
+    descriptor = leaf.get("set_descriptor")
+    return isinstance(descriptor, Mapping) and descriptor.get("kind") in ("mapping_membership", "external_set")
+
+
+def _canonical_authority_selector_for_slot(name: str | None, leaf: Mapping[str, Any] | None = None) -> str | None:
     """Canonical public authority-getter selector for a storage-slot-constant
-    operand, or ``None`` when the name doesn't denote one (fail-closed).
+    operand, or ``None`` when the operand doesn't denote one (fail-closed).
 
     Solady ``_OWNER_SLOT`` / OZ-v5 ``OwnableStorageLocation`` /
     ``_GOVERNOR_SLOT`` name a *slot locator*, not a getter — reading
     ``<slot>()`` reverts. The contract's canonical public getter
-    (``owner()``/``governor()``/``authority()``) reads that same slot. Gated on
-    :func:`_is_storage_layout_constant` so ordinary address state vars — which
-    resolve through their own auto-getter — are never rerouted here."""
+    (``owner()``/``governor()``/``authority()``) reads that same slot.
+
+    Two gates, structure first: a leaf that tests keyed-set membership names a role
+    KEY, and resolving a role key through ``owner()``/``governor()`` would publish
+    a real address as the authorized caller of a role-gated function. That refusal
+    does not consult the identifier, so it holds for a role constant whose name
+    happens to carry a slot-locator suffix. The surviving
+    :func:`_is_storage_layout_constant` gate only narrows further, keeping ordinary
+    address state vars — which resolve through their own auto-getter — out."""
     if not isinstance(name, str) or not name:
+        return None
+    if _leaf_is_keyed_set_membership(leaf):
         return None
     from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
 
@@ -1338,9 +1434,9 @@ def _resolve_equality_principal(
                 [
                     _nullary_getter_selector(name),
                     _public_getter_selector_for_internal_accessor(f"{name}()") if name else None,
-                    _canonical_authority_selector_for_slot(name),
+                    _canonical_authority_selector_for_slot(name, leaf),
                 ],
-                bases=["auto_getter", "internal_accessor_convention", "slot_name_keyword"],
+                bases=["abi_auto_getter", "deunderscore_convention", "slot_name_keyword"],
             )
         elif op.get("member_path") == ["_owner"]:
             result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
@@ -1352,13 +1448,14 @@ def _resolve_equality_principal(
         # stage carried is AUTHORITATIVE — the value lives in the contract's own
         # storage, read it directly. A non-zero slot IS the principal; a
         # confirmed-zero slot is a renounced/unset authority (resolved_empty, like a
-        # clean-zero getter — NOT empty-by-design, hence ``zero_empty_reason=None``);
+        # clean-zero getter), published as the read that produced it
+        # (``slot_read_zero``, with the slot, contract and pinned block);
         # an unreadable slot stays an honest ``lower_bound``. Only bare address
         # scalars carry a slot (the static pass excludes mappings/structs/packed
         # vars), so a non-address word is never misread as a principal.
         slot = op.get("storage_slot")
         if isinstance(slot, str) and not op.get("member_path"):
-            slot_result = _live_resolve_authority_slot(ctx, slot, zero_empty_reason=None)
+            slot_result = _live_resolve_authority_slot(ctx, slot)
             if slot_result is not None:
                 return slot_result
             # Slot present but no read attempted (no reachable RPC) — honest
@@ -1424,6 +1521,7 @@ def _resolve_equality_principal(
             return CapabilityExpr.conditional_universal(cond)
         selector = None
         canonical_selector = None
+        canonical_basis = "deunderscore_convention"
         if not op.get("callee_args"):
             signature = op.get("callee_signature")
             selector = op.get("callee_selector")
@@ -1439,6 +1537,7 @@ def _resolve_equality_principal(
             # authority is the value the public getter returns, so prefer the
             # de-underscored canonical getter (``governor()``/``owner()``).
             canonical_selector = _public_getter_selector_for_internal_accessor(signature)
+            canonical_basis = "deunderscore_convention"
             # OZ-v5 keeps ownership in an ERC-7201 namespace, so an ``owner()``
             # gate inlines to a ``view_call`` of the namespaced storage accessor
             # (``_getAccessControlDefaultAdminRulesStorage()``) rather than a
@@ -1446,10 +1545,18 @@ def _resolve_equality_principal(
             # through ``owner()``.
             if canonical_selector is None:
                 canonical_selector = _oz_v5_namespaced_authority_selector(signature)
+                canonical_basis = "standard_namespaced_accessor"
         # Canonical public getter first (when the operand is an internal authority
         # accessor its own selector is dead); otherwise the literal selector.
         candidates = dict.fromkeys((canonical_selector, selector))
-        candidate_basis = {selector: "callee_selector", canonical_selector: "internal_accessor_convention"}
+        # Which HELPER produced the canonical selector is a control-flow fact at
+        # this write point, so the two accessor arms are published as themselves
+        # rather than under one label a consumer cannot split: an ERC-7201
+        # accessor matched against the standard's table
+        # (``standard_namespaced_accessor``) and the leading-underscore naming
+        # convention (``deunderscore_convention``). Both are accessor-NAME
+        # matches and neither is ranked above the other.
+        candidate_basis = {selector: "callee_selector", canonical_selector: canonical_basis}
         result = _resolve_authority_via_getters(
             ctx,
             list(candidates),
@@ -1462,8 +1569,10 @@ def _resolve_equality_principal(
         # carried is AUTHORITATIVE. A non-zero slot IS the principal — on
         # Governable ``_changeGovernor`` never clears the pending slot, so after a
         # completed transfer it stays == governor and the accept gate is
-        # satisfiable by the sitting governor; a confirmed-zero slot is a
-        # read-confirmed accept-side ceiling; an unreadable slot stays an honest
+        # satisfiable by the sitting governor; a confirmed-zero slot publishes the
+        # read (``slot_read_zero``) and leaves the accept-side-ceiling
+        # CLASSIFICATION to ``_pending_ceiling_capability``, which discloses that it
+        # rests on the accessor's name; an unreadable slot stays an honest
         # ``lower_bound``. We never downgrade an unreadable slot to a name guess,
         # so resolved_empty here is always an evidenced (read-confirmed) verdict.
         slot = op.get("storage_slot")

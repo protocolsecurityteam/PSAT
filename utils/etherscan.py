@@ -11,12 +11,19 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 from eth_utils.crypto import keccak
 
+from utils.balance_status import (
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    ASSET_SET_STATUS_FETCH_FAILED,
+    ASSET_SET_STATUS_RETURNED_ASSETS,
+    ASSET_SET_STATUS_RETURNED_EMPTY,
+)
 from utils.chains import chain_by_id
 from utils.logging import record_degraded
 
@@ -605,6 +612,27 @@ def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
     return count >= TOKEN_BALANCE_PAGE_SIZE
 
 
+@dataclass(frozen=True)
+class TokenBalancePage:
+    """One ``addresstokenbalance`` page, with what the ENDPOINT actually said.
+
+    ``rows`` is the filtered holdings list :func:`get_token_balances` returns.
+    ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter —
+    the only thing that can witness the at-cap case, and the signal the filter
+    destroys. ``None`` means not_determined (the fetch failed).
+
+    ``status`` exists because ``rows == []`` is three states at once: the fetch
+    failed, the address holds nothing, or the page was capped. The failure is
+    swallowed one layer down (a ``RuntimeError`` becomes ``[]``), so a caller that
+    only sees the list cannot tell, and a caller that writes rows from it turns a
+    failure into "holds nothing".
+    """
+
+    rows: list[dict]
+    page_length: int | None
+    status: str
+
+
 def get_token_balances(address: str, chain_id: int) -> list[dict]:
     """Return this address's ERC-20 token balances — ONE page, cap
     :data:`TOKEN_BALANCE_PAGE_SIZE`.
@@ -625,6 +653,20 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
     actually returned — including when ``TokenDivisor`` is missing, because the scale
     is then a guess and the error mode is a factor of 10^n on a money figure. It is
     never 0 to mean "unknown": 0 means priced and worth less than half a cent.
+
+    A caller that PERSISTS this list must use :func:`get_token_balances_page`
+    instead: this signature cannot distinguish the empty page from the failed
+    fetch, and writing rows from the latter publishes "holds nothing".
+    """
+    return get_token_balances_page(address, chain_id=chain_id).rows
+
+
+def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
+    """:func:`get_token_balances`, plus what the endpoint said about the page.
+
+    Same wire call, same rate limit, same parsing, same ``record_degraded`` on
+    failure — the only addition is that the raw page length and the fetch outcome
+    come back to the caller instead of collapsing into ``[]``.
     """
     global _token_balance_last_call
     # Hardcoded 1 req/s rate limit for this endpoint
@@ -653,7 +695,9 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
             context={"address": address, "chain_id": chain_id},
         )
         logger.warning("token balance fetch failed for %s on chain %s: %s", address, chain_id, exc)
-        return []
+        # page_length None, not 0: nothing was learned about the page, and a 0
+        # here would read as a proven-empty page.
+        return TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
 
     results = []
     for entry in data.get("result", []):
@@ -700,4 +744,15 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
             returned,
             len(results),
         )
-    return sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True)
+        status = ASSET_SET_STATUS_AT_PAGE_CAP
+    elif returned:
+        status = ASSET_SET_STATUS_RETURNED_ASSETS
+    else:
+        # A proven-empty PAGE. NOT "this address holds no tokens" — the endpoint
+        # is one page deep and this is what it answered, nothing more.
+        status = ASSET_SET_STATUS_RETURNED_EMPTY
+    return TokenBalancePage(
+        rows=sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True),
+        page_length=returned,
+        status=status,
+    )

@@ -56,9 +56,16 @@ def _abi_encode_address_array(addrs: list[str]) -> str:
 
 def test_helper_functions():
     assert cls._slot_to_address(ZERO_SLOT) is None
-    assert cls._slot_to_address("0x") is None
-    assert cls._slot_to_address(None) is None  # type: ignore[arg-type]
     assert cls._slot_to_address(_slot_for(ADDR(2))) == ADDR(2)
+    # A nonzero word whose low 20 bytes are zero carries no address.
+    assert cls._slot_to_address("0x" + "01" + "00" * 31) is None
+    # "None for zero/empty" is a VERDICT and only a full 64-nibble word earns
+    # it: short, empty, over-long, or non-hex words are transport artifacts and
+    # must read as failures, never as empty slots (the old pad-then-slice
+    # minted the address 0x…001 out of a truncated "0x1").
+    for malformed in ("0x", "0x0", "0x1", None, "0x" + "0" * 63, "0x" + "0" * 65, "0x" + " " * 2 + "0" * 62):
+        with pytest.raises(ValueError):
+            cls._slot_to_address(malformed)  # type: ignore[arg-type]
 
     impl = "aabbccddee11223344556677889900aabbccddee"
     assert cls.detect_eip1167("0x" + cls.EIP1167_PREFIX + impl + cls.EIP1167_SUFFIX) == "0x" + impl
@@ -716,6 +723,20 @@ def test_classify_single_falls_back_when_batch_returns_errors(monkeypatch):
     assert result["type"] == "proxy"
     assert result["proxy_type"] == "eip1967"
     assert result["implementation"] == impl
+
+
+def test_batched_slot_read_treats_short_words_as_failed_reads(monkeypatch):
+    """A SUCCESSFUL response carrying a short word (``"0x0"``) is a transport
+    artifact, not an empty slot: it must set ``any_read_failed`` rather than
+    decode into "confirmed non-proxy" via padding."""
+
+    def fake_batch(_rpc, calls, chain_id=None):
+        return [("0x0", False) for _ in calls]
+
+    monkeypatch.setattr(cls, "rpc_batch_request_with_status", fake_batch)
+    decoded, any_read_failed = cls._read_proxy_slots_batched(RPC, ADDR(0xA))
+    assert decoded == (None, None, None, None, None)
+    assert any_read_failed is True
 
 
 # ---------------------------------------------------------------------------

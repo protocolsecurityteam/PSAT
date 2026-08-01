@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -21,6 +22,61 @@ logger = logging.getLogger(__name__)
 # ``_fetch_range`` bisects on error down to MIN_BISECT_SPAN before giving up.
 MAX_BLOCK_RANGE = 1_000_000
 MIN_BISECT_SPAN = 10_000
+
+# Result cap the upstream is believed to enforce by SILENTLY returning a short
+# 200-OK page. A page whose length reaches it is treated as a reject and
+# bisected, exactly like an error, because the alternative is advancing a cursor
+# past logs that were never returned.
+#
+# Default None = "no cap is known to be in force", and that is a measurement,
+# not a shrug: against the deployed eRPC route on 2026-07-30 single windows
+# returned 9,030 / 45,055 / 68,256 / 125,629 logs, each with
+# ``max(blockNumber) == toBlock`` — no truncation at any size tried, and the
+# documented HyperRPC 50,000 result cap did not fire. Hard-coding 50,000 here
+# would bisect windows that the upstream serves whole, spending request budget to
+# buy nothing. The consequence is stated rather than hidden: while this is None
+# no cursor can be promoted to page-complete, so every event-absence negative
+# keeps an unquantified residual (see ``window_stats_basis``).
+#
+# It follows that this value is a claim about a third party at one moment, not an
+# invariant — which is why the cap in force is persisted per cursor alongside the
+# counts it gated, and a verdict is refused when the two disagree.
+_RESULT_CAP_ENV = "PSAT_GETLOGS_RESULT_CAP"
+
+
+def default_result_cap() -> int | None:
+    raw = (os.getenv(_RESULT_CAP_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning("ignoring non-integer %s=%r; treating the result cap as unknown", _RESULT_CAP_ENV, raw)
+        return None
+    return parsed if parsed > 0 else None
+
+
+@dataclass(frozen=True)
+class FetchWindowStat:
+    """One accepted ``eth_getLogs`` page: the window, how many logs came back,
+    and the cap that was in force when it was accepted.
+
+    ``cap is None`` means no cap was enforced, so ``returned_log_count`` bounds
+    nothing — the page may have been complete or may have been truncated by an
+    upstream whose limit we do not know. Only a stat with a non-None ``cap`` and
+    ``returned_log_count < cap`` witnesses a whole page.
+
+    ``returned_log_count is None`` means the response was not a countable page at
+    all (``result: null``, an object, anything but a list). That is NOT a page of
+    zero logs: a malformed 200-OK recorded as 0 would read as a proven empty
+    window, which is the strongest possible claim minted from the least
+    information. It downgrades the cursor's window record instead.
+    """
+
+    from_block: int
+    to_block: int
+    returned_log_count: int | None
+    cap: int | None
 
 
 @dataclass(frozen=True)
@@ -51,10 +107,18 @@ class RpcEventLogFetcher:
         max_block_range: int = MAX_BLOCK_RANGE,
         min_bisect_span: int = MIN_BISECT_SPAN,
         chain_id: int | None = None,
+        result_cap: int | None = None,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
         self.min_bisect_span = max(1, min_bisect_span)
+        # Default None — no cap, so no caller acquires the bisect-and-raise
+        # behaviour by omission. The environment default is applied by the
+        # DURABLE INDEXER's fetcher builder alone, because only it persists the
+        # counts the cap gates; the live monitoring watcher constructs a fetcher
+        # here too and must keep returning pages an operator's env var would
+        # otherwise turn into a raise at the bisect floor.
+        self.result_cap = result_cap
         # Declared so ``rpc_request`` can assert the eRPC URL routes this chain
         # (inv. 7). None keeps the guard a no-op for callers that lack a chain.
         self.chain_id = chain_id
@@ -66,6 +130,7 @@ class RpcEventLogFetcher:
         topics: Sequence[str],
         from_block: int,
         to_block: int,
+        window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]:
         """Fetch logs matching ANY of ``topics`` in topic position 0.
 
@@ -77,6 +142,11 @@ class RpcEventLogFetcher:
         or a list — a multi-address filter serves a whole cohort of monitored
         contracts in one request. Per-emitter attribution is on each result's
         ``.address``. Both shapes share this one bisect-on-reject implementation.
+
+        Pass ``window_stats`` to collect one :class:`FetchWindowStat` per
+        ACCEPTED page (bisected windows contribute their leaves, not the rejected
+        parent). Omitting it — what every caller that does not persist coverage
+        does — leaves behaviour and the request sequence unchanged.
         """
         if isinstance(event_address, str):
             address_filter: str | list[str] = event_address
@@ -87,7 +157,7 @@ class RpcEventLogFetcher:
         start = from_block
         while start <= to_block:
             end = min(to_block, start + self.max_block_range - 1)
-            out.extend(self._fetch_range(address_filter, topic_list, start, end))
+            out.extend(self._fetch_range(address_filter, topic_list, start, end, window_stats))
             start = end + 1
         return out
 
@@ -97,6 +167,7 @@ class RpcEventLogFetcher:
         topics: list[str],
         from_block: int,
         to_block: int,
+        window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]:
         params = [
             {
@@ -125,9 +196,43 @@ class RpcEventLogFetcher:
                     "exc_type": type(exc).__name__,
                 },
             )
-            mid = from_block + span // 2 - 1
-            return self._fetch_range(event_address, topics, from_block, mid) + self._fetch_range(
-                event_address, topics, mid + 1, to_block
+            return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
+        # A page whose length reaches the cap is indistinguishable from a page the
+        # upstream truncated to the cap, so it is a REJECT, not a result: take the
+        # same bisect the error path takes. Without this the window loop advances
+        # ``start = end + 1`` over logs that were never returned, and the cursor
+        # records a range it never actually read. The ``cap is not None`` guard is
+        # load-bearing and must stay literal — an unguarded ``>=`` against None
+        # raises TypeError, which is not RuntimeError and would escape the bisect
+        # entirely, taking the whole scan down instead of narrowing the window.
+        cap = self.result_cap
+        # A response that is not a list is not a page of zero logs — it is a page
+        # we could not read. Recording 0 would turn a malformed payload into a
+        # proven empty window.
+        count = len(raw_logs) if isinstance(raw_logs, list) else None
+        if cap is not None and count is not None and count >= cap:
+            span = to_block - from_block + 1
+            if span <= self.min_bisect_span:
+                raise RuntimeError(
+                    f"eth_getLogs returned {count} logs at the {cap} result cap for "
+                    f"[{from_block}, {to_block}] and the span is at the bisect floor: "
+                    "the page cannot be proven whole"
+                )
+            logger.debug(
+                "eth_getLogs window returned a page at the result cap; bisecting",
+                extra={
+                    "event_address": event_address,
+                    "from_block": from_block,
+                    "to_block": to_block,
+                    "span": span,
+                    "returned_log_count": count,
+                    "result_cap": cap,
+                },
+            )
+            return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
+        if window_stats is not None:
+            window_stats.append(
+                FetchWindowStat(from_block=from_block, to_block=to_block, returned_log_count=count, cap=cap)
             )
         out: list[FetchedEventLog] = []
         if isinstance(raw_logs, list):
@@ -136,6 +241,20 @@ class RpcEventLogFetcher:
                 if decoded is not None:
                     out.append(decoded)
         return out
+
+    def _bisect_halves(
+        self,
+        event_address: str | list[str],
+        topics: list[str],
+        from_block: int,
+        to_block: int,
+        span: int,
+        window_stats: list[FetchWindowStat] | None,
+    ) -> list[FetchedEventLog]:
+        mid = from_block + span // 2 - 1
+        return self._fetch_range(event_address, topics, from_block, mid, window_stats) + self._fetch_range(
+            event_address, topics, mid + 1, to_block, window_stats
+        )
 
 
 class RpcHeadBlockFetcher:

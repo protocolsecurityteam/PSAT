@@ -104,7 +104,7 @@ def test_public_state_var_principal_declares_the_abi_basis(monkeypatch: pytest.M
     cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "governor"}), _ctx())
 
     assert cap.members == [GOVERNOR]
-    assert [e["basis"] for e in _basis_steps(cap, "authority_getter_basis")] == ["auto_getter"]
+    assert [e["basis"] for e in _basis_steps(cap, "authority_getter_basis")] == ["abi_auto_getter"]
 
 
 def test_locator_naming_two_roles_resolves_to_no_getter() -> None:

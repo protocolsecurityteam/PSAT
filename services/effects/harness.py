@@ -21,8 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from services.effects.config import (
+    BLOCK_SOURCES,
     SCOPE_KERNEL,
     TIER_CALL,
+    TIER_HISTORICAL,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
@@ -68,6 +70,11 @@ class SimContext:
     hardfork: str
     anvil_version: str | None = None
     foundry_version: str | None = None
+    # PROVENANCE of ``block`` — one of :data:`config.BLOCK_SOURCES`, or ``None``
+    # when the recorded height is not provably the height the probe ran at (an
+    # unpinnable head, a fork spawned without ``--fork-block-number``). Only a
+    # named source publishes the height as a witness; ``None`` publishes nothing.
+    block_source: str | None = None
 
 
 @dataclass
@@ -195,7 +202,7 @@ def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: st
     """A transcript bounded to the replay minimum (§8.5): tier, forked block,
     hardfork, anvil/foundry version. ``calls``/``results`` are appended by
     :func:`record_calls` as the recipe issues them."""
-    return {
+    tr = {
         "feature": feature,
         "version": 1,
         "tier": tier,
@@ -208,6 +215,14 @@ def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: st
         "calls": [],
         "results": [],
     }
+    # Tier 0 is excluded on purpose: it decides from an INDEXED event history plus
+    # a current-state check (``observation: not_run``), so no single height is the
+    # height it observed and ``ctx.block`` would be a bystander. Tier 1 simulates
+    # at ``hex(block_number)`` and Tier 2 forks at it, so for those the recorded
+    # height IS the observation — where the source says it was pinned.
+    if ctx.block_source in BLOCK_SOURCES and tier != TIER_HISTORICAL and ctx.block > 0:
+        tr["block_source"] = ctx.block_source
+    return tr
 
 
 def record_calls(
@@ -259,7 +274,34 @@ def emit(store: TranscriptStore, effect: ObservedEffect) -> ObservedEffect:
         effect.transcript_ptr = store(effect.transcript)
         if effect.discrepancy is not None and effect.discrepancy.transcript_ptr is None:
             effect.discrepancy.transcript_ptr = effect.transcript_ptr
+    _stamp_observation_height(effect)
     return effect
+
+
+def _stamp_observation_height(effect: ObservedEffect) -> None:
+    """Copy the transcript's PROVEN observation height onto the verdict's witness.
+
+    Every verdict already travels with a transcript, so this is the one place the
+    height reaches ``effect_verdicts.witness`` — no recipe restates it and none can
+    forget to. It publishes only what :func:`new_transcript` certified: a positive
+    height AND a named pin scope. A failed head pin (``block`` is ``0``, the
+    sentinel that reads as genesis), an unpinned fork, and a Tier-0 index read all
+    arrive here with no ``block_source`` and leave BOTH keys absent — the
+    not_determined state, never a fabricated or zero height.
+
+    The pair is state-plane (:data:`db.effect_cache.DEPLOYMENT_PLANE_KEYS`): one
+    deployment's observation height is not a property of the bytecode, so it must
+    not ride the behavioral cache onto a twin.
+    """
+    tr = effect.transcript or {}
+    block = tr.get("block_number")
+    source = tr.get("block_source")
+    if source not in BLOCK_SOURCES:
+        return
+    if isinstance(block, bool) or not isinstance(block, int) or block <= 0:
+        return
+    effect.details["block_number"] = block
+    effect.details["block_source"] = source
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ from db.queue import (
 from services.discovery.ranking import (
     MIN_CONFIDENCE_THRESHOLD,
     effective_confidence,
-    not_superseded_impl_clause,
+    is_superseded_impl,
     rank_contract_rows,
 )
 from utils.chains import chain_enabled
@@ -59,6 +59,20 @@ def _existing_in_same_cascade(session: Session, addr: str, chain: str | None, ro
         stmt = stmt.where(Job.request["chain"].as_string() == chain)
     stmt = stmt.limit(1)
     return session.execute(stmt).scalar_one_or_none() is not None
+
+
+def _excluded_record(row: Contract, *, reason: str, effective_confidence: float | None = None) -> dict:
+    """One ``pre_rank_excluded`` entry: a row removed BEFORE ranking, so it never
+    competed for the budget and never appears in ``not_selected``."""
+    record: dict = {
+        "address": row.address,
+        "chain": row.chain,
+        "reason": reason,
+    }
+    if effective_confidence is not None:
+        record["effective_confidence"] = effective_confidence
+    logger.info("Selection candidate excluded before ranking", extra={**record, "site": "selection"})
+    return record
 
 
 class SelectionWorker(BaseWorker):
@@ -153,25 +167,43 @@ class SelectionWorker(BaseWorker):
             extra={"protocol_id": job.protocol_id, "analyze_limit": analyze_limit},
         )
 
-        # Skip superseded historical impls (audit-coverage anchors only); the
-        # current live impl of a proxy is kept (it carries the live marker).
-        # Single source of truth for the anchor predicate: services/discovery/ranking.
-        candidates = (
+        # Every unanalysed row for the protocol, INCLUDING the ones the two
+        # pre-rank filters remove. The superseded-impl anchors used to be
+        # excluded in SQL and the sub-threshold rows used to survive only as a
+        # count — so a candidate that never reached the ranking was
+        # indistinguishable from one that never existed. Both are now
+        # partitioned in Python and enumerated into ``pre_rank_excluded``:
+        # without that, an empty ``not_selected`` would assert "nothing was
+        # dropped" while two paths silently dropped rows upstream of it.
+        # ``is_superseded_impl`` is the same predicate the SQL clause mirrored,
+        # so the single source of truth is unchanged.
+        all_rows = (
             session.execute(
                 select(Contract).where(
                     Contract.protocol_id == job.protocol_id,
                     Contract.job_id.is_(None),
-                    not_superseded_impl_clause(Contract.discovery_sources),
                 )
             )
             .scalars()
             .all()
         )
+
+        pre_rank_excluded: list[dict] = []
+        candidates: list[Contract] = []
+        for row in all_rows:
+            # Skip superseded historical impls (audit-coverage anchors only); the
+            # current live impl of a proxy is kept (it carries the live marker).
+            if is_superseded_impl(list(row.discovery_sources or [])):
+                pre_rank_excluded.append(
+                    _excluded_record(row, reason="superseded_impl_anchor"),
+                )
+                continue
+            candidates.append(row)
         record_stage_metric("candidates", len(candidates))
 
         if not candidates:
             logger.info("Selection found no unanalyzed candidates")
-            self._finish(session, job, ranked=[], child_ids=[])
+            self._finish(session, job, ranked=[], child_ids=[], not_selected=[], pre_rank_excluded=pre_rank_excluded)
             return
 
         self.update_detail(
@@ -181,15 +213,18 @@ class SelectionWorker(BaseWorker):
         )
 
         # Apply effective confidence up front so the threshold filter and the ranker see the same number.
-        eligible_rows = [
-            row
-            for row in candidates
-            if effective_confidence(
+        eligible_rows: list[Contract] = []
+        for row in candidates:
+            score = effective_confidence(
                 float(row.confidence) if row.confidence is not None else None,
                 list(row.discovery_sources or []),
             )
-            >= MIN_CONFIDENCE_THRESHOLD
-        ]
+            if score >= MIN_CONFIDENCE_THRESHOLD:
+                eligible_rows.append(row)
+            else:
+                pre_rank_excluded.append(
+                    _excluded_record(row, reason="below_confidence_threshold", effective_confidence=score),
+                )
         dropped = len(candidates) - len(eligible_rows)
         record_stage_metric("eligible", len(eligible_rows))
         record_stage_metric("dropped", dropped)
@@ -203,7 +238,7 @@ class SelectionWorker(BaseWorker):
                 },
             )
             session.commit()
-            self._finish(session, job, ranked=[], child_ids=[])
+            self._finish(session, job, ranked=[], child_ids=[], not_selected=[], pre_rank_excluded=pre_rank_excluded)
             return
 
         with log_timed_phase(logger, "ranking") as ph:
@@ -229,7 +264,7 @@ class SelectionWorker(BaseWorker):
                 row.rank_score = rank
         session.commit()
 
-        child_ids = self._queue_top_n(
+        child_ids, not_selected = self._queue_top_n(
             session=session,
             job=job,
             ranked=ranked_dicts,
@@ -238,7 +273,14 @@ class SelectionWorker(BaseWorker):
             request=request,
         )
 
-        self._finish(session, job, ranked=ranked_dicts, child_ids=child_ids)
+        self._finish(
+            session,
+            job,
+            ranked=ranked_dicts,
+            child_ids=child_ids,
+            not_selected=not_selected,
+            pre_rank_excluded=pre_rank_excluded,
+        )
 
     def _queue_top_n(
         self,
@@ -249,8 +291,29 @@ class SelectionWorker(BaseWorker):
         analyze_limit: int,
         root_job_id: str,
         request: dict,
-    ) -> list[dict]:
-        """Create child analysis jobs for the top ``analyze_limit`` candidates."""
+    ) -> tuple[list[dict], list[dict]]:
+        """Create child analysis jobs for the top ``analyze_limit`` candidates.
+
+        Returns ``(child_ids, not_selected)``. Every ranked candidate that does
+        not become a child appears in ``not_selected`` with its reason — a
+        budget cut that leaves no record is the exact defect this ledger exists
+        to prevent.
+        """
+        not_selected: list[dict] = []
+
+        def _drop(entry: dict, reason: str, **extra: object) -> None:
+            record = {
+                "address": entry["__row_address"],
+                "chain": entry["__row_chain"] or "ethereum",
+                "rank_score": entry.get("rank_score"),
+                "reason": reason,
+            }
+            not_selected.append(record)
+            logger.info(
+                "Selection candidate not selected",
+                extra={**record, **extra, "site": "selection"},
+            )
+
         already_used = count_analysis_children(session, root_job_id)
         remaining = max(0, analyze_limit - already_used)
         if remaining == 0:
@@ -258,15 +321,18 @@ class SelectionWorker(BaseWorker):
                 "Selection budget already filled",
                 extra={"analyze_limit": analyze_limit, "existing_children": already_used},
             )
-            return []
+            # Returning here without enumerating drops EVERY ranked candidate
+            # silently — the same silent budget cut this ledger exists to
+            # prevent, reproduced inside its own producer.
+            for entry in ranked:
+                _drop(entry, "budget_exhausted", analyze_limit=analyze_limit, existing_children=already_used)
+            return [], not_selected
 
         # Under --force, dedupe known-proxy re-queues within the same cascade so multiple discovery sources don't spawn
         # N copies.
         force = bool(request.get("force"))
         selected: list[dict] = []
         for entry in ranked:
-            if len(selected) >= remaining:
-                break
             addr = entry["__row_address"]
             # Coalesce NULL→"ethereum" (legacy convention): the dedup helpers
             # below skip chain filtering entirely for chain=None, so a legacy
@@ -280,34 +346,15 @@ class SelectionWorker(BaseWorker):
             # analysis children for them. Skip without consuming analyze budget;
             # widening PSAT_SUPPORTED_CHAIN_IDS lets a future scan pick them up.
             if not chain_enabled(chain):
-                logger.info(
-                    "Skipping candidate: chain not enabled for this deployment",
-                    extra={"address": addr, "chain": chain, "reason": "chain_not_enabled", "site": "selection"},
-                )
+                _drop(entry, "chain_not_enabled")
                 continue
             existing = find_existing_job_for_address(session, addr, chain=chain)
             if existing is not None:
                 if not is_known_proxy(session, addr, chain=chain):
-                    logger.info(
-                        "Skipping candidate: address already has a job",
-                        extra={
-                            "address": addr,
-                            "chain": chain,
-                            "existing_job_id": str(existing.id),
-                            "reason": "existing_job",
-                        },
-                    )
+                    _drop(entry, "existing_job", existing_job_id=str(existing.id))
                     continue
                 if force and _existing_in_same_cascade(session, addr, chain, root_job_id):
-                    logger.info(
-                        "Skipping candidate: proxy already queued in this cascade",
-                        extra={
-                            "address": addr,
-                            "chain": chain,
-                            "existing_job_id": str(existing.id),
-                            "reason": "in_cascade_dedupe",
-                        },
-                    )
+                    _drop(entry, "in_cascade_dedupe", existing_job_id=str(existing.id))
                     continue
                 logger.info(
                     "Re-queuing proxy for upgrade check",
@@ -318,6 +365,15 @@ class SelectionWorker(BaseWorker):
                         "reason": "proxy_upgrade_recheck",
                     },
                 )
+            # Budget LAST, so a candidate the chain gate or the dedup arm would
+            # have rejected anyway is reported with the reason that actually
+            # applies. Checking it first made every below-the-cut candidate read
+            # `budget_exhausted` — no silent drop, but the wrong cause, and the
+            # ledger's whole value is the cause. It also consumes no budget, for
+            # the same reason the spawn walker spends its budget at create_job.
+            if len(selected) >= remaining:
+                _drop(entry, "budget_exhausted", analyze_limit=analyze_limit, existing_children=already_used)
+                continue
             selected.append(entry)
 
         child_ids: list[dict] = []
@@ -367,7 +423,7 @@ class SelectionWorker(BaseWorker):
                     "child_job_id": str(child_job.id),
                 },
             )
-        return child_ids
+        return child_ids, not_selected
 
     def _finish(
         self,
@@ -376,6 +432,8 @@ class SelectionWorker(BaseWorker):
         *,
         ranked: list[dict],
         child_ids: list[dict],
+        not_selected: list[dict],
+        pre_rank_excluded: list[dict],
     ) -> None:
         summary_ranked = [
             {
@@ -397,6 +455,13 @@ class SelectionWorker(BaseWorker):
                 "ranked_count": len(ranked),
                 "analyzed_count": len(child_ids),
                 "child_jobs": child_ids,
+                # The two omission ledgers. ``not_selected`` covers the RANKED
+                # population; ``pre_rank_excluded`` covers the rows removed
+                # before ranking. Only both being empty proves nothing was
+                # dropped — ``not_selected == []`` alone does not, because the
+                # pre-rank filters run upstream of it.
+                "not_selected": not_selected,
+                "pre_rank_excluded": pre_rank_excluded,
                 "ranked": summary_ranked,
             },
         )

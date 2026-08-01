@@ -73,13 +73,21 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
 def test_fixture_index_covers_all_solidity_contract_fixtures():
     indexed_paths = {entry["path"] for entry in _fixture_index()}
     # The detection-pattern index catalogs the hand-authored single-file fixtures.
-    # ``label_corpus/`` holds the effect-labels golden-gate sources (synthetic
-    # single-file .sol + one Foundry project); their own manifest is the source of
-    # truth, so they are not indexed here.
+    # Two directories are excluded because they are compiled through a manifest
+    # that is their own source of truth, not through this index:
+    #   * ``label_corpus/`` — the effect-labels golden-gate sources (synthetic
+    #     single-file .sol + one Foundry project).
+    #   * ``etherfi_timelock/`` — the VERBATIM Etherscan-verified source of
+    #     0xcd425f44… (EtherFiTimelock + its vendored OpenZeppelin tree), pinned
+    #     by ``tests/test_timelock_surface_parity.py``. These files are not
+    #     hand-authored detection patterns and must not be edited to suit one:
+    #     the test's whole claim is that they are byte-identical to what the
+    #     chain verified, so indexing them here would invite exactly that edit.
+    _MANIFEST_OWNED_DIRS = {"label_corpus", "etherfi_timelock"}
     fixture_paths = {
         str(path.relative_to(FIXTURES_DIR))
         for path in FIXTURES_DIR.rglob("*.sol")
-        if "label_corpus" not in path.relative_to(FIXTURES_DIR).parts
+        if not _MANIFEST_OWNED_DIRS & set(path.relative_to(FIXTURES_DIR).parts)
     }
 
     assert indexed_paths == fixture_paths

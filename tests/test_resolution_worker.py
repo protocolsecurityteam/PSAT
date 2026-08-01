@@ -14,6 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from db.models import ContractBalance, ContractBalanceFetch
+from tests.support.balance_stubs import page, pinned_native_unavailable
+from utils.balance_status import NATIVE_STATUS_FETCH_FAILED, NATIVE_STATUS_NOT_DETERMINED
 from workers.resolution_worker import ResolutionWorker
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL", os.environ.get("DATABASE_URL", "")) or ""
@@ -25,10 +28,15 @@ def _stub_etherscan_balances(monkeypatch):
 
     Benign defaults (no balances); tests exercising specific balance behaviour
     override these in-body (monkeypatch order lets the later setattr win).
+
+    The pinned native read is a second, non-Etherscan wire the same call makes,
+    and no test here exercises it — so the module takes the unpinned path its
+    expectations were written against.
     """
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
-    monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+    monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+    pinned_native_unavailable(monkeypatch)
 
 
 def _can_connect() -> bool:
@@ -180,6 +188,10 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+    # The perimeter walk moved to services/discovery/perimeter; the resolution
+    # worker still imports create_job for its dependency-provider spawn, so both
+    # bindings are stubbed and the assertions below are unchanged.
+    monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
     monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_control_snapshot)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_control_graph)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
@@ -293,6 +305,25 @@ class TestProxyAddressOverride:
         assert captured_plan[0]["contract_address"] == PROXY_ADDRESS
 
 
+def _added(session) -> list:
+    """Every object handed to ``session.add`` on a MagicMock session."""
+    return [c.args[0] for c in session.add.call_args_list if c.args]
+
+
+def _balance_rows(session) -> int:
+    """HOLDINGS rows only. The fetch-provenance row is not a holding and must
+    never be counted as one — that separation is the whole point of the plane."""
+    return sum(1 for o in _added(session) if isinstance(o, ContractBalance))
+
+
+def _fetch_objects(session) -> list:
+    return [o for o in _added(session) if isinstance(o, ContractBalanceFetch)]
+
+
+def _fetch_rows(session) -> int:
+    return len(_fetch_objects(session))
+
+
 # ---------------------------------------------------------------------------
 # 3. _fetch_balances — ETH + tokens stored, price failure handled
 # ---------------------------------------------------------------------------
@@ -310,25 +341,30 @@ class TestFetchBalancesHappyPath:
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 2000.0)
         monkeypatch.setattr(
-            "utils.etherscan.get_token_balances",
-            lambda addr, *a, **k: [
-                {
-                    "token_address": "0xtoken1",
-                    "token_name": "USDC",
-                    "token_symbol": "USDC",
-                    "decimals": 6,
-                    "balance": 1000000,
-                    "price_usd": 1.0,
-                    "usd_value": 1.0,
-                }
-            ],
+            "utils.etherscan.get_token_balances_page",
+            lambda addr, *a, **k: page(
+                [
+                    {
+                        "token_address": "0xtoken1",
+                        "token_name": "USDC",
+                        "token_symbol": "USDC",
+                        "decimals": 6,
+                        "balance": 1000000,
+                        "price_usd": 1.0,
+                        "usd_value": 1.0,
+                    }
+                ]
+            ),
         )
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # 2 add calls: 1 ETH + 1 token
-        assert session.add.call_count == 2
+        # 2 holdings rows: 1 ETH + 1 token. The third ``add`` is the
+        # ``ContractBalanceFetch`` provenance row, which is NOT a holding and is
+        # counted separately for exactly that reason.
+        assert _balance_rows(session) == 2
+        assert _fetch_rows(session) == 1
         session.commit.assert_called()
 
     def test_price_failure_still_stores_eth(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -339,29 +375,38 @@ class TestFetchBalancesHappyPath:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
         monkeypatch.setattr("utils.etherscan.get_native_price", MagicMock(side_effect=Exception("API down")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
         # Should still add ETH balance even if price failed
-        assert session.add.call_count == 1
+        assert _balance_rows(session) == 1
+        assert _fetch_rows(session) == 1
         session.commit.assert_called()
 
-    def test_balance_fetch_exception_returns_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_balance_fetch_exception_writes_no_holding_but_leaves_a_trace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
         fake_contract = SimpleNamespace(id=42)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error")))
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # No balances stored on exception
-        session.add.assert_not_called()
+        # No holdings row on a failed read — the balance is not known, and the
+        # earlier code path recorded that only via ``record_degraded``, leaving
+        # the balance plane showing a plain absence. A provenance row now says
+        # the read was attempted and failed.
+        assert _balance_rows(session) == 0
+        fetches = _fetch_objects(session)
+        assert len(fetches) == 1
+        assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
 
     def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A BSC job records its native gas balance under BNB at the BNB quote,
@@ -373,12 +418,12 @@ class TestFetchBalancesHappyPath:
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000)  # 2 BNB
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id: 600.0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=56)
 
-        native_rows = [c.args[0] for c in session.add.call_args_list if c.args[0].token_address is None]
+        native_rows = [o for o in _added(session) if isinstance(o, ContractBalance) and o.token_address is None]
         assert len(native_rows) == 1
         row = native_rows[0]
         assert row.token_symbol == "BNB"
@@ -434,6 +479,10 @@ class TestQueueDiscoveredContracts:
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(
             nodes=[
@@ -460,10 +509,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -480,10 +532,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -501,10 +556,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(id=uuid.uuid4())
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -523,10 +581,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -548,10 +609,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         # Node address matches root
         graph = _resolved_graph(
@@ -569,10 +633,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(
             nodes=[
@@ -591,10 +658,13 @@ class TestQueueDiscoveredContracts:
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -643,6 +713,10 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -666,6 +740,10 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
 
@@ -741,12 +819,21 @@ class TestFetchBalancesZeroEth:
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        session.add.assert_not_called()
+        # No holdings row for a zero balance — a row here would be consumed as
+        # "this deployment holds the native asset". The zero itself is recorded
+        # on the fetch plane, and because this read came from the UNPINNED
+        # Etherscan path it is ``not_determined``, never ``proven_zero``: the
+        # answer carries no height, so it proves zero at no height.
+        assert _balance_rows(session) == 0
+        fetches = _fetch_objects(session)
+        assert len(fetches) == 1
+        assert fetches[0].native_status == NATIVE_STATUS_NOT_DETERMINED
+        assert fetches[0].block_number is None
         session.commit.assert_called()
 
 
@@ -770,7 +857,7 @@ class TestFetchBalancesProxyAddress:
             return 0
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", fake_get_eth)
-        monkeypatch.setattr("utils.etherscan.get_token_balances", lambda addr, *a, **k: [])
+        monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
         job = _job(request={"proxy_address": PROXY_ADDRESS})
@@ -795,10 +882,13 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         session.get = lambda model, pid: None  # parent not found
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
@@ -840,6 +930,10 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
+        # The perimeter walk moved to services/discovery/perimeter; the resolution
+        # worker still imports create_job for its dependency-provider spawn, so both
+        # bindings are stubbed and the assertions below are unchanged.
+        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
@@ -1232,10 +1326,13 @@ class TestStructuralOwnershipPropagation:
         job = _job(id=real_job.id, request={"rpc_url": "rpc"})
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1263,10 +1360,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1332,10 +1432,13 @@ class TestStructuralOwnershipPropagation:
         job = _job(id=real_job.id, request={"rpc_url": "rpc"})
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1343,6 +1446,81 @@ class TestStructuralOwnershipPropagation:
         assert len(create_calls) == 1
         assert create_calls[0]["discovery_relationship"] == "proxy"
         assert create_calls[0]["parent_owns_high"] is True
+
+    @requires_postgres
+    def test_proxy_back_link_on_another_chain_does_not_propagate(
+        self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dep's back-linking Contract row exists only on ANOTHER chain
+        (CREATE2 twin): the back-link is not evidence on the parent's chain,
+        so the child must not inherit (readiness §2.5)."""
+        session = db_session_for_resolution
+        parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+        dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
+
+        from db.models import Contract, ContractDependency
+
+        parent = Contract(
+            address=parent_addr,
+            chain="ethereum",
+            protocol_id=None,
+            contract_name="ImplParent",
+            discovery_sources=["defillama"],
+        )
+        session.add(parent)
+        session.commit()
+        # The only row carrying the back-link is the same-address twin on base.
+        session.add(
+            Contract(
+                address=dep_addr,
+                chain="base",
+                protocol_id=None,
+                contract_name="DepProxyTwin",
+                is_proxy=True,
+                implementation=parent_addr,
+            )
+        )
+        session.add(
+            ContractDependency(
+                contract_id=parent.id,
+                dependency_address=dep_addr,
+                relationship_type="proxy",
+                source=["dynamic"],
+            )
+        )
+        session.commit()
+
+        from db.models import Job, JobStage, JobStatus
+
+        real_job = Job(
+            id=uuid.uuid4(),
+            stage=JobStage.resolution,
+            status=JobStatus.processing,
+            request={"rpc_url": "rpc"},
+        )
+        session.add(real_job)
+        session.commit()
+        parent.job_id = real_job.id
+        session.commit()
+        job = _job(id=real_job.id, request={"rpc_url": "rpc"})
+
+        create_calls: list[dict] = []
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+
+        graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
+        ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
+
+        assert len(create_calls) == 1
+        assert "discovery_relationship" not in create_calls[0], (
+            "a cross-chain twin's back-link satisfied the structural check — the lookup is no longer chain-scoped"
+        )
+        assert "parent_owns_high" not in create_calls[0]
 
     @requires_postgres
     def test_relationship_type_alone_does_not_propagate(
@@ -1369,10 +1547,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -1405,10 +1586,13 @@ class TestStructuralOwnershipPropagation:
         job = self._link_parent_to_real_job(session, parent)
 
         create_calls: list[dict] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.create_job",
-            lambda _s, req, **kw: create_calls.append(req) or SimpleNamespace(id=uuid.uuid4(), company=None),
-        )
+
+        def _fake_create(_s, req, **kw):
+            create_calls.append(req)
+            return SimpleNamespace(id=uuid.uuid4(), company=None)
+
+        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
+        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")

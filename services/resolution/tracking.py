@@ -11,9 +11,11 @@ from collections.abc import Callable
 from typing import Any
 
 from eth_abi.abi import decode
+from eth_utils.crypto import keccak as _keccak
 
 from schemas.contract_analysis import ControllerReadSpec
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan, TrackedController
+from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.logging import record_degraded
 from utils.rpc import (
@@ -469,15 +471,274 @@ def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, ch
     return raw
 
 
+# --- Safe module / guard protection probe (C1) -----------------------------
+#
+# Every value below is derived from a preimage the deployed Safe singletons
+# contain verbatim, recomputed at import so the constant can never drift from
+# the preimage it claims:
+#
+#   modules head — Safe stores ``mapping(address => address) modules`` at storage
+#     slot 1 and seeds it with ``modules[SENTINEL_MODULES] = SENTINEL_MODULES``
+#     where ``SENTINEL_MODULES == address(0x1)``. The head word therefore lives at
+#     ``keccak256(abi.encode(address(0x1), uint256(1)))``.
+#   guard — ``GUARD_STORAGE_SLOT = keccak256("guard_manager.guard.address")``,
+#     the literal present in the 1.3.0 and 1.4.1 singletons.
+_SAFE_SENTINEL_MODULES_WORD = (1).to_bytes(32, "big")
+_SAFE_MODULES_MAPPING_SLOT_WORD = (1).to_bytes(32, "big")
+_SAFE_MODULES_HEAD_SLOT = "0x" + _keccak(_SAFE_SENTINEL_MODULES_WORD + _SAFE_MODULES_MAPPING_SLOT_WORD).hex()
+_SAFE_GUARD_SLOT = "0x" + _keccak(text="guard_manager.guard.address").hex()
+_SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
+
+# The largest word value that is still a left-padded address.
+_ADDRESS_WORD_MAX = (1 << 160) - 1
+
+# Safe releases whose DEPLOYED singleton source was read and found to contain (or
+# to lack) ``GUARD_STORAGE_SLOT``. A zero word at the guard slot means "no guard
+# is set" only on a release that HAS the feature; on 1.1.1 the slot is unused
+# storage, and reading its zero as "guard disabled" would be a defaulted witness.
+# Any version outside both sets — including a variant suffix such as ``1.3.0+L2``
+# whose source was not read — is not_determined, never assumed either way.
+_SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1"})
+_SAFE_VERSIONS_WITHOUT_GUARD = frozenset({"1.1.1"})
+
+_NOT_DETERMINED = "not_determined"
+_BLOCK_TAG_ALIASES = frozenset({"latest", "pending", "earliest", "safe", "finalized"})
+
+
+def _resolve_pinned_block(rpc_url: str, block_tag: str, *, chain_id: int | None = None) -> int | None:
+    """The integer height the protection probe will pin its reads to, or ``None``.
+
+    An explicit quantity tag is already the height. A moving alias is resolved to
+    a concrete number FIRST and the reads are then issued against that number, so
+    the published ``probe_block`` is the height the words actually came from
+    rather than whatever ``latest`` meant at each individual read. ``None`` (head
+    read failed) suppresses the probe entirely — a module set observed at an
+    unknown height is a now-fact with no block, which may not be published."""
+    tag = (block_tag or "").strip().lower()
+    if tag.startswith("0x"):
+        try:
+            return int(tag, 16)
+        except ValueError:
+            return None
+    if tag not in _BLOCK_TAG_ALIASES:
+        return None
+    try:
+        return _current_block_number(rpc_url, chain_id=chain_id)
+    except Exception:
+        return None
+
+
+def _word_to_address(word: str | None) -> str | None:
+    """The address a 32-byte word holds, or ``None``.
+
+    ``None`` for anything that is not exactly 64 hex nibbles behind ``0x``, and
+    ``None`` when the top 12 bytes are set (that word is not an address at all).
+    The decode is delegated to ``decode_word`` rather than re-derived: left-pad
+    then length-check cannot reject anything, and under it ``"0x1"`` pads into
+    the modules sentinel — a one-nibble read minting a proven-empty module set."""
+    value = _decode_word(word)
+    if value is None or value > _ADDRESS_WORD_MAX:
+        return None
+    return "0x" + f"{value:040x}"
+
+
+def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str, str | None]:
+    """``(guard_state, guard_address)`` from the guard slot word and VERSION().
+
+    Four states, and the failure/absence path is ``not_determined`` in every arm:
+    an unread word, an unknown version, or a word that contradicts the version's
+    feature set all land there rather than on a polarity."""
+    if guard_word is None or version is None:
+        return _NOT_DETERMINED, None
+    address = _word_to_address(guard_word)
+    if address is None:
+        return _NOT_DETERMINED, None
+    is_zero = address == "0x" + "0" * 40
+    if version in _SAFE_VERSIONS_WITH_GUARD:
+        return ("proven_zero", None) if is_zero else ("proven_address", address)
+    if version in _SAFE_VERSIONS_WITHOUT_GUARD:
+        # A nonzero word at a slot the release does not implement is unexplained;
+        # "feature_absent" would be asserting more than the read supports.
+        return ("feature_absent", None) if is_zero else (_NOT_DETERMINED, None)
+    return _NOT_DETERMINED, None
+
+
+def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> dict:
+    """The Safe module/guard protection witness, at a pinned height.
+
+    Two storage words plus ``VERSION()``. The module linked list is NOT walked, so
+    the head word can only ever prove the list EMPTY (head == sentinel). A
+    non-sentinel head proves a module exists — which makes the k/n signer threshold
+    an upper bound on protection — but says nothing about how many, so the set stays
+    ``not_determined``: publishing ``[head]`` would report a two-module Safe as a
+    one-module Safe. Never raises; every failure arm publishes ``not_determined``."""
+    out: dict[str, object] = {
+        "probe_block": _NOT_DETERMINED,
+        "safe_version": _NOT_DETERMINED,
+        "modules_head": _NOT_DETERMINED,
+        "module_set": _NOT_DETERMINED,
+        "module_set_basis": _NOT_DETERMINED,
+        "protection_is_upper_bound": _NOT_DETERMINED,
+        "guard": _NOT_DETERMINED,
+    }
+    probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
+    if probe_block is None:
+        return out
+    out["probe_block"] = probe_block
+    pinned = hex(probe_block)
+
+    decoded_version = _try_eth_call_decoded(rpc_url, address, "VERSION()", "string", pinned, chain_id=chain_id)
+    version = decoded_version if isinstance(decoded_version, str) else None
+    if version is not None:
+        out["safe_version"] = version
+
+    def _word(slot: str) -> str | None:
+        """The 32-byte word at ``slot``, or ``None`` for a failed or malformed read.
+
+        Nothing is padded. ``eth_getStorageAt`` answering ``"0x"``, ``"0x1"``, a
+        63-nibble body or whitespace is not a word, and padding one to width
+        before checking it would turn "the node told us nothing" into the
+        sentinel or into a zero — a proven state minted from a non-observation.
+        Every such shape leaves the whole probe ``not_determined``."""
+        try:
+            raw = _get_storage_at(rpc_url, address, slot, pinned, chain_id=chain_id)
+        except Exception:
+            return None
+        if not isinstance(raw, str) or _decode_word(raw) is None:
+            return None
+        return "0x" + raw[2:].lower()
+
+    head_word = _word(_SAFE_MODULES_HEAD_SLOT)
+    if head_word is not None:
+        out["modules_head"] = head_word
+        head_address = _word_to_address(head_word)
+        if head_address == _SAFE_SENTINEL_ADDRESS:
+            out["module_set"] = []
+            out["module_set_basis"] = "storage_linked_list_terminated"
+        elif head_address is not None and head_address != "0x" + "0" * 40:
+            # A module is enabled at probe_block; it can act without meeting the
+            # signer threshold, so k/n bounds protection from above. The count
+            # stays unknown — this is the only positive the head word earns.
+            out["protection_is_upper_bound"] = True
+            out["modules_head_address"] = head_address
+
+    out["guard"], guard_address = _safe_guard_state(_word(_SAFE_GUARD_SLOT), version)
+    if guard_address is not None:
+        out["guard_address"] = guard_address
+    return out
+
+
+#: The getter the back-link probe reads. A selector, fired with a negative
+#: control — NOT a name match on the principal. The published fact is an address
+#: EQUALITY at a pinned height; the getter's name contributes nothing to it.
+_BACKLINK_GETTER_SIG = "vault()"
+
+
+def probe_declared_vault_backlink(
+    rpc_url: str,
+    principal_address: str,
+    gated_contract_address: str,
+    block_tag: str = "latest",
+    *,
+    chain_id: int | None = None,
+) -> dict[str, object] | None:
+    """Does *principal_address* itself declare *gated_contract_address* as its
+    ``vault()``, at a pinned height, with the duck-typing control passed?
+
+    The narrow fact this earns, and the only one it may be read as: **M declares
+    V as its vault() at ``probe_block``, with the nonsense-selector control
+    passed.** That corroborates the (M, V) PAIRING the projection already
+    asserts, from a structural read rather than from the
+    ``ManagerWithMerkleVerification`` label string (inv.2).
+
+    It earns NOTHING about what M *is*, and on this corpus that is not a corner
+    case: of the 20 pairs that publish ``True`` at 25643300, **10 are not
+    managers at all** — Tellers, solvers and vaults whose ``vault()`` happens to
+    be the contract they gate. Half the positive population would be
+    mis-typed by anyone reading this as "M is the manager".
+
+    Returns ``None`` — the witness is wholly ABSENT, not falsified — when the
+    height cannot be pinned: two facts on one node row may not carry different
+    unstated heights, so an unpinnable read publishes nothing at all.
+
+    ``declared_vault_matches_gated_contract`` is ``True`` or ``"not_determined"``
+    and has **no false state**, because a mismatch is not a disproof: a pairing
+    established by some other mechanism is not refuted by this getter answering
+    differently.
+
+    **The non-match payload is byte-identical to the never-read payload.** This
+    is load-bearing and was got wrong once. Publishing the control verdict
+    before the equality test made ``negative_control`` a perfect mismatch
+    oracle: the control can only be fired after a decodable address is in hand,
+    so ``negative_control == "passed"`` alongside
+    ``declared_vault_matches_gated_contract == "not_determined"`` was reachable
+    ONLY by "M declares a vault and it is not V" — the earned negative this
+    function refuses, reconstructable one key over. The control verdict is
+    therefore committed to the payload only on the arm that publishes a
+    positive. Withholding it is NOT a claim that the mismatch is unknowable —
+    ``control_graph_edges.relation='controller_value'`` with ``label='vault'``
+    already publishes the raw address for any consumer that wants it (32 rows /
+    25 contracts on this corpus, with ``controller_values.block_number``). It is
+    a statement about what THIS witness asserts.
+    """
+    probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
+    if probe_block is None:
+        return None
+    pinned = hex(probe_block)
+    # ``gated_contract_address`` is structural — it names the subject of the
+    # verdict, so the row is self-describing and a later graph merge cannot
+    # silently reattribute the witness to a different V.
+    out: dict[str, object] = {
+        "probe_block": probe_block,
+        "backlink_getter": _BACKLINK_GETTER_SIG,
+        "gated_contract_address": (gated_contract_address or "").lower(),
+        "backlink_address": _NOT_DETERMINED,
+        "negative_control": _NOT_DETERMINED,
+        "declared_vault_matches_gated_contract": _NOT_DETERMINED,
+    }
+
+    declared = _try_eth_call_decoded(
+        rpc_url, principal_address, _BACKLINK_GETTER_SIG, "address", pinned, chain_id=chain_id
+    )
+    if not isinstance(declared, str):
+        # Revert, empty return, non-32-byte return, decode failure, transport
+        # error. No control is fired: nothing positive is on the table for it to
+        # gate.
+        return out
+
+    if declared.lower() != (gated_contract_address or "").lower():
+        # Byte-identical to the branch above, deliberately. Firing the control
+        # here and recording its verdict would republish the mismatch.
+        return out
+
+    control = _negative_control_probe(rpc_url, principal_address, pinned, chain_id=chain_id)
+    if control != "passed":
+        # A catch-all fallback answers everything, so the matching vault() answer
+        # is worthless. Recording the verdict is safe on this arm: it is reached
+        # only when the address MATCHED, so it discriminates nothing about the
+        # pairing.
+        out["negative_control"] = control
+        return out
+
+    out["negative_control"] = control
+    out["backlink_address"] = declared.lower()
+    out["declared_vault_matches_gated_contract"] = True
+    return out
+
+
 def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
     """The ERC-1967 implementation slot: an implementation address when the
     slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
-    ``_PROBE_ERROR`` when the read did not dispositively happen."""
+    ``_PROBE_ERROR`` when the read did not dispositively happen.
+
+    The word must be exactly 64 nibbles before any interpretation: "slot is
+    zero" is a typing verdict (not a proxy), so it is earned only by a full
+    zero word — a short return is a transport artifact and stays an error."""
     try:
         raw = _get_storage_at(rpc_url, address, _ERC1967_IMPLEMENTATION_SLOT, block_tag, chain_id=chain_id)
     except Exception:
         return _PROBE_ERROR
-    word = raw[2:].lower().rjust(64, "0")
+    word = raw[2:].lower()
     if len(word) != 64 or set(word) - set("0123456789abcdef"):
         return _PROBE_ERROR
     if set(word) == {"0"}:
@@ -682,6 +943,9 @@ def _classify_uncached_batched(
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
+                # Nested so a consumer cannot read module_set without its probe_block:
+                # both are one now-fact and neither means anything alone.
+                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
             },
             had_error,
         )
@@ -781,6 +1045,7 @@ def _classify_uncached(
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
+                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
             },
             had_error,
         )

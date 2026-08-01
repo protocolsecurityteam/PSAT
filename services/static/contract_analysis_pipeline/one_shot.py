@@ -63,6 +63,14 @@ logger = logging.getLogger(__name__)
 # ``tracking._function_is_initializer`` keys the Initialized-event tag on.
 INITIALIZER_MODIFIERS = frozenset({"initializer", "reinitializer", "onlyInitializing"})
 
+# ``expected_version``'s provenance, recorded beside the integer so no consumer
+# can read it as compiler-forced. Both arms key on the closed
+# ``INITIALIZER_MODIFIERS`` name set (the residual); they differ in whether a
+# source literal was actually read, which is not a difference a single label can
+# carry honestly.
+EXPECTED_VERSION_BASIS_REINITIALIZER_LITERAL = "oz_reinitializer_argument_literal"
+EXPECTED_VERSION_BASIS_INITIALIZER_CONSTANT = "oz_initializer_modifier_standard_constant"
+
 # OZ v5 ERC-7201 InitializableStorage struct layout: the namespaced slot holds
 # ``uint64 _initialized`` then ``bool _initializing``. Slither lowers the
 # struct read to the slot CONSTANT as the state variable, with the member on
@@ -120,8 +128,8 @@ def apply_one_shot_pass(contract: Any, predicate_trees: dict[str, PredicateTree]
         if not latch_vars:
             continue
 
-        expected_version = _expected_version(fn, init_modifiers)
-        if _stamp_tree(contract, tree, latch_vars, transient_names, expected_version):
+        expected_version, expected_version_basis = _expected_version(fn, init_modifiers)
+        if _stamp_tree(contract, tree, latch_vars, transient_names, expected_version, expected_version_basis):
             stamped_any = True
 
     _apply_structural_candidates(contract, predicate_trees)
@@ -149,15 +157,18 @@ def _stamp_tree(
     latch_vars: dict[str, Any],
     transient_names: set[str],
     expected_version: int | None,
+    expected_version_basis: str | None,
 ) -> bool:
     stamped = False
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is not None and _maybe_stamp_leaf(contract, leaf, latch_vars, transient_names, expected_version):
+        if leaf is not None and _maybe_stamp_leaf(
+            contract, leaf, latch_vars, transient_names, expected_version, expected_version_basis
+        ):
             stamped = True
         return stamped
     for child in tree.get("children") or []:
-        if _stamp_tree(contract, child, latch_vars, transient_names, expected_version):
+        if _stamp_tree(contract, child, latch_vars, transient_names, expected_version, expected_version_basis):
             stamped = True
     return stamped
 
@@ -168,6 +179,7 @@ def _maybe_stamp_leaf(
     latch_vars: dict[str, Any],
     transient_names: set[str],
     expected_version: int | None,
+    expected_version_basis: str | None,
 ) -> bool:
     # Already-classified non-business leaves (reentrancy/pause/authority)
     # keep their classification — fail closed to the generic badge.
@@ -200,7 +212,13 @@ def _maybe_stamp_leaf(
         name = operand.get("state_variable_name")
         if not isinstance(name, str) or name not in latch_vars or name in transient_names:
             continue
-        latch = _latch_location(contract, latch_vars[name], cast("dict[str, Any]", operand), expected_version)
+        latch = _latch_location(
+            contract,
+            latch_vars[name],
+            cast("dict[str, Any]", operand),
+            expected_version,
+            expected_version_basis,
+        )
         if latch is not None:
             leaf["one_shot_latch"] = latch
             break
@@ -217,6 +235,7 @@ def _latch_location(
     state_var: Any,
     operand: dict[str, Any] | None,
     expected_version: int | None,
+    expected_version_basis: str | None = None,
 ) -> dict[str, Any] | None:
     """On-chain location of the persistent latch read by ``state_var``.
 
@@ -256,6 +275,7 @@ def _latch_location(
                 "size_bytes": None,
                 "value_type": None,
                 "expected_version": expected_version,
+                "expected_version_basis": expected_version_basis,
                 "standard": "namespaced_slot_constant",
             }
         return {
@@ -267,6 +287,7 @@ def _latch_location(
             "size_bytes": member_layout["size_bytes"],
             "value_type": member_layout["value_type"],
             "expected_version": expected_version,
+            "expected_version_basis": expected_version_basis,
             "standard": "oz_v5_namespaced",
         }
 
@@ -296,6 +317,7 @@ def _latch_location(
         "size_bytes": size_bytes,
         "value_type": str(getattr(state_var, "type", "")) or None,
         "expected_version": expected_version,
+        "expected_version_basis": expected_version_basis,
         "standard": "storage_layout",
     }
 
@@ -368,17 +390,22 @@ def _placeholder_bracketed_writes(modifier: Any) -> set[str]:
     return writes(nodes[:placeholder_index]) & writes(nodes[placeholder_index + 1 :])
 
 
-def _expected_version(fn: Any, init_modifiers: list[Any]) -> int | None:
-    """The version the latch must reach for this gate to be consumed:
-    1 for ``initializer``, the literal argument for ``reinitializer(n)``,
-    None when it can't be determined statically (non-literal reinitializer
-    version, or an ``onlyInitializing``-only helper)."""
+def _expected_version(fn: Any, init_modifiers: list[Any]) -> tuple[int | None, str | None]:
+    """``(version, basis)`` — the version the latch must reach for this gate to
+    be consumed, and where that integer came from. 1 for ``initializer`` (the
+    standard's own constant, not a value read from this source), the literal
+    argument for ``reinitializer(n)``. ``(None, None)`` when it can't be
+    determined statically (non-literal reinitializer version, or an
+    ``onlyInitializing``-only helper) — never a defaulted 1."""
     names = {getattr(m, "name", "") for m in init_modifiers}
     if "reinitializer" in names:
-        return _reinitializer_literal(fn)
+        literal = _reinitializer_literal(fn)
+        if literal is None:
+            return None, None
+        return literal, EXPECTED_VERSION_BASIS_REINITIALIZER_LITERAL
     if "initializer" in names:
-        return 1
-    return None
+        return 1, EXPECTED_VERSION_BASIS_INITIALIZER_CONSTANT
+    return None, None
 
 
 def _reinitializer_literal(fn: Any) -> int | None:

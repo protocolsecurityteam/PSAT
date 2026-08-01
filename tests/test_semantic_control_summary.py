@@ -120,7 +120,21 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
 
 
 def test_role_definitions_from_predicate_role_keys(tmp_path):
-    """``role_definitions`` comes from role keys used in predicate trees."""
+    """``role_definitions`` comes from role keys used in predicate trees — and
+    only from the in-contract ``mapping_membership`` shape.
+
+    The cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate below names two
+    real roles and mints NEITHER. ``callee_signature`` is read off
+    ``ir.function.full_name`` (``predicates.py:2338``), the interface the CALLER
+    declared, so it is not a proven property of the deployed callee: a slot lens
+    or a merkle-tree contract declared under the name ``hasRole(bytes32,address)``
+    lowers to a byte-identical descriptor, and those shapes minted ERC-7201
+    pointers as roles (see ``tests/test_role_definition_leaf_admission.py``).
+
+    The absence is a **coverage caveat**, not a finding: these roles are
+    ``not_determined``, never "this contract has no roles"
+    (``SCORING_INVARIANTS.md`` B4c).
+    """
     source = """
     pragma solidity ^0.8.19;
     interface IRoleRegistry {
@@ -144,7 +158,7 @@ def test_role_definitions_from_predicate_role_keys(tmp_path):
     """
     ac = _detect(tmp_path, source)
     role_names = {r["role"] for r in ac["role_definitions"]}
-    assert {"ADMIN_ROLE", "MINTER_ROLE"}.issubset(role_names)
+    assert role_names == set()
 
 
 def test_delegated_authority_leaf_admits_function(tmp_path):

@@ -389,6 +389,15 @@ _FLOW_KEYS = (
     # mandatory-gate transparency join reads exactly this, so the gate must
     # show a change to it (the corpus is blind to fields it does not pin).
     "router_ops",
+    # Destination identity + its write surface. ``writer_surface_closed`` is
+    # pinned even though it is a constant: a future change that made it dynamic
+    # would otherwise land silently on every row.
+    "target_variable",
+    "target_variables",
+    "target_writer_signatures",
+    "target_writer_scan_complete",
+    "target_writer_absent_reason",
+    "writer_surface_closed",
 )
 
 
@@ -591,17 +600,28 @@ def _flatten_record(
                 # head (a library-wrapped/cast token receiver, G5) or to the
                 # canonical callee selector (the cross-contract join) diffs the
                 # gate. Without this pin those two shapes are invisible here.
+                # ``receiver`` rides here and NOT in ``_FLOW_KEYS``: it is a
+                # property of the SINK, and this projection is a separate dict
+                # from the flow one, so pinning it there would have left the
+                # field invisible — the same blindness that hid the resolved
+                # head before ``external_calls`` was pinned at all.
                 "external_calls": sorted(
                     (
                         {
                             "target": str(s.get("target") or ""),
                             "selector": str(s.get("selector") or ""),
                             "origin": str(s.get("origin") or ""),
+                            "receiver": _json_safe(s.get("receiver")),
                         }
                         for s in (info.get("sinks") or [])
                         if isinstance(s, dict) and s.get("kind") == "external_call"
                     ),
-                    key=lambda s: (s["target"], s["selector"], s["origin"]),
+                    key=lambda s: (
+                        s["target"],
+                        s["selector"],
+                        s["origin"],
+                        json.dumps(s["receiver"], sort_keys=True),
+                    ),
                 ),
                 # Delegatecall sinks, pinned separately because they are NOT
                 # ``external_call`` kind and so were invisible above — the corpus

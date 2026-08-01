@@ -40,6 +40,12 @@ ResolvedAnalysisState = Literal[
 ResolvedEdgeRelation = Literal[
     "controller_value",
     "role_principal",
+    # A ``function_principals`` row materialized into the graph plane. A control
+    # relation (it IS in ``db.models.CONTROL_EDGE_RELATIONS``), but distinct from
+    # ``role_principal``: it asserts "resolved principal of a gated function on
+    # the from-node", never "holder of role R" — the claim the upstream
+    # capability resolver explicitly declined to make for this population.
+    "capability_principal",
     "safe_owner",
     "timelock_owner",
     "proxy_admin_owner",

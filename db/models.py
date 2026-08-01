@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -29,12 +30,39 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
+from utils.balance_status import NATIVE_STATUS_PROVEN_ZERO
 from utils.chains import UnknownChainError, chain_by_name
+from utils.restaking_status import (
+    CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
+    CROSS_READ_AGREE,
+    CROSS_READ_AGREEMENTS,
+    EIGENPOD_BASES,
+    EIGENPOD_BASIS_NO_EIGENPOD_PROVEN,
+    EIGENPOD_BASIS_PROVEN_CROSS_READ,
+    NODE_SET_COMPLETENESS_NOT_DETERMINED,
+    NON_OBSERVING_SHARES_BASES,
+    SHARES_BASES,
+    SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
+    SHARES_BASIS_NO_EIGENPOD_PROVEN,
+    SHARES_COLUMN_COMMENT,
+)
+
+
+def _sql_tuple(values: tuple[str, ...]) -> str:
+    """A SQL ``IN`` list built from the vocabulary module.
+
+    The constraint text and the producer must name the same strings; spelling
+    them twice is how a domain check drifts into permitting a value the writer
+    can no longer produce (or refusing one it can).
+    """
+    return "(" + ", ".join(f"'{value}'" for value in values) + ")"
+
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +867,27 @@ EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
 # authority and no value through the closure.
 EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
 
+# A ``function_principals`` row, materialized into the graph plane by
+# ``services.governance.control_graph_types.materialize_fp_principal_nodes``.
+#
+# Deliberately NOT ``role_principal``. That relation asserts a WITNESSED ROLE
+# ("this address holds role R"), and the largest population reaching this pass
+# is precisely the one for which ``capability_role_grants`` REFUSED to assert a
+# role: a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves
+# ``effective_functions.authority_roles`` JSON null, and 127 further rows carry
+# ``authority_roles == []`` (authority proven, not role-keyed). Writing those as
+# ``role_principal`` would mint the exact claim the upstream declined to make.
+#
+# What it DOES assert is the FP row itself: this address is a resolved principal
+# of a gated function on the from-node contract. That is an authority claim, so
+# it belongs in ``CONTROL_EDGE_RELATIONS`` below. It moves NO NEW VALUE through
+# the effects closure: ``services.effects.selection.build_authority_graph``
+# already folds ``function_principals`` straight into the closure as
+# "principal -> the contract the function lives on", so this edge duplicates an
+# authority link the closure carries anyway — it makes it reachable in the TABLE
+# plane (Surface, chat, enrollment) that reads edges instead of FP rows.
+EDGE_RELATION_CAPABILITY_PRINCIPAL = "capability_principal"
+
 # Allowlist, not a denylist: a relation this set does not name contributes no
 # authority. A new relation therefore has to be classified deliberately before
 # it can move value through the authority closure, instead of being folded in
@@ -851,6 +900,7 @@ CONTROL_EDGE_RELATIONS = frozenset(
         "proxy_admin_owner",
         "role_principal",
         "mapping_member",
+        EDGE_RELATION_CAPABILITY_PRINCIPAL,
     }
 )
 
@@ -869,9 +919,182 @@ UPGRADE_SOURCE_EVENT_SCAN = "event_scan"
 UPGRADE_SOURCE_POLL = "poll"
 
 
+# ``UpgradeTransaction.executor_kind`` vocabulary. The enum is deliberately
+# three-valued: the two positives are each a *proven* routing fact (a
+# keccak-matched marker log whose emitter an independent classifier typed), and
+# ``not_determined`` is the single state every failure, revert, absence and
+# unclassified-emitter path reaches. There is no ``eoa_one_hop`` member: a
+# receipt proves ``tx.from`` was msg.sender in the TOP-LEVEL frame, which is not
+# proof it was msg.sender at the upgrade site, and never proof of who authorised.
+EXECUTOR_KIND_TIMELOCK_ROUTED = "timelock_routed"
+EXECUTOR_KIND_SAFE_DIRECT = "safe_direct"
+EXECUTOR_KIND_NOT_DETERMINED = "not_determined"
+EXECUTOR_KINDS = (
+    EXECUTOR_KIND_TIMELOCK_ROUTED,
+    EXECUTOR_KIND_SAFE_DIRECT,
+    EXECUTOR_KIND_NOT_DETERMINED,
+)
+
+
+class UpgradeTransaction(Base):
+    """Receipt-derived facts about ONE upgrade transaction.
+
+    Keyed on the transaction, not the event, because the facts are properties of
+    the transaction: one tx emits up to 19 ``Upgraded`` logs across 19 proxies in
+    this corpus, and storing the executor fact per event would store 19 mutable
+    copies of one fact and let a consumer count one governance action 19 times.
+    ``(chain_id, tx_hash)`` IS the governance action id.
+
+    **Row existence is the coverage discriminator.** A row means a receipt was
+    read and decoded; its absence means never read or read failed. That is the
+    distinction nullable columns on ``upgrade_events`` could not express —
+    ``executor_kind IS NULL`` would conflate "not fetched" with "fetched and
+    undetermined", which is a defaulted witness by construction.
+    """
+
+    __tablename__ = "upgrade_transactions"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Lowercased 0x-prefixed 32-byte hash. Also the ``governance_action_id``:
+    # aggregate on this, never on ``upgrade_events.id``.
+    tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    # Observation coordinates. ``eth_getTransactionReceipt`` takes no block
+    # parameter, so this read cannot be pinned by parameter the way every other
+    # chain read in the codebase is; ``block_hash`` is what lets a later reader
+    # DETECT a reorg instead of having to trust the original observation.
+    block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    block_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    # 1 = success, 0 = reverted. A reverted transaction cannot have upgraded
+    # anything, so every positive below is withheld unless this is 1.
+    tx_status: Mapped[int] = mapped_column(Integer, nullable=False)
+    receipt_from: Mapped[str] = mapped_column(String(42), nullable=False)
+    # NULL is a FACT (the transaction is a contract creation), distinguished
+    # from "unknown" by the row existing at all.
+    receipt_to: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    created_contract_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    is_contract_creation: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    executor_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    executor_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # Which persisted plane typed the emitter, and as what. Recorded so the
+    # verdict is auditable; the plane order is fixed and is NOT a strength
+    # ranking — planes that disagree yield ``not_determined``.
+    executor_classification_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    executor_classified_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Height at which the emitter was classified, from the classifier's own
+    # ``safe_protection.probe_block``. NULL = not determined. The classification
+    # plane carries no block on rows written before that probe existed, so this
+    # is the field that keeps ``executor_kind`` from implying "…and the emitter
+    # was a Safe AT the upgrade's block", which the receipt cannot prove.
+    executor_classification_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The ``target`` word decoded from each ``CallExecuted`` log, gated on
+    # ``executor_kind='timelock_routed'`` (NULL otherwise — the strength gate is
+    # not detachable from the payload). Lets a reader tell which proxies the
+    # timelock call actually targeted instead of attributing every log in the
+    # transaction to it.
+    # ``none_as_null`` so an absent target list is SQL NULL (not determined),
+    # never the JSON literal ``null`` — the CHECK below distinguishes them and
+    # so would any consumer.
+    executor_call_targets: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # COMPUTED, never asserted. True only when (i) every stored ``Upgraded``
+    # event for this tx is present in the receipt's own log array, emitted by
+    # its proxy, (ii) the ``logsBloom`` is present, well-formed and passes a
+    # positive control — it must confirm an ``Upgraded`` log the array actually
+    # carries, which is what rules out the all-zero bloom that answers "absent"
+    # to everything — and (iii) that usable bloom agrees with the log array
+    # about ``CallExecuted`` (a bloom has no false negatives, so bloom-absent is
+    # then independent proof of absence; bloom-present with no such log means
+    # the array may be pruned). False withdraws every marker-ABSENCE inference —
+    # which is the whole basis of ``safe_direct``.
+    receipt_log_set_complete_for_tx: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The receipt's own ``Upgraded``-log count per emitting proxy. Kept because
+    # the projected rows cannot witness their own under-projection: if only one
+    # of two logs was stored, the stored pair count says "one event" and the
+    # deployment guard would exclude a transaction that also carried a real
+    # implementation change.
+    receipt_upgraded_counts: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "executor_kind IN ('timelock_routed', 'safe_direct', 'not_determined')",
+            name="ck_upgrade_transactions_executor_kind",
+        ),
+        # The strength gate may never be published apart from its payload: a
+        # positive kind must carry its emitter AND the plane that typed it, and
+        # ``not_determined`` may carry neither.
+        CheckConstraint(
+            "(executor_kind = 'not_determined') = (executor_address IS NULL) "
+            "AND (executor_kind = 'not_determined') = (executor_classification_source IS NULL) "
+            "AND (executor_kind = 'not_determined') = (executor_classified_type IS NULL)",
+            name="ck_upgrade_transactions_executor_gate_attached",
+        ),
+        # ``jsonb_typeof`` rather than a SQL null test: a null test also passes
+        # the jsonb scalar ``null``, and a written-null here would be a target
+        # list a writer claimed to have recorded. Only the never-written state
+        # is admissible outside ``timelock_routed``.
+        CheckConstraint(
+            "executor_kind = 'timelock_routed' OR coalesce(jsonb_typeof(executor_call_targets), 'unset') = 'unset'",
+            name="ck_upgrade_transactions_call_targets_gated",
+        ),
+        Index("ix_upgrade_transactions_tx_hash", "tx_hash"),
+    )
+
+
+class ContractCreationWitness(Base):
+    """Two independent witnesses that an address was created in a given tx.
+
+    The receipt rule (``to IS NULL AND contractAddress == proxy``) catches only
+    the proxies deployed by an EOA-sent creation transaction. A proxy deployed
+    BY A FACTORY has a populated ``receipt.to`` and is indistinguishable from an
+    upgrade on the receipt alone, so its deployment-time ``Upgraded`` log gets
+    counted as an upgrade. This table carries the second arm.
+
+    **Both witnesses are required and they must agree.** ``creation_tx_hash``
+    alone is a claim by an indexer; ``code_absent_at_probe`` alone proves only
+    that the address was empty at some height. Together — the indexer names this
+    exact tx AND the address provably had no code in the block before the event
+    — they prove the event is a deployment. Disagreement, or either witness
+    missing, yields ``not_determined``, and a ``not_determined`` event stays
+    COUNTED (an upgrade count that may over-count is honest; one that silently
+    drops real upgrades is not).
+    """
+
+    __tablename__ = "contract_creation_witnesses"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    # From Etherscan ``getcontractcreation``. NULL = the indexer did not answer,
+    # never "the address has no creation tx".
+    creation_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    creation_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The height at which ``eth_getCode`` was read, and what it said. NULL/NULL
+    # = not probed; the pair is written together so "probed and code was there"
+    # is distinguishable from "never probed".
+    code_probe_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    code_absent_at_probe: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(code_probe_block IS NULL) = (code_absent_at_probe IS NULL)",
+            name="ck_contract_creation_witnesses_code_probe_paired",
+        ),
+    )
+
+
 class UpgradeEvent(Base):
     __tablename__ = "upgrade_events"
-    __table_args__ = (Index("ix_upgrade_events_contract_id", "contract_id"),)
+    __table_args__ = (
+        Index("ix_upgrade_events_contract_id", "contract_id"),
+        # MATCH SIMPLE: a NULL in EITHER column disables the constraint, which
+        # is what lets an event exist before (or without) its receipt fact and
+        # what carries the poll writer's tx_hash-less rows.
+        ForeignKeyConstraint(
+            ["chain_id", "tx_hash"],
+            ["upgrade_transactions.chain_id", "upgrade_transactions.tx_hash"],
+            name="fk_upgrade_events_upgrade_transaction",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
@@ -897,6 +1120,13 @@ class UpgradeEvent(Base):
     # NULL = written before this column existed; the writer is unknown, which
     # is a third state and not a synonym for either value.
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Link half of the composite FK to ``upgrade_transactions``. Set ONLY once
+    # the receipt-fact row for this ``tx_hash`` exists, so NULL means "no linked
+    # receipt fact" — it is NOT a claim that the chain is unknown (the chain is
+    # always derivable from ``contracts.chain``). Nothing reads it as a chain
+    # discriminator; it exists so the join to the per-transaction facts is a
+    # real foreign key rather than a convention.
+    chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="upgrade_events")
 
@@ -1266,6 +1496,72 @@ class ProtocolSubscription(Base):
     __table_args__ = (Index("ix_protocol_subscriptions_protocol_id", "protocol_id"),)
 
 
+def include_object(obj, name, type_, reflected, compare_to) -> bool:
+    """Alembic autogenerate filter: keep mapped VIEWs out.
+
+    ``ContractBalanceLatest`` maps the ``contract_balances_latest`` view so ORM
+    readers can swap entity without hand-written SQL. Alembic cannot tell a
+    mapped view from a mapped table, so without this it would report the view as
+    a missing TABLE and a later autogenerate would emit a ``CREATE TABLE`` that
+    shadows it. Keyed on the ``info={"is_view": True}`` marker the model carries,
+    not on a name list, so a future view is covered by declaring the marker.
+
+    Lives here rather than in ``alembic/env.py`` because that module runs
+    migrations at import time and cannot be imported by the drift test that
+    proves this filter works.
+    """
+    if type_ == "table" and (obj.info or {}).get("is_view"):
+        return False
+    return True
+
+
+class ContractBalanceFetch(Base):
+    """One balance-read attempt against one address. **NOT a holdings witness.**
+
+    This is the fetch-provenance plane. A row here records that a read was
+    ATTEMPTED and how it went; it never asserts that anything is held. That
+    separation is the whole point: the three-state discriminator cannot live on
+    ``contract_balances`` because ``services.effects.selection`` consumes a
+    ``contract_balances`` row's mere EXISTENCE as "this deployment holds this
+    asset", so a ``fetch_failed`` or ``proven_zero`` row written there would
+    publish holdings that do not exist.
+
+    ``native_status`` must be read as the PAIR ``(native_status, block_number)``
+    and never alone — ``proven_nonzero`` with a NULL block is "nonzero at an
+    unrecorded height", not an as-of-block fact. Route consumers through
+    :func:`services.monitoring.balance_reads.native_balance_fact`.
+    """
+
+    __tablename__ = "contract_balance_fetches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The address the read was actually ISSUED against, captured verbatim from
+    # the write-point local. Not necessarily ``contracts.address``: the
+    # resolution worker reads ``request['proxy_address'] or address``.
+    observed_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # The height the NATIVE quantity was read at. NULL = not_determined. Never
+    # projected onto ERC-20 rows (Q1 keeps those unpinned).
+    block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    native_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset_set_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The RAW endpoint entry count, BEFORE the ``raw_balance > 0`` filter drops
+    # entries. NULL = not_determined. This is the only thing that can witness
+    # the at-cap case; a stored-row count cannot (the filter destroys it).
+    asset_page_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    writer: Mapped[str] = mapped_column(String(32), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_cbf_contract_fetched", "contract_id", "fetched_at", "id"),
+        CheckConstraint(
+            f"native_status <> '{NATIVE_STATUS_PROVEN_ZERO}' OR block_number IS NOT NULL",
+            name="ck_cbf_proven_zero_requires_block",
+        ),
+    )
+
+
 class ContractBalance(Base):
     __tablename__ = "contract_balances"
 
@@ -1279,10 +1575,278 @@ class ContractBalance(Base):
     usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
     price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # The address this quantity was read at, verbatim from the write-point
+    # local. NULL = not_determined (every row written before this column
+    # existed; the address was never recorded and cannot be recovered).
+    observed_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # The height THIS quantity was read at. Populated only on the pinned
+    # Multicall3 native path; NULL = not_determined, permanently, for every
+    # Etherscan-sourced row. An ERC-20 row can never carry one (CHECK below):
+    # its quantity comes from an unpinned ``tag=latest`` answer, and letting it
+    # inherit the fetch's native height would mint a height it never had.
+    block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Structurally always NULL, and that is the field's job. No price source in
+    # this system carries a height (Etherscan's stats endpoint and
+    # ``TokenPriceUSD`` are both heightless), and the same asset diverges up to
+    # 20.97% within one recorded instant. A consumer MUST NOT substitute
+    # ``block_number``: ``usd_value``/``price_usd`` are never as-of-block facts.
+    # DB-enforced by ``ck_contract_balances_price_block_null``.
+    price_block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The fetch that observed this row. NULL = legacy row, provenance
+    # not_determined. The ``contract_balances_latest`` view keys off it.
+    fetch_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("contract_balance_fetches.id", ondelete="CASCADE"), nullable=True
+    )
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="balances")
 
-    __table_args__ = (Index("ix_contract_balances_contract_id", "contract_id"),)
+    __table_args__ = (
+        Index("ix_contract_balances_contract_id", "contract_id"),
+        Index("ix_contract_balances_fetch_id", "fetch_id"),
+        CheckConstraint(
+            "token_address IS NULL OR block_number IS NULL",
+            name="ck_contract_balances_token_block_null",
+        ),
+        CheckConstraint(
+            "price_block_number IS NULL",
+            name="ck_contract_balances_price_block_null",
+        ),
+    )
+
+
+class ContractBalanceLatest(Base):
+    """READ-ONLY mapping of the ``contract_balances_latest`` VIEW.
+
+    The view is what every consumer must read now that the writers are
+    insert-only. It is a pure projection of ``contract_balances`` — same columns,
+    a subset of the rows, never a join that can multiply or manufacture one — and
+    it answers one question per (contract, row class): which fetch's row set is
+    current?
+
+    * Per ROW CLASS (native vs ERC-20), independently: the latest fetch that did
+      NOT fail for that class wins WHOLESALE. A fetch's rows ARE the set it
+      observed, so an asset the holder has since sold correctly disappears, and
+      a transient token-fetch failure does not withdraw the native holding (or
+      vice versa).
+    * A failed fetch never wins. Letting one win would republish "holds nothing"
+      out of a failure — the exact fail-open this unit exists to close.
+    * Legacy rows (``fetch_id IS NULL``) remain visible until a NON-FAILED fetch
+      exists for that contract and class. A first fetch that fails must not
+      delete history from the view.
+
+    Not autogenerate-visible: :func:`include_object` (in this module, wired into
+    ``alembic/env.py``) filters it out on the ``info={"is_view": True}`` marker
+    below — not by name — because Alembic cannot tell a mapped view from a mapped
+    table and would otherwise emit a ``CREATE TABLE`` shadowing it.
+    ``tests/test_alembic_chain.py`` asserts the filtered diff is empty.
+    """
+
+    __tablename__ = "contract_balances_latest"
+    __table_args__ = {"info": {"is_view": True}}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(Integer)
+    token_address: Mapped[str | None] = mapped_column(String(42))
+    token_name: Mapped[str | None] = mapped_column(String(255))
+    token_symbol: Mapped[str | None] = mapped_column(String(50))
+    decimals: Mapped[int] = mapped_column(Integer)
+    raw_balance: Mapped[str] = mapped_column(String)
+    usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observed_address: Mapped[str | None] = mapped_column(String(42))
+    block_number: Mapped[int | None] = mapped_column(BigInteger)
+    price_block_number: Mapped[int | None] = mapped_column(BigInteger)
+    fetch_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class RestakingPosition(Base):
+    """One node's EigenLayer beaconChainETH position at ONE pinned height.
+
+    A separate plane from ``contract_balances`` on purpose, and the separation is
+    structural rather than a filter. Every spot-balance reader joins
+    ``contract_balances(_latest).contract_id`` to ``contracts.id``; the live
+    EtherFiNode instances are BeaconProxy deployments with NO ``contracts`` row
+    (measured: zero), and ``contract_balances.contract_id`` is ``NOT NULL``. So a
+    restaking row cannot be written into that table at all without first minting
+    a ``contracts`` row per node — which would make
+    ``services.effects.selection`` read the share quantity as a HOLDING of a
+    deployment and sum it into the authority graph. That is the shape the
+    balance-provenance unit exists to close, in a new place.
+
+    There is deliberately **no USD column anywhere on this plane**, so a share
+    quantity cannot be added to a dollar figure even by accident.
+
+    ``eigenlayer_beacon_shares_wei`` is named for its scope because a bare
+    "position" would be read as the node's money. Measured at block 25643300
+    over the 26 enumerated nodes: every one reads 0 shares, while their pods hold
+    374.148164612 ETH between them — one of them exactly 320 ETH. Summing this
+    column over the enumerated set yields 0 wei against that. The node's and the
+    pod's execution-layer native balances are ``not_determined`` here, and the
+    consensus-layer residual is ``not_determined`` and unbounded above.
+    """
+
+    __tablename__ = "restaking_positions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # PROVENANCE ONLY: the ``contracts`` row whose ADDRESS EQUALS the address the
+    # enumerating log was emitted at — the proxy, not the implementation row that
+    # shares the manager's name. Never "this contract holds the position".
+    manager_contract_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("contracts.id", ondelete="SET NULL"), nullable=True
+    )
+    protocol_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
+    )
+    # Every read of a row is ISSUED at this height. There is no unpinned path on
+    # this plane: without a height nothing is written at all.
+    block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The reorg witness (inv.11/12). Without it a replay "at block N" cannot tell
+    # it is on the same chain history; the event indexer stamps
+    # ``last_indexed_block_hash`` for the same reason.
+    block_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+    eigenpod: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    eigenpod_basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    eigenlayer_beacon_shares_wei: Mapped[Any | None] = mapped_column(
+        Numeric(80, 0), nullable=True, comment=SHARES_COLUMN_COMMENT
+    )
+    shares_basis: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Read from ``EigenPodManager.beaconChainETHStrategy()`` at the SAME block.
+    # A literal would be indefensible: the near-miss
+    # ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`` answers 0 with success, as
+    # does a nonexistent staker, byte-identical to the real 26/26 answer.
+    shares_strategy: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # ``int256`` on EigenPodManager and genuinely able to go negative. Stored
+    # signed and unclamped.
+    deposit_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0), nullable=True)
+    cross_read_agreement: Mapped[str] = mapped_column(String(30), nullable=False)
+    active_validator_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_checkpoint_timestamp: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    consensus_layer_residual: Mapped[str] = mapped_column(String(20), nullable=False)
+    node_set_completeness: Mapped[str] = mapped_column(String(20), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # The basis columns are NOT NULL for a load-bearing reason, not tidiness: the
+    # OR-joined arms below are only fail-closed while they are. A NULL basis
+    # makes every arm NULL, an OR of NULLs is NULL, and a CHECK that evaluates to
+    # NULL PASSES in Postgres — so a nullable basis would readmit every shape
+    # these constraints exist to reject.
+    __table_args__ = (
+        Index("ix_rp_node_block", "chain_id", "node_address", "block_number", "id"),
+        CheckConstraint(
+            "shares_basis IN " + _sql_tuple(SHARES_BASES),
+            name="ck_rp_basis_domain",
+        ),
+        CheckConstraint(
+            "eigenpod_basis IN " + _sql_tuple(EIGENPOD_BASES),
+            name="ck_rp_pod_basis_domain",
+        ),
+        CheckConstraint(
+            "cross_read_agreement IN " + _sql_tuple(CROSS_READ_AGREEMENTS),
+            name="ck_rp_agreement_domain",
+        ),
+        # ONE ARM PER BASIS, OR-joined, each arm pinning the basis AND the value
+        # together. An arm naming only the basis, or only the value, is vacuous.
+        # An unrecognised basis satisfies no arm, so the expression is FALSE.
+        CheckConstraint(
+            "("
+            f"  shares_basis = '{SHARES_BASIS_EIGENLAYER_BEACON_SHARES}'"
+            "   AND eigenlayer_beacon_shares_wei IS NOT NULL"
+            f"  AND eigenpod_basis = '{EIGENPOD_BASIS_PROVEN_CROSS_READ}'"
+            "   AND shares_strategy IS NOT NULL"
+            f"  AND (eigenlayer_beacon_shares_wei <> 0 OR cross_read_agreement = '{CROSS_READ_AGREE}')"
+            ") OR ("
+            f"  shares_basis = '{SHARES_BASIS_NO_EIGENPOD_PROVEN}'"
+            "   AND eigenlayer_beacon_shares_wei IS NOT DISTINCT FROM 0"
+            f"  AND eigenpod_basis = '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}'"
+            "   AND shares_strategy IS NULL"
+            ") OR ("
+            "   shares_basis IN " + _sql_tuple(NON_OBSERVING_SHARES_BASES) + ""
+            "   AND eigenlayer_beacon_shares_wei IS NULL"
+            "   AND shares_strategy IS NULL"
+            ")",
+            name="ck_rp_basis_matches_value",
+        ),
+        # A share quantity is unsigned by construction (the withdrawable leg is
+        # a ``uint256``); only the DEPOSIT leg is signed. Without this the DB
+        # would accept a negative the producer cannot emit.
+        CheckConstraint(
+            "eigenlayer_beacon_shares_wei IS NULL OR eigenlayer_beacon_shares_wei >= 0",
+            name="ck_rp_shares_non_negative",
+        ),
+        CheckConstraint(
+            f"eigenpod_basis <> '{EIGENPOD_BASIS_NO_EIGENPOD_PROVEN}' OR eigenpod IS NULL",
+            name="ck_rp_no_pod_has_no_address",
+        ),
+        CheckConstraint(
+            f"eigenpod_basis <> '{EIGENPOD_BASIS_PROVEN_CROSS_READ}' OR eigenpod IS NOT NULL",
+            name="ck_rp_pod_cross_read_has_address",
+        ),
+        # Pod-derived facts require the proven pod. Without this a
+        # ``last_checkpoint_timestamp`` of 0 — a real "never checkpointed"
+        # witness — could be minted against an address never proven to have one.
+        CheckConstraint(
+            f"eigenpod_basis = '{EIGENPOD_BASIS_PROVEN_CROSS_READ}'"
+            " OR (active_validator_count IS NULL AND last_checkpoint_timestamp IS NULL)",
+            name="ck_rp_pod_facts_require_pod",
+        ),
+        CheckConstraint(
+            f"consensus_layer_residual = '{CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED}'",
+            name="ck_rp_cl_residual_not_determined",
+        ),
+        CheckConstraint(
+            f"node_set_completeness = '{NODE_SET_COMPLETENESS_NOT_DETERMINED}'",
+            name="ck_rp_node_set_completeness",
+        ),
+    )
+
+
+class RestakingPositionLatest(Base):
+    """READ-ONLY mapping of the ``restaking_positions_latest`` VIEW.
+
+    Per ``(chain_id, node_address)`` — the chain is part of the key because the
+    same address on two chains is two different entities — the most recent
+    OBSERVING row wins, ordered ``block_number DESC, id DESC`` so the order is
+    total and two rows at one height resolve deterministically.
+
+    Both non-observing bases are excluded from winning. ``read_failed`` is a
+    transport or decode failure; ``not_determined`` is a transport success whose
+    evidence does not license a value. Letting either win would withdraw a proven
+    position on the strength of a non-observation.
+
+    **Absence from this view is ``not_determined``, never "no position".** A node
+    whose every row is non-observing does not appear at all, so a consumer that
+    read a missing row as zero would reintroduce, at the projection layer, the
+    absent-row-as-``$0`` shape the balance-provenance unit exists to close.
+
+    Not autogenerate-visible: :func:`include_object` filters it on the
+    ``info={"is_view": True}`` marker, as it does the balance view.
+    """
+
+    __tablename__ = "restaking_positions_latest"
+    __table_args__ = {"info": {"is_view": True}}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chain_id: Mapped[int] = mapped_column(Integer)
+    node_address: Mapped[str] = mapped_column(String(42))
+    manager_contract_id: Mapped[int | None] = mapped_column(Integer)
+    protocol_id: Mapped[int | None] = mapped_column(Integer)
+    block_number: Mapped[int] = mapped_column(BigInteger)
+    block_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
+    eigenpod: Mapped[str | None] = mapped_column(String(42))
+    eigenpod_basis: Mapped[str] = mapped_column(String(32))
+    eigenlayer_beacon_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0))
+    shares_basis: Mapped[str] = mapped_column(String(40))
+    shares_strategy: Mapped[str | None] = mapped_column(String(42))
+    deposit_shares_wei: Mapped[Any | None] = mapped_column(Numeric(80, 0))
+    cross_read_agreement: Mapped[str] = mapped_column(String(30))
+    active_validator_count: Mapped[int | None] = mapped_column(Integer)
+    last_checkpoint_timestamp: Mapped[int | None] = mapped_column(BigInteger)
+    consensus_layer_residual: Mapped[str] = mapped_column(String(20))
+    node_set_completeness: Mapped[str] = mapped_column(String(20))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class DAppInteraction(Base):
@@ -1375,6 +1939,46 @@ class IndexedEventLog(Base):
     )
 
 
+# ``indexed_event_cursors`` provenance vocabulary. It lives here, with the
+# columns, because the writer (the indexer worker) and the reader (the resolution
+# repo) must agree on the exact tokens and neither may import the other.
+#
+# ``first_indexed_block_basis`` — only CREATION licenses citing the lower bound.
+FIRST_INDEXED_BASIS_CREATION = "creation_block_minus_one"
+FIRST_INDEXED_BASIS_EXPLICIT = "explicit_seed"
+CURSOR_BASIS_NOT_DETERMINED = "not_determined"
+# ``enrollment_basis`` — whether the row carries a variable attribution.
+ENROLLMENT_BASIS_PREDICATE_HINT = "predicate_tree_hint"
+ENROLLMENT_BASIS_TRACKED_TOPICS = "tracked_topics_asserted"
+# ALLOW-LIST, deliberately, and it is the whole point of the column. Exactness —
+# a zero-row fold published as "this event never fired" — is permitted only for a
+# basis that is known to carry a variable attribution. A deny-list on the one
+# token we happened to invent would fail OPEN on every other value, and there is
+# already such a value in the schema: ``enroll_event_cursor`` stores the literal
+# ``not_determined`` whenever a caller omits the argument, which is precisely the
+# case that must not license anything. NULL is included because it means "row
+# predates this column", and those 80 rows were folding before the column existed;
+# demoting them is a separate change with its own blast radius.
+EXACTNESS_ELIGIBLE_ENROLLMENT_BASES = frozenset({None, ENROLLMENT_BASIS_PREDICATE_HINT})
+
+
+def enrollment_basis_permits_exactness(basis: str | None) -> bool:
+    """Whether a cursor with this ``enrollment_basis`` may support an exact empty.
+
+    Anything unrecognised — a future token, a hand-written value, the
+    ``not_determined`` default — answers False. New enrolment sources are
+    therefore inert until someone deliberately adds them here.
+    """
+    return basis in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES
+
+
+# ``window_stats_basis`` — neither token ever means "measured and incomplete";
+# that is expressed by a count at or above the cap that gated it.
+WINDOW_STATS_CONTINUOUS = "continuous_from_first_indexed_block"
+WINDOW_STATS_UNMEASURED_LEGACY = "unmeasured_legacy"
+WINDOW_STATS_NOT_DETERMINED = CURSOR_BASIS_NOT_DETERMINED
+
+
 class IndexedEventCursor(Base):
     """One scan cursor per ``(chain_id, event_address, topic0)``."""
 
@@ -1395,6 +1999,344 @@ class IndexedEventCursor(Base):
     # consult this flag (not the block number) before trusting the durable index;
     # until it flips True they fall back to an inline fetch.
     backfill_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Lower bound of the range this cursor's logs cover, and what proves it.
+    # ``backfill_complete`` is an UPPER-bound flag only; nothing here bounds the
+    # range from below, so absence of a log below ``first_indexed_block`` is
+    # proven only when the basis is ``creation_block_minus_one`` — which requires
+    # all three pinned reads of ``_witness_seed_block`` to agree. NULL/NULL means
+    # the row predates these columns (lower bound unknown); a populated block with
+    # basis ``explicit_seed`` is a seed a caller supplied, NOT a witness; basis
+    # ``not_determined`` means the witness was attempted and failed, and the block
+    # is NULL because a number no consumer may cite is a number no consumer should
+    # see.
+    first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    first_indexed_block_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # How this cursor came to exist, and — through the ALLOW-LIST
+    # ``enrollment_basis_permits_exactness`` — whether it may ever support an
+    # exact empty. ``predicate_tree_hint`` = a static ``enumeration_hint`` named
+    # this (chain, address, topic0) as a writer of a specific storage variable;
+    # eligible. NULL = predates the column; eligible, because those rows folded
+    # before it existed. Everything else is INELIGIBLE, including
+    # ``tracked_topics_asserted`` (minted from a tracking plan, which names topics
+    # an emitter CAN emit and attributes them to no variable), the literal
+    # ``not_determined`` that ``enroll_event_cursor`` stores when a caller omits
+    # the argument, and any token added later. Read at the ``_cursor_state`` choke
+    # point in ``services/resolution/repos/event_logs_pg.py`` and by the two
+    # out-of-band cursor readers (``_authority_has_role_store_cursor``,
+    # ``_authority_backfilled``).
+    enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Largest ``eth_getLogs`` page this cursor has ever accepted, the result cap
+    # in force when those pages were fetched, and whether the record is continuous
+    # from ``first_indexed_block``. A page returned at the cap may have been
+    # truncated by the upstream, so "no such log exists" is proven only when every
+    # window came back strictly under a cap that was actually enforced. All three
+    # are NULL on rows whose windows predate the columns.
+    max_window_log_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    window_stats_basis: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+
+def exactness_eligible_cursor_clause():
+    """SQL form of :func:`enrollment_basis_permits_exactness`, for the readers
+    that ask "does a usable cursor exist" without loading the row.
+
+    Derived from the same frozenset the Python predicate reads, so the two
+    cannot drift into disagreeing about which rows may support an exact empty.
+    """
+    non_null = sorted(b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None)
+    clauses = []
+    if None in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES:
+        clauses.append(IndexedEventCursor.enrollment_basis.is_(None))
+    if non_null:
+        clauses.append(IndexedEventCursor.enrollment_basis.in_(non_null))
+    return or_(*clauses)
+
+
+# ``role_holder_planes`` vocabulary. Each token names the evidence that put the
+# row in that state; there is no token meaning "we looked and there is nobody".
+HOLDERS_BASIS_PINNED_HAS_ROLE = "pinned_has_role_confirmed"
+HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED = "not_determined"
+ROLE_COVERAGE_LOWER_BOUND = "lower_bound"
+ROLE_COVERAGE_PARTIAL = "partial"
+ROLE_NAME_BASIS_KECCAK = "keccak_preimage"
+ROLE_NAME_BASIS_AC_DEFAULT_ADMIN = "accesscontrol_default_admin_literal"
+ROLE_NAME_BASIS_NOT_DETERMINED = "not_determined"
+
+# ``role_holder_plane_refreshes`` outcomes. Both mean a pass RAN against a
+# registry whose gate was open; they differ only in whether the fold proposed
+# anything. A registry whose gate was closed gets no row at all — see the model.
+ROLE_REFRESH_OUTCOME_NO_ROWS = "no_rows"
+ROLE_REFRESH_OUTCOME_ROWS_WRITTEN = "rows_written"
+
+# "No holder set was published", as SQL. A bare ``holders IS NULL`` is NOT this:
+# a JSONB column also accepts the jsonb scalar ``null``, which is what a write of
+# a Python None stores unless the column says otherwise, and which every SQL null
+# test reads as a present payload. Both spellings must count as withheld or the
+# constraints below stop discriminating exactly where it matters. Enforced from
+# the other side too, by ``holders_is_array_or_absent``, so the two can't drift.
+HOLDERS_WITHHELD_SQL = "(holders IS NULL OR jsonb_typeof(holders) = 'null')"
+# The same two spellings for the disagreement log. It travels with ``holders``:
+# on a withheld row nothing was read, or what was read is not published, so
+# "no disagreement was observed" is not_determined rather than an empty list.
+DISAGREEMENTS_WITHHELD_SQL = "(fold_chain_disagreements IS NULL OR jsonb_typeof(fold_chain_disagreements) = 'null')"
+
+
+class RoleHolderPlane(Base):
+    """Who a ``(chain_id, registry_address, role_hash)`` is PROVEN to include.
+
+    ``holders`` is a **lower bound**, never a membership set. Every member was
+    independently confirmed by a pinned ``hasRole(bytes32,address)`` read at
+    ``as_of_block`` — the event fold only proposed the candidates, and a fold
+    that is arbitrarily wrong still yields a true lower bound because no member
+    rests on it. What the fold's incompleteness costs is completeness, and that
+    is published separately and permanently as ``holder_set_exhaustive``.
+
+    The gate travels in the same ROW as the payload. A child holders table was
+    rejected for exactly this reason: it would expose addresses to a reader that
+    never joined back to the qualifier, and it would make the empty-set check
+    below inexpressible.
+
+    Four states a naive schema conflates, kept apart here:
+
+    * a proven lower bound — ``holders`` non-empty, ``holders_basis`` the pinned
+      arm, ``as_of_block`` set;
+    * every candidate's read completed and confirmed nobody;
+    * every candidate's read reverted or failed in transport;
+    * the recording surface was cold, so no candidate was even enumerable.
+
+    The last three all publish ``holders = NULL`` and are **deliberately
+    indistinguishable at row level**. Telling them apart would reconstruct the
+    banned empty set: "N probed, every read completed, none confirmed" is ``[]``
+    written in three columns. So the residual counters, which qualify a
+    published lower bound, are NULL whenever there is no lower bound to qualify.
+    """
+
+    __tablename__ = "role_holder_planes"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    registry_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    # The 32-byte role identity, and the ONLY identity. A name is decoration
+    # attached downstream and never keys anything. Rows are minted solely from
+    # the OZ AccessControl ``RoleGranted``/``RoleRevoked`` topic pair, so every
+    # hash in this column lives in one identity space; Solady's ``RoleSet``
+    # carries a ``uint256`` role in a different space and mints no row here.
+    role_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    # NULL means not_determined. It never means "nobody holds this role", and
+    # an empty array — which a reader could mistake for that — cannot be stored.
+    # ``none_as_null`` is load-bearing: JSONB's default is to store Python None
+    # as the JSON literal ``'null'``, which is NOT SQL NULL. Every biconditional
+    # below would then read the withheld row as if it carried a holder set, and
+    # the checks that make the empty set unrepresentable would not fire.
+    holders: Mapped[list[str] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    holders_basis: Mapped[str] = mapped_column(String(48), nullable=False)
+    # Pinned to ``not_determined`` by CHECK. 0 of the 4 role registries in the
+    # corpus implement the AccessControlEnumerable getter, so under B14 an
+    # exhaustiveness arm has population 0 and may not be built. This is a
+    # DEFERRAL WITH CAUSE, not a permanent impossibility: a registry that
+    # implements ``getRoleMemberCount``/``getRoleMember``, or a proven inverse
+    # index over the recording surface, would each license a real value here.
+    # A future unit must revisit the constraint deliberately rather than assume
+    # it was derived from something weaker.
+    holder_set_exhaustive: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED
+    )
+    # The block every read in ``holders`` was pinned at, plus that block's hash.
+    # A membership fact is mutable, so it is meaningless without its height; the
+    # hash is what makes the height replayable across a reorg.
+    as_of_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    as_of_block_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    # The cursor bounds, copied from ``indexed_event_cursors`` so the candidate
+    # source's coverage is legible without a join. The LOWER bound is citable
+    # only where U10A witnessed it (basis ``creation_block_minus_one``); an
+    # ``explicit_seed`` is a caller's number, not evidence, and lands here as
+    # NULL + not_determined.
+    cursor_first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursor_first_indexed_block_basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    cursor_last_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursor_enrollment_bases: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    cursor_page_completeness: Mapped[str] = mapped_column(String(16), nullable=False)
+    coverage: Mapped[str] = mapped_column(String(16), nullable=False)
+    # NULL means the key is absent — no preimage was proven. It never means the
+    # role is unnamed. ``keccak_preimage`` is a total mathematical fact about
+    # the hash, independent of which contract offered the candidate string.
+    role_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    role_name_basis: Mapped[str] = mapped_column(String(48), nullable=False)
+    # How many addresses the fold proposed, and how many of those could not be
+    # read at all. Both NULL exactly when ``holders`` is NULL (see class doc).
+    candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unconfirmed_candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Where the fold and the chain read disagreed, recorded and NEVER diagnosed.
+    # ``as_of_block`` sits above the cursor head, so a disagreement cannot be
+    # attributed between "the fold missed a log" and "the state changed after
+    # the cursor stopped". Permitted keys are fixed by the writer; no key
+    # naming a cause may be added.
+    #
+    # NULL exactly when ``holders`` is, and for the same reason the counters are:
+    # an empty list asserts "we looked and found none", which on a withheld row
+    # is either untrue (an all-reverting registry read nothing to compare) or
+    # suppression (an all-false registry DID observe disagreements). Publishing
+    # ``[]`` there would be an unearned negative one column over from the empty
+    # set the constraints below make unrepresentable. On a PUBLISHED row ``[]``
+    # is earned, and its scope is the candidates whose reads completed —
+    # ``unconfirmed_candidate_count`` carries the rest.
+    fold_chain_disagreements: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        # The two hard bans, enforced where code cannot route around them.
+        # NOT NULL on every discriminator is load-bearing for these: a CHECK
+        # that evaluates to NULL PASSES in Postgres, so a nullable column would
+        # make each of them satisfiable by omission.
+        # ``holders`` is a withheld marker or an array — never a jsonb string,
+        # number or object, which would satisfy a naive "is it set?" read while
+        # naming no addresses at all.
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} OR jsonb_typeof(holders) = 'array'",
+            name="ck_role_holder_planes_holders_is_array_or_absent",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} OR jsonb_array_length(holders) > 0",
+            name="ck_role_holder_planes_no_empty_set",
+        ),
+        CheckConstraint(
+            "holder_set_exhaustive = 'not_determined'",
+            name="ck_role_holder_planes_never_exhaustive",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (holders_basis = 'not_determined')",
+            name="ck_role_holder_planes_basis_matches_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (as_of_block IS NULL)",
+            name="ck_role_holder_planes_block_matches_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (candidate_count IS NULL)",
+            name="ck_role_holder_planes_candidates_match_holders",
+        ),
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = (unconfirmed_candidate_count IS NULL)",
+            name="ck_role_holder_planes_unconfirmed_match_holders",
+        ),
+        CheckConstraint(
+            f"NOT {HOLDERS_WITHHELD_SQL} OR coverage = 'partial'",
+            name="ck_role_holder_planes_null_holders_are_partial",
+        ),
+        # The disagreement log travels with the holder set: withheld together,
+        # published together. Without this a withheld row could carry ``[]`` —
+        # "we looked and found none" over reads that either never happened or
+        # are not being published.
+        CheckConstraint(
+            f"{HOLDERS_WITHHELD_SQL} = {DISAGREEMENTS_WITHHELD_SQL}",
+            name="ck_role_holder_planes_disagreements_match_holders",
+        ),
+        CheckConstraint(
+            f"{DISAGREEMENTS_WITHHELD_SQL} OR jsonb_typeof(fold_chain_disagreements) = 'array'",
+            name="ck_role_holder_planes_disagreements_are_array_or_absent",
+        ),
+        # A witnessed lower bound and its basis are one fact. Split, the row can
+        # claim a height it cannot cite, or discard a height it proved.
+        CheckConstraint(
+            "(cursor_first_indexed_block IS NULL) = (cursor_first_indexed_block_basis = 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_matches_basis",
+        ),
+        # ``explicit_seed`` is deliberately NOT in the stored domain: the writer
+        # normalises a seed to NULL + not_determined, because a number a caller
+        # supplied is not a witness and must not be storable as one.
+        CheckConstraint(
+            "cursor_first_indexed_block_basis IN ('creation_block_minus_one', 'not_determined')",
+            name="ck_role_holder_planes_lower_bound_basis_domain",
+        ),
+        CheckConstraint(
+            "cursor_page_completeness IN ('complete', 'incomplete', 'not_determined')",
+            name="ck_role_holder_planes_page_completeness_domain",
+        ),
+        CheckConstraint(
+            "(role_name IS NULL) = (role_name_basis = 'not_determined')",
+            name="ck_role_holder_planes_name_matches_basis",
+        ),
+        CheckConstraint(
+            "holders_basis IN ('pinned_has_role_confirmed', 'not_determined')",
+            name="ck_role_holder_planes_holders_basis_domain",
+        ),
+        CheckConstraint(
+            "coverage IN ('lower_bound', 'partial')",
+            name="ck_role_holder_planes_coverage_domain",
+        ),
+        CheckConstraint(
+            "role_name_basis IN ('keccak_preimage', 'accesscontrol_default_admin_literal', 'not_determined')",
+            name="ck_role_holder_planes_name_basis_domain",
+        ),
+    )
+
+
+class RoleHolderPlaneRefresh(Base):
+    """When ``(chain_id, registry_address)`` was last folded, and what came of it.
+
+    The plane above is keyed by ROLE, so it cannot answer a question about the
+    REGISTRY: a registry whose fold proposed no candidate writes no row there,
+    and row-absence in a per-role table is indistinguishable from a registry
+    nothing ever ran against. That ambiguity is what this table removes, in
+    exactly three states:
+
+    * **never refreshed** — no row here. The registry is due.
+    * **refreshed, confirmed nothing** — a row with ``outcome = 'no_rows'``.
+      The pass ran; the fold proposed nothing at ``trigger_log_block``. It is
+      NOT due again until one of the recorded observations below changes.
+    * **refreshed, wrote N** — a row with ``outcome = 'rows_written'`` and
+      ``rows_written = N``.
+
+    A row is written only where the AccessControl cursor pair EXISTS. A closed
+    gate leaves the registry rowless — "never refreshed" — so it re-selects by
+    itself the moment the indexer finishes enrolling it, with no timer to expire
+    and no flag to clear.
+
+    The three stored observations are what make the not-due state safe rather
+    than a freeze. ``trigger_log_block`` is the highest AccessControl log block
+    the registry had indexed at the pass (NULL = none had been), so a later
+    grant or revoke re-selects it. ``cursors_warm`` is the pair's
+    ``backfill_complete`` conjunction, so a registry folded against a cold
+    surface re-selects when the surface goes warm even if no new log lands.
+    ``refreshed_at`` bounds the age of the floors themselves, which are
+    time-varying facts about deployed state and go stale on their own.
+
+    Nothing here records WHY a floor was withheld, and that is deliberate: the
+    plane makes an all-reverting registry and an all-false one indistinguishable
+    on purpose, so a refresh trigger that told them apart would reconstruct the
+    distinction the plane refuses to publish.
+    """
+
+    __tablename__ = "role_holder_plane_refreshes"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    registry_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # NULL means no AccessControl log was indexed for this registry at the pass.
+    # An observation of the index, never a claim that none were emitted.
+    trigger_log_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursors_warm: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    rows_written: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('no_rows', 'rows_written')",
+            name="ck_role_holder_plane_refreshes_outcome_domain",
+        ),
+        # The count and the token are one fact. Split, a pass could record
+        # "confirmed nothing" over rows it wrote, which would stop the registry
+        # re-selecting on the evidence that it does have roles to track.
+        CheckConstraint(
+            "(outcome = 'rows_written') = (rows_written > 0)",
+            name="ck_role_holder_plane_refreshes_outcome_matches_count",
+        ),
+        CheckConstraint(
+            "rows_written >= 0",
+            name="ck_role_holder_plane_refreshes_count_non_negative",
+        ),
+    )
 
 
 class WorkerHeartbeat(Base):

@@ -160,9 +160,16 @@ jobs:
       # and with a NON-empty store the solc shim skips its bootstrap-latest
       # fallback (the accident bare-Slither compiles relied on before) and
       # halts with "No solc version set", failing every bare-Slither test.
+      # 0.8.25 is a SECOND pinned version, not a replacement: the timelock
+      # producer-parity test compiles a real verified source pinned to it and
+      # must FAIL rather than skip when it is missing, so CI has to carry it.
+      # Only `use` sets the shared global version — installing an extra artifact
+      # cannot flip it, and the pinned-version tests drive their binary by
+      # absolute path (FOUNDRY_SOLC / crytic `solc=`), never via the global.
       - name: Install solc for real-Slither tests
         run: |
           uv run solc-select install 0.8.27
+          uv run solc-select install 0.8.25
           uv run solc-select use 0.8.27
       - name: Install Playwright browser
         run: uv run playwright install --with-deps chromium

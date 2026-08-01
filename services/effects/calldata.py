@@ -144,9 +144,11 @@ class ValueOutPlanInputs:
     sentinel_address: str | None = None
     sentinel_calldata: str | None = None
     # Downstream value-reach: the protocol's witnessed value-holders the recipe
-    # measures against, and the acting deployment's own balance floor.
+    # measures against, and the acting deployment's own balance floor. ``None`` on
+    # the floor is "no balance row was witnessed for the acting deployment", which
+    # the recipe publishes as an absent floor key — not as a zero.
     value_holders: tuple[AssetHolding, ...] = ()
-    acting_balance_usd: float = 0.0
+    acting_balance_usd: float | None = None
     protocol_tvl_usd: float | None = None
     # Input-asset seeding: candidate getters naming the asset F pulls, and the
     # whole-unit calldata the SEEDED retry uses. Empty ⇒ no retry, today's probe.
@@ -2053,9 +2055,18 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
     it (``$.pauseUntilDuration``, bounded by ``MIN``/``MAX_PAUSE_DURATION`` inside
     a different function's guard), so only a live read of that state or a
     cross-function derivation could name it. All 4 proven ``freeze_pause``
-    verdicts in the local corpus are that shape, and every one of them published
-    ``null`` — rendered as "indefinite latch (no self-recovery bound)" on the
-    function inspector, about a latch called ``pauseUntil``.
+    verdicts in the local corpus are that shape, and every one of them publishes
+    ``null``; the function inspector renders that as "window not determined", and
+    the proven-indefinite sentence is reserved for ``no_time_reference``.
+
+    A live read would not lift the ``not_determined`` either, and that is a
+    conclusion rather than a gap. The window is MUTABLE — ``pauseUntil()`` is
+    nullary and ``setPauseUntilDuration(uint256)`` dispatches on all four
+    contracts — and nothing observed stops the latch being re-armed the instant it
+    lapses, so any window read at one height bounds ONE call and not the freeze.
+    Publishing it as a bound would lower freeze severity from a value that its own
+    holder can raise, which is why the duration contributes zero severity in
+    either direction here rather than a small number.
 
     ``no_time_reference`` IS A PROOF BY ABSENCE, so it carries two preconditions
     beyond the leaf-local one, and neither is optional. Both are asked of the WHOLE

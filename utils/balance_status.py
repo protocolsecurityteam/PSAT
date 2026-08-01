@@ -1,0 +1,59 @@
+"""Balance-provenance status vocabularies.
+
+A leaf module on purpose. The producer (``utils.etherscan``), the schema
+(``db.models``), the writers and the readers must agree on the exact strings,
+and a second copy of any of them is a divergence vector. Nothing here imports
+anything, so every layer can depend on it.
+
+The governing rule for all of these: a value is published as a positive fact
+only when the evidence proves it. Every failure, swallow, revert and
+unparseable answer lands on ``fetch_failed`` or ``not_determined`` — never on a
+polarity, in either direction.
+"""
+
+from __future__ import annotations
+
+# --- native coin -----------------------------------------------------------
+# ``proven_zero`` is reachable ONLY from a pinned read, and the schema enforces
+# it (``ck_cbf_proven_zero_requires_block``): a zero from an unpinned
+# ``tag=latest`` answer is zero at an unrecorded moment, which proves zero at no
+# height, and reading it as a proven zero is the exact conflation this closes.
+NATIVE_STATUS_PROVEN_ZERO = "proven_zero"
+NATIVE_STATUS_PROVEN_NONZERO = "proven_nonzero"
+NATIVE_STATUS_FETCH_FAILED = "fetch_failed"
+NATIVE_STATUS_NOT_DETERMINED = "not_determined"
+NATIVE_STATUSES = (
+    NATIVE_STATUS_PROVEN_ZERO,
+    NATIVE_STATUS_PROVEN_NONZERO,
+    NATIVE_STATUS_FETCH_FAILED,
+    NATIVE_STATUS_NOT_DETERMINED,
+)
+
+# --- ERC-20 discovery page -------------------------------------------------
+# ``returned_empty`` is a fact about the PAGE, never "this address holds no
+# tokens": the endpoint is one page deep and its failure path returns ``[]``.
+# There is deliberately no "complete" — a page length can prove the at-cap case
+# and never its negation.
+ASSET_SET_STATUS_RETURNED_ASSETS = "returned_assets"
+ASSET_SET_STATUS_RETURNED_EMPTY = "returned_empty"
+ASSET_SET_STATUS_AT_PAGE_CAP = "at_page_cap"
+ASSET_SET_STATUS_FETCH_FAILED = "fetch_failed"
+ASSET_SET_STATUSES = (
+    ASSET_SET_STATUS_RETURNED_ASSETS,
+    ASSET_SET_STATUS_RETURNED_EMPTY,
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    ASSET_SET_STATUS_FETCH_FAILED,
+)
+
+# The one string that means "this row class was not observed on this fetch".
+# The ``contract_balances_latest`` view and the retention prune both key off it,
+# per row class. Same literal in both vocabularies by design.
+STATUS_FETCH_FAILED = "fetch_failed"
+
+# --- writer identity -------------------------------------------------------
+# A literal at the two call sites, so which loop issued a read is a stored code
+# fact instead of the ``fetched_at``-multiplicity heuristic it could only be
+# inferred by before.
+BALANCE_WRITER_TVL = "tvl"
+BALANCE_WRITER_RESOLUTION = "resolution_worker"
+BALANCE_WRITERS = (BALANCE_WRITER_TVL, BALANCE_WRITER_RESOLUTION)

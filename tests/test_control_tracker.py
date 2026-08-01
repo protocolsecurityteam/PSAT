@@ -509,6 +509,19 @@ def test_classify_resolved_address_detects_safe(monkeypatch):
             "0x2222222222222222222222222222222222222222",
         ],
         "threshold": 2,
+        # The module/guard probe suppresses itself when it cannot pin a height
+        # (offline: tests/conftest.py stubs the head read), and publishes the
+        # three-state rather than omitting the keys. Exercised in
+        # tests/test_classify_safe_modules_guard.py.
+        "safe_protection": {
+            "probe_block": "not_determined",
+            "safe_version": "not_determined",
+            "modules_head": "not_determined",
+            "module_set": "not_determined",
+            "module_set_basis": "not_determined",
+            "protection_is_upper_bound": "not_determined",
+            "guard": "not_determined",
+        },
     }
 
 

@@ -65,6 +65,7 @@ from .one_shot_probe import (
     LatchReadResult,
     annotate_capability_one_shot,
     collect_one_shot_latches,
+    latch_descriptor_digest,
     one_shot_probe_enabled,
     resolve_one_shot_state,
     tree_has_one_shot_role,
@@ -772,7 +773,7 @@ def _maybe_one_shot_probe(
         chain_id,
         runtime_addr.lower(),
         probe_height,
-        tuple(sorted(str(latch.get("slot") or latch.get("getter_selector") or "") for latch in all_latches)),
+        latch_descriptor_digest(all_latches),
     )
     result = pass_cache.get(cache_key)
     if result is None:
@@ -1054,6 +1055,12 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     out["confidence"] = cap.confidence
     if cap.last_indexed_block is not None:
         out["last_indexed_block"] = cap.last_indexed_block
+    # Three states on the wire: an int (exact at one instant), the literal
+    # ``"not_determined"`` (heights present, heterogeneous — refused), and the key
+    # ABSENT (never computed). ``last_indexed_block`` is a staleness floor and is
+    # never a substitute for this key.
+    if cap.exact_as_of is not None:
+        out["exact_as_of"] = cap.exact_as_of
     if cap.trace:
         out["trace"] = list(cap.trace)
     # Only emit when non-default so root-caller capabilities (the vast majority) keep

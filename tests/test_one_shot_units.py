@@ -107,24 +107,28 @@ def test_parse_guard_constant_forms():
 
 
 def test_classify_value_standard_storage_layout():
+    """The classification AND the oracle that produced it — a consumed verdict
+    reached through the sentinel, the version compare and the bare non-zero
+    compare are three different claims and must not collapse to one label."""
     v4 = {"standard": "storage_layout", "size_bytes": 1, "expected_version": 1}
-    assert _classify_value(v4, 1) == "consumed"
-    assert _classify_value(v4, 0) == "armed"
-    assert _classify_value(v4, 0xFF) == "consumed"  # _disableInitializers sentinel
+    assert _classify_value(v4, 1) == ("consumed", "version_ge")
+    assert _classify_value(v4, 0) == ("armed", "version_ge")
+    assert _classify_value(v4, 0xFF) == ("consumed", "sentinel")  # _disableInitializers
     v5 = {"standard": "oz_v5_namespaced", "size_bytes": 8, "expected_version": 1}
-    assert _classify_value(v5, 0xFFFFFFFFFFFFFFFF) == "consumed"  # uint64 sentinel
-    assert _classify_value(v5, 2) == "consumed"
+    assert _classify_value(v5, 0xFFFFFFFFFFFFFFFF) == ("consumed", "sentinel")  # uint64
+    assert _classify_value(v5, 2) == ("consumed", "version_ge")
     no_expected = {"standard": "storage_layout", "size_bytes": 1}
-    assert _classify_value(no_expected, 3) == "consumed"
-    assert _classify_value(no_expected, 0) == "armed"
+    assert _classify_value(no_expected, 3) == ("consumed", "value_gt_zero")
+    assert _classify_value(no_expected, 0) == ("armed", "value_gt_zero")
 
 
 def test_classify_value_structural_guard():
     latch = {"standard": "structural_scalar_latch", "guard": {"operator": "falsy", "constant": None}}
-    assert _classify_value(latch, 0) == "armed"  # guard allows → not yet consumed
-    assert _classify_value(latch, 1) == "consumed"
+    assert _classify_value(latch, 0) == ("armed", "guard")  # guard allows → not yet consumed
+    assert _classify_value(latch, 1) == ("consumed", "guard")
     unknown = {"standard": "unstructured_slot_latch", "guard": {"operator": "weird", "constant": None}}
-    assert _classify_value(unknown, 5) == "unknown"
+    # Nothing decided: no basis, so nothing may be published as the oracle.
+    assert _classify_value(unknown, 5) == ("unknown", None)
 
 
 def test_read_latch_value_byte_offset_extraction():
@@ -134,8 +138,9 @@ def test_read_latch_value_byte_offset_extraction():
             return _word(0x01 << (8 * 20))
 
     latch = {"slot": _ZERO, "byte_offset": 20, "size_bytes": 1}
-    value = _read_latch_value(_Rpc(), "x", PROXY, latch, "latest", {})
+    value, read = _read_latch_value(_Rpc(), "x", PROXY, latch, "latest", {})
     assert value == 1
+    assert read == {"kind": "storage", "slot": _ZERO, "value": hex(0x01 << (8 * 20))}
 
 
 def test_detect_proxy_standard_implementation_getter_fallback():

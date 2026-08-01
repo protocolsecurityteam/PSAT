@@ -104,6 +104,68 @@ def test_candidate_floor_and_holder_set_use_the_holding_address(db_session):
     assert AssetHolding(deployment.lower(), NATIVE_ASSET_LOG_EMITTER, 7_500.0) in cand.value_holders
 
 
+@requires_postgres
+def test_a_contract_with_no_balance_row_carries_no_floor_not_a_zero(db_session):
+    """The absence the INNER join produces must survive the candidate build.
+
+    ``build_authority_graph`` joins ``contract_balances`` INNER precisely so a
+    contract with no current row yields NO ``deployment_balance`` key — "holds
+    nothing", "not fetched" and "fetch failed" are one shape on that plane, so
+    none of them may be published as a bound. The candidate now carries that as
+    ``None``; it used to read the key with ``.get(acting, _ZERO_USD)`` and hand
+    ``_add_reach`` a ``0.0`` floor for a deployment nobody had ever priced.
+    """
+    p = _protocol(db_session, "reach-no-balance")
+    impl = _contract(db_session, p.id, ADDR(0x2301))
+    deployment = ADDR(0x2302)
+    _fn(
+        db_session,
+        impl.id,
+        name="route",
+        selector="0xbbbb0301",
+        effect_targets=["S"],
+        deployment_address=deployment,
+    )
+    db_session.flush()
+
+    graph = build_authority_graph(db_session, p.id)
+    assert deployment.lower() not in graph.deployment_balance
+
+    cand = next(c for c in select_candidates(db_session, p.id) if c.selector == "0xbbbb0301")
+    assert cand.acting_balance_usd is None
+
+
+@requires_postgres
+def test_a_priced_zero_balance_row_carries_a_floor_of_zero(db_session):
+    """The discriminating sibling: a row EXISTS and prices to $0.00, which is a
+    witness — weak, but read — so the candidate carries ``0.0`` and not ``None``.
+
+    Without this row, "``None`` whenever the floor is zero" would be
+    indistinguishable from the three-state carry, and the fix would have traded
+    one collapse for another.
+    """
+    p = _protocol(db_session, "reach-priced-zero")
+    impl = _contract(db_session, p.id, ADDR(0x2401))
+    deployment = ADDR(0x2402)
+    _fn(
+        db_session,
+        impl.id,
+        name="route",
+        selector="0xbbbb0401",
+        effect_targets=["S"],
+        deployment_address=deployment,
+    )
+    _balance(db_session, impl.id, 0.0)
+    db_session.flush()
+
+    graph = build_authority_graph(db_session, p.id)
+    assert graph.deployment_balance[deployment.lower()] == 0
+
+    cand = next(c for c in select_candidates(db_session, p.id) if c.selector == "0xbbbb0401")
+    assert cand.acting_balance_usd == 0.0
+    assert cand.acting_balance_usd is not None
+
+
 # ---------------------------------------------------------------------------
 # 2. which execution the reach is read from
 # ---------------------------------------------------------------------------
@@ -117,7 +179,9 @@ HOLDER = "0x" + "44" * 20
 TOKEN = "0x" + "7a" * 20
 
 
-def _value_out(blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=100.0, tvl=None):
+def _value_out(
+    blocks, *, seeding=None, holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor: float | None = 100.0, tvl=None
+):
     remaining = list(blocks)
 
     def simulate(calls, block_tag=None, overrides=None):
@@ -198,6 +262,33 @@ def test_a_zero_balance_deployment_publishes_no_reach_number_at_all():
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
     assert eff.concrete["observed_reach_floor_usd"] == 0.0
+    assert "observed_reach_holders" not in eff.concrete
+
+
+def test_an_unwitnessed_acting_balance_publishes_no_floor_key():
+    """The whole recipe, not just ``_add_reach``: an acting deployment with NO
+    current balance row reaches ``value_out`` as ``acting_balance_usd=None`` and
+    comes out the other side with the floor key ABSENT.
+
+    The sibling of the test above, and the pair is the point. There the acting
+    deployment's sheet was READ and summed to zero, which is a (weak) witness and
+    keeps its key. Here nothing was read at all, and a ``0.0`` in its place would
+    be a bound minted out of a failed or never-attempted fetch — the defect the
+    INNER join in ``build_authority_graph`` exists to prevent and that
+    ``selection.py``'s old ``.get(acting, _ZERO_USD)`` undid one line later.
+    """
+    moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
+    eff = _value_out([moved_nothing], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=None)
+
+    assert eff.verdict == VERDICT_PROVEN
+    assert eff.concrete["reach_determined"] is False
+    assert eff.concrete["reach_indeterminate"] is True
+    # Not present-and-null: the key does not exist. ``in`` is the assertion,
+    # because a ``null`` is what a naive "carry the None through" would produce
+    # and it reads as a value to every consumer that does a bare ``is not None``
+    # on ``.get()``.
+    assert "observed_reach_floor_usd" not in eff.concrete
+    assert "observed_reach_value_usd" not in eff.concrete
     assert "observed_reach_holders" not in eff.concrete
 
 

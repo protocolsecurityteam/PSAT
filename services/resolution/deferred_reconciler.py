@@ -68,7 +68,16 @@ from sqlalchemy import Text, and_, cast, exists, func, select
 from sqlalchemy.orm import Session, aliased
 
 from db.jsonb import jsonb_has_payload
-from db.models import Contract, EffectiveFunction, IndexedEventCursor, IndexedEventLog, Job, JobStage, JobStatus
+from db.models import (
+    Contract,
+    EffectiveFunction,
+    IndexedEventCursor,
+    IndexedEventLog,
+    Job,
+    JobStage,
+    JobStatus,
+    exactness_eligible_cursor_clause,
+)
 from services.resolution.role_store_standards import all_topic0s
 from utils.chains import UnknownChainError, chain_by_id
 
@@ -218,7 +227,7 @@ def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
 
 
 def _authority_backfilled(session: Session, chain_id: int, event_address: str) -> bool:
-    """True iff at least one cursor for ``event_address`` has
+    """True iff at least one EXACTNESS-ELIGIBLE cursor for ``event_address`` has
     ``backfill_complete = True``.
 
     "Any topic backfilled" is the right gate: the re-resolution re-reads every
@@ -226,12 +235,18 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
     was waiting on catch up to head". A cursor that exists but is still
     mid-backfill (``backfill_complete = False``) does NOT count — re-resolving
     then would just re-defer.
+
+    Neither does a cursor the resolution gate refuses. A warm tracking-plan
+    cursor would say "the index caught up" while ``_cursor_state`` still folds
+    the address as cold, so every reconcile pass would re-enqueue the same
+    resolution and it would defer again — a thrash loop, paid per pass.
     """
     row = session.execute(
         select(IndexedEventCursor.event_address)
         .where(IndexedEventCursor.chain_id == chain_id)
         .where(func.lower(IndexedEventCursor.event_address) == event_address.lower())
         .where(IndexedEventCursor.backfill_complete.is_(True))
+        .where(exactness_eligible_cursor_clause())
         .limit(1)
     ).first()
     return row is not None

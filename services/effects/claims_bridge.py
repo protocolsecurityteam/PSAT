@@ -269,6 +269,17 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "backing",
         "input_seeded",
         "contract_balance_seeded",
+        # WHEN the observation was taken and how far the pin that fixed it
+        # reaches (``config.BLOCK_SOURCES``). Both keys are absent together
+        # whenever the height is not proven — a failed head pin, a fork spawned
+        # unpinned, a cache hit that observed nothing at this deployment — and
+        # that absence is the third state: the verdict stands, its height does
+        # not. A consumer must not read an absent height as "current", and must
+        # not compare two verdicts as one world state unless both carry the same
+        # height; ``invocation_pin`` in particular does NOT make a run coherent
+        # (one run spanned 51 heights over 495 blocks).
+        "block_number",
+        "block_source",
     )
     summary = {k: raw[k] for k in keep if k in raw}
     summary.update(_reach_summary(verdict))
@@ -296,6 +307,13 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
 #     itself, so a scorer reading the number and ignoring the flag scored "$0
 #     reach" for a zero-balance router that can move millions — an unproven
 #     value read as a proven zero.
+#     ``observed_reach_floor_usd`` is itself THREE-STATE and its absence is the
+#     third: the key is present with a positive figure (a witnessed floor),
+#     present at ``0.0`` (a balance row was read and summed to zero — weak, and
+#     still not a measured reach), or ABSENT beside ``reach_indeterminate: True``,
+#     meaning NO balance row was witnessed for the acting deployment at all and
+#     there is no floor to state. It is never ``null``; a scorer must read the
+#     KEY's presence, never a ``.get()`` that folds absence into a zero.
 #   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
 #     observed leaving a holder and its USD is NOT determined, because at least one
 #     (holder, asset) pair that moved has no priced holding on record.

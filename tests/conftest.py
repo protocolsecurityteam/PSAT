@@ -42,6 +42,7 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     Contract,
+    ContractCreationWitness,
     DaemonLease,
     EffectVerdict,
     IndexedEventCursor,
@@ -54,6 +55,7 @@ from db.models import (  # noqa: E402
     ProxySubscription,
     ProxyUpgradeEvent,
     TvlSnapshot,
+    UpgradeTransaction,
     WatchedProxy,
 )
 
@@ -463,6 +465,24 @@ def _stub_resolution_finality_head_read(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_safe_protection_head_read(monkeypatch):
+    """Keep the offline suite hermetic against the Safe module/guard probe.
+
+    ``_probe_safe_protection`` fires on every address classified as a Safe and
+    resolves ``latest`` to a concrete height first (``eth_blockNumber``) so the
+    published ``probe_block`` is the height the words came from. That head read is
+    unconditional and offline the classifier still resolves a real eRPC URL, so it
+    would hit the wire. Making it raise reproduces the exact head-read-failure path
+    the code already takes — probe suppressed, every protection field
+    ``not_determined``, zero further RPC — so offline behaviour is byte-identical
+    without the wire. Stubbed at ``_resolve_pinned_block`` rather than at
+    ``_current_block_number``, which the control-snapshot builder also uses and
+    several tests feed their own canned head. The dedicated C1 tests re-patch this
+    binding in the test body (which runs after this fixture) to pin 25643300."""
+    monkeypatch.setattr("services.resolution.tracking._resolve_pinned_block", lambda *_a, **_kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _stub_role_store_wire(monkeypatch):
     """Keep the offline suite hermetic against the role-store wire reads.
 
@@ -668,6 +688,10 @@ def db_session():
             EffectVerdict,
             Contract,
             Protocol,
+            # Only reachable once Contract is gone: upgrade_events cascade from
+            # Contract and hold the FK into upgrade_transactions.
+            UpgradeTransaction,
+            ContractCreationWitness,
             # Scanner/poller passes commit durable daemon_leases rows (with a
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.

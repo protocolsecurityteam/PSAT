@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from services.effects.config import (
+    BLOCK_SOURCE_INVOCATION_PIN,
     DURATION_BOUND_NOT_DETERMINED,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_VALUE_OUT,
@@ -137,6 +138,28 @@ class AnvilTransport(Protocol):
     def set_storage_at(self, address: str, slot: str, value: str) -> None: ...
 
 
+def fork_block_pin(transport: AnvilTransport) -> int | None:
+    """The height ``transport``'s fork was PROVABLY pinned at, else ``None``.
+
+    Deliberately an optional capability rather than a member of
+    :class:`AnvilTransport`: a transport that cannot answer — any stub, an older
+    forking spawn, a fork taken at the upstream's spawn-time head — yields
+    ``None``, and the recipe then publishes no observation height at all. That is
+    the not_determined state; the alternative (falling back to the preflight pin)
+    is exactly the defect this exists to close, since an unpinned fork's real
+    height is unrecoverable rather than merely unrecorded."""
+    getter = getattr(transport, "fork_block_number", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def assert_post_cancun(transport: AnvilTransport) -> str:
     """Assert the fork's hardfork carries post-Cancun semantics and return it for
     the transcript. Raises ``ValueError`` on a stale fork — a witness minted
@@ -173,12 +196,18 @@ def pause_recipe(
     NEVER becomes the denominator — the pre-pause succeeding set is recorded so
     consumers see it."""
     hardfork = assert_post_cancun(transport)
+    # The height the FORK was taken at, which is the height this recipe observes —
+    # not the caller's preflight pin, which the fork only shares when it was
+    # actually spawned with it. An unpinned fork therefore records no height and
+    # names no pin scope, and both witness keys stay absent.
+    fork_block = fork_block_pin(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
-        block=ctx.block,
+        block=fork_block if fork_block is not None else ctx.block,
         hardfork=hardfork,
         anvil_version=transport.versions().get("anvil"),
         foundry_version=transport.versions().get("foundry"),
+        block_source=BLOCK_SOURCE_INVOCATION_PIN if fork_block is not None else None,
     )
     tr = new_transcript(ctx, feature="pause", tier=TIER_FORK, effect_class=EFFECT_CLASS_FREEZE_PAUSE)
     tr["contract_address"] = contract_address.lower()
@@ -427,12 +456,18 @@ def timelock_execute_recipe(
     code-plane structural fact a bytecode twin inherits. So each verdict carries
     ``state_dependent=True``, which ``_is_cacheable`` refuses outright."""
     hardfork = assert_post_cancun(transport)
+    # The height the FORK was taken at, which is the height this recipe observes —
+    # not the caller's preflight pin, which the fork only shares when it was
+    # actually spawned with it. An unpinned fork therefore records no height and
+    # names no pin scope, and both witness keys stay absent.
+    fork_block = fork_block_pin(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
-        block=ctx.block,
+        block=fork_block if fork_block is not None else ctx.block,
         hardfork=hardfork,
         anvil_version=transport.versions().get("anvil"),
         foundry_version=transport.versions().get("foundry"),
+        block_source=BLOCK_SOURCE_INVOCATION_PIN if fork_block is not None else None,
     )
     tr = new_transcript(ctx, feature="timelock", tier=TIER_FORK, effect_class=EFFECT_CLASS_VALUE_OUT)
     tr["contract_address"] = contract_address.lower()
@@ -670,10 +705,19 @@ def _build_anvil_cmd(
     hardfork_name: str,
     fork_url: str | None,
     fork_headers: Mapping[str, str] | None,
+    fork_block_number: int | None = None,
 ) -> list[str]:
     cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
     if fork_url is not None:
         cmd += ["--fork-url", fork_url]
+        # Unpinned, anvil forks at whatever head the upstream serves AT SPAWN, so
+        # the state a Tier-2 verdict was observed against is neither recorded nor
+        # reproducible. The pin is the caller's already-resolved preflight height;
+        # ``0`` is that preflight's failure sentinel and would fork at GENESIS, so
+        # only a positive height is ever passed and an unpinnable head leaves the
+        # fork unpinned (and its height unpublished) rather than pinning a lie.
+        if isinstance(fork_block_number, int) and not isinstance(fork_block_number, bool) and fork_block_number > 0:
+            cmd += ["--fork-block-number", str(fork_block_number)]
         # eRPC (the production upstream) authenticates via a header, not the URL —
         # without this the fork upstream is unauthenticated and every lazy
         # getStorageAt/getCode fails. anvil applies each --fork-header to its fork
@@ -697,12 +741,17 @@ class SubprocessAnvil:
         hardfork_name: str = "prague",
         fork_url: str | None = None,
         fork_headers: Mapping[str, str] | None = None,
+        fork_block_number: int | None = None,
         anvil_bin: str = "anvil",
         startup_timeout: float = 20.0,
     ) -> None:
         self._url = f"http://127.0.0.1:{port}"
         self._hardfork = hardfork_name
-        cmd = _build_anvil_cmd(anvil_bin, port, hardfork_name, fork_url, fork_headers)
+        cmd = _build_anvil_cmd(anvil_bin, port, hardfork_name, fork_url, fork_headers, fork_block_number)
+        # The height actually on the command line, not the one asked for: a
+        # non-forking spawn and a rejected (non-positive) pin both leave this
+        # ``None``, and ``fork_block_number()`` is what a recipe publishes from.
+        self._fork_block: int | None = fork_block_number if "--fork-block-number" in cmd else None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:
@@ -750,6 +799,9 @@ class SubprocessAnvil:
 
     def hardfork(self) -> str:
         return self._hardfork
+
+    def fork_block_number(self) -> int | None:
+        return self._fork_block
 
     def versions(self) -> dict[str, str]:
         return {"anvil": self._foundry_version, "foundry": self._foundry_version}
