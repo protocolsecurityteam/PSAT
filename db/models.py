@@ -53,8 +53,9 @@ from utils.restaking_status import (
     SHARES_COLUMN_COMMENT,
 )
 from utils.scoring_status import (
-    DESTINATION_STATE_CONSTRAINED_PROVEN,
-    DESTINATION_STATE_UNCONSTRAINED_PROVEN,
+    DESTINATION_BEARING_CLAIMS,
+    DESTINATION_STATE_NOT_APPLICABLE,
+    DESTINATION_STATE_NOT_DETERMINED,
     DESTINATION_STATES,
     GRADE_STATE_COMPUTED,
     GRADE_STATES,
@@ -2750,8 +2751,26 @@ class FunctionScoreSignal(Base):
     pre-resolved any of them would double-count the moment a second contract
     reached the same entity.
 
-    Insert-only and job-scoped: a re-analysis replaces this job's rows
-    wholesale, like the other per-job planes.
+    A CURRENT-STATE plane with contract-scoped wholesale replace — NOT an
+    insert-only per-job one. Re-analysis mints a NEW job
+    (``maybe_queue_reanalysis`` → ``create_job``) and completed jobs are never
+    deleted, so a job-scoped delete could never remove the previous job's rows:
+    every re-analysis would add a second full signal set for the same contract
+    and the fold would double-count it — the precise bug Layer 2 exists to
+    prevent. The distiller therefore delete+reinserts all of a contract's
+    signals in one transaction, the same currency pattern
+    ``effective_functions`` uses, and the fold reads current rows with no
+    job-currency filtering.
+
+    Identity is ``(chain, deployment_address, contract_id, selector,
+    claim_id)``. ``contract_id`` is IN the key because split-proxy secondary
+    implementations share one ``deployment_address`` — live on this corpus —
+    so without it two legitimately distinct contracts collide on the same
+    selector. ``job_id`` is provenance only and never identity.
+
+    ``contract_id`` is CASCADE: a contract dropped from the perimeter must stop
+    charging exposure, and a signal outliving its contract would keep a finding
+    alive against something no longer analysed.
 
     Every three-state fact is a PAIR — a NOT NULL ``*_state`` discriminator from
     a closed vocabulary containing ``not_determined``, plus a nullable payload
@@ -2763,16 +2782,19 @@ class FunctionScoreSignal(Base):
     ``function_id`` is SET NULL, not CASCADE, for the same reason
     ``effect_verdicts.function_id`` is: ``effective_functions`` is
     delete+reinserted per contract, so a concurrent policy pass would otherwise
-    destroy signals it never disagreed with. ``(chain, deployment_address,
-    selector)`` is the identity that survives that, which is why the uniqueness
-    key is keyed on the selector and not on the function id.
+    destroy signals it never disagreed with. The identity above is what survives
+    that, which is why uniqueness keys on the selector and not the function id.
     """
 
     __tablename__ = "function_score_signals"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
+    # Provenance only — which job's distillation last wrote this row. SET NULL,
+    # because a pruned job must not delete signals that are still current, and
+    # never part of the identity: keying on it is what would let a re-analysis
+    # accumulate a second signal set instead of replacing the first.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
     )
     # Denormalised rather than joined through ``jobs``: ``jobs.protocol_id`` is
     # nullable and SET NULL, and signals silently orphaned by that NULL would be
@@ -2784,9 +2806,7 @@ class FunctionScoreSignal(Base):
     # cross-chain collapse: the same address on two chains is two units.
     chain: Mapped[str] = mapped_column(String(100), nullable=False)
     deployment_address: Mapped[str] = mapped_column(String(42), nullable=False)
-    contract_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("contracts.id", ondelete="SET NULL"), nullable=True
-    )
+    contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     function_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("effective_functions.id", ondelete="SET NULL"), nullable=True
     )
@@ -2846,14 +2866,15 @@ class FunctionScoreSignal(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "job_id",
             "chain",
             "deployment_address",
+            "contract_id",
             "selector",
             "claim_id",
             name="uq_function_score_signals_identity",
         ),
         Index("ix_fss_protocol_id", "protocol_id"),
+        Index("ix_fss_contract_id", "contract_id"),
         Index("ix_fss_job_id", "job_id"),
         Index("ix_fss_function_id", "function_id"),
         Index("ix_fss_entity", "chain", "deployment_address"),
@@ -2880,9 +2901,21 @@ class FunctionScoreSignal(Base):
             f"principal_state IN {_sql_tuple(PRINCIPAL_STATES)}",
             name="ck_fss_principal_state",
         ),
+        # Unconditional: without it a non-enumerated row could carry references
+        # as a JSON object, which the pairing check below would not see (it
+        # tests array length) and a reader unpacking the blob would still find.
+        CheckConstraint(
+            "jsonb_typeof(principal_refs) = 'array'",
+            name="ck_fss_principal_refs_array",
+        ),
         # Only the enumerated arm may carry references, and it must carry some:
         # an empty ``enumerated`` list would be the banned empty caller set
         # published as a proven one.
+        # The ``jsonb_typeof`` guard is not redundant with the check above:
+        # ``jsonb_array_length`` ERRORS on a non-array, and CHECK evaluation
+        # order is not guaranteed, so without it a smuggled object surfaces as a
+        # DataError from this constraint instead of a clean violation of the one
+        # that actually describes the problem.
         CheckConstraint(
             f"(principal_state = '{PRINCIPAL_STATE_ENUMERATED}') = "
             "(jsonb_typeof(principal_refs) = 'array' AND jsonb_array_length(principal_refs) > 0)",
@@ -2903,6 +2936,14 @@ class FunctionScoreSignal(Base):
             f"(value_state = '{VALUE_STATE_PROVEN_REACH}') = (array_length(value_entity_keys, 1) IS NOT NULL)",
             name="ck_fss_value_pairing",
         ),
+        # A NULL element is an entity the fold cannot key, so MAX-per-entity
+        # would silently drop or merge it. The ``<chain>::<address>`` FORMAT is
+        # validated in ``services.scoring.schema`` — a CHECK cannot quantify over
+        # array elements without a subquery.
+        CheckConstraint(
+            "array_position(value_entity_keys, NULL) IS NULL",
+            name="ck_fss_value_entity_keys_no_nulls",
+        ),
         # A bound is a property of a proven reach; there is nothing to bound
         # otherwise, and an ``exact`` on an unproven reach would read as a set.
         CheckConstraint(
@@ -2913,10 +2954,22 @@ class FunctionScoreSignal(Base):
             f"destination_state IN {_sql_tuple(DESTINATION_STATES)}",
             name="ck_fss_destination_state",
         ),
+        # Biconditional: exactly one state (``not_determined``) means "unread",
+        # and it is the only one without a shape. ``not_applicable`` carries the
+        # shape ``not_applicable`` rather than a NULL, so "no destination exists"
+        # and "the destination was not read" can never present alike.
         CheckConstraint(
-            f"destination_shape IS NULL OR destination_state IN "
-            f"('{DESTINATION_STATE_CONSTRAINED_PROVEN}', '{DESTINATION_STATE_UNCONSTRAINED_PROVEN}')",
+            f"(destination_state <> '{DESTINATION_STATE_NOT_DETERMINED}') = (destination_shape IS NOT NULL)",
             name="ck_fss_destination_pairing",
+        ),
+        # A capability whose behaviour HAS a destination can never claim there is
+        # none. Without this, an unread delegatecall destination could be written
+        # as ``not_applicable`` and skip the escalation entirely — the prototype's
+        # −30λ false positive arriving through the schema instead of the fold.
+        CheckConstraint(
+            f"destination_state <> '{DESTINATION_STATE_NOT_APPLICABLE}' "
+            f"OR claim_id NOT IN {_sql_tuple(DESTINATION_BEARING_CLAIMS)}",
+            name="ck_fss_destination_not_applicable_claims",
         ),
         CheckConstraint(
             f"reach_gate_state IN {_sql_tuple(REACH_GATE_STATES)}",
@@ -3008,11 +3061,20 @@ class ProtocolScoreLatest(Base):
     can multiply. Needed because the writer is insert-only, so a naive reader
     would see every historical score.
 
-    A ``not_determined`` grade still wins if it is newest. Picking the newest
-    *computed* row instead would republish a stale grade as current, which is the
-    absence-reads-as-a-fact defect wearing a different hat: the honest answer to
-    "what does the protocol grade now" is the latest fold's verdict, including
-    when that verdict is that it could not be determined.
+    **This DIVERGES from ``contract_balances_latest``, deliberately.** There, a
+    failed fetch never wins, because a failure is the absence of an observation
+    and letting it win would republish "holds nothing" out of a read that
+    observed nothing. Here there is no equivalent of a failed fetch: a
+    ``not_determined`` grade is a COMPUTED VERDICT — the fold ran, over a real
+    population, and concluded the grade could not be determined. Suppressing it
+    in favour of the last computed grade would republish a stale number as the
+    protocol's current standing, which is the more dangerous direction. So the
+    newest row wins unconditionally, ``grade_state`` is not filtered, and the
+    consumer is expected to read ``grade_state`` rather than assume a grade.
+
+    The fold owes the provenance block the distinction this view cannot make:
+    "no population" (nothing to score) versus "population scored to nothing".
+    Both arrive here as ``not_determined``.
 
     Not autogenerate-visible: :func:`include_object` filters it on the
     ``info={"is_view": True}`` marker below.

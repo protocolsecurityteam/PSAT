@@ -29,17 +29,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 
-from db.models import FunctionScoreSignal, Job, Protocol, ProtocolScore, ProtocolScoreLatest  # noqa: E402
+from db.models import (  # noqa: E402
+    Contract,
+    FunctionScoreSignal,
+    Job,
+    Protocol,
+    ProtocolScore,
+    ProtocolScoreLatest,
+)
+from services.aggregations.company_overview import _entity_key as canon_entity_key  # noqa: E402
+from services.scoring.population import (  # noqa: E402
+    current_signals_for_protocol,
+    replace_contract_signals,
+)
 from services.scoring.schema import (  # noqa: E402
     NOT_DETERMINED,
     FunctionSignal,
     PrincipalRef,
     ScoreDocument,
     Tri,
+    coalesce_chain,
     entity_key,
+    is_entity_key,
     not_determined_signal_defaults,
+    signal_from_row,
+    signal_to_row_kwargs,
 )
 from utils.scoring_status import (  # noqa: E402
+    DESTINATION_BEARING_CLAIMS,
+    DESTINATION_SHAPE_NOT_APPLICABLE,
     DESTINATION_STATE_NOT_APPLICABLE,
     DESTINATION_STATE_UNCONSTRAINED_PROVEN,
     GRADE_STATE_COMPUTED,
@@ -270,31 +288,62 @@ def test_perimeter_has_a_third_state():
 # --------------------------------------------------------------------------
 
 
+class _Fixture:
+    """Two jobs and two contracts sharing one deployment_address.
+
+    The shared address is the split-proxy shape that is live on this corpus: a
+    proxy whose secondary implementations are distinct ``contracts`` rows at one
+    runtime address. It is the fixture default rather than a special case
+    because the identity key has to survive it.
+    """
+
+    def __init__(self, protocol, job, later_job, contract, sibling):
+        self.protocol = protocol
+        self.job = job
+        self.later_job = later_job
+        self.contract = contract
+        self.sibling = sibling
+
+
 @pytest.fixture()
 def scoring_protocol(db_session):
     protocol = Protocol(name=f"scoretest-{uuid.uuid4().hex[:8]}")
     db_session.add(protocol)
     db_session.flush()
-    job = Job(id=uuid.uuid4(), protocol_id=protocol.id)
-    db_session.add(job)
+    jobs = [Job(id=uuid.uuid4(), protocol_id=protocol.id) for _ in range(2)]
+    # Two implementation contracts at their own addresses, both of whose
+    # functions are deployed behind ONE proxy — so their signals share a
+    # deployment_address. This is the split-proxy secondary-impl shape that is
+    # live on this corpus, and the identity key has to survive it.
+    contracts = [
+        Contract(address=f"0x{uuid.uuid4().hex[:40]}", chain="ethereum", protocol_id=protocol.id) for _ in range(2)
+    ]
+    db_session.add_all(jobs + contracts)
     db_session.commit()
     try:
-        yield protocol, job
+        yield _Fixture(protocol, jobs[0], jobs[1], contracts[0], contracts[1])
     finally:
         db_session.rollback()
         db_session.query(FunctionScoreSignal).filter_by(protocol_id=protocol.id).delete()
         db_session.query(ProtocolScore).filter_by(protocol_id=protocol.id).delete()
-        db_session.query(Job).filter_by(id=job.id).delete()
+        for contract in contracts:
+            db_session.query(Contract).filter_by(id=contract.id).delete()
+        for job in jobs:
+            db_session.query(Job).filter_by(id=job.id).delete()
         db_session.query(Protocol).filter_by(id=protocol.id).delete()
         db_session.commit()
 
 
-def _row(protocol, job, **overrides: Any) -> FunctionScoreSignal:
+SHARED_ADDRESS = "0x8f08b70456eb22f6109f57b8fafe862ed28e6040"
+
+
+def _row(fx, **overrides: Any) -> FunctionScoreSignal:
     base: dict[str, Any] = dict(
-        job_id=job.id,
-        protocol_id=protocol.id,
+        job_id=fx.job.id,
+        protocol_id=fx.protocol.id,
+        contract_id=fx.contract.id,
         chain="ethereum",
-        deployment_address="0xdead",
+        deployment_address=SHARED_ADDRESS,
         selector="0x12345678",
         function_name="setImplementation",
         claim_id="upgrade.implementation",
@@ -320,15 +369,27 @@ def _row(protocol, job, **overrides: Any) -> FunctionScoreSignal:
     return FunctionScoreSignal(**base)
 
 
+def _signal_for(fx, **overrides: Any) -> FunctionSignal:
+    """The typed counterpart of :func:`_row`, bound to the fixture's identity."""
+    bound: dict[str, Any] = dict(
+        protocol_id=fx.protocol.id,
+        contract_id=fx.contract.id,
+        job_id=fx.job.id,
+        deployment_address=SHARED_ADDRESS,
+        selector="0x12345678",
+    )
+    bound.update(overrides)
+    return _signal(**bound)
+
+
 @pytest.mark.usefixtures("scoring_protocol")
 def test_signal_three_states_round_trip(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
+    fx = scoring_protocol
     db_session.add_all(
         [
-            _row(protocol, job, selector="0x00000001"),
+            _row(fx, selector="0x00000001"),
             _row(
-                protocol,
-                job,
+                fx,
                 selector="0x00000002",
                 severity_state=SEVERITY_STATE_PROVEN,
                 severity_proven=0.0,
@@ -343,8 +404,7 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
                 value_basis="observed_reach_floor_usd",
             ),
             _row(
-                protocol,
-                job,
+                fx,
                 selector="0x00000003",
                 value_state=VALUE_STATE_PROVEN_NO_REACH,
                 value_basis="proven_no_reach",
@@ -356,7 +416,7 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
 
     rows = (
         db_session.query(FunctionScoreSignal)
-        .filter_by(protocol_id=protocol.id)
+        .filter_by(protocol_id=fx.protocol.id)
         .order_by(FunctionScoreSignal.selector)
         .all()
     )
@@ -376,8 +436,8 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_undetermined_severity_cannot_carry_a_number(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
-    db_session.add(_row(protocol, job, severity_state=SEVERITY_STATE_NOT_DETERMINED, severity_proven=1.0))
+    fx = scoring_protocol
+    db_session.add(_row(fx, severity_state=SEVERITY_STATE_NOT_DETERMINED, severity_proven=1.0))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
@@ -385,14 +445,14 @@ def test_undetermined_severity_cannot_carry_a_number(db_session, scoring_protoco
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_proven_severity_requires_a_number_and_a_basis(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
-    db_session.add(_row(protocol, job, severity_state=SEVERITY_STATE_PROVEN, severity_proven=None))
+    fx = scoring_protocol
+    db_session.add(_row(fx, severity_state=SEVERITY_STATE_PROVEN, severity_proven=None))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
     db_session.add(
-        _row(protocol, job, severity_state=SEVERITY_STATE_PROVEN, severity_proven=0.9, severity_basis=[]),
+        _row(fx, severity_state=SEVERITY_STATE_PROVEN, severity_proven=0.9, severity_basis=[]),
     )
     with pytest.raises(IntegrityError):
         db_session.commit()
@@ -401,8 +461,8 @@ def test_proven_severity_requires_a_number_and_a_basis(db_session, scoring_proto
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_empty_enumerated_principal_set_is_rejected(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
-    db_session.add(_row(protocol, job, principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=[]))
+    fx = scoring_protocol
+    db_session.add(_row(fx, principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=[]))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
@@ -411,8 +471,8 @@ def test_empty_enumerated_principal_set_is_rejected(db_session, scoring_protocol
 @pytest.mark.usefixtures("scoring_protocol")
 def test_undetermined_value_cannot_smuggle_entity_keys(db_session, scoring_protocol):
     """A partial set under ``not_determined`` is a set a reader could total."""
-    protocol, job = scoring_protocol
-    db_session.add(_row(protocol, job, value_state=VALUE_STATE_NOT_DETERMINED, value_entity_keys=["ethereum::0x1"]))
+    fx = scoring_protocol
+    db_session.add(_row(fx, value_state=VALUE_STATE_NOT_DETERMINED, value_entity_keys=["ethereum::0x1"]))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
@@ -420,16 +480,15 @@ def test_undetermined_value_cannot_smuggle_entity_keys(db_session, scoring_proto
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_undetermined_destination_cannot_carry_a_shape(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
-    db_session.add(_row(protocol, job, destination_state=NOT_DETERMINED, destination_shape="caller_arbitrary"))
+    fx = scoring_protocol
+    db_session.add(_row(fx, destination_state=NOT_DETERMINED, destination_shape="caller_arbitrary"))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
     db_session.add(
         _row(
-            protocol,
-            job,
+            fx,
             destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN,
             destination_shape="caller_arbitrary",
         )
@@ -445,51 +504,166 @@ def test_state_columns_have_no_default(db_session, scoring_protocol):
     never determined the fact would record ``not_determined`` silently, which is
     exactly an unread witness becoming a published one.
     """
-    protocol, job = scoring_protocol
-    with pytest.raises(IntegrityError):
-        db_session.execute(
+    discriminators = [
+        "severity_state",
+        "witness_tier",
+        "authority_openness",
+        "principal_state",
+        "value_state",
+        "value_bound",
+        "destination_state",
+        "reach_gate_state",
+    ]
+    defaulted = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'function_score_signals' AND column_default IS NOT NULL "
+            "AND column_name = ANY(:cols)"
+        ),
+        {"cols": discriminators},
+    ).fetchall()
+    assert defaulted == [], f"discriminators must not be defaultable: {defaulted}"
+
+    # And NOT NULL, so omission is an error rather than a NULL third state.
+    nullable = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'function_score_signals' AND is_nullable = 'YES' "
+            "AND column_name = ANY(:cols)"
+        ),
+        {"cols": discriminators},
+    ).fetchall()
+    assert nullable == [], f"discriminators must be NOT NULL: {nullable}"
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_score_state_columns_have_no_default(db_session, scoring_protocol):
+    for column in ("grade_state", "perimeter_state"):
+        row = db_session.execute(
             text(
-                "INSERT INTO function_score_signals "
-                "(job_id, protocol_id, chain, deployment_address, function_name, claim_id, "
-                " witness_tier, severity_basis, authority_openness, principal_state, principal_refs, "
-                " value_state, value_bound, value_entity_keys, value_basis, destination_state, "
-                " reach_gate_state, gate_inputs, citations, witness_notes) "
-                "VALUES (:job, :proto, 'ethereum', '0xdead', 'f', 'pause.set', "
-                " :tier, '{}', :open, :pstate, '[]'::jsonb, "
-                " :vstate, :vbound, '{}', 'x', :dstate, :rgate, '{}'::jsonb, '[]'::jsonb, '{}')"
+                "SELECT column_default, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'protocol_scores' AND column_name = :col"
             ),
-            {
-                "job": str(job.id),
-                "proto": protocol.id,
-                "tier": WITNESS_TIER_NOT_DETERMINED,
-                "open": OPENNESS_NOT_DETERMINED,
-                "pstate": PRINCIPAL_STATE_NOT_DETERMINED,
-                "vstate": VALUE_STATE_NOT_DETERMINED,
-                "vbound": VALUE_BOUND_NOT_DETERMINED,
-                "dstate": NOT_DETERMINED,
-                "rgate": REACH_GATE_NOT_DETERMINED,
-            },
-        )
+            {"col": column},
+        ).one()
+        assert row[0] is None and row[1] == "NO", f"{column} is defaultable or nullable"
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_reanalysis_replaces_prior_jobs_signals_for_the_same_contract(db_session, scoring_protocol):
+    """The real currency case: a SECOND job distilling the same contract.
+
+    Re-analysis mints a new job, so a job-scoped delete would leave the first
+    job's rows behind and the fold would count the contract twice. The delete is
+    contract-scoped precisely so the later distillation supersedes the earlier
+    one regardless of which job produced it.
+    """
+    fx = scoring_protocol
+    db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
+    db_session.commit()
+
+    replaced = replace_contract_signals(
+        db_session,
+        contract_id=fx.contract.id,
+        signals=[_signal_for(fx, selector="0x00000009")],
+        job_id=fx.later_job.id,
+    )
+    db_session.commit()
+
+    assert replaced == 2
+    remaining = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
+    assert [r.selector for r in remaining] == ["0x00000009"]
+    assert remaining[0].job_id == fx.later_job.id
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_does_not_touch_a_sibling_contract(db_session, scoring_protocol):
+    """Contract-scoped means contract-scoped, even at a shared deployment address."""
+    fx = scoring_protocol
+    db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
+    db_session.commit()
+
+    replace_contract_signals(db_session, contract_id=fx.contract.id, signals=[], job_id=fx.later_job.id)
+    db_session.commit()
+
+    survivors = db_session.query(FunctionScoreSignal).filter_by(protocol_id=fx.protocol.id).all()
+    assert [r.contract_id for r in survivors] == [fx.sibling.id]
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_split_proxy_siblings_share_a_deployment_address_without_colliding(db_session, scoring_protocol):
+    """Two contracts, one deployment_address, same selector and claim.
+
+    Live on this corpus: secondary implementations behind one proxy. Without
+    ``contract_id`` in the identity this is a unique-constraint violation and one
+    of the two contracts' signals can never be written at all.
+    """
+    fx = scoring_protocol
+    db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
+    db_session.commit()
+
+    rows = db_session.query(FunctionScoreSignal).filter_by(deployment_address=SHARED_ADDRESS).all()
+    assert len(rows) == 2
+    assert {r.contract_id for r in rows} == {fx.contract.id, fx.sibling.id}
+    assert len({r.selector for r in rows}) == 1
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_identity_still_rejects_a_true_duplicate(db_session, scoring_protocol):
+    fx = scoring_protocol
+    db_session.add_all([_row(fx), _row(fx)])
+    with pytest.raises(IntegrityError):
+        db_session.commit()
     db_session.rollback()
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_signals_are_replaced_wholesale_per_job(db_session, scoring_protocol):
-    protocol, job = scoring_protocol
-    db_session.add_all([_row(protocol, job, selector=f"0x0000000{n}") for n in (1, 2)])
+def test_deleting_a_contract_stops_it_charging_exposure(db_session, scoring_protocol):
+    """A contract dropped from the perimeter must not outlive its own analysis."""
+    fx = scoring_protocol
+    db_session.add(_row(fx))
     db_session.commit()
 
-    db_session.query(FunctionScoreSignal).filter_by(job_id=job.id).delete(synchronize_session=False)
-    db_session.add(_row(protocol, job, selector="0x00000009"))
+    db_session.query(Contract).filter_by(id=fx.contract.id).delete()
     db_session.commit()
 
-    remaining = db_session.query(FunctionScoreSignal).filter_by(job_id=job.id).all()
-    assert [r.selector for r in remaining] == ["0x00000009"]
+    assert db_session.query(FunctionScoreSignal).filter_by(protocol_id=fx.protocol.id).count() == 0
 
 
-def _score(protocol, **overrides: Any) -> ProtocolScore:
+@pytest.mark.usefixtures("scoring_protocol")
+def test_losing_the_job_keeps_the_signal(db_session, scoring_protocol):
+    """``job_id`` is provenance: pruning it must not withdraw a current signal."""
+    fx = scoring_protocol
+    db_session.add(_row(fx))
+    db_session.commit()
+
+    db_session.query(Job).filter_by(id=fx.job.id).delete()
+    db_session.commit()
+
+    row = db_session.query(FunctionScoreSignal).filter_by(protocol_id=fx.protocol.id).one()
+    assert row.job_id is None
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_population_read_is_ordered_and_typed(db_session, scoring_protocol):
+    fx = scoring_protocol
+    db_session.add_all(
+        [
+            _row(fx, selector="0x00000003", claim_id="pause.set"),
+            _row(fx, selector="0x00000001"),
+            _row(fx, selector="0x00000002", contract_id=fx.sibling.id),
+        ]
+    )
+    db_session.commit()
+
+    signals = current_signals_for_protocol(db_session, fx.protocol.id)
+    assert [s.selector for s in signals] == ["0x00000001", "0x00000003", "0x00000002"]
+    assert all(isinstance(s, FunctionSignal) for s in signals)
+
+
+def _score(fx, **overrides: Any) -> ProtocolScore:
     base: dict[str, Any] = dict(
-        protocol_id=protocol.id,
+        protocol_id=fx.protocol.id,
         model_version=MODEL_VERSION,
         trigger=SCORE_TRIGGER_JOB,
         grade_state=GRADE_STATE_COMPUTED,
@@ -507,20 +681,20 @@ def _score(protocol, **overrides: Any) -> ProtocolScore:
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_score_grade_pairing_is_enforced(db_session, scoring_protocol):
-    protocol, _job = scoring_protocol
-    db_session.add(_score(protocol, grade_state=GRADE_STATE_NOT_DETERMINED))
+    fx = scoring_protocol
+    db_session.add(_score(fx, grade_state=GRADE_STATE_NOT_DETERMINED))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
-    db_session.add(_score(protocol, grade_state=GRADE_STATE_COMPUTED, confidence_pct=None))
+    db_session.add(_score(fx, grade_state=GRADE_STATE_COMPUTED, confidence_pct=None))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
     db_session.add(
         _score(
-            protocol,
+            fx,
             grade_state=GRADE_STATE_NOT_DETERMINED,
             grade_lambda=None,
             grade_exposure=None,
@@ -532,35 +706,35 @@ def test_score_grade_pairing_is_enforced(db_session, scoring_protocol):
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_score_document_is_inline_or_spilled_never_both(db_session, scoring_protocol):
-    protocol, _job = scoring_protocol
-    db_session.add(_score(protocol, findings={"a": 1}, storage_key="scores/1.json"))
+    fx = scoring_protocol
+    db_session.add(_score(fx, findings={"a": 1}, storage_key="scores/1.json"))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
-    db_session.add(_score(protocol, findings=None, storage_key=None))
+    db_session.add(_score(fx, findings=None, storage_key=None))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
-    db_session.add(_score(protocol, findings=None, storage_key="scores/1.json"))
+    db_session.add(_score(fx, findings=None, storage_key="scores/1.json"))
     db_session.commit()
 
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_latest_view_returns_the_newest_row_per_protocol(db_session, scoring_protocol):
-    protocol, _job = scoring_protocol
+    fx = scoring_protocol
     now = datetime.now(timezone.utc)
     db_session.add_all(
         [
-            _score(protocol, computed_at=now - timedelta(hours=2), confidence_pct=10.0),
-            _score(protocol, computed_at=now - timedelta(hours=1), confidence_pct=20.0),
-            _score(protocol, computed_at=now, confidence_pct=30.0),
+            _score(fx, computed_at=now - timedelta(hours=2), confidence_pct=10.0),
+            _score(fx, computed_at=now - timedelta(hours=1), confidence_pct=20.0),
+            _score(fx, computed_at=now, confidence_pct=30.0),
         ]
     )
     db_session.commit()
 
-    latest = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=protocol.id).all()
+    latest = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=fx.protocol.id).all()
     assert len(latest) == 1
     assert float(latest[0].confidence_pct) == 30.0
 
@@ -572,13 +746,13 @@ def test_latest_view_prefers_the_newest_verdict_over_the_newest_grade(db_session
     Serving the last COMPUTED row instead would republish a stale grade as
     current — an absence reading as a fact at the read surface.
     """
-    protocol, _job = scoring_protocol
+    fx = scoring_protocol
     now = datetime.now(timezone.utc)
     db_session.add_all(
         [
-            _score(protocol, computed_at=now - timedelta(hours=1)),
+            _score(fx, computed_at=now - timedelta(hours=1)),
             _score(
-                protocol,
+                fx,
                 computed_at=now,
                 grade_state=GRADE_STATE_NOT_DETERMINED,
                 grade_lambda=None,
@@ -590,24 +764,321 @@ def test_latest_view_prefers_the_newest_verdict_over_the_newest_grade(db_session
     )
     db_session.commit()
 
-    latest = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=protocol.id).one()
+    latest = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=fx.protocol.id).one()
     assert latest.grade_state == GRADE_STATE_NOT_DETERMINED
     assert latest.grade_lambda is None
 
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_latest_view_breaks_same_instant_ties_deterministically(db_session, scoring_protocol):
-    protocol, _job = scoring_protocol
+    fx = scoring_protocol
     now = datetime.now(timezone.utc)
-    db_session.add_all([_score(protocol, computed_at=now, confidence_pct=c) for c in (11.0, 22.0)])
+    db_session.add_all([_score(fx, computed_at=now, confidence_pct=c) for c in (11.0, 22.0)])
     db_session.commit()
 
-    rows = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=protocol.id).all()
+    rows = db_session.query(ProtocolScoreLatest).filter_by(protocol_id=fx.protocol.id).all()
     assert len(rows) == 1
     newest_id = (
         db_session.query(ProtocolScore.id)
-        .filter_by(protocol_id=protocol.id)
+        .filter_by(protocol_id=fx.protocol.id)
         .order_by(ProtocolScore.id.desc())
         .first()[0]
     )
     assert rows[0].id == newest_id
+
+
+# --------------------------------------------------------------------------
+# Reviewer-required coverage: normalization, seam, gate reader, guards
+# --------------------------------------------------------------------------
+
+
+def test_chain_aliases_collapse_to_one_entity_key():
+    """MAX-per-entity only dedups if the alias forms mint ONE key.
+
+    Without the fold, ``"mainnet"``/``"Ethereum"``/``None`` would be three keys
+    for one vault and the value axis would charge it three times.
+    """
+    keys = {entity_key(c, "0xVAULT") for c in (None, "", "  ", "mainnet", "Ethereum", "ETHEREUM", "ethereum")}
+    assert keys == {"ethereum::0xvault"}
+    assert coalesce_chain("MAINNET") == "ethereum"
+
+
+def test_entity_key_is_byte_identical_to_the_codebase_canon():
+    for chain in (None, "", "mainnet", "Ethereum", "optimism", "BASE"):
+        for address in ("0xAbC", "0xdeadBEEF"):
+            assert entity_key(chain, address) == canon_entity_key(chain, address)
+
+
+def test_is_entity_key_rejects_unscoped_and_malformed_tokens():
+    assert is_entity_key("ethereum::0xabc")
+    # A bare address aliases every chain's copy of it into one entity.
+    assert not is_entity_key("0xabc")
+    assert not is_entity_key("ethereum::0xABC")
+    assert not is_entity_key("::0xabc")
+    assert not is_entity_key("ethereum::")
+    assert not is_entity_key("a::b::c")
+
+
+def test_signal_rejects_unscoped_value_entity_keys():
+    with pytest.raises(ValueError, match="canonical"):
+        _signal(
+            value_state=VALUE_STATE_PROVEN_REACH,
+            value_entity_keys=("0xvault",),
+            value_basis="observed_reach_value_usd",
+        )
+
+
+def test_proven_state_must_carry_its_witness_value():
+    """S2: the pairing is biconditional in the Python layer too."""
+    with pytest.raises(ValueError, match="must carry its witness"):
+        Tri(state=SEVERITY_STATE_PROVEN, value=None)
+    with pytest.raises(ValueError, match="must carry its witness"):
+        Tri(state=DESTINATION_STATE_NOT_APPLICABLE, value=None)
+
+
+def test_gate_input_raises_on_a_gate_that_was_never_distilled():
+    """A ``dict.get`` here would return None and read as 'no constraint'."""
+    sig = _signal(gate_inputs={"pause_effective": Tri.not_determined().to_json()})
+    assert sig.gate_input("pause_effective").state == NOT_DETERMINED
+    with pytest.raises(KeyError, match="duration_bound_seconds"):
+        sig.gate_input("duration_bound_seconds")
+
+
+def test_gate_inputs_must_be_tri_envelopes():
+    with pytest.raises(ValueError, match="tri-state envelope"):
+        _signal(gate_inputs={"pause_effective": True})
+
+
+def test_gate_input_round_trips_all_three_states():
+    gates = {
+        "proven_present": Tri.proven(SEVERITY_STATE_PROVEN, 0.2).to_json(),
+        "not_determined": Tri.not_determined().to_json(),
+    }
+    sig = _signal(gate_inputs=gates)
+    assert sig.gate_input("proven_present").require(SEVERITY_STATE_PROVEN) == 0.2
+    assert sig.gate_input("not_determined").value is None
+
+
+def test_destination_bearing_claim_cannot_be_not_applicable():
+    """Item 6: an unread delegatecall destination must not launder as 'none'."""
+    for claim in DESTINATION_BEARING_CLAIMS:
+        with pytest.raises(ValueError, match="launder"):
+            _signal(
+                claim_id=claim,
+                destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
+            )
+    ok = _signal(
+        claim_id="pause.set",
+        destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
+    )
+    assert ok.destination.state == DESTINATION_STATE_NOT_APPLICABLE
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_destination_bearing_claim_cannot_be_not_applicable_in_the_db(db_session, scoring_protocol):
+    fx = scoring_protocol
+    db_session.add(
+        _row(
+            fx,
+            claim_id="delegatecall.execute",
+            destination_state=DESTINATION_STATE_NOT_APPLICABLE,
+            destination_shape=DESTINATION_SHAPE_NOT_APPLICABLE,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_proven_destination_must_carry_a_shape_in_the_db(db_session, scoring_protocol):
+    """N2: the reverse arm of the destination biconditional."""
+    fx = scoring_protocol
+    db_session.add(_row(fx, destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN, destination_shape=None))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_non_enumerated_principal_state_cannot_carry_refs(db_session, scoring_protocol):
+    """N2: the reverse arm of the principal pairing."""
+    fx = scoring_protocol
+    db_session.add(
+        _row(
+            fx,
+            principal_state=PRINCIPAL_STATE_NOT_DETERMINED,
+            principal_refs=[{"function_principal_id": 1, "chain": "ethereum", "address": "0xa"}],
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_principal_refs_cannot_be_smuggled_as_an_object(db_session, scoring_protocol):
+    """S3: a JSONB object is invisible to a length test but not to a reader."""
+    fx = scoring_protocol
+    db_session.add(_row(fx, principal_refs={"function_principal_id": 1}))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_proven_no_reach_cannot_carry_entity_keys(db_session, scoring_protocol):
+    """N2: the reverse arm of the value pairing — an earned negative is empty."""
+    fx = scoring_protocol
+    db_session.add(
+        _row(
+            fx,
+            value_state=VALUE_STATE_PROVEN_NO_REACH,
+            value_basis="proven_no_reach",
+            value_entity_keys=["ethereum::0x1"],
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_value_entity_keys_reject_nulls(db_session, scoring_protocol):
+    """S7: a NULL element is an entity the fold cannot key."""
+    fx = scoring_protocol
+    db_session.add(
+        _row(
+            fx,
+            value_state=VALUE_STATE_PROVEN_REACH,
+            value_basis="observed_reach_value_usd",
+            value_entity_keys=["ethereum::0x1", None],
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protocol):
+    """S5: every field's three states survive the trip through Postgres.
+
+    Both directions are exercised, because the failure this guards against is a
+    state written to the wrong column — every individual value stays legal, so
+    no CHECK downstream would notice.
+    """
+    fx = scoring_protocol
+    originals = [
+        _signal_for(fx, selector="0x00000001"),
+        _signal_for(
+            fx,
+            selector="0x00000002",
+            claim_id="pause.set",
+            witness_tier=WITNESS_TIER_BEHAVIORAL_OBSERVED,
+            severity=Tri.proven(SEVERITY_STATE_PROVEN, 0.0),
+            severity_basis=("base", "keyset_independent:6>=4"),
+            authority_openness=OPENNESS_RESTRICTED,
+            principal_state=PRINCIPAL_STATE_ENUMERATED,
+            principal_refs=(PrincipalRef(function_principal_id=42, chain="ethereum", address="0xaaa"),),
+            value_state=VALUE_STATE_PROVEN_REACH,
+            value_entity_keys=(entity_key("ethereum", "0xVAULT"),),
+            value_bound=VALUE_BOUND_FLOOR,
+            value_basis="observed_reach_floor_usd",
+            destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
+            gate_inputs={"pause_effective": Tri.proven(SEVERITY_STATE_PROVEN, True).to_json()},
+            citations=({"field": "observed_reach_floor_usd"},),
+            witness_notes=("keyset_independent",),
+        ),
+        _signal_for(
+            fx,
+            selector="0x00000003",
+            claim_id="pause.set",
+            value_state=VALUE_STATE_PROVEN_NO_REACH,
+            value_basis="proven_no_reach",
+            principal_state=PRINCIPAL_STATE_NONE_REQUIRED,
+        ),
+    ]
+    for signal in originals:
+        db_session.add(FunctionScoreSignal(**signal_to_row_kwargs(signal, job_id=fx.job.id)))
+    db_session.commit()
+
+    restored = current_signals_for_protocol(db_session, fx.protocol.id)
+    assert len(restored) == 3
+    for original, back in zip(originals, restored):
+        assert back.severity == original.severity
+        assert back.severity_basis == original.severity_basis
+        assert back.destination == original.destination
+        assert back.principal_state == original.principal_state
+        assert back.principal_refs == original.principal_refs
+        assert back.value_state == original.value_state
+        assert back.value_bound == original.value_bound
+        assert back.value_entity_keys == original.value_entity_keys
+        assert back.authority_openness == original.authority_openness
+        assert back.witness_tier == original.witness_tier
+        assert back.gate_inputs == original.gate_inputs
+        assert back.enters_grade == original.enters_grade
+
+    # The three states stayed three on the way back out.
+    assert len({s.value_state for s in restored}) == 3
+    assert restored[1].severity.require(SEVERITY_STATE_PROVEN) == 0.0
+    assert restored[0].severity.value is None
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_signal_from_row_is_the_inverse_of_to_row_kwargs(db_session, scoring_protocol):
+    fx = scoring_protocol
+    original = _signal_for(fx, severity=Tri.proven(SEVERITY_STATE_PROVEN, 0.75), severity_basis=("base",))
+    row = FunctionScoreSignal(**signal_to_row_kwargs(original, job_id=fx.job.id))
+    db_session.add(row)
+    db_session.commit()
+    assert signal_from_row(row) == original
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_replace_rejects_a_signal_for_another_contract(db_session, scoring_protocol):
+    fx = scoring_protocol
+    with pytest.raises(ValueError, match="passed to replace"):
+        replace_contract_signals(
+            db_session,
+            contract_id=fx.contract.id,
+            signals=[_signal_for(fx, contract_id=fx.sibling.id)],
+            job_id=fx.job.id,
+        )
+    db_session.rollback()
+
+
+@pytest.mark.usefixtures("scoring_protocol")
+def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
+    """N3: one protocol's newest row never becomes another's."""
+    fx = scoring_protocol
+    other = Protocol(name=f"scoretest-other-{uuid.uuid4().hex[:8]}")
+    db_session.add(other)
+    db_session.commit()
+    now = datetime.now(timezone.utc)
+    try:
+        db_session.add_all(
+            [
+                _score(fx, computed_at=now - timedelta(hours=1), confidence_pct=11.0),
+                _score(fx, computed_at=now, confidence_pct=22.0),
+            ]
+        )
+        older = _score(fx, computed_at=now - timedelta(days=1), confidence_pct=33.0)
+        older.protocol_id = other.id
+        db_session.add(older)
+        db_session.commit()
+
+        rows = (
+            db_session.query(ProtocolScoreLatest)
+            .filter(ProtocolScoreLatest.protocol_id.in_([fx.protocol.id, other.id]))
+            .all()
+        )
+        assert len(rows) == 2
+        by_protocol = {r.protocol_id: float(r.confidence_pct) for r in rows}
+        assert by_protocol[fx.protocol.id] == 22.0
+        assert by_protocol[other.id] == 33.0
+    finally:
+        db_session.rollback()
+        db_session.query(ProtocolScore).filter_by(protocol_id=other.id).delete()
+        db_session.query(Protocol).filter_by(id=other.id).delete()
+        db_session.commit()

@@ -12,10 +12,22 @@ per (entity, asset), subsumption — because only the fold sees every finding th
 touches an entity, and a signal that pre-resolved any of them would double-count
 the moment a second contract reached the same place.
 
+It is a CURRENT-STATE plane, contract-scoped, replaced wholesale by the
+distiller in one transaction — the ``effective_functions`` currency pattern, not
+an insert-only per-job one. Re-analysis mints a NEW job and completed jobs are
+never deleted, so a job-scoped delete could never remove the prior job's rows:
+every re-analysis would leave a second full signal set behind and the fold would
+double-count it. Identity is ``(chain, deployment_address, contract_id,
+selector, claim_id)``; ``contract_id`` is in the key because split-proxy
+secondary implementations share one ``deployment_address`` on the live corpus.
+``job_id`` is provenance only.
+
 ``protocol_scores`` is insert-only, so a re-fold never destroys a row a consumer
 already read and score history comes for free. ``protocol_scores_latest`` is the
 read surface, needed for exactly the reason ``contract_balances_latest`` is:
-with an insert-only writer, a naive reader sees every historical row.
+with an insert-only writer, a naive reader sees every historical row. It
+deliberately DIVERGES from that view on which row wins — see the model
+docstring; a not-determined grade is a computed verdict, not a failed fetch.
 
 Every three-state fact in both tables is stored as a PAIR — a NOT NULL
 ``*_state`` discriminator from a closed vocabulary that always contains
@@ -42,8 +54,9 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 from utils.scoring_status import (
-    DESTINATION_STATE_CONSTRAINED_PROVEN,
-    DESTINATION_STATE_UNCONSTRAINED_PROVEN,
+    DESTINATION_BEARING_CLAIMS,
+    DESTINATION_STATE_NOT_APPLICABLE,
+    DESTINATION_STATE_NOT_DETERMINED,
     DESTINATION_STATES,
     GRADE_STATE_COMPUTED,
     GRADE_STATES,
@@ -101,7 +114,10 @@ def upgrade() -> None:
     op.create_table(
         "function_score_signals",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("job_id", postgresql.UUID(as_uuid=True), nullable=False),
+        # Provenance only, never identity: keying on it is what would let a
+        # re-analysis (which mints a NEW job) accumulate a second signal set
+        # instead of replacing the first.
+        sa.Column("job_id", postgresql.UUID(as_uuid=True), nullable=True),
         # Denormalised rather than joined through ``jobs``: ``jobs.protocol_id``
         # is nullable and SET NULL, and a signal silently orphaned by that NULL
         # would drop out of the fold's population without a trace.
@@ -110,7 +126,7 @@ def upgrade() -> None:
         # entity-key token the value references use.
         sa.Column("chain", sa.String(length=100), nullable=False),
         sa.Column("deployment_address", sa.String(length=42), nullable=False),
-        sa.Column("contract_id", sa.Integer(), nullable=True),
+        sa.Column("contract_id", sa.Integer(), nullable=False),
         sa.Column("function_id", sa.Integer(), nullable=True),
         sa.Column("selector", sa.String(length=10), nullable=False, server_default=NO_SELECTOR),
         sa.Column("function_name", sa.String(length=255), nullable=False),
@@ -134,9 +150,11 @@ def upgrade() -> None:
         sa.Column("witness_notes", postgresql.ARRAY(sa.String(length=255)), nullable=False),
         sa.Column("effect_verdict_id", sa.BigInteger(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=False),
-        sa.ForeignKeyConstraint(["job_id"], ["jobs.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["job_id"], ["jobs.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["protocol_id"], ["protocols.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["contract_id"], ["contracts.id"], ondelete="SET NULL"),
+        # CASCADE: a contract dropped from the perimeter must stop charging
+        # exposure, not outlive its own analysis as a live finding.
+        sa.ForeignKeyConstraint(["contract_id"], ["contracts.id"], ondelete="CASCADE"),
         # SET NULL for the same reason ``effect_verdicts.function_id`` is:
         # ``effective_functions`` is delete+reinserted per contract, so CASCADE
         # would let a concurrent policy pass destroy signals it never disagreed
@@ -145,10 +163,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["function_id"], ["effective_functions.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["effect_verdict_id"], ["effect_verdicts.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
+        # ``contract_id`` is IN the key because split-proxy secondary
+        # implementations share one ``deployment_address`` on the live corpus,
+        # so without it two distinct contracts collide on the same selector.
         sa.UniqueConstraint(
-            "job_id",
             "chain",
             "deployment_address",
+            "contract_id",
             "selector",
             "claim_id",
             name="uq_function_score_signals_identity",
@@ -166,6 +187,13 @@ def upgrade() -> None:
         sa.CheckConstraint(f"principal_state IN {_in(PRINCIPAL_STATES)}", name="ck_fss_principal_state"),
         # An empty ``enumerated`` list would be the banned empty caller set
         # published as a proven one.
+        # Unconditional: without it a non-enumerated row could carry references
+        # as a JSON object, invisible to a length test but not to a reader.
+        sa.CheckConstraint("jsonb_typeof(principal_refs) = 'array'", name="ck_fss_principal_refs_array"),
+        # The ``jsonb_typeof`` guard is not redundant with the check above:
+        # ``jsonb_array_length`` ERRORS on a non-array and CHECK evaluation order
+        # is not guaranteed, so without it a smuggled object surfaces as a
+        # DataError here instead of violating the constraint that names the problem.
         sa.CheckConstraint(
             f"(principal_state = '{PRINCIPAL_STATE_ENUMERATED}') = "
             "(jsonb_typeof(principal_refs) = 'array' AND jsonb_array_length(principal_refs) > 0)",
@@ -183,11 +211,28 @@ def upgrade() -> None:
             f"value_state = '{VALUE_STATE_PROVEN_REACH}' OR value_bound = '{VALUE_BOUND_NOT_DETERMINED}'",
             name="ck_fss_value_bound_pairing",
         ),
-        sa.CheckConstraint(f"destination_state IN {_in(DESTINATION_STATES)}", name="ck_fss_destination_state"),
+        # A NULL element is an entity the fold cannot key. The
+        # ``<chain>::<address>`` FORMAT is validated in services.scoring.schema —
+        # a CHECK cannot quantify over array elements without a subquery.
         sa.CheckConstraint(
-            f"destination_shape IS NULL OR destination_state IN "
-            f"('{DESTINATION_STATE_CONSTRAINED_PROVEN}', '{DESTINATION_STATE_UNCONSTRAINED_PROVEN}')",
+            "array_position(value_entity_keys, NULL) IS NULL",
+            name="ck_fss_value_entity_keys_no_nulls",
+        ),
+        sa.CheckConstraint(f"destination_state IN {_in(DESTINATION_STATES)}", name="ck_fss_destination_state"),
+        # Biconditional: ``not_determined`` is the only state without a shape,
+        # so "no destination exists" (``not_applicable``, which carries its own
+        # shape token) can never present like "the destination was not read".
+        sa.CheckConstraint(
+            f"(destination_state <> '{DESTINATION_STATE_NOT_DETERMINED}') = (destination_shape IS NOT NULL)",
             name="ck_fss_destination_pairing",
+        ),
+        # A capability whose behaviour HAS a destination can never claim there is
+        # none — otherwise an unread delegatecall destination could be written as
+        # ``not_applicable`` and skip the escalation entirely.
+        sa.CheckConstraint(
+            f"destination_state <> '{DESTINATION_STATE_NOT_APPLICABLE}' "
+            f"OR claim_id NOT IN {_in(DESTINATION_BEARING_CLAIMS)}",
+            name="ck_fss_destination_not_applicable_claims",
         ),
         sa.CheckConstraint(f"reach_gate_state IN {_in(REACH_GATE_STATES)}", name="ck_fss_reach_gate_state"),
         # A severity with an empty basis is a number with no witness behind it.
@@ -197,6 +242,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_fss_protocol_id", "function_score_signals", ["protocol_id"])
+    op.create_index("ix_fss_contract_id", "function_score_signals", ["contract_id"])
     op.create_index("ix_fss_job_id", "function_score_signals", ["job_id"])
     op.create_index("ix_fss_function_id", "function_score_signals", ["function_id"])
     op.create_index("ix_fss_entity", "function_score_signals", ["chain", "deployment_address"])
@@ -252,5 +298,6 @@ def downgrade() -> None:
     op.drop_index("ix_fss_entity", table_name="function_score_signals")
     op.drop_index("ix_fss_function_id", table_name="function_score_signals")
     op.drop_index("ix_fss_job_id", table_name="function_score_signals")
+    op.drop_index("ix_fss_contract_id", table_name="function_score_signals")
     op.drop_index("ix_fss_protocol_id", table_name="function_score_signals")
     op.drop_table("function_score_signals")

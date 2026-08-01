@@ -17,14 +17,23 @@ identical code.
 
 from __future__ import annotations
 
+from services.scoring.population import (
+    current_signal_rows,
+    current_signals_for_protocol,
+    replace_contract_signals,
+)
 from services.scoring.schema import (
     NOT_DETERMINED,
     FunctionSignal,
     PrincipalRef,
     ScoreDocument,
     Tri,
+    coalesce_chain,
     entity_key,
+    is_entity_key,
     not_determined_signal_defaults,
+    signal_from_row,
+    signal_to_row_kwargs,
 )
 
 __all__ = [
@@ -33,6 +42,13 @@ __all__ = [
     "PrincipalRef",
     "ScoreDocument",
     "Tri",
+    "coalesce_chain",
+    "current_signal_rows",
+    "current_signals_for_protocol",
     "entity_key",
+    "is_entity_key",
     "not_determined_signal_defaults",
+    "replace_contract_signals",
+    "signal_from_row",
+    "signal_to_row_kwargs",
 ]

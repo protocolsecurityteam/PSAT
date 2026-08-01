@@ -105,6 +105,23 @@ DESTINATION_STATES = (
     DESTINATION_STATE_NOT_DETERMINED,
 )
 
+# The shape payload of the ``not_applicable`` arm. Every state except
+# ``not_determined`` carries a shape, so exactly one state means "unread" and the
+# pairing CHECK is a plain biconditional instead of a three-way special case.
+DESTINATION_SHAPE_NOT_APPLICABLE = "not_applicable"
+
+# The capabilities whose behaviour HAS a destination. For these,
+# ``not_applicable`` is never a truthful answer — an unread destination on a
+# delegatecall is ``not_determined``, and letting it present as "there is no
+# destination here" would launder an unread witness into a non-escalating state,
+# which is the prototype's −30λ false positive arriving by a different door. The
+# schema CHECK is what makes that unrepresentable rather than merely discouraged.
+DESTINATION_BEARING_CLAIMS = (
+    "flow.out",
+    "delegatecall.execute",
+    "exec.arbitrary",
+)
+
 # --- reach gate ------------------------------------------------------------
 # The ``gated_contract_backlink`` licence to charge a holder's value through a
 # gated function. ``not_licensed`` is a reachability verdict only: it never types
