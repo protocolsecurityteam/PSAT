@@ -33,10 +33,12 @@ destination operand to the subject's own symbol.
 
 The destination states are earned, never defaulted into: ``storage_setter`` and
 its siblings come from the resolved variable, ``param`` from the subject's own
-formal, ``self`` from a literal ``address(this)`` — a compile-time destination
-that no writer and no caller can redirect, so it is a PROVEN fixed destination
-and carries a proven-constrained ``destination_constraint``, not a weakened or
-hedged one. Everything the walk did not settle — a mapping element
+formal, ``self`` from a literal ``address(this)`` — a destination ADDRESS pinned
+at compile time, so it is a PROVEN fixed destination and carries a
+proven-constrained ``destination_constraint``, not a weakened or hedged one.
+(What that address can be made to RUN, where this contract is an implementation
+behind a proxy, is ``upgrade.implementation``'s claim, not this one's.)
+Everything the walk did not settle — a mapping element
 (``userModule[msg.sender]``: nothing static can name the address, and answering
 ``userModule`` would assert ONE destination where there is one per caller), a
 multiply-defined name, an unresolved forwarder — lands on ``indeterminate`` with
@@ -185,13 +187,15 @@ def _resolve(ctx: ClaimContext, unit: Any, bindings: dict[int, Any], depth: int)
         if bound is not None:
             root = bound
         if isinstance(root, SolidityVariable) and getattr(root, "name", None) == "this":
-            # ``address(this)``: the destination is this contract's own code, so
-            # no writer and no caller can point it elsewhere. Matched after the
-            # binding substitution so the library route (OZ ``Multicall`` reaches
-            # its ``delegatecall`` through ``Address.functionDelegateCall``)
-            # earns the same answer as the direct one. ``msg.sender`` and the
-            # other composed solidity variables carry different names and are
-            # not admitted.
+            # ``address(this)``: the destination ADDRESS is pinned at compile
+            # time — no writer and no caller can point it at another address.
+            # Whether the code AT that address can be replaced is the proxy
+            # question, which ``upgrade.implementation`` claims separately.
+            # Matched after the binding substitution so the library route (OZ
+            # ``Multicall`` reaches its ``delegatecall`` through
+            # ``Address.functionDelegateCall``) earns the same answer as the
+            # direct one. ``msg.sender`` and the other composed solidity
+            # variables carry different names and are not admitted.
             return {"target_kind": "self"}
         if isinstance(root, StateVariable):
             kind, writers = _classify_state_variable(ctx, root)
@@ -329,10 +333,10 @@ def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | No
 def _destination_constraint(ctx: ClaimContext, function: str, unit: Any, destination: dict[str, Any]) -> dict[str, Any]:
     """The three-state verdict on whether the destination is pinned.
 
-    ``self`` is settled by the operand itself: ``address(this)`` is a
-    compile-time value with no writer and no caller input, so the constraint is
-    EARNED ``constrained`` on the strongest binding available — the destination
-    operand — rather than inherited from a gate. For a caller-named destination
+    ``self`` is settled by the operand itself: ``address(this)`` pins the
+    destination address at compile time, with no writer and no caller input, so
+    the constraint is EARNED ``constrained`` on the strongest binding available
+    — the destination operand — rather than inherited from a gate. For a caller-named destination
     the question is whether a mandatory revert gate pins it, which is the same
     question here as it is on a value move. Every other kind leaves it
     unsettled, and an unsettled destination is ``not_determined``."""
