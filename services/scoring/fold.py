@@ -195,10 +195,10 @@ def compute_protocol_score(
         "ledgers": P.load_ledgers(session, protocol_id),
         "audit_posture": P.load_audit_posture(session, protocol_id),
         "perimeter": perimeter_detail,
-        "earned_negative_scope": (
-            "published for claim-bearing functions only, because a signal is keyed on a "
-            "capability; a function with an earned empty caller set and no claim carries "
-            "no signal and is therefore absent here (1 such row on this corpus)"
+        "signal_scope": (
+            "a signal is keyed on a CAPABILITY, so a function carrying no claim produces "
+            "none: its earned empty caller set and its one_shot latch witness are outside "
+            "this document. That is a distillation gap, never a proven absence"
         ),
         "determinism": (
             "every query carries a total ORDER BY and every sort a total tiebreak; "
