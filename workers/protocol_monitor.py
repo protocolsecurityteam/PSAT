@@ -31,6 +31,7 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
+    HEARTBEAT_ROLE_HOLDER_PLANE,
     record_heartbeat,
 )
 from utils.logging import configure_logging
@@ -180,11 +181,12 @@ class Supervisor:
 def _build_default_supervisor(rpc_url: str, interval: float | None) -> Supervisor:
     """Build (but do not start) the default-mode Supervisor.
 
-    The restaking plane is a sibling loop, not a phase of the TVL refresh: the
-    Supervisor's per-loop isolation is what keeps a restaking read failure out of
-    the balance cycle's failure domain.
+    The restaking and role-holder planes are sibling loops, not phases of the TVL
+    refresh: the Supervisor's per-loop isolation is what keeps one plane's read
+    failure out of another cycle's failure domain.
     """
     from services.monitoring.restaking_cycle import DEFAULT_RESTAKING_INTERVAL, run_restaking_loop
+    from services.monitoring.role_holder_cycle import DEFAULT_ROLE_PLANE_INTERVAL, run_role_holder_plane_loop
     from services.monitoring.tvl import DEFAULT_TVL_INTERVAL, run_tvl_loop
     from services.monitoring.unified_watcher import (
         DEFAULT_POLL_INTERVAL,
@@ -197,12 +199,14 @@ def _build_default_supervisor(rpc_url: str, interval: float | None) -> Superviso
     poll_interval = interval if interval is not None else DEFAULT_POLL_INTERVAL
     tvl_interval = interval if interval is not None else DEFAULT_TVL_INTERVAL
     restaking_interval = interval if interval is not None else DEFAULT_RESTAKING_INTERVAL
+    role_plane_interval = interval if interval is not None else DEFAULT_ROLE_PLANE_INTERVAL
 
     loops: list[tuple[str, LoopTarget]] = [
         (HEARTBEAT_PROTOCOL_SCANNER, lambda ev: run_scan_loop(rpc_url, scan_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_POLLER, lambda ev: run_poll_loop(rpc_url, poll_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_TVL, lambda ev: run_tvl_loop(tvl_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_RESTAKING, lambda ev: run_restaking_loop(restaking_interval, stop_event=ev)),
+        (HEARTBEAT_ROLE_HOLDER_PLANE, lambda ev: run_role_holder_plane_loop(role_plane_interval, stop_event=ev)),
     ]
     return Supervisor(loops)
 

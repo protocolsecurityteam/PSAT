@@ -24,6 +24,7 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
+    HEARTBEAT_ROLE_HOLDER_PLANE,
     record_heartbeat,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     "HEARTBEAT_PROTOCOL_RESTAKING",
     "HEARTBEAT_PROTOCOL_SCANNER",
     "HEARTBEAT_PROTOCOL_TVL",
+    "HEARTBEAT_ROLE_HOLDER_PLANE",
     "emit_monitor_cycle",
 ]
 

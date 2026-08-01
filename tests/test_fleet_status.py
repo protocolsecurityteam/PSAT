@@ -51,6 +51,7 @@ _KNOWN_PROCESSES = {
     "protocol_poller",
     "protocol_tvl",
     "protocol_restaking",
+    "role_holder_plane",
     "ops_alerter",
 }
 

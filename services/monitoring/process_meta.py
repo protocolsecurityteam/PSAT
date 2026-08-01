@@ -26,6 +26,7 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
+    HEARTBEAT_ROLE_HOLDER_PLANE,
 )
 
 # Per-process display metadata + staleness window. ``interval_s`` is the loop
@@ -42,6 +43,7 @@ PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_PROTOCOL_POLLER: {"kind": "watcher", "interval_s": 600, "label": "Protocol state poller"},
     HEARTBEAT_PROTOCOL_TVL: {"kind": "watcher", "interval_s": 3600, "label": "Protocol TVL refresh"},
     HEARTBEAT_PROTOCOL_RESTAKING: {"kind": "watcher", "interval_s": 3600, "label": "Restaking position refresh"},
+    HEARTBEAT_ROLE_HOLDER_PLANE: {"kind": "watcher", "interval_s": 3600, "label": "Role-holder plane refresh"},
     HEARTBEAT_OPS_ALERTER: {"kind": "daemon", "interval_s": 120, "label": "Ops watchdog / alerter"},
 }
 

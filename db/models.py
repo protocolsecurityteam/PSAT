@@ -2062,6 +2062,12 @@ ROLE_NAME_BASIS_KECCAK = "keccak_preimage"
 ROLE_NAME_BASIS_AC_DEFAULT_ADMIN = "accesscontrol_default_admin_literal"
 ROLE_NAME_BASIS_NOT_DETERMINED = "not_determined"
 
+# ``role_holder_plane_refreshes`` outcomes. Both mean a pass RAN against a
+# registry whose gate was open; they differ only in whether the fold proposed
+# anything. A registry whose gate was closed gets no row at all — see the model.
+ROLE_REFRESH_OUTCOME_NO_ROWS = "no_rows"
+ROLE_REFRESH_OUTCOME_ROWS_WRITTEN = "rows_written"
+
 # "No holder set was published", as SQL. A bare ``holders IS NULL`` is NOT this:
 # a JSONB column also accepts the jsonb scalar ``null``, which is what a write of
 # a Python None stores unless the column says otherwise, and which every SQL null
@@ -2262,6 +2268,73 @@ class RoleHolderPlane(Base):
         CheckConstraint(
             "role_name_basis IN ('keccak_preimage', 'accesscontrol_default_admin_literal', 'not_determined')",
             name="ck_role_holder_planes_name_basis_domain",
+        ),
+    )
+
+
+class RoleHolderPlaneRefresh(Base):
+    """When ``(chain_id, registry_address)`` was last folded, and what came of it.
+
+    The plane above is keyed by ROLE, so it cannot answer a question about the
+    REGISTRY: a registry whose fold proposed no candidate writes no row there,
+    and row-absence in a per-role table is indistinguishable from a registry
+    nothing ever ran against. That ambiguity is what this table removes, in
+    exactly three states:
+
+    * **never refreshed** — no row here. The registry is due.
+    * **refreshed, confirmed nothing** — a row with ``outcome = 'no_rows'``.
+      The pass ran; the fold proposed nothing at ``trigger_log_block``. It is
+      NOT due again until one of the recorded observations below changes.
+    * **refreshed, wrote N** — a row with ``outcome = 'rows_written'`` and
+      ``rows_written = N``.
+
+    A row is written only where the AccessControl cursor pair EXISTS. A closed
+    gate leaves the registry rowless — "never refreshed" — so it re-selects by
+    itself the moment the indexer finishes enrolling it, with no timer to expire
+    and no flag to clear.
+
+    The three stored observations are what make the not-due state safe rather
+    than a freeze. ``trigger_log_block`` is the highest AccessControl log block
+    the registry had indexed at the pass (NULL = none had been), so a later
+    grant or revoke re-selects it. ``cursors_warm`` is the pair's
+    ``backfill_complete`` conjunction, so a registry folded against a cold
+    surface re-selects when the surface goes warm even if no new log lands.
+    ``refreshed_at`` bounds the age of the floors themselves, which are
+    time-varying facts about deployed state and go stale on their own.
+
+    Nothing here records WHY a floor was withheld, and that is deliberate: the
+    plane makes an all-reverting registry and an all-false one indistinguishable
+    on purpose, so a refresh trigger that told them apart would reconstruct the
+    distinction the plane refuses to publish.
+    """
+
+    __tablename__ = "role_holder_plane_refreshes"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    registry_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # NULL means no AccessControl log was indexed for this registry at the pass.
+    # An observation of the index, never a claim that none were emitted.
+    trigger_log_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cursors_warm: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    rows_written: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('no_rows', 'rows_written')",
+            name="ck_role_holder_plane_refreshes_outcome_domain",
+        ),
+        # The count and the token are one fact. Split, a pass could record
+        # "confirmed nothing" over rows it wrote, which would stop the registry
+        # re-selecting on the evidence that it does have roles to track.
+        CheckConstraint(
+            "(outcome = 'rows_written') = (rows_written > 0)",
+            name="ck_role_holder_plane_refreshes_outcome_matches_count",
+        ),
+        CheckConstraint(
+            "rows_written >= 0",
+            name="ck_role_holder_plane_refreshes_count_non_negative",
         ),
     )
 

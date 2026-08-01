@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
@@ -18,7 +18,6 @@ from db.models import (
     ContractBalance,
     ContractBalanceFetch,
     ControllerValue,
-    IndexedEventCursor,
     Job,
     JobStage,
     derive_job_chain_id,
@@ -32,6 +31,13 @@ from services.monitoring.balance_reads import (
     pinned_native_balances,
     prune_balance_fetches,
 )
+from services.monitoring.role_holder_cycle import (
+    OUTCOME_GATE_CLOSED,
+    OUTCOME_NO_REGISTRY,
+    OUTCOME_NO_ROWS,
+    OUTCOME_ROWS_WRITTEN,
+    access_control_gate_open,
+)
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
@@ -44,7 +50,6 @@ from services.resolution.flow_asset_plane import (
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.role_holder_plane import (
-    ACCESS_CONTROL_TOPIC0S,
     persist_role_holder_planes,
     pin_probe_block,
     resolve_role_holder_planes,
@@ -401,28 +406,32 @@ class ResolutionWorker(BaseWorker):
     ) -> int:
         """Publish this registry's role floors. Returns the rows written.
 
+        The opportunistic fast path: it refreshes whatever this job's own
+        registry can prove while the stage is already here. The periodic
+        refresher (``services.monitoring.role_holder_cycle``) is what guarantees
+        a registry is reached at all, on a clock that does not depend on a job
+        arriving for it.
+
         The gate is cursor EXISTENCE on both AccessControl topics, not warmth. A
         cold cursor still mints a row whose floor is withheld (``holders`` NULL,
         ``coverage`` partial); skipping it instead would erase the distinction
         between a registry with no roles and a registry nothing was read from.
         Everything past that precondition is the module's to refuse.
 
+        Every outcome is recorded — a closed gate, an open gate that resolved
+        nothing, and N rows written. They are three different facts, and a metric
+        that fires only on the third makes the first two indistinguishable from
+        the stage never running.
+
         The registry is the RUNTIME address — the proxy an impl job's logs are
         actually emitted at, never the implementation its ``contracts`` row is
         keyed to.
         """
         if not registry_address:
+            self._record_role_plane_outcome(job, None, OUTCOME_NO_REGISTRY, 0)
             return 0
-        enrolled = {
-            str(topic).lower()
-            for topic in session.execute(
-                select(IndexedEventCursor.topic0)
-                .where(IndexedEventCursor.chain_id == chain_id)
-                .where(func.lower(IndexedEventCursor.event_address) == registry_address.lower())
-                .where(IndexedEventCursor.topic0.in_(ACCESS_CONTROL_TOPIC0S))
-            ).scalars()
-        }
-        if not set(ACCESS_CONTROL_TOPIC0S).issubset(enrolled):
+        if not access_control_gate_open(session, chain_id=chain_id, registry_address=registry_address):
+            self._record_role_plane_outcome(job, registry_address, OUTCOME_GATE_CLOSED, 0)
             return 0
 
         rows = resolve_role_holder_planes(
@@ -432,18 +441,30 @@ class ResolutionWorker(BaseWorker):
             rpc_url=rpc_url,
         )
         if not rows:
+            self._record_role_plane_outcome(job, registry_address, OUTCOME_NO_ROWS, 0)
             return 0
         written = persist_role_holder_planes(session, rows)
         session.commit()
-        record_stage_metric("role_holder_planes", written)
-        logger.info(
-            "Job %s: role-holder plane resolved for registry %s (%d row(s))",
-            job.id,
-            registry_address,
-            written,
-            extra={"registry_address": registry_address, "role_holder_planes": written},
-        )
+        self._record_role_plane_outcome(job, registry_address, OUTCOME_ROWS_WRITTEN, written)
         return written
+
+    @staticmethod
+    def _record_role_plane_outcome(job: Job, registry_address: str | None, outcome: str, written: int) -> None:
+        """One metric and one log line per pass, whatever the pass concluded."""
+        record_stage_metric("role_holder_planes", written)
+        record_stage_metric("role_holder_plane_outcome", outcome)
+        logger.info(
+            "Job %s: role-holder plane %s for registry %s (%d row(s))",
+            job.id,
+            outcome,
+            registry_address or "0x0",
+            written,
+            extra={
+                "registry_address": registry_address,
+                "outcome": outcome,
+                "role_holder_planes": written,
+            },
+        )
 
     def _resolve_flow_asset_addresses(
         self,

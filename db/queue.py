@@ -76,6 +76,7 @@ HEARTBEAT_PROTOCOL_SCANNER = "protocol_scanner"
 HEARTBEAT_PROTOCOL_POLLER = "protocol_poller"
 HEARTBEAT_PROTOCOL_TVL = "protocol_tvl"
 HEARTBEAT_PROTOCOL_RESTAKING = "protocol_restaking"
+HEARTBEAT_ROLE_HOLDER_PLANE = "role_holder_plane"
 # The ops watchdog runs in the web app lifespan; its heartbeat row doubles as
 # the CAS-guarded store for alert dedupe/cooldown state (services/monitoring/
 # ops_alerts.py).
