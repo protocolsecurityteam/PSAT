@@ -230,7 +230,10 @@ def _persist_spawn_summary(
             session.rollback()
         except Exception:
             logger.debug("Job %s: rollback before spawn-summary retry failed", job.id, exc_info=True)
-    fresh = SessionLocal()
+    # Bound to the SAME engine as the session it replaces: the ledger belongs
+    # to the database the job lives in, and the global default is a different
+    # one wherever the two are split (the test harness; any future multi-DB).
+    fresh = Session(bind=session.get_bind())
     try:
         store_artifact(fresh, job.id, artifact_name, data=spawn_result)
         fresh.commit()
