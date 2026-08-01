@@ -64,6 +64,20 @@ def _url(fetcher: object) -> str:
     return cast(Any, fetcher).rpc_url
 
 
+@pytest.fixture(autouse=True)
+def _no_creation_witness(monkeypatch):
+    """Enrollment grades its seed with three pinned chain reads before writing
+    the cursor. Nothing here asserts that grade — the subject is the cursor's
+    ``chain_id`` — so the wire is stubbed to the unreachable-RPC failure, whose
+    documented outcome is ``(None, not_determined)``."""
+    import workers.event_log_indexer as eli
+
+    def _no_wire(*_a, **_kw):
+        raise RuntimeError("no rpc")
+
+    monkeypatch.setattr(eli, "rpc_request", _no_wire)
+
+
 def _can_connect() -> bool:
     if not _DB_URL:
         return False

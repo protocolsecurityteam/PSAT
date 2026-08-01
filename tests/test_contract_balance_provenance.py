@@ -102,6 +102,10 @@ def _stub_etherscan(monkeypatch, *, wei, token_page=None):
 
     monkeypatch.setattr("utils.etherscan.get_eth_balance", _bal)
     monkeypatch.setattr("utils.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
+    # ``get_eth_price`` delegates to ``get_native_price``, so stubbing it does not
+    # cover the resolution worker, which calls the native quote directly. Same
+    # quote, so the native row is priced the way the TVL arms already price it.
+    monkeypatch.setattr("utils.etherscan.get_native_price", lambda chain_id=1: 2000.0)
     monkeypatch.setattr(
         "utils.etherscan.get_token_balances_page",
         lambda address, chain_id=1: token_page if token_page is not None else page([]),

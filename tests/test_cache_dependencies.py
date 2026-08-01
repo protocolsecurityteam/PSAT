@@ -713,6 +713,10 @@ def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
         "services.discovery.upgrade_history.build_upgrade_history",
         mock_build_uh,
     )
+    # The stored events are folded per transaction, one receipt read each. This
+    # test is about the merge, so the read is stubbed to the unfetchable outcome
+    # it already had — ``None``, which the fold counts as receipt-unusable.
+    monkeypatch.setattr("services.discovery.upgrade_history._fetch_receipt", lambda *a, **kw: None)
 
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
@@ -767,6 +771,9 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
         "services.discovery.upgrade_history.build_upgrade_history",
         mock_build_uh,
     )
+    # Same as above: the previously stored events are still folded, and the
+    # receipt read is stubbed to the unfetchable outcome it already had.
+    monkeypatch.setattr("services.discovery.upgrade_history._fetch_receipt", lambda *a, **kw: None)
 
     worker = StaticWorker()
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)

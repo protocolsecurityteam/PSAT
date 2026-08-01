@@ -17,7 +17,7 @@ from services.monitoring.tvl import (
     take_tvl_snapshot,
 )
 from tests.conftest import requires_postgres
-from tests.support.balance_stubs import page
+from tests.support.balance_stubs import page, pinned_native_unavailable
 from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, NATIVE_STATUS_FETCH_FAILED
 
 # Unique address helpers — each test class gets its own prefix to avoid
@@ -42,6 +42,16 @@ _ADDR_PREFIX = {
 def _addr(prefix_key: str, suffix: str) -> str:
     base = _ADDR_PREFIX[prefix_key]
     return (base + suffix).ljust(42, "0")[:42]
+
+
+@pytest.fixture(autouse=True)
+def _no_pinned_native(monkeypatch):
+    """Every balance test here stubs Etherscan only; pin the second native wire too.
+
+    No test in this module exercises the pinned read, so the whole module takes
+    the unpinned path — the one its expectations were written against.
+    """
+    pinned_native_unavailable(monkeypatch)
 
 
 @pytest.fixture()

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.support.balance_stubs import page
+from tests.support.balance_stubs import page, pinned_native_unavailable
 
 
 def _row(**attrs: Any) -> Any:
@@ -212,6 +212,10 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
     monkeypatch.setattr("utils.etherscan.get_token_balances_page", _tokens)
     monkeypatch.setattr("utils.etherscan.get_native_price", _price)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
+    # The chain id under test is the one on the Etherscan reads; the pinned
+    # native read is a separate wire on the same path, stubbed to its
+    # unavailable outcome so the assertions stay about Etherscan.
+    pinned_native_unavailable(monkeypatch)
 
     worker = ResolutionWorker()
     session = MagicMock()

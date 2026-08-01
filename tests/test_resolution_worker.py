@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from db.models import ContractBalance, ContractBalanceFetch
-from tests.support.balance_stubs import page
+from tests.support.balance_stubs import page, pinned_native_unavailable
 from utils.balance_status import NATIVE_STATUS_FETCH_FAILED, NATIVE_STATUS_NOT_DETERMINED
 from workers.resolution_worker import ResolutionWorker
 
@@ -28,10 +28,15 @@ def _stub_etherscan_balances(monkeypatch):
 
     Benign defaults (no balances); tests exercising specific balance behaviour
     override these in-body (monkeypatch order lets the later setattr win).
+
+    The pinned native read is a second, non-Etherscan wire the same call makes,
+    and no test here exercises it — so the module takes the unpinned path its
+    expectations were written against.
     """
     monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 0.0)
     monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda addr, *a, **k: page([]))
+    pinned_native_unavailable(monkeypatch)
 
 
 def _can_connect() -> bool:
