@@ -15,7 +15,13 @@ than by a later mutation.
 The write ORDER is storage-then-row on purpose. A row committed before its body
 exists names an object a reader would 404 on and would be indistinguishable from
 a genuinely lost body; a body written before a row that never lands is an
-orphaned object, which costs bytes and claims nothing.
+orphaned object, which costs bytes and claims nothing. Orphans are logged with
+their key at both the INSERT and the commit, so they are countable; collecting
+them is not this pass's job.
+
+The document is serialized exactly ONCE, and the inline column stores what came
+back out of that serialization. Two encoders is how the same document becomes
+two different documents.
 """
 
 from __future__ import annotations
@@ -54,8 +60,15 @@ def persist_score_document(session: Session, document: ScoreDocument) -> Any:
     """
     from db.models import ProtocolScore
 
-    payload = document.document()
-    body = json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
+    # ONE serialization, and the inline column stores what came back out of it.
+    # Two encoders would make the same document two different documents: a
+    # ``default=str`` fallback silently turns a Decimal into a string on the
+    # spilled path while the inline path hands the raw object to the JSONB
+    # serializer, which raises. A value this cannot encode is a producer bug and
+    # must fail the same way in both paths, at persist time, with the document
+    # in hand.
+    body = json.dumps(document.document(), sort_keys=True).encode("utf-8")
+    payload = json.loads(body)
 
     findings: Any | None = payload
     storage_key: str | None = None
@@ -89,7 +102,19 @@ def persist_score_document(session: Session, document: ScoreDocument) -> Any:
         model_parameters=document.model_parameters,
     )
     session.add(row)
-    session.flush()
+    try:
+        session.flush()
+    except Exception:
+        # The body is already in the bucket and the row that would have named it
+        # is not going to exist. No GC here, but the key is logged so an orphan
+        # is countable rather than invisible — an unnamed object is otherwise
+        # indistinguishable from one nobody ever wrote.
+        if storage_key:
+            logger.warning(
+                "protocol score document orphaned in object storage: row insert failed",
+                extra={"protocol_id": document.protocol_id, "storage_key": storage_key},
+            )
+        raise
     return row
 
 
