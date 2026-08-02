@@ -1111,13 +1111,21 @@ class EffectsWorker(BaseWorker):
 
         The whole pass runs in the job's transaction rather than committing:
         the ``_bridge_claims`` writes above are uncommitted at this point, and a
-        DB error outside a savepoint would abort the transaction carrying them.
+        DB error outside a savepoint would abort the transaction carrying them —
+        an abort the stage would not notice until its own commit silently became
+        a rollback and the job advanced as a success with its verdicts gone.
         """
         from services.scoring.dirty import SCORE_DIRTY_EFFECTS, mark_protocol_score_dirty
         from services.scoring.distill import distill_job_signals
         from services.scoring.population import replace_contract_signals
 
         protocol_id = getattr(job, "protocol_id", None)
+        # Flushed OUTSIDE the guard. ``begin_nested`` flushes unconditionally,
+        # so a failure in the STAGE's own pending writes would otherwise be
+        # caught below and reported as a distillation failure it is not — while
+        # the job died at commit anyway. Everything the ``except`` reports is
+        # then genuinely this hook's.
+        session.flush()
         try:
             with session.begin_nested():
                 grouped = distill_job_signals(session, job)
@@ -1136,13 +1144,33 @@ class EffectsWorker(BaseWorker):
         for contract_id, signals in grouped.items():
             try:
                 with session.begin_nested():
-                    replace_contract_signals(
+                    deleted = replace_contract_signals(
                         session,
                         contract_id=contract_id,
                         signals=signals,
                         job_id=job.id,
                     )
                 written += 1
+                if deleted and not signals:
+                    # A wholesale replace by an EMPTY set retracts every
+                    # capability the contract had. That is correct when its
+                    # functions genuinely went away and fail-open when anything
+                    # upstream merely failed to produce them, and the two are
+                    # indistinguishable from the row count alone — so the
+                    # retraction is named rather than left silent.
+                    logger.warning(
+                        "Effects: distillation retracted all %d score signals for contract %s (job %s)",
+                        deleted,
+                        contract_id,
+                        job.id,
+                        extra={
+                            "job_id": str(job.id),
+                            "protocol_id": protocol_id,
+                            "contract_id": contract_id,
+                            "signals_retracted": deleted,
+                            "phase": "score_distillation",
+                        },
+                    )
             except Exception:
                 failed.append(contract_id)
                 logger.warning(

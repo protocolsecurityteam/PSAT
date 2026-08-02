@@ -214,7 +214,19 @@ class CoverageWorker(BaseWorker):
             from services.scoring.dirty import SCORE_DIRTY_COVERAGE, mark_protocol_score_dirty
 
             if mark_protocol_score_dirty(session, contract.protocol_id, SCORE_DIRTY_COVERAGE):
-                session.commit()
+                try:
+                    session.commit()
+                except Exception:
+                    # The mark swallows its own failure; the commit it induces
+                    # must too, or best-effort marking would fail the stage
+                    # through the back door. The coverage rows are already
+                    # committed above, and the sweep re-folds this protocol.
+                    session.rollback()
+                    logger.warning(
+                        "Coverage stage: protocol score dirty-mark commit failed for protocol %s",
+                        contract.protocol_id,
+                        exc_info=True,
+                    )
         record_stage_metric("coverage_rows", inserted)
         self.update_detail(session, job, f"Audit coverage refreshed: {inserted} row(s)")
         logger.info(
