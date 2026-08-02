@@ -3046,8 +3046,15 @@ class ProtocolScore(Base):
             f"trigger IN {_sql_tuple(SCORE_TRIGGERS)}",
             name="ck_protocol_scores_trigger",
         ),
+        # ``jsonb_typeof(findings) IS NOT NULL`` rather than
+        # ``findings IS NOT NULL``: identical truth value (``jsonb_typeof``
+        # returns SQL NULL only for a SQL-NULL column, and the string
+        # ``'null'`` — which is NOT NULL — for the jsonb scalar null), but the
+        # raw shape is banned repo-wide because everywhere ELSE it silently
+        # counts written-nulls as payload. Spelling the discriminator keeps this
+        # column out of the exception the reader would otherwise have to know.
         CheckConstraint(
-            "(findings IS NOT NULL) <> (storage_key IS NOT NULL)",
+            "(jsonb_typeof(findings) IS NOT NULL) <> (storage_key IS NOT NULL)",
             name="ck_protocol_scores_document_exactly_one",
         ),
     )

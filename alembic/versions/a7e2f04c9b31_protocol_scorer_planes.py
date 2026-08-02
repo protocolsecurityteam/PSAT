@@ -280,9 +280,13 @@ def upgrade() -> None:
         sa.CheckConstraint(f"perimeter_state IN {_in(PERIMETER_STATES)}", name="ck_protocol_scores_perimeter_state"),
         sa.CheckConstraint(f"trigger IN {_in(SCORE_TRIGGERS)}", name="ck_protocol_scores_trigger"),
         # Never both: a reader must not be handed a stale inline copy alongside
-        # a spill, and never neither.
+        # a spill, and never neither. ``jsonb_typeof(findings) IS NOT NULL`` is
+        # the same truth value as ``findings IS NOT NULL`` — ``jsonb_typeof``
+        # yields SQL NULL only for a SQL-NULL column — spelled the way the
+        # repo-wide jsonb discipline requires, so no reader has to hold this
+        # column as the one place the banned shape was still fine.
         sa.CheckConstraint(
-            "(findings IS NOT NULL) <> (storage_key IS NOT NULL)",
+            "(jsonb_typeof(findings) IS NOT NULL) <> (storage_key IS NOT NULL)",
             name="ck_protocol_scores_document_exactly_one",
         ),
     )
