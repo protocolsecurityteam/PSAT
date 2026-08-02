@@ -207,6 +207,14 @@ class CoverageWorker(BaseWorker):
                 verify_source_equivalence=False,
             )
         session.commit()
+        # Audit posture is a scored axis, so a coverage rebuild invalidates the
+        # protocol's grade. Marked after the commit above, so the mark never
+        # references rows that rolled back.
+        if contract.protocol_id is not None:
+            from services.scoring.dirty import SCORE_DIRTY_COVERAGE, mark_protocol_score_dirty
+
+            if mark_protocol_score_dirty(session, contract.protocol_id, SCORE_DIRTY_COVERAGE):
+                session.commit()
         record_stage_metric("coverage_rows", inserted)
         self.update_detail(session, job, f"Audit coverage refreshed: {inserted} row(s)")
         logger.info(
