@@ -42,10 +42,12 @@ def _score_or_skip(live_client: LiveClient) -> dict:
     """
     response = live_client.company_score(DEFAULT_TEST_COMPANY)
     if response.status_code == 404:
-        overview = live_client._session.get(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}"), timeout=30)
-        assert overview.status_code == 200, (
+        # ``/audits`` resolves the company the same way and answers in bytes
+        # rather than the overview's 1-3 MB.
+        probe = live_client._session.get(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}/audits"), timeout=30)
+        assert probe.status_code == 200, (
             f"'{DEFAULT_TEST_COMPANY}' does not exist on this deployment "
-            f"(overview {overview.status_code}) — the score 404 is not a 'no fold yet'"
+            f"(audits {probe.status_code}) — the score 404 is not a 'no fold yet'"
         )
         pytest.skip(f"no protocol score computed yet for '{DEFAULT_TEST_COMPANY}'")
     assert response.status_code == 200, f"score read failed: {response.status_code} {response.text[:300]}"

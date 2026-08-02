@@ -29,6 +29,10 @@ rather than merely careful about them.
 dirty rows sort first, so without ``attempts``/``last_failed_at`` a pass-budget
 of poison protocols would hold the loop forever and the staleness sweep — the
 only cover for the §4 invalidation events that carry no mark — would never run.
+The accepted cost is stated rather than hidden: a TRANSIENT fold failure delays
+a real invalidation by that protocol's current backoff, up to
+``DEFAULT_RETRY_BACKOFF_CAP_S`` — deliberately set to the staleness ceiling, so
+the worst case is no worse than a protocol nobody marked at all.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from sqlalchemy.orm import Session
 
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
+from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENESS_SWEEP
@@ -256,7 +261,9 @@ def _record_failure(session: Session, due: DueProtocol, *, warn_after: int) -> N
             pg_insert(ProtocolScoreQueue)
             .values(
                 protocol_id=due.protocol_id,
-                reason=due.reason or due.trigger,
+                # One vocabulary for the column: a row minted by a staleness
+                # failure names itself from the same register the mark sites use.
+                reason=due.reason or SCORE_DIRTY_STALENESS_SWEEP,
                 attempts=1,
                 last_failed_at=func.clock_timestamp(),
             )

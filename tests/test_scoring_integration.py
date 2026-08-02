@@ -1048,11 +1048,21 @@ def test_a_not_determined_grade_is_served_as_such_not_as_zero(fx, api_client):
 
 
 def test_score_endpoint_404s_when_no_score_exists(fx, api_client):
-    assert api_client.get(f"/api/company/{fx.protocol.name}/score").status_code == 404
+    """One of two 404s, and the detail is the only thing telling them apart.
+
+    Pinned because the live suite branches on it: a client that reads both the
+    same way reports a typo'd protocol as "not scored yet", and the live skip
+    would turn a missing test company into a green run.
+    """
+    response = api_client.get(f"/api/company/{fx.protocol.name}/score")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "No score has been computed for this protocol yet"
 
 
 def test_score_endpoint_404s_for_an_unknown_company(api_client):
-    assert api_client.get("/api/company/psat-no-such-protocol-xyz/score").status_code == 404
+    response = api_client.get("/api/company/psat-no-such-protocol-xyz/score")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Company not found"
 
 
 def test_score_endpoint_reassembles_a_spilled_document(fx, api_client, monkeypatch):
