@@ -306,7 +306,7 @@ def compute_protocol_score(
         "upgrade_history": P.load_upgrade_provenance(session, protocol_id),
         "unconsumed_reach_relations": P.unconsumed_reach_relations(session, protocol_id),
         "ledgers": P.load_ledgers(session, protocol_id),
-        "audit_posture": P.load_audit_posture(session, protocol_id),
+        "audit_posture": P.load_audit_posture(session, protocol_id, value_plane),
         "perimeter": perimeter_detail,
         "signal_scope": (
             "a signal is keyed on a CAPABILITY, so a function carrying no claim produces "
@@ -1120,9 +1120,15 @@ def _row_value(
             if contribution is None:
                 undetermined.append({"function": instance.signal.function_name, "entity": key, "why": why})
                 continue
-            previous = per_entity.get(key)
+            # An implementation and the proxy that deploys it are ONE priced
+            # entity: the plane already folded the balance onto the proxy, so a
+            # row reaching both keys would charge that one balance twice — once
+            # in this sum and again in the exposure budget, which is keyed on
+            # these same entities.
+            canonical = value_plane.canonical(key)
+            previous = per_entity.get(canonical)
             if previous is None or contribution > previous:
-                per_entity[key] = contribution
+                per_entity[canonical] = contribution
 
     reach = set(per_entity)
     if not per_entity:

@@ -11,6 +11,7 @@ only "I could not resolve the operand".
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from services.scoring.constants import (
 )
 from services.scoring.distill import distill_contract_signals, distill_job_signals
 from services.scoring.fold import compute_protocol_score
+from services.scoring.planes import load_audit_posture, load_value_plane
 from services.scoring.population import current_signals_for_protocol
 from services.scoring.schema import entity_key
 from utils.scoring_status import (
@@ -65,8 +67,14 @@ class _Corpus:
         self.job = job
         self.contracts: list[Contract] = []
 
-    def contract(self, address: str, *, chain: str | None = "ethereum") -> Contract:
-        row = Contract(address=address, chain=chain, protocol_id=self.protocol.id, job_id=self.job.id)
+    def contract(self, address: str, *, chain: str | None = "ethereum", implementation: str | None = None) -> Contract:
+        row = Contract(
+            address=address,
+            chain=chain,
+            protocol_id=self.protocol.id,
+            job_id=self.job.id,
+            implementation=implementation,
+        )
         self.session.add(row)
         self.session.commit()
         self.contracts.append(row)
@@ -875,3 +883,133 @@ def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
         db_session.query(Contract).filter_by(id=foreign.id).delete()
         db_session.query(Protocol).filter_by(id=other.id).delete()
         db_session.commit()
+
+
+# --------------------------------------------------------------------------
+# The value plane and the audit posture, as the document publishes them
+# --------------------------------------------------------------------------
+
+
+def _balance(session, contract: Contract, *, usd: str, token: str) -> None:
+    from db.models import ContractBalance
+
+    session.add(
+        ContractBalance(
+            contract_id=contract.id,
+            token_address=token,
+            decimals=18,
+            raw_balance="1",
+            usd_value=Decimal(usd),
+        )
+    )
+    session.commit()
+
+
+def _audit(session, protocol_id: int, auditor: str):
+    from db.models import AuditReport
+
+    report = AuditReport(
+        protocol_id=protocol_id,
+        url=f"https://example.invalid/{auditor}",
+        auditor=auditor,
+        title=f"{auditor} review",
+    )
+    session.add(report)
+    session.commit()
+    return report
+
+
+def _coverage(session, protocol_id: int, contract: Contract, report, *, status: str, commit: str | None = None) -> None:
+    from db.models import AuditContractCoverage
+
+    session.add(
+        AuditContractCoverage(
+            contract_id=contract.id,
+            audit_report_id=report.id,
+            protocol_id=protocol_id,
+            matched_name="Vault",
+            match_type="direct",
+            match_confidence="high",
+            equivalence_status=status,
+            matched_commit_sha=commit,
+        )
+    )
+    session.commit()
+
+
+def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus, db_session):
+    """The exposure denominator is emitted, not left to be back-solved."""
+    token = "0x" + "d1" * 20
+    proxy = corpus.contract("0x" + "c1" * 20, implementation="0x" + "c2" * 20)
+    impl = corpus.contract("0x" + "c2" * 20)
+    _balance(db_session, proxy, usd="1000.00", token=token)
+    _balance(db_session, impl, usd="400.00", token=token)
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    # One entity, one asset: MAX, never the 1400.00 the two rows would sum to.
+    assert plane.provenance["tracked_total_usd"] == 1000.0
+    assert plane.total(entity_key("ethereum", impl.address)) == 1000.0
+
+
+def test_an_unpriced_perimeter_publishes_no_tracked_total(corpus, db_session):
+    """Nothing priced is not_determined, never a proven zero."""
+    corpus.contract("0x" + "c3" * 20)
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    assert plane.provenance["tracked_total_usd"] is None
+
+
+def test_audit_posture_weighs_contracts_and_value_not_coverage_rows(corpus, db_session):
+    token = "0x" + "d2" * 20
+    proxy = corpus.contract("0x" + "c4" * 20, implementation="0x" + "c5" * 20)
+    impl = corpus.contract("0x" + "c5" * 20)
+    unaudited = corpus.contract("0x" + "c6" * 20)
+    _balance(db_session, proxy, usd="1000.00", token=token)
+    _balance(db_session, unaudited, usd="25.00", token=token)
+    _coverage(
+        db_session,
+        corpus.protocol.id,
+        impl,
+        _audit(db_session, corpus.protocol.id, "alpha"),
+        status="proven",
+        commit="0" * 40,
+    )
+    _coverage(
+        db_session, corpus.protocol.id, impl, _audit(db_session, corpus.protocol.id, "beta"), status="hash_mismatch"
+    )
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    posture = load_audit_posture(db_session, corpus.protocol.id, plane)
+    assert posture["reports_on_file"] == 2
+    assert posture["rows"] == 2
+    assert posture["contracts_total"] == 3
+    # Two audits of one contract are two rows and ONE covered contract.
+    assert posture["contracts_covered"] == 1
+    assert posture["contracts_proven"] == 1
+    # The proxy holds the balance and the audit reviewed the implementation, so
+    # the money behind that audit is the proxy's — counted once, and the
+    # unaudited contract's $25 is not in it.
+    assert posture["value_covered_usd"] == 1000.0
+    assert posture["value_proven_usd"] == 1000.0
+    assert posture["non_coverage_classified"] == {"deployed_source_provably_differs": 1}
+
+
+def test_audit_posture_value_is_null_when_no_covered_entity_is_priced(corpus, db_session):
+    audited = corpus.contract("0x" + "c7" * 20)
+    priced = corpus.contract("0x" + "c8" * 20)
+    _balance(db_session, priced, usd="500.00", token="0x" + "d3" * 20)
+    _coverage(
+        db_session,
+        corpus.protocol.id,
+        audited,
+        _audit(db_session, corpus.protocol.id, "gamma"),
+        status="proven",
+        commit="0" * 40,
+    )
+
+    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
+    assert posture["contracts_covered"] == 1
+    assert posture["contracts_proven"] == 1
+    # An unpriced audited contract contributes nothing and is never read as $0.
+    assert posture["value_covered_usd"] is None
+    assert posture["value_proven_usd"] is None

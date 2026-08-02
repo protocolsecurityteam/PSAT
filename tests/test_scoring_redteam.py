@@ -45,9 +45,13 @@ SAFE = "0x" + "2" * 40
 SAFE2 = "0x" + "5" * 40
 EOA = "0x" + "3" * 40
 TIMELOCK = "0x" + "7" * 40
+PROXY = "0x" + "6" * 40
+IMPL = "0x" + "9" * 40
 OWNERS = tuple("0x" + c * 40 for c in "cdef")
 KEY_C = entity_key("ethereum", C)
 KEY_V = entity_key("ethereum", VAULT)
+KEY_PROXY = entity_key("ethereum", PROXY)
+KEY_IMPL = entity_key("ethereum", IMPL)
 
 
 def sig(**over: Any) -> FunctionSignal:
@@ -138,11 +142,16 @@ def facts(
     )
 
 
-def value_plane(per_asset: dict[str, dict[str, float]] | None = None, contracts: tuple[str, ...] = ()) -> P.ValuePlane:
+def value_plane(
+    per_asset: dict[str, dict[str, float]] | None = None,
+    contracts: tuple[str, ...] = (),
+    alias: dict[str, str] | None = None,
+) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
     # The confidence perimeter's base population, as the DB would supply it.
     plane.contract_entities = set(contracts) | set(plane.per_asset)
+    plane.alias = alias or {}
     plane.provenance = {"stub": True}
     return plane
 
@@ -162,7 +171,7 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "load_upgrade_provenance", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "unconsumed_reach_relations", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_ledgers", lambda s, p: {"stub": True})
-        monkeypatch.setattr(P, "load_audit_posture", lambda s, p: {"stub": True})
+        monkeypatch.setattr(P, "load_audit_posture", lambda s, p, v: {"stub": True})
         # The planes are stubbed, so the fold never touches a session.
         return FOLD.compute_protocol_score(cast(Any, None), 1, signals=signals)
 
@@ -594,6 +603,38 @@ def test_v4_exposure_caps_on_the_entity_contribution_not_the_row_total(fold):
     assert finding["value_by_entity"] == {KEY_C: 100.0, KEY_V: 100.0}
     # Each entity contributes at most its own $100, never the row's $200.
     assert finding["exposure_usd"] <= 200.0
+
+
+def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
+    """Reaching both keys of one proxy pair charges one balance, not two.
+
+    The plane folds the implementation's balance onto its proxy, so both keys
+    answer with the same dollars; keying the row's contributions on the raw keys
+    published a value at stake and an exposure that were both exactly 2x real.
+    """
+    signal = sig(
+        deployment_address=PROXY,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_IMPL, KEY_PROXY),
+    )
+    document = fold(
+        [signal],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_PROXY: {"usdc": 100_000_000.0}}, alias={KEY_IMPL: KEY_PROXY}),
+    )
+    finding = document.findings[0]
+    assert finding["reach_entities"] == [KEY_PROXY]
+    assert finding["value_by_entity"] == {KEY_PROXY: 100_000_000.0}
+    assert finding["value_at_stake_usd"] == 100_000_000.0
+    assert finding["exposure_entities_charged"] == [KEY_PROXY]
+    fraction = finding["severity_proven"] * finding["weakness"]
+    assert finding["exposure_usd"] == round(fraction * 100_000_000.0, 2)
+    # The denominator holds that same single balance, so charging the pair twice
+    # spent more than the protocol tracks and drove the grade negative.
+    assert document.grade_exposure == round(100.0 * (1.0 - fraction), 3)
 
 
 # --------------------------------------------------------------------------
