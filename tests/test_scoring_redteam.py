@@ -971,3 +971,38 @@ def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidenc
     detail_after = after.model_parameters["confidence_detail"]
     assert detail_after["perimeter_entities"] == detail_before["perimeter_entities"]
     assert detail_after["perimeter_value_weighted_denominator"] == detail_before["perimeter_value_weighted_denominator"]
+
+
+def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):
+    """Single-asset pricing is licensed by a decidable token identity, not by a sheet."""
+    undecidable = flow_sig(
+        function_name="withdrawToken",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        gates={"asset_class": Tri.proven("proven", "erc20_only").to_json()},
+        **proven(0.9, ("caller_arbitrary_proven",)),
+        **reaches(KEY_C),
+    )
+    decidable = flow_sig(
+        function_name="withdrawToken",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        gates={
+            "asset_class": Tri.proven("proven", "erc20_only").to_json(),
+            "asset_identity": Tri.proven("resolved", {"asset_address": "0x" + "7" * 40}).to_json(),
+        },
+        **proven(0.9, ("caller_arbitrary_proven",)),
+        **reaches(KEY_C),
+    )
+    plane = value_plane({KEY_C: {"usdc": 50_000_000.0}})
+
+    blocked = fold([undecidable], value=plane).findings[0]
+    priced = fold([decidable], value=plane).findings[0]
+
+    assert blocked["value_at_stake_usd"] is None
+    assert blocked["undetermined_instances"][0]["why"].startswith("token_identity_not_decidable")
+    assert priced["value_at_stake_usd"] == 50_000_000.0
+    # And the gap is charged to confidence rather than being free.
+    assert fold([undecidable], value=plane).model_parameters["confidence_detail"]["value_priced_pct"] is not None
