@@ -344,7 +344,9 @@ def test_f8_propose_only_does_not_collapse_a_timelock(fold):
 
     # With both halves proven the collapse runs, and the delayed value is still
     # charged at the DISCOUNTED weakness rather than the Safe's direct one.
-    collapsed = [f for f in both.findings + both.provenance["subsumed_rows"] if f["capability"] == "upgrade.implementation"]
+    collapsed = [
+        f for f in both.findings + both.provenance["subsumed_rows"] if f["capability"] == "upgrade.implementation"
+    ]
     assert {f["principal_unit"] for f in collapsed} == {entity_key("ethereum", SAFE)}
     weaknesses = sorted(f["weakness"] for f in collapsed)
     assert len(weaknesses) == 2 and weaknesses[0] < weaknesses[1]
@@ -622,9 +624,7 @@ def test_probe_a_poisoned_payload_fails_closed_on_its_own_row(fold):
         authority_openness="open",
         principal_state="none_required",
         witness_tier="behavioral_observed",
-        gates={
-            "reach_magnitude_usd": Tri.proven("proven_exact", {"state": "not_determined", "value": None}).to_json()
-        },
+        gates={"reach_magnitude_usd": Tri.proven("proven_exact", {"state": "not_determined", "value": None}).to_json()},
         **proven(0.9, ("caller_arbitrary_proven",)),
         **reaches(KEY_C),
     )
