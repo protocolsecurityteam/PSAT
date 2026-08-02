@@ -619,6 +619,11 @@ class EffectsWorker(BaseWorker):
             for phase in _PHASES_AFTER_SELECTION:
                 with log_timed_phase(logger, phase, durations_ms=durations_ms):
                     pass
+            # A zero-candidate job still owns contracts whose claims the policy
+            # stage wrote. Skipping distillation here would leave every such
+            # contract absent from the fold's population — an omission the
+            # score would read as "this contract has no capabilities".
+            self._distill_score_signals(session, job)
             self._record_metrics(counters)
             logger.info(
                 "Effects stage complete for job %s: 0 candidates (no-op)",
@@ -648,6 +653,12 @@ class EffectsWorker(BaseWorker):
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
             ph["labeled"] = self._bridge_claims(session, items)
+
+        # Layer-1 distillation, after the bridge so it reads the
+        # ``behavioral_observed`` claims this job just merged. Deliberately
+        # outside the phase span: it writes no verdict and adds no stage to the
+        # /monitor timeline.
+        self._distill_score_signals(session, job)
 
         self._record_seed_metrics(counters)
         self._record_metrics(counters)
@@ -1081,6 +1092,94 @@ class EffectsWorker(BaseWorker):
             ef.claims, ef.effect_labels = merged
             labeled += 1
         return labeled
+
+    def _distill_score_signals(self, session: Session, job: Job) -> None:
+        """Distil this job's contracts into ``function_score_signals`` + mark the
+        protocol's score dirty.
+
+        **Fail-forward, and partial-free per contract.** The effects stage never
+        emits ``failed_terminal``, so a distillation raise must not be the thing
+        that kills a job whose verdicts are already written and correct — every
+        failure here is caught, logged with protocol/job context, and dropped.
+        What must NOT survive is a half-written contract: each contract is
+        replaced inside its own SAVEPOINT, and ``replace_contract_signals``
+        validates every signal before it deletes anything, so a contract either
+        replaces wholesale or not at all. Contracts that succeeded before a
+        failing one legitimately stand — each was a complete honest replace of a
+        different contract, and discarding them would lose recall to prove
+        nothing.
+
+        The whole pass runs in the job's transaction rather than committing:
+        the ``_bridge_claims`` writes above are uncommitted at this point, and a
+        DB error outside a savepoint would abort the transaction carrying them.
+        """
+        from services.scoring.dirty import SCORE_DIRTY_EFFECTS, mark_protocol_score_dirty
+        from services.scoring.distill import distill_job_signals
+        from services.scoring.population import replace_contract_signals
+
+        protocol_id = getattr(job, "protocol_id", None)
+        try:
+            with session.begin_nested():
+                grouped = distill_job_signals(session, job)
+        except Exception:
+            logger.warning(
+                "Effects: score-signal distillation failed for job %s (protocol %s)",
+                job.id,
+                protocol_id,
+                exc_info=True,
+                extra={"job_id": str(job.id), "protocol_id": protocol_id, "phase": "score_distillation"},
+            )
+            return
+
+        written = 0
+        failed: list[int] = []
+        for contract_id, signals in grouped.items():
+            try:
+                with session.begin_nested():
+                    replace_contract_signals(
+                        session,
+                        contract_id=contract_id,
+                        signals=signals,
+                        job_id=job.id,
+                    )
+                written += 1
+            except Exception:
+                failed.append(contract_id)
+                logger.warning(
+                    "Effects: score-signal persist failed for contract %s on job %s (protocol %s)",
+                    contract_id,
+                    job.id,
+                    protocol_id,
+                    exc_info=True,
+                    extra={
+                        "job_id": str(job.id),
+                        "protocol_id": protocol_id,
+                        "contract_id": contract_id,
+                        "phase": "score_distillation",
+                    },
+                )
+
+        if not grouped:
+            return
+        # Mark on any successful replace: the protocol's signal set changed, and
+        # the fold must see it. A pass where every contract failed changed
+        # nothing, so it does not enqueue a fold that would read the same rows.
+        if written and protocol_id is not None:
+            mark_protocol_score_dirty(session, protocol_id, SCORE_DIRTY_EFFECTS)
+        logger.info(
+            "Effects: distilled score signals for job %s: %d contract(s) replaced, %d failed",
+            job.id,
+            written,
+            len(failed),
+            extra={
+                "job_id": str(job.id),
+                "protocol_id": protocol_id,
+                "contracts_replaced": written,
+                "contracts_failed": len(failed),
+                "failed_contract_ids": failed,
+                "signal_rows": sum(len(v) for v in grouped.values()),
+            },
+        )
 
     def _resolve_item(
         self, session: Session, it: _Item, counters: _Counters
