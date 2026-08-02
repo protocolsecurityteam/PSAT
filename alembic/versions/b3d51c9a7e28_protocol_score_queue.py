@@ -8,9 +8,10 @@ this one pins how the fold learns it has work.
 
 One row per protocol, keyed on the protocol so N marks between two passes cost
 one fold. ``dirty_at`` is both the sweep's ordering cursor and the loop's
-clearing predicate: the loop deletes only rows at or before the instant it read
-the population, so a mark that arrives mid-fold is not cleared by a fold that
-never saw it.
+clearing token: the row is deleted only while ``dirty_at`` still equals the
+value the loop selected, so a mark that arrives mid-fold (which bumps it)
+survives. ``attempts`` / ``last_failed_at`` back off a protocol whose fold keeps
+failing, so poison rows cannot hold the pass budget against the staleness sweep.
 
 Revision ID: b3d51c9a7e28
 Revises: a7e2f04c9b31
@@ -37,6 +38,8 @@ def upgrade() -> None:
         sa.Column("protocol_id", sa.Integer(), nullable=False),
         sa.Column("dirty_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("reason", sa.String(length=64), nullable=True),
+        sa.Column("attempts", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("last_failed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["protocol_id"], ["protocols.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("protocol_id"),
     )

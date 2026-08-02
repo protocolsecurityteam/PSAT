@@ -3115,10 +3115,20 @@ class ProtocolScoreQueue(Base):
     protocol write two history rows and the newest wins, which is a duplicate
     row rather than a corruption.
 
-    ``dirty_at`` is the ordering cursor AND the clearing predicate: the loop
-    deletes only rows whose ``dirty_at`` predates the instant it read the
-    population, so a mark that lands mid-fold survives and re-fires next pass
-    instead of being cleared by a fold that never saw it.
+    ``dirty_at`` is the ordering cursor AND the clearing token: the loop deletes
+    the row only when ``dirty_at`` still EQUALS the value it selected, so a mark
+    that arrives mid-fold — which bumps ``dirty_at`` — survives instead of being
+    cleared by a fold that never saw the change it describes. Equality rather
+    than a ``<=`` against a read instant because ``now()`` is
+    ``transaction_timestamp()``: the effects stage runs as one long transaction,
+    so its mark is stamped minutes before its data is visible and any
+    instant-based comparison would clear a mark for data the fold never read.
+
+    ``attempts`` / ``last_failed_at`` are the poison guard. Marks are retained
+    on failure (an unscored protocol must re-select), and dirty rows sort first,
+    so without a backoff a handful of permanently-failing protocols would
+    consume every pass forever and the staleness sweep — the only cover for the
+    invalidation events that carry no mark — would never run again.
     """
 
     __tablename__ = "protocol_score_queue"
@@ -3126,6 +3136,8 @@ class ProtocolScoreQueue(Base):
     protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), primary_key=True)
     dirty_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
