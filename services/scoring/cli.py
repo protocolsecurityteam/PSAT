@@ -53,41 +53,35 @@ def document_json(document: ScoreDocument) -> dict[str, Any]:
 # ---------------------------------------------------------------- differential
 
 
-def _index(rows: list[dict[str, Any]], key: str) -> dict[tuple[str, str], dict[str, Any]]:
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        unit = str(row.get(key) or "").lower()
-        # The prototype's units are bare addresses; ours are chain-scoped. Diff
-        # on the address so a chain-scoping change does not read as a protocol
-        # that lost every finding.
-        address = unit.split("::", 1)[-1]
-        out[(address, str(row.get("capability")))] = row
-    return out
+def _keys_for(row: dict[str, Any], unit_field: str) -> set[str]:
+    """Every address that could identify this row's unit, lowercased.
 
-
-def _principal_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
-    """Secondary index on the GATING principal, not the unit it was folded into.
-
-    A merged Safe unit is named by an arbitrary member, so two scorers can fold
-    the same set of Safes into the same unit and still label it differently. Diffing
-    on the unit alone would report every such row as one disappearance plus one
-    appearance, hiding whichever rows really did change.
+    A merged Safe unit is named by an arbitrary member, and this scorer and the
+    prototype pick different ones, so matching on the published unit id alone
+    reports one disappearance plus one appearance for a row that never moved.
+    The member set and the gating principal are the identifiers that survive a
+    re-key.
     """
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        principal = str(row.get("principal") or "")
-        address = principal.split("0x")[-1]
-        if address:
-            out[("0x" + address.lower(), str(row.get("capability")))] = row
-    return out
+    keys: set[str] = set()
+    unit = str(row.get(unit_field) or "").lower()
+    if unit:
+        keys.add(unit.split("::", 1)[-1])
+    for member in row.get("unit_members") or []:
+        keys.add(str(member).lower().split("::", 1)[-1])
+    for address in row.get("principal_addresses") or []:
+        keys.add(str(address).lower())
+    principal = str(row.get("principal") or "")
+    if "0x" in principal:
+        keys.add("0x" + principal.split("0x")[-1].lower())
+    return {k for k in keys if k}
 
 
 def _causes(previous: dict[str, Any], row: dict[str, Any]) -> list[str]:
-    """What moved between two rows for the same (principal, capability).
+    """What moved between two rows for the same (unit, capability).
 
     Analysed for EVERY matched pair, including rows matched only after a unit
-    re-key: a re-key that also changed the arithmetic would otherwise be filed as
-    a cosmetic relabel and its delta would never be explained.
+    re-key or an access-path split: a re-key that also changed the arithmetic
+    would otherwise be filed as a cosmetic relabel and its delta never explained.
     """
     causes: list[str] = []
     if abs((row.get("raw_points") or 0) - (previous.get("raw_points") or 0)) > 1e-9:
@@ -117,73 +111,81 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
     """
     new_rows = list(document.findings) + list(document.provenance.get("subsumed_rows", []))
     old_rows = list(oracle.get("findings", [])) + list(oracle.get("subsumed_rows", []))
-    new_index = _index(new_rows, "principal_unit")
-    old_index = _index(old_rows, "principal_unit")
-    new_by_principal = _principal_index(new_rows)
-    old_by_principal = _principal_index(old_rows)
 
-    added, changed, removed, rekeyed = [], [], [], []
-    for key in sorted(new_index):
-        row = new_index[key]
-        if key not in old_index:
-            principal_key = next((k for k, v in sorted(new_by_principal.items()) if v is row), None)
-            counterpart = old_by_principal.get(principal_key) if principal_key else None
-            if counterpart is not None:
-                causes = _causes(counterpart, row)
-                rekeyed.append(
-                    {
-                        "principal": row.get("principal"),
-                        "capability": row.get("capability"),
-                        "unit_before": counterpart.get("principal_unit"),
-                        "unit_after": row.get("principal_unit"),
-                        "raw_before": counterpart.get("raw_points"),
-                        "raw_after": row.get("raw_points"),
-                        "cause": "unit id relabelled (lowest member key, not the union-find root)",
-                        "caused_by": causes,
-                        "arithmetic_changed": bool(causes),
-                    }
-                )
-                continue
-            added.append(
+    new_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in new_rows:
+        for key in _keys_for(row, "principal_unit"):
+            new_by_key.setdefault((key, str(row.get("capability"))), []).append(row)
+
+    matched_new: set[int] = set()
+    changed, removed, split = [], [], []
+    for previous in old_rows:
+        capability = str(previous.get("capability"))
+        candidates: list[dict[str, Any]] = []
+        for key in _keys_for(previous, "principal_unit"):
+            for row in new_by_key.get((key, capability), []):
+                if id(row) not in {id(c) for c in candidates}:
+                    candidates.append(row)
+        if not candidates:
+            removed.append(
                 {
-                    "principal": row.get("principal"),
-                    "capability": row.get("capability"),
-                    "raw_points": row.get("raw_points"),
-                    "severity_basis": row.get("severity_basis"),
-                    "value_basis": row.get("value_at_stake_basis"),
-                    "witness_notes": row.get("witness_notes"),
+                    "principal": previous.get("principal"),
+                    "capability": capability,
+                    "raw_before": previous.get("raw_points"),
+                    "severity_basis": previous.get("severity_basis"),
+                    "value_band": previous.get("value_band"),
                 }
             )
             continue
-        previous = old_index[key]
-        causes = _causes(previous, row)
-        if causes:
+        for row in candidates:
+            matched_new.add(id(row))
+        top = max(candidates, key=lambda r: r.get("raw_points") or 0.0)
+        causes = _causes(previous, top)
+        if len(candidates) > 1:
+            split.append(
+                {
+                    "principal": previous.get("principal"),
+                    "capability": capability,
+                    "raw_before": previous.get("raw_points"),
+                    "rows_after": [
+                        {
+                            "access_path": r.get("access_path"),
+                            "principal": r.get("principal"),
+                            "weakness": r.get("weakness"),
+                            "raw_points": r.get("raw_points"),
+                            "value_band": r.get("value_band"),
+                        }
+                        for r in sorted(candidates, key=lambda r: -(r.get("raw_points") or 0.0))
+                    ],
+                    "cause": "one row per ACCESS PATH: delayed value is charged at the delayed rung",
+                }
+            )
+        elif causes:
             changed.append(
                 {
-                    "principal": row.get("principal"),
-                    "capability": row.get("capability"),
+                    "principal": top.get("principal"),
+                    "capability": capability,
                     "raw_before": previous.get("raw_points"),
-                    "raw_after": row.get("raw_points"),
+                    "raw_after": top.get("raw_points"),
                     "caused_by": causes,
-                    "witness_notes": row.get("witness_notes"),
+                    "witness_notes": top.get("witness_notes"),
                 }
             )
-    rekeyed_units = {(r["capability"], str(r["unit_before"]).split("::", 1)[-1].lower()) for r in rekeyed}
-    for key in sorted(old_index):
-        if key in new_index:
-            continue
-        previous = old_index[key]
-        if (str(previous.get("capability")), key[0]) in rekeyed_units:
-            continue
-        removed.append(
-            {
-                "principal": previous.get("principal"),
-                "capability": previous.get("capability"),
-                "raw_before": previous.get("raw_points"),
-                "severity_basis": previous.get("severity_basis"),
-                "value_band": previous.get("value_band"),
-            }
-        )
+
+    added = [
+        {
+            "principal": row.get("principal"),
+            "capability": row.get("capability"),
+            "access_path": row.get("access_path"),
+            "raw_points": row.get("raw_points"),
+            "severity_basis": row.get("severity_basis"),
+            "value_basis": row.get("value_at_stake_basis"),
+            "witness_notes": row.get("witness_notes"),
+        }
+        for row in new_rows
+        if id(row) not in matched_new
+    ]
+
     return {
         "grade_lambda": {"oracle": oracle.get("grade_lambda"), "scorer": document.grade_lambda},
         "grade_exposure": {"oracle": oracle.get("grade_exposure"), "scorer": document.grade_exposure},
@@ -198,13 +200,12 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             "added": len(added),
             "changed": len(changed),
             "removed": len(removed),
-            "rekeyed": len(rekeyed),
-            "rekeyed_with_arithmetic_change": sum(1 for r in rekeyed if r["arithmetic_changed"]),
+            "split_by_access_path": len(split),
         },
         "added": added,
         "changed": changed,
         "removed": removed,
-        "rekeyed": rekeyed,
+        "split_by_access_path": split,
     }
 
 

@@ -121,9 +121,11 @@ class _Instance:
 class _Row:
     unit: str
     capability: str
-    weakness: float
-    weakest_label: str
-    principal_kind: str
+    path: str
+    weakness: float = 0.0
+    weakest_label: str = ""
+    principal_kind: str = ""
+    weakest_address: str = ""
     principal_addresses: set[str] = field(default_factory=set)
     instances: list[_Instance] = field(default_factory=list)
     seeds: set[str] = field(default_factory=set)
@@ -164,7 +166,7 @@ def compute_protocol_score(
     seen_negatives: set[tuple[str, str]] = set()
 
     units = _UnitResolver(signals, principal_facts, role_floors)
-    rows_by_key: dict[tuple[str, str, float], _Row] = {}
+    rows_by_key: dict[tuple[str, str, str], _Row] = {}
 
     for signal in signals:
         malformed = _malformed_gates(signal)
@@ -183,8 +185,7 @@ def compute_protocol_score(
             severity, severity_basis, extra_notes = _fold_severity(signal, None, principal_facts, warnings)
             instance = _instance(signal, severity, severity_basis)
             unit = entity_key(signal.chain, ANYONE)
-            row = _row_for(rows_by_key, unit, signal.claim_id, K.WEAKNESS_ANYONE, "ANYONE", ANYONE)
-            row.principal_addresses.add(ANYONE)
+            row = _row_for(rows_by_key, unit, signal.claim_id, "direct", K.WEAKNESS_ANYONE, "ANYONE", ANYONE, ANYONE)
             _attach(row, signal, instance, extra_notes)
             continue
 
@@ -219,13 +220,17 @@ def compute_protocol_score(
                     )
                 )
                 continue
-            # Keyed on the weakness as well as the unit: a timelock collapsed into
-            # its proposer Safe reaches its value through a DELAY the Safe's direct
-            # path does not pay, and a single max-weakness row would charge the
-            # delayed value at the undelayed weakness.
             unit = units.unit_for(facts)
-            row = _row_for(rows_by_key, unit, signal.claim_id, weakness, label, kind)
-            row.principal_addresses.add(facts.address)
+            row = _row_for(
+                rows_by_key,
+                unit,
+                signal.claim_id,
+                units.path_for(facts),
+                weakness,
+                label,
+                kind,
+                facts.address,
+            )
             _attach(row, signal, instance, extra_notes | set(notes))
 
     findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, units)
@@ -318,18 +323,35 @@ def compute_protocol_score(
 
 
 def _row_for(
-    rows: dict[tuple[str, str, float], _Row],
+    rows: dict[tuple[str, str, str], _Row],
     unit: str,
     capability: str,
+    path: str,
     weakness: float,
     label: str,
     kind: str,
+    address: str,
 ) -> _Row:
-    key = (unit, capability, round(weakness, 6))
+    """The row for one (unit, capability, ACCESS PATH), at its weakest gate.
+
+    The path is part of the key because a unit can hold the same capability
+    through paths that cost different things: a Safe that also proposes-and-
+    executes on a timelock reaches the timelock's contracts only by paying the
+    delay, and one max-weakness row would charge that delayed value at the
+    Safe's undelayed rung. Within one path the weakest gate still wins (inv.5),
+    which is what keeps two merged Safes one power rather than two.
+    """
+    key = (unit, capability, path)
     row = rows.get(key)
     if row is None:
-        row = _Row(unit=unit, capability=capability, weakness=weakness, weakest_label=label, principal_kind=kind)
+        row = _Row(unit=unit, capability=capability, path=path)
         rows[key] = row
+    if weakness > row.weakness or not row.weakest_label:
+        row.weakness = weakness
+        row.weakest_label = label
+        row.principal_kind = kind
+        row.weakest_address = address
+    row.principal_addresses.add(address)
     return row
 
 
@@ -565,6 +587,12 @@ class _UnitResolver:
 
     def proposer_for(self, facts: P.PrincipalFacts) -> dict[str, Any] | None:
         return self._proposers.get(facts.key)
+
+    def path_for(self, facts: P.PrincipalFacts) -> str:
+        """How this principal reaches the unit's capability: directly, or via a delay."""
+        if facts.resolved_type == "timelock" and facts.key in self._proposers:
+            return f"via_timelock:{facts.key}"
+        return "direct"
 
     def weakness_for(
         self, facts: P.PrincipalFacts, *, recovery_proven_independent: bool = False
@@ -830,7 +858,7 @@ def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[s
 
 
 def _aggregate(
-    rows_by_key: dict[tuple[str, str, float], _Row],
+    rows_by_key: dict[tuple[str, str, str], _Row],
     value_plane: P.ValuePlane,
     closure: dict[str, set[str]],
     units: _UnitResolver,
@@ -864,7 +892,10 @@ def _aggregate(
             {
                 "principal_unit": row.unit,
                 "unit_members": sorted(units.published_units()["members"].get(row.unit, [row.unit])),
-                "principal": f"{row.weakest_label} {min(row.principal_addresses)}",
+                # The published principal IS the one that set the weakness, not
+                # whichever row was folded last.
+                "principal": f"{row.weakest_label} {row.weakest_address}",
+                "access_path": row.path,
                 "principal_addresses": sorted(row.principal_addresses),
                 "principal_kind": row.principal_kind,
                 "capability": row.capability,
@@ -902,12 +933,15 @@ def _aggregate(
     findings: list[dict[str, Any]] = []
     subsumed: list[dict[str, Any]] = []
     for unit in sorted(by_unit):
-        ordered = sorted(by_unit[unit], key=lambda r: (-r["raw_points"], r["capability"], r["weakness"]))
+        ordered = sorted(
+            by_unit[unit], key=lambda r: (-r["raw_points"], r["capability"], r["access_path"], r["weakness"])
+        )
         top = dict(ordered[0])
         rest = ordered[1:]
         top["subsumed_capabilities"] = [
             {
                 "capability": r["capability"],
+                "access_path": r["access_path"],
                 "weakness": r["weakness"],
                 "raw_points": r["raw_points"],
                 "n_entities": r["n_entities"],
