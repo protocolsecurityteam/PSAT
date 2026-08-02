@@ -933,3 +933,41 @@ def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
     assert not set(DESTINATION_BEARING_CLAIMS) & set(DESTINATION_FREE_CLAIMS)
     for claim in ("value_router", "callee_pointer.rotate", "upgrade.implementation"):
         assert claim not in DESTINATION_FREE_CLAIMS
+
+
+def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidence(fold):
+    """The denominator is the value plane plus the closure — never the population.
+
+    Injecting a signal that answers nothing, on an entity the value and control
+    planes never mention, must leave the published confidence exactly where it
+    was: a perimeter that grew with the analysis would let the figure be moved by
+    the act of looking.
+    """
+    answered = sig(
+        function_name="upgradeTo",
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    injected = sig(
+        claim_id="roles.grant",
+        function_name="grantRole",
+        deployment_address="0x" + "9" * 40,
+        contract_id=99,
+        selector="0x99999999",
+        **proven(0.55),
+        **reaches(entity_key("ethereum", "0x" + "9" * 40)),
+    )
+    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=3)}
+    plane = value_plane({KEY_C: {"usdc": 1_000_000_000.0}})
+
+    before = fold([answered], principals=principals, value=plane)
+    after = fold([answered, injected], principals=principals, value=plane)
+    assert after.confidence_pct == before.confidence_pct
+    detail_before = before.model_parameters["confidence_detail"]
+    detail_after = after.model_parameters["confidence_detail"]
+    assert detail_after["perimeter_entities"] == detail_before["perimeter_entities"]
+    assert detail_after["perimeter_value_weighted_denominator"] == detail_before["perimeter_value_weighted_denominator"]
