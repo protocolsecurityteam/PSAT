@@ -37,10 +37,24 @@ def _replaced_contract_ids(session: Session) -> set[int]:
     return session.info.setdefault(_REPLACED_KEY, set())
 
 
-@event.listens_for(Session, "after_commit")
-@event.listens_for(Session, "after_rollback")
-def _clear_replaced_contract_ids(session: Session) -> None:
-    session.info.pop(_REPLACED_KEY, None)
+@event.listens_for(Session, "after_transaction_end")
+def _clear_replaced_contract_ids(session: Session, transaction: object) -> None:
+    """Disarm the guard when the OUTERMOST transaction ends, and only then.
+
+    Not ``after_commit``/``after_rollback``: SQLAlchemy fires those on SAVEPOINT
+    release and savepoint rollback too, so a writer that wraps each contract in
+    its own savepoint — which the end-of-effects distiller does, precisely so
+    one contract's failure cannot discard another's — would clear the set after
+    every contract and the guard would never fire. The invariant it protects is
+    per-PASS, so it has to outlive the savepoints a pass is made of.
+
+    ``parent is None`` is the test, and ``not nested`` is NOT enough: a plain
+    ``Session.flush()`` opens an internal ``SUBTRANSACTION`` whose end also
+    reports ``nested = False``, and this function's own writer flushes. Only the
+    session-level transaction has no parent.
+    """
+    if getattr(transaction, "parent", None) is None:
+        session.info.pop(_REPLACED_KEY, None)
 
 
 def current_signal_rows(session: Session, protocol_id: int) -> list[FunctionScoreSignal]:
