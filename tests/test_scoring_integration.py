@@ -12,7 +12,10 @@ everything between it and the run:
     be written never fails its host;
   * the loop folds dirty protocols before stale ones, stamps the perimeter it
     was handed rather than a polarity of its own, accumulates history instead of
-    overwriting it, and clears only the marks its read instant covered;
+    overwriting it, clears only the exact mark it consumed, and backs off a
+    protocol whose fold keeps raising;
+  * the double-replace guard stays armed across the savepoints the hook is made
+    of, which is the only shape it ever actually sees;
   * the endpoint serves the ledger payload verbatim, distinguishes "no score"
     from "unreadable document", and reassembles a spilled one.
 """
@@ -26,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -42,6 +46,7 @@ from db.models import (
     ProtocolScoreQueue,
 )
 from services.scoring import loop as score_loop
+from services.scoring import persist as score_persist
 from services.scoring.dirty import (
     SCORE_DIRTY_COVERAGE,
     SCORE_DIRTY_COVERAGE_VERIFY,
@@ -57,7 +62,9 @@ from services.scoring.persist import (
     load_score_document,
     persist_score_document,
 )
-from services.scoring.schema import ScoreDocument
+from services.scoring.population import replace_contract_signals
+from services.scoring.schema import FunctionSignal, ScoreDocument, not_determined_signal_defaults
+from tests.conftest import DATABASE_URL
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
@@ -163,6 +170,25 @@ def fx(db_session):
         db_session.query(Job).filter(Job.protocol_id == protocol_id).delete()
         db_session.query(Protocol).filter_by(id=protocol_id).delete()
         db_session.commit()
+
+
+@pytest.fixture()
+def other_session():
+    """A SECOND connection, for the interleavings a single session cannot express.
+
+    The mark's ``dirty_at`` is ``transaction_timestamp()`` and the defect it
+    guards against is a mark stamped in one transaction becoming visible only
+    after another transaction has already read the population. One session
+    cannot hold two transactions, so the test needs a real second one.
+    """
+    engine = create_engine(DATABASE_URL)
+    session = Session(engine, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+        engine.dispose()
 
 
 def _document(protocol_id: int, **overrides: Any) -> ScoreDocument:
@@ -317,6 +343,107 @@ def test_partial_persist_keeps_the_contracts_that_succeeded(fx, monkeypatch, cap
     assert any(str(second.id) in r.getMessage() for r in caplog.records), "the failing contract must be named"
 
 
+def test_retracting_every_signal_for_a_contract_is_logged(fx, monkeypatch, caplog):
+    """A wholesale replace by an EMPTY set is fail-open by construction.
+
+    It is correct when the functions genuinely went away and wrong when anything
+    upstream merely failed to produce them, and the row count cannot tell the
+    two apart — so the retraction is named rather than left silent.
+    """
+    contract = fx.contract()
+    fx.function(contract)
+    worker = _effects_worker(monkeypatch)
+    worker._process(fx.session, fx.job)
+    fx.session.commit()
+    assert fx.signals()
+
+    import services.scoring.distill as distill_module
+
+    monkeypatch.setattr(distill_module, "distill_job_signals", lambda session, job: {contract.id: []})
+
+    with caplog.at_level(logging.WARNING, logger="workers.effects_worker"):
+        worker._process(fx.session, fx.job)
+    fx.session.commit()
+
+    assert fx.signals() == []
+    assert any("retracted all" in r.getMessage() and str(contract.id) in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# The double-replace guard, under the savepoint shape the hook actually uses
+# --------------------------------------------------------------------------
+
+
+def _signal_for(fx, contract: Contract, selector: str) -> FunctionSignal:
+    return FunctionSignal(
+        job_id=fx.job.id,
+        protocol_id=fx.protocol.id,
+        contract_id=contract.id,
+        chain="ethereum",
+        deployment_address=contract.address,
+        selector=selector,
+        function_name="pause",
+        claim_id="pause.set",
+        **not_determined_signal_defaults(),
+    )
+
+
+def _replace_in_savepoint(fx, contract: Contract, selector: str = "0x00000001") -> None:
+    """Exactly the effects hook's shape: one savepoint per contract, no commit.
+
+    Carries a real signal so the replace actually INSERTS. That matters: an
+    empty replace never flushes pending objects, and it is the flush that opens
+    the internal SUBTRANSACTION whose end is the second way this guard can be
+    disarmed.
+    """
+    with fx.session.begin_nested():
+        replace_contract_signals(
+            fx.session, contract_id=contract.id, signals=[_signal_for(fx, contract, selector)], job_id=fx.job.id
+        )
+
+
+def test_the_double_replace_guard_survives_savepoints(fx):
+    """The guard's invariant is per-PASS, so it must outlive the pass's savepoints.
+
+    ``after_commit``/``after_rollback`` also fire on SAVEPOINT release, and a
+    plain ``flush`` ends an internal SUBTRANSACTION that reports itself as
+    un-nested — either one disarms the guard after every contract, and a caller
+    that regrouped its signals finer than ``contract_id`` would then silently
+    truncate the contract instead of raising.
+    """
+    contract = fx.contract()
+    _replace_in_savepoint(fx, contract)
+
+    with pytest.raises(ValueError, match="already replaced"):
+        _replace_in_savepoint(fx, contract, "0x00000002")
+
+
+def test_a_failed_contract_does_not_disarm_the_guard(fx):
+    """The savepoint rollback path — the other half of the same wiring."""
+    contract = fx.contract()
+    sibling = fx.contract()
+    _replace_in_savepoint(fx, contract)
+
+    with pytest.raises(RuntimeError):
+        with fx.session.begin_nested():
+            replace_contract_signals(
+                fx.session, contract_id=sibling.id, signals=[_signal_for(fx, sibling, "0x00000003")], job_id=fx.job.id
+            )
+            raise RuntimeError("this contract failed")
+
+    with pytest.raises(ValueError, match="already replaced"):
+        _replace_in_savepoint(fx, contract, "0x00000002")
+
+
+def test_committing_the_pass_disarms_the_guard(fx):
+    """Per-pass, not forever: the next job's distillation must be able to replace."""
+    contract = fx.contract()
+    _replace_in_savepoint(fx, contract)
+    fx.session.commit()
+
+    _replace_in_savepoint(fx, contract, "0x00000002")  # a new pass; no raise
+
+
 # --------------------------------------------------------------------------
 # The dirty mark
 # --------------------------------------------------------------------------
@@ -462,17 +589,45 @@ def test_dirty_protocol_is_scored_and_its_mark_cleared(fx):
     assert fx.queued_row() is None, "a mark the fold accounted for must be cleared"
 
 
-def test_a_mark_arriving_mid_fold_survives_the_clear(fx):
-    """The clear is time-scoped, so an invalidation the fold never saw re-fires."""
-    read_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+def test_a_mark_committed_after_selection_is_not_cleared(fx, other_session):
+    """The real interleaving, not a hand-fed instant.
+
+    Reproduces the shape the effects stage actually has: ONE long transaction
+    whose mark carries ``transaction_timestamp()`` — a stamp from BEFORE the
+    loop ran — but whose data only becomes visible when it commits, after the
+    loop already selected. A clear keyed on any instant the loop captured would
+    delete this mark, and the change it describes would never be folded.
+    """
+    mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
+    other_session.flush()  # stamped, still invisible to the loop
+
+    due = [d for d in select_due_protocols(fx.session, limit=500) if d.protocol_id == fx.protocol.id]
+    assert due and due[0].trigger == SCORE_TRIGGER_STALENESS_SWEEP, "the uncommitted mark must be invisible"
+
+    other_session.commit()  # the marker's data lands mid-fold
+
+    score_protocol(fx.session, due[0])
+
+    assert fx.queued_row() is not None, "a mark this fold could not have seen must survive"
+
+
+def test_a_mark_that_lands_during_the_fold_survives(fx, other_session):
+    """Selected mark cleared by token equality; a newer mark has a newer token."""
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
+    due = [d for d in select_due_protocols(fx.session, limit=500) if d.protocol_id == fx.protocol.id][0]
+    assert due.dirty_at is not None
 
-    cleared = score_loop._clear_marks(fx.session, fx.protocol.id, read_at)
-    fx.session.commit()
+    mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_COVERAGE)
+    other_session.commit()
+    fx.session.expire_all()
+    bumped = fx.queued_row().dirty_at
+    assert bumped != due.dirty_at, "two transactions must not share a transaction_timestamp; otherwise a flake"
 
-    assert cleared == 0
-    assert fx.queued_row() is not None
+    score_protocol(fx.session, due)
+
+    survivor = fx.queued_row()
+    assert survivor is not None and survivor.reason == SCORE_DIRTY_COVERAGE
 
 
 def test_scores_accumulate_rather_than_overwrite(fx):
@@ -544,6 +699,87 @@ def test_pass_survives_one_protocol_failing(fx, monkeypatch, caplog):
     assert counters.failures >= 1
     assert beats and beats[0][1]["partial"] is True
     assert fx.queued_row() is not None, "an unscored protocol keeps its mark"
+
+
+def _poison(monkeypatch):
+    monkeypatch.setattr(
+        score_loop,
+        "compute_protocol_score",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("fold exploded")),
+    )
+    monkeypatch.setattr(score_loop, "emit_monitor_cycle", lambda process, **kw: None)
+
+
+def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
+    """Marks survive a failure and dirty rows sort first, so poison must back off.
+
+    Without this a pass-budget of permanently-failing protocols holds the loop
+    forever, and the staleness sweep — the only cover for the invalidation
+    events that carry no mark — never runs again.
+    """
+    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
+    fx.session.commit()
+    _poison(monkeypatch)
+
+    score_loop.score_due_protocols(fx.session, limit=200)
+
+    fx.session.expire_all()
+    row = fx.queued_row()
+    assert row is not None and row.attempts == 1 and row.last_failed_at is not None
+
+    inside = select_due_protocols(fx.session, limit=500, backoff_base_s=3600)
+    assert fx.protocol.id not in [d.protocol_id for d in inside], "a backed-off protocol takes no slot at all"
+
+    elapsed = select_due_protocols(fx.session, limit=500, backoff_base_s=0)
+    assert fx.protocol.id in [d.protocol_id for d in elapsed], "the backoff must expire, never retire the protocol"
+
+
+def test_a_staleness_failure_arms_the_backoff_too(fx, monkeypatch):
+    """A protocol with no queue row would otherwise re-enter through that door.
+
+    A failed fold leaves no score row, so the protocol is permanently stale; if
+    only the dirty arm honoured the backoff it would be re-selected every pass
+    forever through the sweep.
+    """
+    _poison(monkeypatch)
+    assert fx.queued_row() is None
+
+    score_loop.score_due_protocols(fx.session, limit=500)
+
+    fx.session.expire_all()
+    row = fx.queued_row()
+    assert row is not None and row.attempts == 1, "the failure needs somewhere to be remembered"
+    assert fx.protocol.id not in [d.protocol_id for d in select_due_protocols(fx.session, limit=500)]
+
+
+def test_repeated_failures_compound_the_backoff_and_are_called_out(fx, monkeypatch, caplog):
+    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
+    fx.session.commit()
+    _poison(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="services.scoring.loop"):
+        for _ in range(3):
+            score_loop.score_due_protocols(fx.session, limit=500, warn_after=3, backoff_base_s=0)
+
+    fx.session.expire_all()
+    assert fx.queued_row().attempts == 3
+    assert any("failed 3 consecutive times" in r.getMessage() for r in caplog.records)
+
+
+def test_a_successful_fold_clears_a_surviving_mark_backoff(fx, monkeypatch):
+    """A mark that outlives a SUCCESSFUL fold must not inherit old failures."""
+    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
+    fx.session.commit()
+    _poison(monkeypatch)
+    score_loop.score_due_protocols(fx.session, limit=500)
+    monkeypatch.undo()
+
+    # A stale-arm fold succeeds while the failed mark is still standing.
+    score_protocol(fx.session, DueProtocol(fx.protocol.id, SCORE_TRIGGER_DIRTY_LOOP, dirty_at=None))
+
+    fx.session.expire_all()
+    row = fx.queued_row()
+    assert row is not None and row.attempts == 0 and row.last_failed_at is None
 
 
 def test_pass_emits_exactly_one_heartbeat(fx, monkeypatch):
@@ -680,6 +916,51 @@ def test_a_large_document_stays_inline_when_storage_is_unconfigured(fx, monkeypa
 
     assert row.storage_key is None
     assert row.findings is not None
+
+
+def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
+    """One document, one encoding, whichever side of the threshold it lands on.
+
+    Two encoders would make the same document two different documents — the
+    spilled path's ``default=str`` silently stringifies what the inline path's
+    JSONB serializer rejects, so the same fold would publish different values
+    depending only on its size.
+    """
+    storage = _FakeStorage()
+    monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
+
+    document = _document(fx.protocol.id, findings=[{"capability": "pause.set", "n": 1, "f": 0.5}])
+    inline_row = persist_score_document(fx.session, document)
+    monkeypatch.setattr(score_persist, "INLINE_DOCUMENT_LIMIT_BYTES", 0)
+    spilled_row = persist_score_document(fx.session, document)
+    fx.session.commit()
+
+    assert inline_row.storage_key is None and spilled_row.storage_key is not None
+    inline_bytes = json.dumps(inline_row.findings, sort_keys=True).encode("utf-8")
+    assert inline_bytes == storage.objects[spilled_row.storage_key]
+
+
+def test_a_value_json_cannot_encode_raises_on_both_paths(fx, monkeypatch):
+    """A producer bug fails at persist, with the document in hand — never silently.
+
+    The stringifying fallback made a Decimal a number on one path and a string
+    on the other; raising is the only answer that is the same on both.
+    """
+    from decimal import Decimal
+
+    storage = _FakeStorage()
+    monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
+    document = _document(fx.protocol.id, findings=[{"exposure": Decimal("1.5")}])
+
+    with pytest.raises(TypeError):
+        persist_score_document(fx.session, document)
+    fx.session.rollback()
+
+    monkeypatch.setattr(score_persist, "INLINE_DOCUMENT_LIMIT_BYTES", 0)
+    with pytest.raises(TypeError):
+        persist_score_document(fx.session, document)
+    fx.session.rollback()
+    assert storage.objects == {}, "nothing may reach the bucket for a document that cannot be encoded"
 
 
 def test_an_unreadable_spill_is_not_an_empty_document(fx, monkeypatch):

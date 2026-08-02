@@ -396,10 +396,13 @@ def company_score(company_name: str) -> dict[str, Any]:
     fold ran and could not determine a grade), which is why the numbers are
     ``null`` beside it instead of zeroed.
 
-    404 has exactly one meaning here: no ``protocol_scores`` row exists for
-    this protocol yet. It is NOT the answer for an unreadable spilled document
-    — that is a 503, because a document that could not be fetched is not an
-    absent score.
+    Two distinct 404s, told apart by ``detail`` because they are different
+    facts and a client that treats them alike will report a typo'd protocol as
+    "not scored yet": ``Company not found`` (no such protocol) versus ``No
+    score has been computed for this protocol yet`` (the protocol exists and
+    the fold has not run). Neither is the answer for an unreadable spilled
+    document — that is a 503, because a document that could not be fetched is
+    not an absent score.
     """
     from db.models import ProtocolScoreLatest
     from services.scoring.persist import ScoreDocumentUnavailable, load_score_document

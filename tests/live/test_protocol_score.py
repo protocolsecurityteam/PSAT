@@ -32,8 +32,21 @@ PERIMETER_STATES = {"settled", "unsettled", "not_determined"}
 
 
 def _score_or_skip(live_client: LiveClient) -> dict:
+    """The score, or a skip — but ONLY for the one 404 that is legitimate.
+
+    The endpoint 404s both for an unknown protocol and for a protocol with no
+    fold yet. Skipping on the first would turn a missing test company (a real
+    failure — every other test in the suite depends on it) into a green run, so
+    existence is established against a different endpoint first and only then is
+    a 404 read as "not scored yet".
+    """
     response = live_client.company_score(DEFAULT_TEST_COMPANY)
     if response.status_code == 404:
+        overview = live_client._session.get(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}"), timeout=30)
+        assert overview.status_code == 200, (
+            f"'{DEFAULT_TEST_COMPANY}' does not exist on this deployment "
+            f"(overview {overview.status_code}) — the score 404 is not a 'no fold yet'"
+        )
         pytest.skip(f"no protocol score computed yet for '{DEFAULT_TEST_COMPANY}'")
     assert response.status_code == 200, f"score read failed: {response.status_code} {response.text[:300]}"
     return response.json()
@@ -64,9 +77,11 @@ def test_score_three_states_are_named_not_implied(analyzed_company, live_client:
         )
 
 
-def test_score_unknown_company_returns_404(live_client: LiveClient):
+def test_score_unknown_company_returns_a_distinguishable_404(live_client: LiveClient):
     response = live_client.company_score("psat-unknown-company-xyz")
     assert response.status_code == 404, f"unknown company should 404, got {response.status_code}"
+    detail = (response.json() or {}).get("detail", "")
+    assert "Company not found" in detail, f"an unknown protocol must not read as 'not scored yet': {detail!r}"
 
 
 def test_score_loop_heartbeat_is_present(live_client: LiveClient):
