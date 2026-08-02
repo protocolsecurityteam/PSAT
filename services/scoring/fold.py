@@ -1323,9 +1323,10 @@ def _confidence(
         "perimeter_value_weighted_denominator": denominator,
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (
-            "the denominator is the value plane plus the control closure, and is "
-            "built without reference to the signal population, so analysis work can "
-            "only move value from unanswered to answered"
+            "the denominator is the protocol's contracts rows unioned with the value "
+            "plane and the control closure, and is built without reference to the "
+            "signal population, so analysis work can only move value from unanswered "
+            "to answered"
         ),
     }
 
