@@ -200,6 +200,14 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "role_breadth_multi_holder",  # role_holder_planes: 11 keys / 3 registries (B14)
     "restaking_position_value",  # the plane carries no USD column; contributions are unpriced
     "reach_gate_licensed",  # gated_contract_backlink: 20 true rows, 16 distinct V (B14)
+    # The uncredited rungs. Both are the value an UNREAD witness lands on, so
+    # neither was fitted to anything, and both can sit BELOW the weakness a
+    # proven-worst reading would earn — an unread 1-of-n Safe takes 0.55 where a
+    # proven 1-of-n takes 0.85. The direction is deliberate (a fabricated k/n is
+    # worse than a conservative rung) but the number itself is a model choice.
+    "weakness_safe_uncredited",
+    "weakness_timelock_undetermined",
+    "uncredited_rung_below_proven_worst",
 )
 
 
@@ -236,6 +244,11 @@ def delay_discount(seconds: float | None) -> float | None:
     monotone weakness function may not be stated before the function is defined.
     The witness supplies only the ORDERING of the delays; this mapping is a model
     choice and belongs to ``model_version``.
+
+    A PROVEN ZERO delay returns ``1.0`` — no discount — because zero is an
+    answer: the timelock imposes no wait. ``None`` is reserved for a delay that
+    could not be read, which is a different fact and must not collect the same
+    treatment. A negative value is unreadable, not a negative wait.
     """
     import math
 
@@ -245,8 +258,10 @@ def delay_discount(seconds: float | None) -> float | None:
         value = float(seconds)
     except (TypeError, ValueError):
         return None
-    if value <= 0:
+    if value < 0:
         return None
+    if value == 0:
+        return 1.0
     days = value / 86400.0
     frac = math.log10(1.0 + days) / math.log10(1.0 + DELAY_DISCOUNT_SATURATION_DAYS)
     return round(max(DELAY_DISCOUNT_FLOOR, min(1.0, 1.0 - frac)), 4)

@@ -122,6 +122,28 @@ DESTINATION_BEARING_CLAIMS = (
     "exec.arbitrary",
 )
 
+# The other half of the same guard, and the only source a distiller may stamp
+# ``not_applicable`` from. ``DESTINATION_BEARING_CLAIMS`` names the capabilities
+# for which "there is no destination here" is provably false; this names the ones
+# for which it is provably TRUE, and everything outside both is
+# ``not_determined``. Without it, "not in the bearing tuple" reads as
+# "destination-free", which is absence standing in for a witness: ``value_router``
+# carries a whole ``flows[]`` array and ``callee_pointer.rotate`` rotates a call
+# target, and both would have published "no destination" on that reasoning.
+#
+# Membership is justified per member, never by default:
+#   pause.set / pause.unset      — a latch; there is no operand to redirect
+#   ownership.renounce           — takes no argument
+#   timelock.set_delay           — a scalar parameter
+#   rate_limit.consume           — draws down a counter
+DESTINATION_FREE_CLAIMS = (
+    "pause.set",
+    "pause.unset",
+    "ownership.renounce",
+    "timelock.set_delay",
+    "rate_limit.consume",
+)
+
 # --- reach gate ------------------------------------------------------------
 # The ``gated_contract_backlink`` licence to charge a holder's value through a
 # gated function. ``not_licensed`` is a reachability verdict only: it never types

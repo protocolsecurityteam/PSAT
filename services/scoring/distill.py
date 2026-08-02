@@ -19,6 +19,7 @@ yields ``severity = not_determined`` and the row never enters the grade.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,7 @@ from services.scoring.schema import (
     not_determined_signal_defaults,
 )
 from utils.scoring_status import (
+    DESTINATION_FREE_CLAIMS,
     DESTINATION_SHAPE_NOT_APPLICABLE,
     DESTINATION_STATE_CONSTRAINED_PROVEN,
     DESTINATION_STATE_NOT_APPLICABLE,
@@ -94,15 +96,39 @@ _TIER_RANK = (
     WITNESS_TIER_NOT_DETERMINED,
 )
 
-_SOLMATE_MUTATORS = frozenset({"setUserRole", "setRoleCapability", "setPublicCapability"})
+# The Solmate role mutators by SELECTOR, never by name. The escalation these
+# license asserts that the registry's owner can grant itself any role, and
+# ``setUserRole(bytes32)`` on an unrelated contract is not
+# ``setUserRole(address,uint8,bool)`` — a name match would let any homonym earn
+# the escalation. Keccak-4 of the canonical signatures.
+_SOLMATE_MUTATOR_SELECTORS: dict[str, str] = {
+    "0x67aff484": "setUserRole(address,uint8,bool)",
+    "0x0ea9b75b": "setRoleCapability(uint8,bytes4,bool)",
+    "0x4b5159da": "setPublicCapability(bytes4,bool)",
+}
 _TIMELOCK_ENTRYPOINTS = frozenset({"schedule", "scheduleBatch", "execute", "executeBatch"})
 
 
 def _f(value: Any) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _proven_number(state: str, value: float) -> Tri[float]:
+    """A numeric gate envelope, checked to BE a number at construction.
+
+    The envelope's payload is free-form JSONB with no CHECK behind it, so the
+    only place its type can be established is where it is minted. A string that
+    happens to compare and multiply — ``"1e12"`` — would otherwise travel to the
+    value axis and charge a trillion dollars nobody witnessed.
+    """
+    number = _f(value)
+    if number is None:
+        raise ValueError(f"numeric gate payload must be a finite number, got {value!r}")
+    return Tri.proven(state, number)
 
 
 def _is_true(value: Any) -> bool:
@@ -128,7 +154,6 @@ class _ContractFacts:
     solmate_mutators: set[str] = field(default_factory=set)
     registry_owner: dict[str, Any] | None = None
     pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
-    timelock_self_gated: list[str] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
 
@@ -207,7 +232,11 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
                 verdicts[row.function_id].append(row)
         facts.verdicts = dict(verdicts)
 
-    facts.solmate_mutators = {str(f.function_name) for f in functions if str(f.function_name) in _SOLMATE_MUTATORS}
+    facts.solmate_mutators = {
+        _SOLMATE_MUTATOR_SELECTORS[_lower(f.selector)]
+        for f in functions
+        if _lower(f.selector) in _SOLMATE_MUTATOR_SELECTORS
+    }
     facts.registry_owner = _registry_owner(
         session.query(ControllerValue)
         .filter(ControllerValue.contract_id == contract.id)
@@ -215,11 +244,19 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         .all()
     )
     facts.pause_unset_principals = _pause_unset_principals(facts)
-    facts.timelock_self_gated = _timelock_self_gated(facts)
 
+    from db.models import Contract as _Contract
+
+    # Protocol-scoped: another protocol's backlink names an entity outside this
+    # perimeter, and charging its value here would both invent reach and consume
+    # exposure room that belongs to this protocol's own entities.
     backlinks = (
         session.query(ControlGraphNode)
-        .filter(ControlGraphNode.details["gated_contract_backlink"]["gated_contract_address"].astext == address)
+        .join(_Contract, _Contract.id == ControlGraphNode.contract_id)
+        .filter(
+            _Contract.protocol_id == contract.protocol_id,
+            ControlGraphNode.details["gated_contract_backlink"]["gated_contract_address"].astext == address,
+        )
         .order_by(ControlGraphNode.id)
         .all()
     )
@@ -272,17 +309,16 @@ def _pause_unset_principals(facts: _ContractFacts) -> list[dict[str, Any]]:
     return [seen[a] for a in sorted(seen)]
 
 
-def _timelock_self_gated(facts: _ContractFacts) -> list[str]:
-    """Delay-change entry points this contract gates on ITSELF."""
-    gated = set()
-    for func in facts.functions:
-        name = str(func.function_name)
-        if name not in ("updateDelay", "grantRole", "revokeRole"):
-            continue
-        for principal in facts.principals.get(func.id, []):
-            if _lower(principal.address) == facts.address:
-                gated.add(name)
-    return sorted(gated)
+def _function_is_self_gated(facts: _ContractFacts, func: Any) -> bool:
+    """Whether THIS function's own resolved gate is the contract itself.
+
+    Keyed on the function being scored, never on a same-named sibling: a
+    self-gated ``grantRole`` says nothing about who can call the function that
+    sets the delay, and crediting one from the other hands every other path on
+    the contract a pass it never earned.
+    """
+    principals = facts.principals.get(func.id, [])
+    return bool(principals) and all(_lower(p.address) == facts.address for p in principals)
 
 
 def _licensed_reach_entities(session: Session, backlinks: list[Any], address: str, chain: str) -> list[dict[str, Any]]:
@@ -507,16 +543,31 @@ def _exec_destination(claim_id: str, witness: dict[str, Any]) -> _Destination:
     state = constraint.get("state")
 
     if target_kind == "self":
+        if state == "unconstrained_proven":
+            # Two witnesses that cannot both be true: a destination fixed at
+            # ``address(this)`` and a destination proven unconstrained. A
+            # contradiction is not evidence for either side, and resolving it to
+            # the benign arm would let one forged half buy the 0.0 severity.
+            return _Destination(
+                tri=Tri[str].not_determined(),
+                severity=None,
+                basis="destination_witness_contradiction(self+unconstrained_proven)",
+                notes=("destination_witnesses_contradict",),
+            )
         # Keyed on the target kind, never on the constraint state alone: a
         # ``constrained`` state says a guard exists, not that the destination is
         # this contract.
         severity = (
             K.DEST_SEVERITY_DELEGATECALL_SELF if claim_id == "delegatecall.execute" else K.DEST_SEVERITY_EXEC_SELF
         )
-        corroborated = constraint.get("binding") in ("destination_operand", "literal_self", "self") or constraint.get(
-            "guard"
-        ) in ("literal_self", "self")
-        notes = ("destination_self_corroborated_by_binding",) if corroborated else ()
+        # Only a literal self-binding corroborates self-ness. ``destination_operand``
+        # says the guard is bound to the operand, which is equally true of an
+        # operand that is not this contract, so it corroborates nothing here.
+        corroborated = constraint.get("binding") in ("literal_self", "self") or constraint.get("guard") in (
+            "literal_self",
+            "self",
+        )
+        notes = ("destination_self_corroborated_by_literal",) if corroborated else ()
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_CONSTRAINED_PROVEN, "self"),
             severity=severity,
@@ -677,7 +728,13 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
     holders = [_lower(h) for h in (observed.get("observed_reach_holders") or []) if h]
 
     if reach_determined and value_usd is not None:
-        keys = tuple(sorted({entity_key(facts.chain, h) for h in holders})) or (acting_key,)
+        keys = tuple(sorted({entity_key(facts.chain, h) for h in holders}))
+        if value_usd > 0.0 and not keys:
+            # A proven magnitude whose HOLDER was never named belongs to an
+            # entity this signal cannot identify. Attributing it to the analysed
+            # deployment is the entity misattribution the register measures in
+            # dollars, so the magnitude is published as unattributed instead.
+            return _no_reach("observed_reach_value_usd_without_holder(not_determined)", ("reach_holder_not_named",))
         if value_usd <= 0.0 and not holders:
             return _Reach(
                 state=VALUE_STATE_PROVEN_NO_REACH,
@@ -691,7 +748,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             bound=VALUE_BOUND_EXACT,
             entity_keys=keys,
             basis="observed_reach_value_usd(fork-proven)",
-            magnitude=Tri.proven("proven_exact", value_usd),
+            magnitude=_proven_number("proven_exact", value_usd),
             notes=("reach_holder_is_not_this_entity",) if holders and acting_key not in keys else (),
         )
 
@@ -704,7 +761,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
                 bound=VALUE_BOUND_FLOOR,
                 entity_keys=(acting_key,),
                 basis="observed_reach_floor_usd(>= floor, reach_indeterminate)",
-                magnitude=Tri.proven("proven_floor", floor),
+                magnitude=_proven_number("proven_floor", floor),
             )
         # A 0.0 floor is "no proven bound": an all-unpriced sheet sums to the
         # same zero as a proven-empty one, and an ungated floor is not the
@@ -727,7 +784,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             bound=VALUE_BOUND_FLOOR,
             entity_keys=keys,
             basis="observed_reach_priced_usd(>= floor)",
-            magnitude=Tri.proven("proven_floor", priced),
+            magnitude=_proven_number("proven_floor", priced),
             notes=("reach_partially_priced",),
         )
     if _is_true(observed.get("contract_balance_seeded")):
@@ -765,7 +822,11 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
         if claim_id:
             grouped[str(claim_id)].append(claim)
 
-    deployment_address = _lower(func.deployment_address) or facts.address
+    # The register's own entity rule: the runtime address is
+    # ``effective_functions.deployment_address`` falling back to
+    # ``contracts.address``. The fallback is licensed there because a row with no
+    # deployment address IS analysed at the contract's own address.
+    deployment_address = _lower(func.deployment_address) if func.deployment_address else facts.address
     acting_key = entity_key(facts.chain, deployment_address)
     openness = _openness(func)
     principals = facts.principals.get(func.id, [])
@@ -891,11 +952,21 @@ def _build_signal(
     elif claim_id == "flow.out":
         destination = _meet_destinations([_flow_destination(e, all_claims) for e in entries])
         gates["destination_basis"] = Tri.proven("basis", destination.basis).to_json()
-    else:
+    elif claim_id in DESTINATION_FREE_CLAIMS:
         destination = _Destination(
             tri=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, DESTINATION_SHAPE_NOT_APPLICABLE),
             severity=None,
             basis="not_applicable",
+        )
+    else:
+        # Not in the bearing tuple is not the same as destination-free. A claim
+        # this scorer has no destination model for publishes not_determined:
+        # stamping "there is no destination here" from the absence of a rule is
+        # the same absence-as-a-witness move in a quieter place.
+        destination = _Destination(
+            tri=Tri[str].not_determined(),
+            severity=None,
+            basis="destination_model_absent(not_determined)",
         )
     fields["destination"] = destination.tri
     notes.update(destination.notes)
@@ -926,6 +997,7 @@ def _build_signal(
         destination=destination,
         openness=openness,
         deployment_address=deployment_address,
+        self_gated=_function_is_self_gated(facts, func),
     )
     fields["severity"] = severity
     fields["severity_basis"] = severity_basis
@@ -1202,6 +1274,7 @@ def _severity(
     destination: _Destination,
     openness: str,
     deployment_address: str,
+    self_gated: bool = False,
 ) -> tuple[Tri[float], tuple[str, ...], set[str]]:
     notes: set[str] = set()
 
@@ -1246,9 +1319,15 @@ def _severity(
             notes.add("owner_may_grant_itself_any_role_on_this_registry")
         elif owner:
             notes.add("registry_escalation_mutators_unverified")
-    elif claim_id == "timelock.set_delay" and facts.timelock_self_gated:
-        base = K.TIMELOCK_SELF_GATED_DELAY
-        basis.append("delay_change_path_self_gated")
+    elif claim_id == "timelock.set_delay":
+        if self_gated:
+            # The credit rests on THIS function's own resolved gate being the
+            # contract itself: the delay cannot be shortened without first paying
+            # it. A self-gated sibling proves nothing about this path.
+            base = K.TIMELOCK_SELF_GATED_DELAY
+            basis.append("delay_change_path_self_gated")
+        else:
+            notes.add("delay_change_gate_not_self_gated")
 
     return Tri.proven(SEVERITY_STATE_PROVEN, base), tuple(basis), notes
 

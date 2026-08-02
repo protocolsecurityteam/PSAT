@@ -82,6 +82,32 @@ def _principal_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[s
     return out
 
 
+def _causes(previous: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    """What moved between two rows for the same (principal, capability).
+
+    Analysed for EVERY matched pair, including rows matched only after a unit
+    re-key: a re-key that also changed the arithmetic would otherwise be filed as
+    a cosmetic relabel and its delta would never be explained.
+    """
+    causes: list[str] = []
+    if abs((row.get("raw_points") or 0) - (previous.get("raw_points") or 0)) > 1e-9:
+        if abs((row.get("weakness") or 0) - (previous.get("weakness") or 0)) > 1e-9:
+            causes.append(f"weakness {previous.get('weakness')} -> {row.get('weakness')}")
+        if abs((row.get("severity_proven") or 0) - (previous.get("severity_proven") or 0)) > 1e-9:
+            causes.append(
+                f"severity {previous.get('severity_proven')} -> {row.get('severity_proven')} "
+                f"({';'.join(row.get('severity_basis') or [])})"
+            )
+        if row.get("value_band") != previous.get("value_band"):
+            causes.append(
+                f"value_band {previous.get('value_band')} -> {row.get('value_band')} "
+                f"({row.get('value_at_stake_basis')})"
+            )
+        if not causes:
+            causes.append(f"raw_points {previous.get('raw_points')} -> {row.get('raw_points')}")
+    return causes
+
+
 def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, Any]:
     """Row-level diff against the prototype oracle, each delta with its cause.
 
@@ -103,6 +129,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             principal_key = next((k for k, v in sorted(new_by_principal.items()) if v is row), None)
             counterpart = old_by_principal.get(principal_key) if principal_key else None
             if counterpart is not None:
+                causes = _causes(counterpart, row)
                 rekeyed.append(
                     {
                         "principal": row.get("principal"),
@@ -112,6 +139,8 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
                         "raw_before": counterpart.get("raw_points"),
                         "raw_after": row.get("raw_points"),
                         "cause": "unit id relabelled (lowest member key, not the union-find root)",
+                        "caused_by": causes,
+                        "arithmetic_changed": bool(causes),
                     }
                 )
                 continue
@@ -127,20 +156,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             )
             continue
         previous = old_index[key]
-        causes = []
-        if abs((row.get("raw_points") or 0) - (previous.get("raw_points") or 0)) > 1e-9:
-            if abs((row.get("weakness") or 0) - (previous.get("weakness") or 0)) > 1e-9:
-                causes.append(f"weakness {previous.get('weakness')} -> {row.get('weakness')}")
-            if abs((row.get("severity_proven") or 0) - (previous.get("severity_proven") or 0)) > 1e-9:
-                causes.append(
-                    f"severity {previous.get('severity_proven')} -> {row.get('severity_proven')} "
-                    f"({';'.join(row.get('severity_basis') or [])})"
-                )
-            if row.get("value_band") != previous.get("value_band"):
-                causes.append(
-                    f"value_band {previous.get('value_band')} -> {row.get('value_band')} "
-                    f"({row.get('value_at_stake_basis')})"
-                )
+        causes = _causes(previous, row)
         if causes:
             changed.append(
                 {
@@ -183,6 +199,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             "changed": len(changed),
             "removed": len(removed),
             "rekeyed": len(rekeyed),
+            "rekeyed_with_arithmetic_change": sum(1 for r in rekeyed if r["arithmetic_changed"]),
         },
         "added": added,
         "changed": changed,

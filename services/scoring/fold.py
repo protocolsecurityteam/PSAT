@@ -11,13 +11,26 @@ pinned, totally ordered query — plus the resolution planes in
 :mod:`services.scoring.planes`, which is where a reference becomes a unit, a
 dollar or a breadth floor.
 
+THE ROOT RULE
+-------------
+**Never substitute an available field for an unread one.** Every ``x or y`` on a
+nullable or three-state expression is that substitution written as an idiom: an
+owner set that did not resolve is not the threshold, an unread delay is not zero,
+an unpriced entity is not ``$0.00``, and a principal address is not its own owner
+set unless the principal IS a key. Where a witness is missing the answer is the
+uncredited rung, an explicit ``None``, or a withheld row — chosen so the mistake
+costs a credit rather than fabricating one. Every remaining fallback in this
+module is guarded by a proof that the substituted value IS the fact.
+
 Every arithmetic branch fails closed. A signal whose severity was not proven is
 not scored; a value that could not be priced falls to the unpriced branch rather
-than to zero; an unread witness never becomes a default.
+than to zero; a malformed gate envelope withholds its own row rather than
+raising out of the whole fold.
 """
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,15 +56,55 @@ from utils.scoring_status import (
     OPENNESS_OPEN,
     PRINCIPAL_STATE_ENUMERATED,
     SCORE_TRIGGER_MANUAL,
+    SEVERITY_STATE_PROVEN,
+    VALUE_STATE_PROVEN_NO_REACH,
     VALUE_STATE_PROVEN_REACH,
 )
 
 ANYONE = "anyone"
 
+# The closed vocabulary of every gate the fold reads: gate name → the proven
+# state tokens that license its positive branch. ``gate_inputs`` is free-form
+# JSONB with no CHECK behind it, so a reader that branches on "is not
+# not_determined" treats a WITHHELD envelope (say ``not_earned``) as the earned
+# one. Branching on the exact token is what makes the two different facts again.
+GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
+    "exact_empty_credit": ("earned",),
+    "latch_witness": ("witnessed",),
+    "reach_magnitude_usd": ("proven_exact", "proven_floor"),
+    "token_identity": ("proven",),
+    "asset_class": ("proven",),
+    "input_seeded": ("proven",),
+    "contract_balance_seeded": ("proven",),
+    "amount_capped_by_balance": ("proven",),
+    "asset_identity": ("resolved",),
+    "pause_effective": ("proven",),
+    "freeze_recovery_principals": ("enumerated",),
+    "freeze_coverage_fraction": ("observed_blast_radius",),
+    "destination_basis": ("basis",),
+}
+
+# Gates whose payload enters arithmetic. Validated as a real, finite number at
+# READ as well as at construction: a string "1e12" compares and multiplies just
+# fine in Python and would charge $1T off an untyped payload.
+NUMERIC_GATES = frozenset({"reach_magnitude_usd"})
+
+# The gates the fold WILL read for a given claim. A signal missing one of them is
+# a distiller bug, and it withholds its own row: reading a gate that was never
+# written would put a default where a witness belongs, and raising would let one
+# malformed row take the whole protocol's grade down with it.
+REQUIRED_GATES = ("exact_empty_credit", "latch_witness", "reach_magnitude_usd")
+REQUIRED_GATES_BY_CLAIM: dict[str, tuple[str, ...]] = {
+    "flow.out": ("token_identity", "asset_class", "asset_identity"),
+    "pause.set": ("freeze_recovery_principals",),
+}
+
+SINGLE_ASSET_CLASSES = frozenset({"erc20_only", "mixed"})
+
 
 @dataclass
 class _Instance:
-    """One signal's contribution to one (unit, capability) row."""
+    """One signal's contribution to one (unit, capability, weakness) row."""
 
     signal: FunctionSignal
     severity: float
@@ -61,16 +114,17 @@ class _Instance:
     value_bound: str
     pricing_blocked: str | None
     native_only: bool
+    asset_identity_undecidable: bool
 
 
 @dataclass
 class _Row:
     unit: str
     capability: str
-    principal_label: str = ""
-    principal_kind: str = ""
-    weakness: float = 0.0
-    weakest_label: str | None = None
+    weakness: float
+    weakest_label: str
+    principal_kind: str
+    principal_addresses: set[str] = field(default_factory=set)
     instances: list[_Instance] = field(default_factory=list)
     seeds: set[str] = field(default_factory=set)
     tiers: set[str] = field(default_factory=set)
@@ -107,12 +161,21 @@ def compute_protocol_score(
 
     warnings: list[dict[str, Any]] = []
     earned_negatives: list[dict[str, Any]] = []
+    seen_negatives: set[tuple[str, str]] = set()
 
-    units = _UnitResolver(signals, principal_facts, role_floors, warnings)
-    rows_by_key: dict[tuple[str, str], _Row] = {}
+    units = _UnitResolver(signals, principal_facts, role_floors)
+    rows_by_key: dict[tuple[str, str, float], _Row] = {}
 
     for signal in signals:
-        _collect_disclosures(signal, earned_negatives, warnings)
+        malformed = _malformed_gates(signal)
+        if malformed:
+            # One unreadable envelope withholds its own row. Raising here would
+            # take the whole protocol's grade down with one bad payload, and
+            # scoring around it would read a payload nobody validated.
+            warnings.append(_warning("gate_input_malformed", signal, f"unreadable gate envelopes: {malformed}"))
+            continue
+
+        _collect_disclosures(signal, earned_negatives, seen_negatives, warnings)
         if not signal.enters_grade:
             continue
 
@@ -120,11 +183,8 @@ def compute_protocol_score(
             severity, severity_basis, extra_notes = _fold_severity(signal, None, principal_facts, warnings)
             instance = _instance(signal, severity, severity_basis)
             unit = entity_key(signal.chain, ANYONE)
-            row = rows_by_key.setdefault((unit, signal.claim_id), _Row(unit=unit, capability=signal.claim_id))
-            row.principal_label = "ANYONE (permissionless)"
-            row.principal_kind = ANYONE
-            row.weakness = K.WEAKNESS_ANYONE
-            row.weakest_label = "ANYONE"
+            row = _row_for(rows_by_key, unit, signal.claim_id, K.WEAKNESS_ANYONE, "ANYONE", ANYONE)
+            row.principal_addresses.add(ANYONE)
             _attach(row, signal, instance, extra_notes)
             continue
 
@@ -147,7 +207,6 @@ def compute_protocol_score(
             instance = _instance(signal, severity, severity_basis)
             weakness, label, kind, notes = units.weakness_for(
                 facts,
-                signal,
                 recovery_proven_independent=any(n.startswith("keyset_independent") for n in extra_notes),
             )
             if weakness is None:
@@ -160,23 +219,23 @@ def compute_protocol_score(
                     )
                 )
                 continue
+            # Keyed on the weakness as well as the unit: a timelock collapsed into
+            # its proposer Safe reaches its value through a DELAY the Safe's direct
+            # path does not pay, and a single max-weakness row would charge the
+            # delayed value at the undelayed weakness.
             unit = units.unit_for(facts)
-            row = rows_by_key.setdefault((unit, signal.claim_id), _Row(unit=unit, capability=signal.claim_id))
-            row.principal_label = f"{label} {facts.address}"
-            row.principal_kind = kind
-            if weakness > row.weakness:
-                row.weakness = weakness
-                row.weakest_label = label
+            row = _row_for(rows_by_key, unit, signal.claim_id, weakness, label, kind)
+            row.principal_addresses.add(facts.address)
             _attach(row, signal, instance, extra_notes | set(notes))
 
-    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure)
+    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, units)
     warnings.extend(value_warnings)
 
-    grade_lambda, grade_exposure, exposure_usd = _grade(findings, value_plane)
+    grade_lambda, grade_exposure, exposure_usd, exposure_gaps = _grade(findings, value_plane)
     confidence = _confidence(signals, value_plane, closure)
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
-    provenance = {
+    provenance: dict[str, Any] = {
         "plane_row_counts": P.plane_row_counts(session, protocol_id),
         "population": {
             "signals": len(signals),
@@ -191,7 +250,11 @@ def compute_protocol_score(
         "value": value_plane.provenance,
         "value_annotations": value_plane.annotations,
         "unpriced_positions": value_plane.unpriced_positions,
+        "exposure_gaps": exposure_gaps,
+        "principal_units": units.published_units(),
+        "safe_keyset_overlaps": units.overlaps,
         "upgrade_history": P.load_upgrade_provenance(session, protocol_id),
+        "unconsumed_reach_relations": P.unconsumed_reach_relations(session, protocol_id),
         "ledgers": P.load_ledgers(session, protocol_id),
         "audit_posture": P.load_audit_posture(session, protocol_id),
         "perimeter": perimeter_detail,
@@ -206,16 +269,34 @@ def compute_protocol_score(
         ),
     }
 
-    # The three grade figures stand or fall together. An exposure ratio with no
-    # priced denominator is not a 100 — it is a quantity that was never
-    # measured — so a protocol with findings but no priced value publishes the
-    # findings and withholds the grade, with the withheld figure in provenance.
+    # The three grade figures stand or fall together, and so does everything
+    # derived from them. An exposure ratio with no priced denominator is not a
+    # 100 — it is a quantity that was never measured — so a protocol with
+    # findings but no priced value publishes the findings and parks every
+    # derived number under provenance instead of serving it beside a withheld
+    # grade.
     scored = bool(findings) and grade_exposure is not None
-    if findings and not scored:
-        provenance["grade_withheld"] = {
-            "grade_lambda_computed": grade_lambda,
-            "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
-        }
+    if not scored:
+        withheld_rows = [
+            {
+                "principal_unit": finding["principal_unit"],
+                "capability": finding["capability"],
+                "net_points_lambda": finding.pop("net_points_lambda", None),
+                "exposure_usd": finding.pop("exposure_usd", None),
+            }
+            for finding in findings
+        ]
+        if findings:
+            provenance["grade_withheld"] = {
+                "grade_lambda_computed": grade_lambda,
+                "confidence_pct_computed": confidence.pop("pct", None),
+                "exposure_usd_computed": exposure_usd,
+                "per_finding": withheld_rows,
+                "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
+            }
+        else:
+            confidence.pop("pct", None)
+
     return ScoreDocument(
         protocol_id=protocol_id,
         model_version=MODEL_VERSION,
@@ -226,14 +307,89 @@ def compute_protocol_score(
         grade_state=GRADE_STATE_COMPUTED if scored else GRADE_STATE_NOT_DETERMINED,
         grade_lambda=grade_lambda if scored else None,
         grade_exposure=grade_exposure if scored else None,
-        confidence_pct=confidence["pct"] if scored else None,
+        confidence_pct=confidence.get("pct") if scored else None,
         findings=findings,
-        earned_negatives=sorted(earned_negatives, key=lambda e: (e["entity"], e["function"])),
+        earned_negatives=sorted(earned_negatives, key=lambda e: (e["entity"], e["function"], e["capability"])),
         warnings=_summarise_warnings(warnings),
         model_parameters={**K.model_parameters(), "confidence_detail": confidence},
-        provenance={**provenance, "subsumed_rows": subsumed, "exposure_usd": exposure_usd},
+        provenance={**provenance, "subsumed_rows": subsumed, "exposure_usd": exposure_usd if scored else None},
         uncalibrated_arms=K.UNCALIBRATED_ARMS,
     )
+
+
+def _row_for(
+    rows: dict[tuple[str, str, float], _Row],
+    unit: str,
+    capability: str,
+    weakness: float,
+    label: str,
+    kind: str,
+) -> _Row:
+    key = (unit, capability, round(weakness, 6))
+    row = rows.get(key)
+    if row is None:
+        row = _Row(unit=unit, capability=capability, weakness=weakness, weakest_label=label, principal_kind=kind)
+        rows[key] = row
+    return row
+
+
+# ---------------------------------------------------------------- gate reads
+
+
+def _malformed_gates(signal: FunctionSignal) -> list[str]:
+    """Gate envelopes this fold refuses to read, by name.
+
+    A state outside the gate's closed vocabulary, or a numeric payload that is
+    not a finite number, is a row this fold cannot score honestly.
+    """
+    bad: list[str] = []
+    for name in REQUIRED_GATES + REQUIRED_GATES_BY_CLAIM.get(signal.claim_id, ()):
+        if name not in signal.gate_inputs:
+            bad.append(f"{name}(absent)")
+    for name, raw in sorted(signal.gate_inputs.items()):
+        expected = GATE_PROVEN_TOKENS.get(name)
+        if expected is None:
+            continue
+        try:
+            tri = Tri.from_json(raw)
+        except ValueError:
+            bad.append(name)
+            continue
+        if tri.state == NOT_DETERMINED:
+            continue
+        if tri.state not in expected:
+            bad.append(name)
+            continue
+        if name in NUMERIC_GATES and not _is_number(tri.value):
+            bad.append(name)
+    return bad
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _gate(signal: FunctionSignal, name: str) -> Tri[Any]:
+    """One gate, read on its EXACT proven token. Never "is not not_determined".
+
+    A state the gate's vocabulary does not name is returned as
+    ``not_determined``: an unrecognised token is a witness this fold cannot
+    vouch for, and reading it as the positive branch is how a withheld arm
+    publishes an earned one.
+    """
+    try:
+        tri = signal.gate_input(name)
+    except KeyError:
+        # ``_malformed_gates`` has already withheld any row whose required gates
+        # are missing; this arm keeps an incidental read from raising out of the
+        # fold rather than inventing a value.
+        return Tri.not_determined()
+    expected = GATE_PROVEN_TOKENS.get(name, ())
+    if tri.state == NOT_DETERMINED or tri.state in expected:
+        if name in NUMERIC_GATES and tri.is_determined and not _is_number(tri.value):
+            return Tri.not_determined()
+        return tri
+    return Tri.not_determined()
 
 
 # ---------------------------------------------------------------- principals
@@ -244,10 +400,11 @@ class _UnitResolver:
 
     Safes that can ACT AS each other are one unit — independence is a property of
     owner KEY SETS, and two Safes sharing enough owners are one power. A timelock
-    whose sole proposer-executor is a Safe collapses into that Safe: upgrade-by-
+    whose proposer-executor is a Safe collapses into that Safe: upgrade-by-
     timelock is a subset of exec-by-proposer, so two rows would charge the same
-    value twice. Neither collapse ever crosses a chain: the same address on two
-    chains is two units, because same-address is not proof of same owner set.
+    value twice. The collapse needs BOTH halves proven — proposing without
+    executing is not acting as the timelock — and neither collapse ever crosses a
+    chain, because same-address is not proof of same owner set.
     """
 
     def __init__(
@@ -255,11 +412,9 @@ class _UnitResolver:
         signals: list[FunctionSignal],
         principal_facts: dict[int, P.PrincipalFacts],
         role_floors: dict[tuple[str, str, str], dict[str, Any]],
-        warnings: list[dict[str, Any]],
     ) -> None:
         self._facts = principal_facts
         self._role_floors = role_floors
-        self._warnings = warnings
         self._safe_by_key = {
             facts.key: facts
             for facts in sorted(principal_facts.values(), key=lambda f: f.key)
@@ -268,7 +423,8 @@ class _UnitResolver:
         self._parent = {key: key for key in self._safe_by_key}
         self.overlaps: list[dict[str, Any]] = []
         self._union_overlapping_safes()
-        self._proposers = self._timelock_proposers(signals)
+        self._proposers = self._timelock_proposer_executors(signals)
+        self._members: dict[str, set[str]] = defaultdict(set)
 
     def _find(self, key: str) -> str:
         while self._parent[key] != key:
@@ -286,8 +442,21 @@ class _UnitResolver:
                 shared = left.owners & right.owners
                 if not shared:
                     continue
-                k_left = left.threshold or 99
-                k_right = right.threshold or 99
+                # An unread threshold cannot license a merge: "these two Safes are
+                # one power" needs both thresholds proven, and a sentinel standing
+                # in for one would publish a coalition size nobody measured.
+                if left.threshold is None or right.threshold is None:
+                    self.overlaps.append(
+                        {
+                            "a": a,
+                            "b": b,
+                            "shared_owners": len(shared),
+                            "merged": False,
+                            "basis": "threshold_not_determined_on_at_least_one_side",
+                        }
+                    )
+                    continue
+                k_left, k_right = left.threshold, right.threshold
                 can_act = len(shared) >= max(k_left, k_right)
                 block_left = len(left.owners) - k_left + 1
                 block_right = len(right.owners) - k_right + 1
@@ -301,6 +470,8 @@ class _UnitResolver:
                         "shared_can_act_as_both": can_act,
                         "shared_can_block_both": len(shared) >= max(block_left, block_right),
                         "min_coalition_to_act_as_both": max(k_left, k_right) if can_act else None,
+                        "merged": can_act,
+                        "basis": "owner_key_set_intersection",
                     }
                 )
                 if can_act:
@@ -309,44 +480,94 @@ class _UnitResolver:
                         self._parent[root_b] = root_a
         self.overlaps.sort(key=lambda o: (o["a"], o["b"]))
 
-    def _timelock_proposers(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
-        """The weakest Safe that can both propose and execute on each timelock."""
-        best: dict[str, dict[str, Any]] = {}
+    def _timelock_proposer_executors(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
+        """The weakest Safe proven able to BOTH propose and execute on a timelock.
+
+        Both halves are required because the collapse asserts the Safe can act as
+        the timelock. A propose-only witness proves the right to start a delayed
+        action, not the right to complete one, and treating it as the collapse
+        would re-price every timelock-gated dollar at the proposer's undelayed
+        weakness on the strength of a witness that never mentioned execution.
+        """
+        by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
+        facts_by_key: dict[str, P.PrincipalFacts] = {}
         for signal in sorted(signals, key=lambda s: (s.chain, s.deployment_address, s.selector, s.claim_id)):
-            if signal.claim_id not in ("timelock.schedule", "timelock.execute"):
+            role = {"timelock.schedule": "schedule", "timelock.execute": "execute"}.get(signal.claim_id)
+            if role is None:
                 continue
             timelock_key = entity_key(signal.chain, signal.deployment_address)
             for ref in signal.principal_refs:
                 facts = self._facts.get(int(ref.function_principal_id))
                 if facts is None or facts.resolved_type != "safe" or not facts.owners:
                     continue
-                ratio = (facts.threshold or len(facts.owners)) / len(facts.owners)
-                candidate = {"key": facts.key, "k": facts.threshold, "n": len(facts.owners), "ratio": ratio}
-                # inv.5 is the WEAKEST path, not the strongest.
-                if timelock_key not in best or candidate["ratio"] < best[timelock_key]["ratio"]:
-                    best[timelock_key] = candidate
-        return best
+                by_role[timelock_key][role].add(facts.key)
+                facts_by_key[facts.key] = facts
+
+        out: dict[str, dict[str, Any]] = {}
+        for timelock_key in sorted(by_role):
+            both = sorted(by_role[timelock_key]["schedule"] & by_role[timelock_key]["execute"])
+            best: dict[str, Any] | None = None
+            for safe_key in both:
+                facts = facts_by_key[safe_key]
+                # inv.5 is the WEAKEST path. An unread threshold cannot lose that
+                # comparison: it sorts first, and is then priced at the uncredited
+                # rung rather than at a ratio nobody measured.
+                rank = (0, 0.0) if facts.threshold is None else (1, facts.threshold / len(facts.owners))
+                candidate = {
+                    "key": safe_key,
+                    "k": facts.threshold,
+                    "n": len(facts.owners),
+                    "rank": rank,
+                }
+                if best is None or candidate["rank"] < best["rank"]:
+                    best = candidate
+            if best is not None:
+                out[timelock_key] = best
+        return out
 
     def unit_for(self, facts: P.PrincipalFacts) -> str:
         key = facts.key
         if facts.resolved_type == "timelock":
             proposer = self._proposers.get(key)
             if proposer:
-                key = proposer["key"]
+                key = str(proposer["key"])
         if key in self._parent:
             # The unit is named by its LOWEST member key, not by whichever root
             # the union order happened to leave: a union-find root is an
             # implementation artefact, and naming a unit with one would make the
             # same set of Safes carry different identities across runs.
             root = self._find(key)
-            return min(member for member in self._parent if self._find(member) == root)
+            members = {member for member in self._parent if self._find(member) == root}
+            unit = min(members)
+            self._members[unit] |= members
+            return unit
+        self._members[key].add(key)
         return key
+
+    def published_units(self) -> dict[str, Any]:
+        """The unit memberships this fold folded, as the document's own evidence.
+
+        A unit id is only meaningful beside the members it collapsed: without
+        them a consumer cannot tell a re-labelled unit from a re-keyed one, and
+        cannot check the inv.13 collapse that removed a double charge.
+        """
+        return {
+            "members": {unit: sorted(members) for unit, members in sorted(self._members.items())},
+            "timelock_collapses": {
+                timelock: {
+                    "into": entry["key"],
+                    "proposer_k_of_n": (f"{entry['k']}/{entry['n']}" if entry["k"] is not None else "not_determined"),
+                    "basis": "proven proposer AND executor",
+                }
+                for timelock, entry in sorted(self._proposers.items())
+            },
+        }
 
     def proposer_for(self, facts: P.PrincipalFacts) -> dict[str, Any] | None:
         return self._proposers.get(facts.key)
 
     def weakness_for(
-        self, facts: P.PrincipalFacts, signal: FunctionSignal, *, recovery_proven_independent: bool = False
+        self, facts: P.PrincipalFacts, *, recovery_proven_independent: bool = False
     ) -> tuple[float | None, str, str, list[str]]:
         notes: list[str] = []
         if facts.resolver_bases:
@@ -357,34 +578,11 @@ class _UnitResolver:
         if facts.resolved_type == "eoa":
             weakness, label, kind = K.WEAKNESS_EOA, "EOA", "eoa"
         elif facts.resolved_type == "safe":
-            n = len(facts.owners) or facts.threshold
-            weakness = K.quorum_weakness(
-                facts.threshold,
-                n,
-                credit_withheld=facts.protection_credit_withheld,
-                waive_single_signer_cliff=recovery_proven_independent,
-            )
-            if facts.protection_credit_withheld:
-                notes.append(f"safe_kn_credit_withheld:{facts.protection_basis}")
-            label, kind = f"Safe {facts.threshold}/{n}", "safe"
+            weakness, label, notes = _safe_weakness(facts, notes, recovery_proven_independent)
+            kind = "safe"
         elif facts.resolved_type == "timelock":
-            discount = K.delay_discount(facts.delay_seconds)
-            proposer = self.proposer_for(facts)
-            if discount is None:
-                notes.append("timelock_delay_not_determined")
-                weakness, label, kind = K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(?)", "timelock"
-            elif not proposer:
-                # A proven delay whose proposer set is undetermined is not proven
-                # protection, so the delay earns no discount.
-                notes.append("timelock_proposer_not_determined:no_delay_credit")
-                weakness = K.WEAKNESS_TIMELOCK_UNDETERMINED
-                label, kind = f"timelock {int(facts.delay_seconds or 0) // 86400}d(proposer?)", "timelock"
-            else:
-                base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
-                weakness = round(base * discount, 4)
-                notes.append(f"delay_discount={discount};proposer={proposer['k']}/{proposer['n']}")
-                label = f"timelock {int(facts.delay_seconds or 0) // 86400}d via {proposer['k']}/{proposer['n']}"
-                kind = "timelock"
+            weakness, label, notes = self._timelock_weakness(facts, notes)
+            kind = "timelock"
         elif facts.resolved_type == "contract":
             # "An EOA controls the gating CONTRACT" is not "an EOA can call this
             # function": the gating contract may impose its own conditions. The
@@ -399,6 +597,33 @@ class _UnitResolver:
             weakness = raised
         return weakness, label, kind, notes
 
+    def _timelock_weakness(self, facts: P.PrincipalFacts, notes: list[str]) -> tuple[float, str, list[str]]:
+        discount = K.delay_discount(facts.delay_seconds)
+        proposer = self.proposer_for(facts)
+        if discount is None:
+            notes.append("timelock_delay_not_determined")
+            return K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(delay not_determined)", notes
+        # Reached only where the discount resolved, which requires a read delay.
+        delay_seconds = float(facts.delay_seconds) if facts.delay_seconds is not None else 0.0
+        days = int(delay_seconds // 86400)
+        if delay_seconds == 0:
+            # A proven ZERO delay is proven-absent protection, not an unread one.
+            # It earns no discount and does not land on the undetermined rung.
+            notes.append("timelock_delay_proven_zero:no_protection")
+            if proposer is None:
+                return K.WEAKNESS_SAFE_UNCREDITED, "timelock(0d, proposer not_determined)", notes
+            base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
+            notes.append(f"proposer={_kn(proposer)}")
+            return base, f"timelock 0d via {_kn(proposer)}", notes
+        if proposer is None:
+            # A proven delay whose proposer-executor set is undetermined is not
+            # proven protection, so the delay earns no discount.
+            notes.append("timelock_proposer_not_determined:no_delay_credit")
+            return K.WEAKNESS_TIMELOCK_UNDETERMINED, f"timelock {days}d(proposer not_determined)", notes
+        base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
+        notes.append(f"delay_discount={discount};proposer={_kn(proposer)}")
+        return round(base * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
+
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
         """A proven holder floor above one is proven BREADTH. It may only raise."""
         for registry, role_hash in facts.role_bindings:
@@ -406,6 +631,37 @@ class _UnitResolver:
             if entry and entry["holders_floor"] > 1:
                 return K.ROLE_BREADTH_MULTI_HOLDER_WEAKNESS
         return None
+
+
+def _kn(proposer: dict[str, Any]) -> str:
+    """A proposer's k/n, or the honest refusal. Never a fabricated ratio."""
+    return f"{proposer['k']}/{proposer['n']}" if proposer["k"] is not None else "k not_determined"
+
+
+def _safe_weakness(
+    facts: P.PrincipalFacts, notes: list[str], recovery_proven_independent: bool
+) -> tuple[float, str, list[str]]:
+    """A Safe's weakness from its PROVEN k and n, or the uncredited rung.
+
+    An unread owner set is not an n. Backfilling n from k publishes a k-of-k Safe
+    — the strongest rung on the ladder — out of a witness that never existed, and
+    prints the fabricated ratio as the finding's own principal.
+    """
+    if not facts.owners:
+        notes.append("safe_owner_set_not_determined:kn_uncomputable")
+        label = "Safe (owners not_determined)" if facts.threshold is None else f"Safe k={facts.threshold}/n?"
+        return K.WEAKNESS_SAFE_UNCREDITED, label, notes
+    n = len(facts.owners)
+    weakness = K.quorum_weakness(
+        facts.threshold,
+        n,
+        credit_withheld=facts.protection_credit_withheld,
+        waive_single_signer_cliff=recovery_proven_independent,
+    )
+    if facts.protection_credit_withheld:
+        notes.append(f"safe_kn_credit_withheld:{facts.protection_basis}")
+    label = f"Safe {facts.threshold}/{n}" if facts.threshold is not None else f"Safe k?/{n}"
+    return weakness, label, notes
 
 
 def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
@@ -421,15 +677,18 @@ def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
     for signal in signals:
         if signal.claim_id != "pause.set":
             continue
-        gate = signal.gate_input("freeze_recovery_principals")
-        if not gate.is_determined:
+        gate = _gate(signal, "freeze_recovery_principals")
+        if not gate.is_determined or not isinstance(gate.value, list):
             continue
-        for entry in gate.value or []:
+        for entry in gate.value:
             if isinstance(entry, dict) and entry.get("function_principal_id") is not None:
                 out.append(
                     _Ref(
                         function_principal_id=int(entry["function_principal_id"]),
-                        chain=str(entry.get("chain") or signal.chain),
+                        # The gate's entries are minted beside the pause signal on
+                        # the same contract, so the chain is the same fact, not a
+                        # substitute for an unread one.
+                        chain=str(entry.get("chain", signal.chain)),
                         address=str(entry.get("address") or ""),
                     )
                 )
@@ -452,7 +711,7 @@ def _fold_severity(
     it once over the union of a function's principals would charge a key set for
     an overlap another principal contributed.
     """
-    severity = signal.severity.require(signal.severity.state)
+    severity = signal.severity.require(SEVERITY_STATE_PROVEN)
     basis = tuple(signal.severity_basis)
     notes: set[str] = set()
     if signal.claim_id != "pause.set" or principal is None:
@@ -472,9 +731,14 @@ def _fold_severity(
             )
         )
     elif verdict is None:
-        # Neither recoverable nor sustainable is proven, so severity stays at the
-        # proven-existence component rather than being assumed either way.
         notes.add(note)
+        if note == "pauser_key_set_not_determined":
+            # The freezing key set itself was never read, so independence is not
+            # computable in either direction. The sustainable-freeze component
+            # therefore stands: an unread key set may not buy the recoverable
+            # credit, and the honest direction here is toward reporting.
+            severity = max(severity, K.FREEZE_SUSTAINABLE)
+            basis = basis + ("freeze_recovery_independence_not_determined",)
         warnings.append(_warning("freeze_recovery_independence_not_determined", signal, note))
     else:
         notes.add(note)
@@ -489,15 +753,23 @@ def _keyset_independence(
     Independence is a property of owner key sets: P and U are independent iff
     ``|owners(U) \\ owners(P)| >= threshold(U)``. Comparing principal ADDRESSES
     publishes a protective credit for a configuration where a handful of keys
-    freeze the protocol and hold it.
+    freeze the protocol and hold it — and an address stands in for a key set only
+    where the principal IS a single key, i.e. an EOA. For every other type an
+    unread owner set makes the test uncomputable, not favourable.
     """
-    gate = signal.gate_input("freeze_recovery_principals")
-    if not gate.is_determined:
+    if principal.owners:
+        pauser_owners = principal.owners
+    elif principal.resolved_type == "eoa":
+        pauser_owners = frozenset({principal.address})
+    else:
+        return None, None, "pauser_key_set_not_determined"
+
+    gate = _gate(signal, "freeze_recovery_principals")
+    if not gate.is_determined or not isinstance(gate.value, list):
         return None, None, "recovery_path_not_determined_no_unset_claim"
-    pauser_owners = principal.owners or frozenset({principal.address})
     saw_safe = False
     best: int | None = None
-    for entry in sorted(gate.value or [], key=lambda e: str(e.get("address"))):
+    for entry in sorted(gate.value, key=lambda e: str(e.get("address"))):
         facts = principal_facts.get(int(entry.get("function_principal_id", -1)))
         if facts is None or facts.resolved_type != "safe" or not facts.owners or facts.threshold is None:
             continue
@@ -516,16 +788,25 @@ def _keyset_independence(
 
 
 def _instance(signal: FunctionSignal, severity: float, basis: tuple[str, ...]) -> _Instance:
-    magnitude = signal.gate_input("reach_magnitude_usd")
+    magnitude = _gate(signal, "reach_magnitude_usd")
     pricing_blocked = None
     native_only = False
+    asset_identity_undecidable = False
     if signal.claim_id == "flow.out":
-        if signal.gate_input("token_identity").is_determined:
+        if _gate(signal, "token_identity").is_determined:
             # Exactly one NON-FUNGIBLE token moves: pricing the row off a
             # fungible balance sheet is forbidden, not merely imprecise.
             pricing_blocked = "token_identity(non-fungible; pricing forbidden)"
-        asset_class = signal.gate_input("asset_class")
+        asset_class = _gate(signal, "asset_class")
         native_only = asset_class.is_determined and asset_class.value == "native_only"
+        # The W2 pricing precondition: single-asset pricing is licensed only by a
+        # decidable token identity. Undecidable ⇒ the unpriced branch, never the
+        # entity's whole fungible sheet read as this call's magnitude.
+        asset_identity_undecidable = (
+            asset_class.is_determined
+            and asset_class.value in SINGLE_ASSET_CLASSES
+            and not _gate(signal, "asset_identity").is_determined
+        )
     return _Instance(
         signal=signal,
         severity=severity,
@@ -535,6 +816,7 @@ def _instance(signal: FunctionSignal, severity: float, basis: tuple[str, ...]) -
         value_bound=signal.value_bound,
         pricing_blocked=pricing_blocked,
         native_only=native_only,
+        asset_identity_undecidable=asset_identity_undecidable,
     )
 
 
@@ -548,9 +830,10 @@ def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[s
 
 
 def _aggregate(
-    rows_by_key: dict[tuple[str, str], _Row],
+    rows_by_key: dict[tuple[str, str, float], _Row],
     value_plane: P.ValuePlane,
     closure: dict[str, set[str]],
+    units: _UnitResolver,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -558,7 +841,7 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        value_usd, value_basis, undetermined, reach = _row_value(row, value_plane, closure)
+        per_entity, value_usd, value_basis, undetermined, reach = _row_value(row, value_plane, closure)
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -580,12 +863,15 @@ def _aggregate(
         rows.append(
             {
                 "principal_unit": row.unit,
-                "principal": row.principal_label,
+                "unit_members": sorted(units.published_units()["members"].get(row.unit, [row.unit])),
+                "principal": f"{row.weakest_label} {min(row.principal_addresses)}",
+                "principal_addresses": sorted(row.principal_addresses),
                 "principal_kind": row.principal_kind,
                 "capability": row.capability,
                 "chain": row.unit.split("::", 1)[0],
                 "value_at_stake_usd": (round(value_usd, 2) if value_usd is not None else None),
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
+                "value_by_entity": {k: round(v, 2) for k, v in sorted(per_entity.items())},
                 "value_at_stake_basis": value_basis,
                 "value_at_stake_is_floor": bool(value_usd is not None and undetermined),
                 "value_band": (
@@ -599,7 +885,7 @@ def _aggregate(
                 "weakness": round(row.weakness, 4),
                 "weakest_gate": row.weakest_label,
                 "raw_points": round(K.SEV_SCALE * severity * row.weakness * band, 4),
-                "n_functions": len(row.instances),
+                "n_functions": len({(i.signal.deployment_address, i.signal.selector) for i in row.instances}),
                 "n_entities": len(row.seeds),
                 "reach_entities": sorted(reach),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
@@ -616,11 +902,17 @@ def _aggregate(
     findings: list[dict[str, Any]] = []
     subsumed: list[dict[str, Any]] = []
     for unit in sorted(by_unit):
-        ordered = sorted(by_unit[unit], key=lambda r: (-r["raw_points"], r["capability"]))
+        ordered = sorted(by_unit[unit], key=lambda r: (-r["raw_points"], r["capability"], r["weakness"]))
         top = dict(ordered[0])
         rest = ordered[1:]
         top["subsumed_capabilities"] = [
-            {"capability": r["capability"], "raw_points": r["raw_points"], "n_entities": r["n_entities"]} for r in rest
+            {
+                "capability": r["capability"],
+                "weakness": r["weakness"],
+                "raw_points": r["raw_points"],
+                "n_entities": r["n_entities"],
+            }
+            for r in rest
         ]
         top["subsumed_raw_points"] = round(sum(r["raw_points"] for r in rest), 4)
         if rest:
@@ -637,89 +929,95 @@ def _aggregate(
 
 def _row_value(
     row: _Row, value_plane: P.ValuePlane, closure: dict[str, set[str]]
-) -> tuple[float | None, str, list[dict[str, Any]], set[str]]:
-    """Value at stake for one (unit, capability) row: MAX per entity, never SUM.
+) -> tuple[dict[str, float], float | None, str, list[dict[str, Any]], set[str]]:
+    """Value at stake for one row: MAX per entity, never SUM.
 
     Two functions reaching the same vault charge it once, and a witnessed
     magnitude caps what the row may charge against an entity — the entity's whole
     balance sheet is not what a bounded call can move.
     """
-    if row.capability in K.TRANSITIVE_CAPABILITIES:
-        reach = _closure(row.seeds, closure)
-        per_entity: dict[str, float] = {}
-        undetermined: list[dict[str, Any]] = []
-        for key in sorted(reach):
-            total = value_plane.total(key)
-            if total is None:
-                continue
-            per_entity[key] = total
-        if not per_entity:
-            return None, "transitive_closure(no priced entity; not_determined)", undetermined, reach
-        return (
-            round(sum(sorted(per_entity.values())), 6),
-            "transitive control closure, MAX per (entity, asset)",
-            undetermined,
-            reach,
-        )
+    per_entity: dict[str, float] = {}
+    undetermined: list[dict[str, Any]] = []
+    transitive = row.capability in K.TRANSITIVE_CAPABILITIES
 
-    per_entity = {}
-    undetermined = []
     for instance in sorted(row.instances, key=lambda i: (i.signal.deployment_address, i.signal.function_name)):
+        entity = entity_key(instance.signal.chain, instance.signal.deployment_address)
         if instance.pricing_blocked:
+            undetermined.append(
+                {"function": instance.signal.function_name, "entity": entity, "why": instance.pricing_blocked}
+            )
+            continue
+        if instance.asset_identity_undecidable and not instance.magnitude.is_determined:
             undetermined.append(
                 {
                     "function": instance.signal.function_name,
-                    "entity": entity_key(instance.signal.chain, instance.signal.deployment_address),
-                    "why": instance.pricing_blocked,
+                    "entity": entity,
+                    "why": "token_identity_not_decidable(unpriced branch)",
                 }
             )
             continue
         if instance.signal.value_state != VALUE_STATE_PROVEN_REACH:
+            # The transitive closure is a REACH, not a licence: a signal whose own
+            # reach was never witnessed contributes no seed, however much value
+            # its deployment's neighbours hold.
             undetermined.append(
-                {
-                    "function": instance.signal.function_name,
-                    "entity": entity_key(instance.signal.chain, instance.signal.deployment_address),
-                    "why": instance.signal.value_basis,
-                }
+                {"function": instance.signal.function_name, "entity": entity, "why": instance.signal.value_basis}
             )
             continue
-        for key in instance.entity_keys:
-            contribution, why = _entity_contribution(instance, key, value_plane)
+
+        keys = set(instance.entity_keys)
+        if transitive:
+            keys = _closure(keys, closure)
+        for key in sorted(keys):
+            contribution, why = _entity_contribution(instance, key, value_plane, transitive=transitive)
             if contribution is None:
                 undetermined.append({"function": instance.signal.function_name, "entity": key, "why": why})
                 continue
             previous = per_entity.get(key)
             if previous is None or contribution > previous:
                 per_entity[key] = contribution
+
     reach = set(per_entity)
     if not per_entity:
-        return None, "not_determined", undetermined, reach
-    basis = "per-instance witnessed value, MAX per (entity, asset)"
+        return per_entity, None, "not_determined", undetermined, reach
+    basis = (
+        "transitive control closure, MAX per (entity, asset)"
+        if transitive
+        else "per-instance witnessed value, MAX per (entity, asset)"
+    )
     if undetermined:
         basis = f">= proven floor over {len(per_entity)} entity(ies); {len(undetermined)} instance(s) not_determined"
-    return round(sum(sorted(per_entity.values())), 6), basis, undetermined, reach
+    return per_entity, round(sum(sorted(per_entity.values())), 6), basis, undetermined, reach
 
 
-def _entity_contribution(instance: _Instance, key: str, value_plane: P.ValuePlane) -> tuple[float | None, str]:
+def _entity_contribution(
+    instance: _Instance, key: str, value_plane: P.ValuePlane, *, transitive: bool
+) -> tuple[float | None, str]:
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.
         native = P.native_value_state(value_plane, key)
         if not native.is_determined:
             return None, "native_only_flow+absent_native_row(not_determined)"
-        return float(native.value or 0.0), "native_only_flow x native_balance"
+        # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
+        held: float | None = float(native.value if native.value is not None else 0.0)
+        basis = "native_only_flow x native_balance"
+    else:
+        held = value_plane.total(key)
+        basis = "entity_holdings"
 
-    held = value_plane.total(key)
-    if instance.magnitude.is_determined:
-        magnitude = float(instance.magnitude.value or 0.0)
+    raw_magnitude = instance.magnitude.value
+    if instance.magnitude.is_determined and _is_number(raw_magnitude):
+        magnitude = float(raw_magnitude)  # type: ignore[arg-type]  # _is_number narrows it
         if instance.magnitude.state == "proven_exact":
             # The witness bounds what this call moves; the entity's sheet bounds
-            # what is there to move. Neither alone is the answer.
-            return (min(held, magnitude) if held is not None else magnitude), "witnessed_reach(exact)"
+            # what is there to move. Neither alone is the answer, and the sheet
+            # alone is the balance-sheet-as-a-reach error.
+            return (min(held, magnitude) if held is not None else magnitude), f"witnessed_reach(exact) x {basis}"
         return magnitude, "witnessed_reach(floor)"
     if held is None:
-        return None, "entity_value_not_determined"
-    return held, "entity_holdings"
+        return None, "entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"
+    return held, basis
 
 
 def _closure(seeds: set[str], closure: dict[str, set[str]]) -> set[str]:
@@ -736,9 +1034,11 @@ def _closure(seeds: set[str], closure: dict[str, set[str]]) -> set[str]:
     return seen
 
 
-def _grade(findings: list[dict[str, Any]], value_plane: P.ValuePlane) -> tuple[float | None, float | None, float]:
+def _grade(
+    findings: list[dict[str, Any]], value_plane: P.ValuePlane
+) -> tuple[float | None, float | None, float | None, list[dict[str, Any]]]:
     if not findings:
-        return None, None, 0.0
+        return None, None, None, []
     for index, finding in enumerate(findings):
         finding["net_points_lambda"] = round(finding["raw_points"] * (K.LAMBDA**index), 4)
     cumulative = round(sum(f["net_points_lambda"] for f in findings), 4)
@@ -746,29 +1046,60 @@ def _grade(findings: list[dict[str, Any]], value_plane: P.ValuePlane) -> tuple[f
 
     claimed: dict[str, float] = defaultdict(float)
     exposure = 0.0
+    gaps: list[dict[str, Any]] = []
+    any_priced = False
     for finding in findings:
         fraction = finding["severity_proven"] * finding["weakness"]
         mine = 0.0
+        priced_entities = 0
+        unpriced: list[str] = []
         for key in finding["reach_entities"]:
-            held = value_plane.total(key) or 0.0
-            if finding["capability"] not in K.TRANSITIVE_CAPABILITIES and finding["value_at_stake_usd"] is not None:
-                # A non-transitive capability can only expose what its own
-                # witness says it can move.
-                held = min(held, finding["value_at_stake_usd"])
+            # The row's OWN per-entity contribution, not its total: charging the
+            # row total against each entity would multiply one witnessed
+            # magnitude by the number of entities it was spread across.
+            held = finding["value_by_entity"].get(key)
+            if held is None:
+                # An unpriced entity contributes nothing AND is disclosed. Reading
+                # it as $0.00 publishes "this capability exposes nothing" out of a
+                # price lookup that never answered.
+                unpriced.append(key)
+                continue
+            priced_entities += 1
             room = max(0.0, 1.0 - claimed[key])
             take = min(fraction, room)
             if take > 0:
                 claimed[key] += take
                 mine += take * held
-        finding["exposure_usd"] = round(mine, 2)
-        exposure += finding["exposure_usd"]
+        if priced_entities:
+            any_priced = True
+            finding["exposure_usd"] = round(mine, 2)
+        else:
+            # No priced entity in reach: the exposure of this finding is a
+            # quantity nobody measured, and null is the only honest answer.
+            finding["exposure_usd"] = None
+        if unpriced or finding["exposure_usd"] is None:
+            gaps.append(
+                {
+                    "principal_unit": finding["principal_unit"],
+                    "capability": finding["capability"],
+                    "unpriced_reach_entities": sorted(unpriced),
+                    "undetermined_instances": finding["undetermined_instances"],
+                    "exposure_usd": finding["exposure_usd"],
+                    "reading": (
+                        "not counted and not read as zero; where the exposure is null nothing "
+                        "about this finding's dollar exposure was measured"
+                    ),
+                }
+            )
+        # A finding whose exposure is not_determined contributes nothing to the
+        # total and is disclosed in exposure_gaps; it is never summed as a zero.
+        if finding["exposure_usd"] is not None:
+            exposure += finding["exposure_usd"]
+
     tracked = value_plane.tracked_total
-    grade_exposure = round(100.0 * (1.0 - exposure / tracked), 3) if tracked else None
-    if grade_exposure is None:
-        # No priced value at all: an exposure ratio has no denominator and is
-        # not_determined rather than a perfect score.
-        return grade_lambda, None, round(exposure, 2)
-    return grade_lambda, grade_exposure, round(exposure, 2)
+    if not tracked or not any_priced:
+        return grade_lambda, None, round(exposure, 2), gaps
+    return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps
 
 
 def _confidence(
@@ -776,11 +1107,13 @@ def _confidence(
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
 
-    The perimeter is fixed independent of what has been analysed, so every unit
-    of resolution work can only move value from unanswered to answered. Two
-    figures, and the headline is the MINIMUM: knowing WHO can call something and
-    knowing WHAT it does are different questions, and reporting the larger
-    over-claims.
+    The perimeter is built from the value and control planes ONLY. Seeding it
+    from the signal population as well would make the denominator move with the
+    analysis: an unpriced contract outside the closure would enter only through
+    its own signals, and LOSING those signals would drop its unanswered weight
+    and RAISE the published confidence. Three figures, and the headline is the
+    MINIMUM — knowing who can call something, knowing what it does, and being
+    able to price what it reaches are different questions.
     """
     perimeter: dict[str, float] = {}
     for key in sorted(value_plane.per_asset):
@@ -789,21 +1122,17 @@ def _confidence(
         perimeter.setdefault(key, K.band(value_plane.total(key)))
         for source in sorted(closure[key]):
             perimeter.setdefault(source, K.band(value_plane.total(source)))
-    for signal in signals:
-        perimeter.setdefault(
-            entity_key(signal.chain, signal.deployment_address),
-            K.band(value_plane.total(entity_key(signal.chain, signal.deployment_address))),
-        )
     denominator = round(sum(sorted(perimeter.values())), 6)
 
     reach: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     scored: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    priced: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for signal in signals:
         key = entity_key(signal.chain, signal.deployment_address)
         answered = (
             signal.authority_openness == OPENNESS_OPEN
             or signal.principal_state == PRINCIPAL_STATE_ENUMERATED
-            or signal.gate_input("exact_empty_credit").is_determined
+            or _gate(signal, "exact_empty_credit").is_determined
         )
         reach[key][1] += 1
         scored[key][1] += 1
@@ -811,6 +1140,19 @@ def _confidence(
             reach[key][0] += 1
         if answered and signal.enters_grade:
             scored[key][0] += 1
+        if signal.claim_id == "flow.out":
+            # The pricing term: an unpriceable reach is a real gap in what the
+            # grade could measure, and leaving it out of confidence would make
+            # unpriceable value free.
+            priced[key][1] += 1
+            asset_class = _gate(signal, "asset_class")
+            decidable = not _gate(signal, "token_identity").is_determined and (
+                not asset_class.is_determined
+                or asset_class.value not in SINGLE_ASSET_CLASSES
+                or _gate(signal, "asset_identity").is_determined
+            )
+            if decidable and value_plane.total(key) is not None:
+                priced[key][0] += 1
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -822,17 +1164,21 @@ def _confidence(
 
     reach_pct = round(100.0 * weighted(reach) / denominator, 1) if denominator else 0.0
     capability_pct = round(100.0 * weighted(scored) / denominator, 1) if denominator else 0.0
+    priced_weight = sum(perimeter[k] for k in sorted(perimeter) if value_plane.total(k) is not None)
+    priced_pct = round(100.0 * priced_weight / denominator, 1) if denominator else 0.0
     return {
-        "pct": min(reach_pct, capability_pct),
+        "pct": min(reach_pct, capability_pct, priced_pct),
         "reachability_answered_pct": reach_pct,
         "capability_scored_pct": capability_pct,
+        "value_priced_pct": priced_pct,
+        "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
         "perimeter_entities": len(perimeter),
         "perimeter_value_weighted_denominator": denominator,
-        "headline_rule": "report the MINIMUM; the larger figure over-claims",
+        "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (
-            "the denominator is the perimeter and is fixed independent of what has "
-            "been analysed, so resolution work can only move value from unanswered "
-            "to answered"
+            "the denominator is the value plane plus the control closure, and is "
+            "built without reference to the signal population, so analysis work can "
+            "only move value from unanswered to answered"
         ),
     }
 
@@ -841,26 +1187,61 @@ def _confidence(
 
 
 def _collect_disclosures(
-    signal: FunctionSignal, earned_negatives: list[dict[str, Any]], warnings: list[dict[str, Any]]
+    signal: FunctionSignal,
+    earned_negatives: list[dict[str, Any]],
+    seen: set[tuple[str, str]],
+    warnings: list[dict[str, Any]],
 ) -> None:
-    credit = signal.gate_input("exact_empty_credit")
+    entity = entity_key(signal.chain, signal.deployment_address)
+    credit = _gate(signal, "exact_empty_credit")
     if credit.is_determined:
-        payload = credit.value if isinstance(credit.value, dict) else {}
+        if signal.principal_state == PRINCIPAL_STATE_ENUMERATED:
+            # "No resolved caller can reach this" and "these resolved callers can"
+            # cannot both be published. The contradiction is the disclosure.
+            warnings.append(
+                _warning(
+                    "exact_empty_credit_contradicted_by_principals",
+                    signal,
+                    "an earned empty caller set on a function whose principals resolved; credit refused",
+                )
+            )
+        elif (entity, signal.function_name) not in seen:
+            seen.add((entity, signal.function_name))
+            payload = credit.value if isinstance(credit.value, dict) else {}
+            earned_negatives.append(
+                {
+                    "entity": entity,
+                    "function": signal.function_name,
+                    "capability": signal.claim_id,
+                    "fact": "no resolved caller can reach this function",
+                    "state": "currently_unreachable",
+                    "observed_at_block": payload.get("block"),
+                    "empty_reason": payload.get("empty_reason"),
+                    "counterfactual": "one ownership/authority write restores reachability",
+                    "axiom": (
+                        "msg.sender != 0x0, so an owner disjunct of {0x0} is a singleton rather than the empty set"
+                    ),
+                    "re_enablable_by": NOT_DETERMINED,
+                }
+            )
+    if signal.value_state == VALUE_STATE_PROVEN_NO_REACH and (entity, signal.function_name + ":no_reach") not in seen:
+        # An earned negative in its own right: reach was WITNESSED and reached
+        # nothing. Publishing it beside the undetermined rows would lose the one
+        # value fact on the page that was actually proven.
+        seen.add((entity, signal.function_name + ":no_reach"))
         earned_negatives.append(
             {
-                "entity": entity_key(signal.chain, signal.deployment_address),
+                "entity": entity,
                 "function": signal.function_name,
                 "capability": signal.claim_id,
-                "fact": "no resolved caller can reach this function",
-                "state": "currently_unreachable",
-                "observed_at_block": payload.get("block"),
-                "empty_reason": payload.get("empty_reason"),
-                "counterfactual": "one ownership/authority write restores reachability",
-                "axiom": ("msg.sender != 0x0, so an owner disjunct of {0x0} is a singleton rather than the empty set"),
+                "fact": "reach was witnessed and reached no value",
+                "state": "proven_no_reach",
+                "basis": signal.value_basis,
+                "counterfactual": "funding the entity would give this capability something to reach",
                 "re_enablable_by": NOT_DETERMINED,
             }
         )
-    latch = signal.gate_input("latch_witness")
+    latch = _gate(signal, "latch_witness")
     if latch.is_determined:
         payload = latch.value if isinstance(latch.value, dict) else {}
         warnings.append(
@@ -882,6 +1263,9 @@ _NOTE_WARNINGS = {
         "the destination was not proven, so no severity is assigned and the row does not "
         "enter the grade; absence of a resolved constraint is not proof the destination is open"
     ),
+    "destination_witnesses_contradict": (
+        "two destination witnesses cannot both be true, so neither is adopted and the row is withheld"
+    ),
     "caller_arbitrary_escalation_withheld": "caller_arbitrary carries no behavioural existence proof",
     "reach_floor_not_a_bound": "a 0.00 floor is 'no proven bound', not a proven zero",
     "reach_floor_absent": "reach_indeterminate with no floor key: nothing about the balance was witnessed",
@@ -900,7 +1284,10 @@ _NOTE_WARNINGS = {
         "an empty caller set that did not earn the served credit: neither reachable nor "
         "proven unreachable, so no earned negative is published"
     ),
-    "registry_escalation_mutators_unverified": "an owner resolves but the role mutators are not present",
+    "registry_escalation_mutators_unverified": "an owner resolves but the role mutator selectors are not present",
+    "delay_change_gate_not_self_gated": (
+        "the delay-change path's own gate is not the contract itself, so no anti-decoy credit is taken"
+    ),
     "destination_redirectable_by_unresolved_setter": "the destination's setter is named by no witness",
     "concrete_destination_existential_not_a_fixed_destination": (
         "an observed sink is existential and cannot prove a fixed destination"
@@ -927,6 +1314,7 @@ def _summarise_warnings(warnings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(w.get("entity")),
             str(w.get("function")),
             str(w.get("capability")),
+            str(w.get("note")),
         ),
     )
 
@@ -949,4 +1337,4 @@ def _counterfactual(kind: str) -> str:
     }.get(kind, "n/a")
 
 
-__all__ = ["compute_protocol_score"]
+__all__ = ["GATE_PROVEN_TOKENS", "compute_protocol_score"]

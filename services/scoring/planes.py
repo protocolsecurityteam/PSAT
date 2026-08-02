@@ -28,10 +28,19 @@ NATIVE_ASSET = "native"
 # Control relations that carry authority. ``safe_owner`` is excluded (one owner
 # does not satisfy k-of-n) and ``controller_value_unattributed`` is excluded
 # (real principals whose authority RELATION was never established — a confidence
-# item, not an edge). ``capability_principal`` is admitted for REACHABILITY only:
-# it duplicates a link the authority graph already folds, so it must never be
-# counted as a second authority witness.
-CONTROL_RELATIONS = ("controller_value", "role_principal", "mapping_member", "capability_principal")
+# item, not an edge).
+CONTROL_RELATIONS = ("controller_value", "role_principal", "mapping_member")
+
+# ``capability_principal`` is deliberately NOT a reach relation here. Its own
+# register entry licenses it "for REACHABILITY only" on the argument that the
+# authority graph already folds the same link — but in THIS closure, which is
+# built from control edges alone, it is the sole carrier of those links rather
+# than a duplicate of them, so admitting it moves value no other witness moved.
+# Its population is also budget-gated (``PSAT_FP_MATERIALIZE_LIMIT``): a reach
+# that appears or disappears with a materialization budget is not a witnessed
+# fact about the protocol. The register's designated reach licence is
+# ``gated_contract_backlink``, which the distiller consumes.
+UNCONSUMED_REACH_RELATIONS = ("capability_principal",)
 
 
 def _lower(value: Any) -> str:
@@ -74,7 +83,10 @@ class ValuePlane:
 
     @property
     def tracked_total(self) -> float:
-        return round(sum(sorted((self.total(k) or 0.0) for k in self.per_asset)), 2)
+        # Only priced entities enter the denominator. An unpriced one contributes
+        # nothing rather than a zero, so the ratio is over what was measured.
+        totals = [self.total(k) for k in self.per_asset]
+        return round(sum(sorted(t for t in totals if t is not None)), 2)
 
 
 def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
@@ -117,7 +129,9 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     )
     for row in rows:
         key = plane.canonical(entity_key(chain_of.get(row.contract_id), address_of.get(row.contract_id)))
-        asset = _lower(row.token_address) or NATIVE_ASSET
+        # A NULL token_address IS the native asset by this column's definition,
+        # not a missing value standing in for one.
+        asset = _lower(row.token_address) if row.token_address else NATIVE_ASSET
         if asset == NATIVE_ASSET:
             native_seen.add(key)
         usd = _float(row.usd_value)
@@ -282,10 +296,13 @@ def _int(value: Any) -> int | None:
 def _safe_protection_verdict(details: dict[str, Any]) -> tuple[bool, str]:
     """Whether the k/n demotion is WITHHELD, and on what basis.
 
-    k/n is an upper bound on protection: a proven module or guard means the
-    threshold can be bypassed, so the credit is denied. An absent or unreadable
-    witness leaves the credit standing, annotated — the register's own reading —
-    and never mints a demotion claim in either direction.
+    k/n is an upper bound on protection, and only a PROVEN bypass denies the
+    credit: a witnessed module (``protection_is_upper_bound`` true, or an
+    enumerated non-empty module set) or a witnessed guard address. Everything
+    else — an absent plane, an unreadable head word, a basis that proves nothing
+    — leaves the credit standing, annotated. Withholding on an unreadable witness
+    would be a demotion claim minted from an absence, which the ruling for this
+    plane forbids in both directions.
     """
     protection = details.get("safe_protection")
     if not isinstance(protection, dict):
@@ -293,13 +310,14 @@ def _safe_protection_verdict(details: dict[str, Any]) -> tuple[bool, str]:
     if protection.get("protection_is_upper_bound") is True:
         return True, "protection_is_upper_bound(proven module)"
     module_set = protection.get("module_set")
-    basis = protection.get("module_set_basis")
-    proven_empty = isinstance(module_set, list) and not module_set and basis == "storage_linked_list_terminated"
-    if not proven_empty:
-        return True, f"module_set_not_proven_empty({basis or 'not_determined'})"
+    if isinstance(module_set, list) and module_set:
+        return True, "module_set_enumerated_non_empty(proven module)"
     if protection.get("guard") == "proven_address":
         return True, "guard_proven_present"
-    return False, f"module_set_proven_empty@{protection.get('probe_block')}"
+    basis = protection.get("module_set_basis")
+    if isinstance(module_set, list) and not module_set and basis == "storage_linked_list_terminated":
+        return False, f"module_set_proven_empty@{protection.get('probe_block')}"
+    return False, f"module_set_not_determined({basis or 'not_determined'});credit_stands"
 
 
 def _resolver_bases(details: dict[str, Any]) -> tuple[str, ...]:
@@ -394,6 +412,36 @@ def load_control_closure(session: Session, protocol_id: int) -> dict[str, set[st
             chain = coalesce_chain(contract.chain)
             controls[entity_key(chain, contract.admin)].add(entity_key(chain, contract.address))
     return {key: set(value) for key, value in sorted(controls.items())}
+
+
+def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, Any]:
+    """Edges that exist but are NOT walked as reach, and why. Provenance only.
+
+    A relation this scorer declines to walk is a STATED exclusion rather than a
+    silent one, so a consumer can see how much reach is being left unconsumed and
+    re-open the ruling when a witnessed licence lands.
+    """
+    from db.models import Contract, ControlGraphEdge
+
+    counts: dict[str, int] = {}
+    for relation in UNCONSUMED_REACH_RELATIONS:
+        counts[relation] = int(
+            session.query(sql_func.count(ControlGraphEdge.id))
+            .join(Contract, Contract.id == ControlGraphEdge.contract_id)
+            .filter(Contract.protocol_id == protocol_id, ControlGraphEdge.relation == relation)
+            .scalar()
+            or 0
+        )
+    return {
+        "edges": counts,
+        "reason": (
+            "capability_principal is the SOLE carrier of these links in a closure built "
+            "from control edges alone, not a duplicate of one, and its population is "
+            "materialization-budget gated — a reach that moves with a budget is not a "
+            "witnessed fact. The register's designated reach licence is "
+            "gated_contract_backlink, which the distiller consumes"
+        ),
+    }
 
 
 def load_upgrade_provenance(session: Session, protocol_id: int) -> dict[str, Any]:

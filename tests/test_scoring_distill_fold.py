@@ -28,6 +28,7 @@ from services.scoring.constants import (
 )
 from services.scoring.distill import distill_contract_signals, distill_job_signals
 from services.scoring.fold import compute_protocol_score
+from services.scoring.schema import entity_key
 from utils.scoring_status import (
     DESTINATION_STATE_CONSTRAINED_PROVEN,
     DESTINATION_STATE_NOT_APPLICABLE,
@@ -36,6 +37,8 @@ from utils.scoring_status import (
     GRADE_STATE_NOT_DETERMINED,
     PRINCIPAL_STATE_ENUMERATED,
     PRINCIPAL_STATE_NOT_DETERMINED,
+    REACH_GATE_LICENSED,
+    REACH_GATE_NOT_DETERMINED,
     SEVERITY_STATE_NOT_DETERMINED,
     SEVERITY_STATE_PROVEN,
     VALUE_STATE_NOT_DETERMINED,
@@ -250,7 +253,14 @@ def test_destination_fold_is_a_meet_not_last_wins(corpus):
 
 
 def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
+    """``not_applicable`` comes from an allow-list, never from "not in the bearing tuple"."""
     contract = corpus.contract("0x" + "d" * 40)
+    corpus.function(
+        contract,
+        name="pause",
+        claims=[{"claim_id": "pause.set", "tier": "idiom_structural", "witness": {}}],
+        selector="0x8456cb59",
+    )
     corpus.function(
         contract,
         name="upgradeTo",
@@ -263,10 +273,14 @@ def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
         claims=[_delegatecall({"target_kind": "indeterminate"}, {"state": "not_determined"})],
         selector="0xac9650d8",
     )
+    pause = corpus.only(contract, "pause.set")
     upgrade = corpus.only(contract, "upgrade.implementation")
     delegatecall = corpus.only(contract, "delegatecall.execute")
 
-    assert upgrade.destination.state == DESTINATION_STATE_NOT_APPLICABLE
+    # A latch is genuinely destination-free; an upgrade names a new
+    # implementation and this scorer has no destination model for it.
+    assert pause.destination.state == DESTINATION_STATE_NOT_APPLICABLE
+    assert upgrade.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert delegatecall.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert upgrade.enters_grade and not delegatecall.enters_grade
 
@@ -744,22 +758,106 @@ def test_token_identity_forbids_pricing_and_does_not_zero_the_row(corpus):
 
 
 def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
-    """§7.5: distil-in-memory and distil-then-persist are one implementation."""
+    """§7.5: distil-in-memory and distil-then-persist are one implementation.
+
+    Two contracts whose ids and addresses sort in OPPOSITE orders, so a fold that
+    inherited the in-memory iteration order instead of the pinned population
+    order would produce a different document rather than the same one by luck.
+    """
     from services.scoring.population import replace_contract_signals
 
-    contract = corpus.contract("0x" + "da" * 20)
-    function = corpus.function(
-        contract,
-        name="upgradeTo",
-        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-    )
-    corpus.principal(function, address=SAFE, resolved_type="safe", details=_safe_details(OWNERS, 4))
+    first = corpus.contract("0x" + "fa" * 20)
+    second = corpus.contract("0x" + "0a" * 20)
+    for index, contract in enumerate((first, second)):
+        function = corpus.function(
+            contract,
+            name=f"upgradeTo{index}",
+            claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
+            selector=f"0x1111111{index}",
+        )
+        corpus.principal(function, address=SAFE, resolved_type="safe", details=_safe_details(OWNERS, 4))
+        corpus.function(
+            contract,
+            name=f"pause{index}",
+            claims=[{"claim_id": "pause.set", "tier": "idiom_structural", "witness": {}}],
+            selector=f"0x2222222{index}",
+        )
 
     in_memory = corpus.score()
 
-    signals = distill_contract_signals(db_session, contract, job_id=corpus.job.id)
-    replace_contract_signals(db_session, contract_id=contract.id, signals=signals, job_id=corpus.job.id)
+    for contract in (first, second):
+        signals = distill_contract_signals(db_session, contract, job_id=corpus.job.id)
+        replace_contract_signals(db_session, contract_id=contract.id, signals=signals, job_id=corpus.job.id)
     db_session.commit()
     persisted = compute_protocol_score(db_session, corpus.protocol.id)
 
     assert persisted.document() == in_memory.document()
+    assert persisted.provenance["subsumed_rows"] == in_memory.provenance["subsumed_rows"]
+    assert persisted.provenance["principal_units"] == in_memory.provenance["principal_units"]
+    assert persisted.provenance["exposure_gaps"] == in_memory.provenance["exposure_gaps"]
+
+
+def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
+    """A reach licence from another protocol's graph is not this protocol's fact."""
+    from db.models import ControlGraphNode, Protocol
+
+    other = Protocol(name=f"other-{uuid.uuid4().hex[:8]}")
+    db_session.add(other)
+    db_session.flush()
+    foreign = Contract(address="0x" + "e1" * 20, chain="ethereum", protocol_id=other.id)
+    db_session.add(foreign)
+    db_session.commit()
+
+    manager = corpus.contract("0x" + "e2" * 20)
+    db_session.add(
+        ControlGraphNode(
+            contract_id=foreign.id,
+            node_type="contract",
+            address=manager.address,
+            details={
+                "gated_contract_backlink": {
+                    "gated_contract_address": manager.address,
+                    "declared_vault_matches_gated_contract": True,
+                    "probe_block": 100,
+                }
+            },
+        )
+    )
+    db_session.commit()
+    try:
+        corpus.function(
+            manager,
+            name="manage",
+            claims=[{"claim_id": "roles.grant", "tier": "standard_exact", "witness": {}}],
+        )
+        signal = corpus.only(manager, "roles.grant")
+        assert signal.reach_gate_state == REACH_GATE_NOT_DETERMINED
+        assert all(entity_key("ethereum", foreign.address) != key for key in signal.value_entity_keys)
+
+        # Positive control: the same backlink inside THIS protocol does license
+        # the pairing, so the negative above is a scope decision and not a
+        # recogniser that never fires.
+        vault = corpus.contract("0x" + "e3" * 20)
+        db_session.add(
+            ControlGraphNode(
+                contract_id=vault.id,
+                node_type="contract",
+                address=manager.address,
+                details={
+                    "gated_contract_backlink": {
+                        "gated_contract_address": manager.address,
+                        "declared_vault_matches_gated_contract": True,
+                        "probe_block": 100,
+                    }
+                },
+            )
+        )
+        db_session.commit()
+        licensed = corpus.only(manager, "roles.grant")
+        assert licensed.reach_gate_state == REACH_GATE_LICENSED
+        assert entity_key("ethereum", vault.address) in licensed.value_entity_keys
+    finally:
+        db_session.query(ControlGraphNode).filter_by(contract_id=foreign.id).delete()
+        db_session.query(Contract).filter_by(id=foreign.id).delete()
+        db_session.query(Protocol).filter_by(id=other.id).delete()
+        db_session.commit()
