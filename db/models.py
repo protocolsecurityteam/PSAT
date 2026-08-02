@@ -3100,6 +3100,34 @@ class ProtocolScoreLatest(Base):
     model_parameters: Mapped[Any] = mapped_column(JSONB)
 
 
+class ProtocolScoreQueue(Base):
+    """Dirty-flag queue driving the protocol-score fold, one row per protocol.
+
+    Same shape as ``monitoring_enrollment_queue`` and for the same reason: the
+    grade is a whole-protocol fold that cannot be accumulated per contract, so
+    every write site that changes a scored input enqueues the protocol and the
+    score loop re-folds it once. Marking is an upsert that bumps ``dirty_at``,
+    so N marks between two passes cost one fold, not N.
+
+    No lease columns, unlike the enrollment queue: that queue's drainer runs a
+    minutes-long governance build worth protecting from a competing drainer,
+    while a fold is seconds and insert-only — two concurrent folds of the same
+    protocol write two history rows and the newest wins, which is a duplicate
+    row rather than a corruption.
+
+    ``dirty_at`` is the ordering cursor AND the clearing predicate: the loop
+    deletes only rows whose ``dirty_at`` predates the instant it read the
+    population, so a mark that lands mid-fold survives and re-fires next pass
+    instead of being cleared by a fold that never saw it.
+    """
+
+    __tablename__ = "protocol_score_queue"
+
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), primary_key=True)
+    dirty_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://psat:psat@localhost:5433/psat")
