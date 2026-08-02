@@ -1114,6 +1114,13 @@ class EffectsWorker(BaseWorker):
         DB error outside a savepoint would abort the transaction carrying them —
         an abort the stage would not notice until its own commit silently became
         a rollback and the job advanced as a success with its verdicts gone.
+
+        **The opening flush is deliberately OUTSIDE the caught envelope.**
+        ``begin_nested`` flushes unconditionally, so leaving it inside would let
+        a failure in the stage's OWN pending writes be caught here and reported
+        as a distillation failure — while the job died at its real commit
+        anyway. Hoisted, a host-work failure raises as itself and everything the
+        handlers below report is genuinely this hook's.
         """
         from services.scoring.dirty import SCORE_DIRTY_EFFECTS, mark_protocol_score_dirty
         from services.scoring.distill import distill_job_signals
@@ -1129,7 +1136,11 @@ class EffectsWorker(BaseWorker):
         try:
             with session.begin_nested():
                 grouped = distill_job_signals(session, job)
-        except Exception:
+        except Exception as exc:
+            # A real degradation, not a side-effect: this job's contracts are
+            # now absent from the fold's population, so the protocol's next
+            # score is computed over less than the run produced.
+            record_degraded(phase="score_distillation", exc=exc, context={"protocol_id": protocol_id})
             logger.warning(
                 "Effects: score-signal distillation failed for job %s (protocol %s)",
                 job.id,
@@ -1171,8 +1182,16 @@ class EffectsWorker(BaseWorker):
                             "phase": "score_distillation",
                         },
                     )
-            except Exception:
+            except Exception as exc:
                 failed.append(contract_id)
+                # Same degradation, one contract wide: this contract keeps the
+                # signal set an earlier job derived, so the protocol's score is
+                # folded over a stale view of it.
+                record_degraded(
+                    phase="score_distillation",
+                    exc=exc,
+                    context={"protocol_id": protocol_id, "contract_id": contract_id},
+                )
                 logger.warning(
                     "Effects: score-signal persist failed for contract %s on job %s (protocol %s)",
                     contract_id,

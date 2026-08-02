@@ -48,7 +48,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
-from utils.logging import log_timed_phase, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.coverage_worker")
@@ -216,12 +216,15 @@ class CoverageWorker(BaseWorker):
             if mark_protocol_score_dirty(session, contract.protocol_id, SCORE_DIRTY_COVERAGE):
                 try:
                     session.commit()
-                except Exception:
+                except Exception as exc:
                     # The mark swallows its own failure; the commit it induces
                     # must too, or best-effort marking would fail the stage
                     # through the back door. The coverage rows are already
-                    # committed above, and the sweep re-folds this protocol.
+                    # committed above, and the sweep re-folds this protocol —
+                    # but a lost mark delays a real invalidation, so it is
+                    # recorded as a degradation rather than only logged.
                     session.rollback()
+                    record_degraded(phase="score_dirty_mark", exc=exc, context={"protocol_id": contract.protocol_id})
                     logger.warning(
                         "Coverage stage: protocol score dirty-mark commit failed for protocol %s",
                         contract.protocol_id,
