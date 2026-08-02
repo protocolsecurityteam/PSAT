@@ -28,6 +28,7 @@ from services.scoring.constants import (
 )
 from services.scoring.distill import distill_contract_signals, distill_job_signals
 from services.scoring.fold import compute_protocol_score
+from services.scoring.population import current_signals_for_protocol
 from services.scoring.schema import entity_key
 from utils.scoring_status import (
     DESTINATION_STATE_CONSTRAINED_PROVEN,
@@ -44,6 +45,12 @@ from utils.scoring_status import (
     VALUE_STATE_NOT_DETERMINED,
     VALUE_STATE_PROVEN_REACH,
 )
+
+
+def _identity(signal) -> tuple:
+    """The population's total-order key, which both feeding modes must agree on."""
+    return (signal.chain, signal.deployment_address, signal.contract_id, signal.selector, signal.claim_id)
+
 
 VAULT = "0x1111111111111111111111111111111111111111"
 SAFE = "0x2222222222222222222222222222222222222222"
@@ -783,14 +790,21 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
             selector=f"0x2222222{index}",
         )
 
-    in_memory = corpus.score()
+    in_memory_signals = distill_protocol_in_memory(db_session, corpus.protocol.id)
+    in_memory = compute_protocol_score(db_session, corpus.protocol.id, signals=in_memory_signals)
 
     for contract in (first, second):
         signals = distill_contract_signals(db_session, contract, job_id=corpus.job.id)
         replace_contract_signals(db_session, contract_id=contract.id, signals=signals, job_id=corpus.job.id)
     db_session.commit()
+    persisted_signals = current_signals_for_protocol(db_session, corpus.protocol.id)
     persisted = compute_protocol_score(db_session, corpus.protocol.id)
 
+    # The SEQUENCES, not just the documents: comparing only the folded output
+    # lets an ordering bug hide behind a fold that happens to be commutative on
+    # this fixture.
+    assert [_identity(s) for s in in_memory_signals] == [_identity(s) for s in persisted_signals]
+    assert in_memory_signals == persisted_signals
     assert persisted.document() == in_memory.document()
     assert persisted.provenance["subsumed_rows"] == in_memory.provenance["subsumed_rows"]
     assert persisted.provenance["principal_units"] == in_memory.provenance["principal_units"]

@@ -16,6 +16,7 @@ from services.scoring import distill as D
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.constants import (
+    FREEZE_CAPABILITY_PROVEN,
     FREEZE_KEYSET_RECOVERABLE,
     FREEZE_SUSTAINABLE,
     WEAKNESS_SAFE_SINGLE_SIGNER,
@@ -137,9 +138,11 @@ def facts(
     )
 
 
-def value_plane(per_asset: dict[str, dict[str, float]] | None = None) -> P.ValuePlane:
+def value_plane(per_asset: dict[str, dict[str, float]] | None = None, contracts: tuple[str, ...] = ()) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
+    # The confidence perimeter's base population, as the DB would supply it.
+    plane.contract_entities = set(contracts) | set(plane.per_asset)
     plane.provenance = {"stub": True}
     return plane
 
@@ -207,30 +210,69 @@ def test_f3_proven_owner_set_still_earns_its_rung(fold):
     assert document.findings[0]["weakest_gate"] == "Safe 3/4"
 
 
-def test_f2_unread_pauser_key_set_cannot_buy_the_recoverable_credit(fold):
-    recovery = [{"function_principal_id": 2, "chain": "ethereum", "address": SAFE2}]
+def _pause_document(fold, pauser: P.PrincipalFacts, recovery: P.PrincipalFacts | None):
+    entries = [{"function_principal_id": 2, "chain": "ethereum", "address": recovery.address}] if recovery else None
     signal = pause_sig(
         authority_openness="restricted",
         principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        gates={"freeze_recovery_principals": Tri.proven("enumerated", recovery).to_json()},
-        **proven(FREEZE_KEYSET_RECOVERABLE, ("freeze_capability_proven",)),
+        principal_refs=(PrincipalRef(1, "ethereum", pauser.address),),
+        gates=(
+            {"freeze_recovery_principals": Tri.proven("enumerated", entries).to_json()} if entries is not None else {}
+        ),
+        **proven(FREEZE_CAPABILITY_PROVEN, ("freeze_capability_proven",)),
         **reaches(KEY_C),
     )
-    document = fold(
-        [signal],
-        principals={
-            1: facts(1, SAFE, "safe", threshold=1),  # owner set never resolved
-            2: facts(2, SAFE2, "safe", owners=OWNERS, threshold=2),
-        },
-        value=value_plane({KEY_C: {"usdc": 5_000_000.0}}),
+    principals = {1: pauser}
+    if recovery is not None:
+        principals[2] = recovery
+    return fold([signal], principals=principals, value=value_plane({KEY_C: {"usdc": 5_000_000.0}}))
+
+
+def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
+    """The freezing key set was never read, so independence is uncomputable.
+
+    Nothing may move on that: not the recoverable credit (which would need proven
+    independence) and not the sustainable component (which would need proven
+    dependence). The question is published instead.
+    """
+    document = _pause_document(
+        fold,
+        facts(1, SAFE, "safe", threshold=1),  # owner set never resolved
+        facts(2, SAFE2, "safe", owners=OWNERS, threshold=2),
     )
     finding = document.findings[0]
     assert not any("keyset_independent" in note for note in finding["witness_notes"])
-    assert finding["severity_proven"] == FREEZE_SUSTAINABLE
+    assert finding["severity_proven"] == FREEZE_CAPABILITY_PROVEN
     # The single-signer cliff is not waived on the strength of a non-witness.
     assert finding["weakness"] == WEAKNESS_SAFE_UNCREDITED
     assert "freeze_recovery_independence_not_determined" in {w["kind"] for w in document.warnings}
+    assert "freeze_recovery_independence_not_determined" in finding["severity_basis"]
+
+
+def test_f2_every_undetermined_recovery_arm_lands_on_the_same_rung(fold):
+    """No recovery claim, an unresolved recovery principal and an unread key set."""
+    pauser = facts(1, SAFE, "safe", owners=OWNERS, threshold=2)
+    arms = [
+        _pause_document(fold, pauser, None),
+        _pause_document(fold, pauser, facts(2, SAFE2, "contract")),
+        _pause_document(fold, facts(1, SAFE, "safe", threshold=2), facts(2, SAFE2, "safe", owners=OWNERS, threshold=2)),
+    ]
+    assert {document.findings[0]["severity_proven"] for document in arms} == {FREEZE_CAPABILITY_PROVEN}
+
+
+def test_f2_proven_dependence_adds_the_sustainable_component(fold):
+    """The only witness that raises the freeze rung is a PROVEN dependent key set."""
+    shared = ("0x" + "1" * 40, "0x" + "2" * 40, "0x" + "3" * 40)
+    document = _pause_document(
+        fold,
+        facts(1, SAFE, "safe", owners=shared, threshold=1),
+        facts(2, SAFE2, "safe", owners=shared, threshold=2),
+    )
+    finding = document.findings[0]
+    assert finding["severity_proven"] == FREEZE_SUSTAINABLE
+    # And the single-signer cliff stands, because independence was refuted.
+    assert finding["weakness"] == WEAKNESS_SAFE_SINGLE_SIGNER
+    assert "freeze_keyset_not_independent" in finding["severity_basis"]
 
 
 def test_f2_an_eoa_pauser_is_its_own_key_set(fold):
@@ -721,7 +763,31 @@ def test_f6_selectors_are_what_the_facts_are_built_from():
     assert D._lower(canonical.selector) in D._SOLMATE_MUTATOR_SELECTORS
 
 
-def test_f6_the_delay_credit_examines_the_scored_functions_own_gate():
+def test_b5_the_self_gated_delay_credit_is_retired():
+    """ "Every resolved principal is the contract" is a lower bound, not closure.
+
+    The enumeration it reads is documented as a proven LOWER BOUND on the caller
+    set, so "no other caller resolved" cannot license driving a capability-class
+    base to exactly zero. The observation is published; the severity does not
+    move on it.
+    """
+    entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
+    self_gated, basis, notes = D._severity(
+        _contract_facts(),
+        None,
+        claim_id="timelock.set_delay",
+        entries=entries,
+        destination=D._UNDETERMINED_DESTINATION,
+        openness="restricted",
+        deployment_address=C,
+        self_gated=True,
+    )
+    assert self_gated.value == 0.3
+    assert "delay_gate_self_gated_lower_bound" in notes
+    assert "delay_change_path_self_gated" not in basis
+
+
+def test_f6_the_delay_gate_observation_names_which_arm_it_took():
     entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
     ungated, _, notes = D._severity(
         _contract_facts(),
@@ -745,8 +811,8 @@ def test_f6_the_delay_credit_examines_the_scored_functions_own_gate():
     )
     assert ungated.value == 0.3
     assert "delay_change_gate_not_self_gated" in notes
-    assert gated.value == 0.0
-    assert "delay_change_path_self_gated" in basis
+    assert gated.value == 0.3
+    assert "capability_class_base" in basis
 
 
 def test_g3_contradictory_destination_witnesses_fail_closed():
@@ -1006,3 +1072,247 @@ def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):
     assert priced["value_at_stake_usd"] == 50_000_000.0
     # And the gap is charged to confidence rather than being free.
     assert fold([undecidable], value=plane).model_parameters["confidence_detail"]["value_priced_pct"] is not None
+
+
+# --------------------------------------------------------------------------
+# Round 2: attacking the fixes
+# --------------------------------------------------------------------------
+
+
+def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
+    """Subsumption removes a row's POINTS, never the unit's reach.
+
+    A vault that only a subsumed row reaches is still value the unit provably
+    reaches, and dropping it from the exposure accounting publishes a smaller
+    exposure for a unit that got no smaller.
+    """
+    top = sig(
+        function_name="upgradeTo",
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    subsumed = sig(
+        claim_id="roles.grant",
+        function_name="grantRole",
+        deployment_address=VAULT,
+        contract_id=2,
+        selector="0xfeedface",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.55),
+        **reaches(KEY_V),
+    )
+    plane = value_plane({KEY_C: {"usdc": 1_000_000.0}, KEY_V: {"usdc": 14_757_365.89}})
+    document = fold([top, subsumed], principals={1: facts(1, EOA, "eoa")}, value=plane)
+
+    finding = document.findings[0]
+    assert finding["capability"] == "upgrade.implementation"
+    assert KEY_V in finding["subsumed_exclusive_value_by_entity"]
+    assert KEY_V in finding["exposure_entities_charged"]
+    # The subsumed row's exclusive vault is charged once, at the unit's finding.
+    assert finding["exposure_usd"] > 1_000_000.0
+    assert finding["subsumed_capabilities"][0]["value_at_stake_usd"] == 14_757_365.89
+
+
+def test_b1_an_entity_both_rows_reach_is_still_charged_once(fold):
+    signals = [
+        sig(
+            claim_id=claim,
+            function_name=f"fn{index}",
+            deployment_address=C,
+            contract_id=index + 1,
+            selector=f"0x0000000{index}",
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+            **proven(severity),
+            **reaches(KEY_C),
+        )
+        for index, (claim, severity) in enumerate((("upgrade.implementation", 1.0), ("roles.grant", 0.55)))
+    ]
+    plane = value_plane({KEY_C: {"usdc": 1_000_000.0}})
+    document = fold(signals, principals={1: facts(1, EOA, "eoa")}, value=plane)
+    finding = document.findings[0]
+    assert finding["subsumed_exclusive_value_by_entity"] == {}
+    assert finding["exposure_usd"] <= 1_000_000.0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [1, 2, 3],
+        ["0xabc"],
+        {"function_principal_id": 1},
+        [{"address": "0x" + "9" * 40, "function_principal_id": "abc"}],
+        [{"address": 7, "function_principal_id": 9}],
+    ],
+)
+def test_b2_a_malformed_list_payload_withholds_its_row_and_not_the_fold(fold, payload):
+    """One bad JSONB on one function must not cost the protocol its score."""
+    hostile = pause_sig(
+        function_name="pause",
+        deployment_address=VAULT,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates={"freeze_recovery_principals": Tri.proven("enumerated", payload).to_json()},
+        **proven(FREEZE_CAPABILITY_PROVEN, ("freeze_capability_proven",)),
+        **reaches(KEY_V),
+    )
+    healthy = sig(
+        function_name="upgradeTo",
+        contract_id=9,
+        selector="0x3659cfe6",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    document = fold(
+        [hostile, healthy],
+        principals={1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2)},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}, KEY_V: {"usdc": 1_000_000.0}}),
+    )
+    assert [f["capability"] for f in document.findings] == ["upgrade.implementation"]
+    assert "gate_input_malformed" in {w["kind"] for w in document.warnings}
+
+
+def test_b2_a_well_formed_recovery_payload_still_reads(fold):
+    document = _pause_document(
+        fold,
+        facts(1, SAFE, "safe", owners=("0x" + "e" * 40, "0x" + "f" * 40), threshold=2),
+        facts(2, SAFE2, "safe", owners=OWNERS, threshold=2),
+    )
+    assert "gate_input_malformed" not in {w["kind"] for w in document.warnings}
+    assert any("keyset_independent" in note for note in document.findings[0]["witness_notes"])
+
+
+def test_b3_a_proven_public_path_refuses_the_earned_negative(fold):
+    """``none_required`` is the opposite pole, and the worse contradiction."""
+    earned = Tri.proven("earned", {"empty_reason": "owner_read_zero", "block": 21_000_000})
+    signal = sig(
+        function_name="upgradeTo",
+        authority_openness="open",
+        principal_state="none_required",
+        gates={"exact_empty_credit": earned.to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
+    assert document.earned_negatives == []
+    contradiction = [w for w in document.warnings if w["kind"] == "exact_empty_credit_contradicted_by_principals"]
+    assert contradiction and contradiction[0]["principal_state"] == "none_required"
+    assert document.findings[0]["principal"].startswith("ANYONE")
+
+
+def test_b4_unresolved_contracts_lower_confidence(fold):
+    """An unpriced, unclosured contract still carries its unanswered weight."""
+    vault = sig(
+        function_name="upgradeTo",
+        deployment_address=VAULT,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        **proven(1.0),
+        **reaches(KEY_V),
+    )
+    unresolved_addresses = tuple("0x" + str(index) * 40 for index in (5, 6, 7))
+    unresolved = [
+        sig(
+            claim_id="roles.grant",
+            function_name=f"grantRole{index}",
+            deployment_address=address,
+            contract_id=10 + index,
+            selector=f"0x0000000{index}",
+            **proven(0.55),
+            **reaches(entity_key("ethereum", address)),
+        )
+        for index, address in enumerate(unresolved_addresses)
+    ]
+    plane = value_plane(
+        {KEY_V: {"usdc": 1_000_000_000.0}},
+        contracts=tuple(entity_key("ethereum", a) for a in unresolved_addresses),
+    )
+    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2)}
+
+    answered_only = fold([vault], principals=principals, value=plane)
+    with_unresolved = fold([vault, *unresolved], principals=principals, value=plane)
+
+    assert answered_only.confidence_pct is not None
+    assert with_unresolved.confidence_pct is not None
+    assert with_unresolved.confidence_pct < 100.0
+    # Analysing MORE cannot raise the figure above what the perimeter licenses,
+    # and the three unresolved contracts are visible in it either way.
+    assert with_unresolved.confidence_pct <= answered_only.confidence_pct
+    detail = with_unresolved.model_parameters["confidence_detail"]
+    assert detail["perimeter_entities"] == 4
+    assert detail["signal_entities_outside_perimeter"] == []
+
+
+def test_b4_an_unpriced_contract_is_in_its_own_denominator(fold):
+    """The A5 shape: three unresolved contracts must MATERIALLY lower the figure."""
+    vault = sig(
+        function_name="upgradeTo",
+        deployment_address=VAULT,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        **proven(1.0),
+        **reaches(KEY_V),
+    )
+    bare = value_plane({KEY_V: {"usdc": 1_000_000_000.0}})
+    wide = value_plane(
+        {KEY_V: {"usdc": 1_000_000_000.0}},
+        contracts=tuple(entity_key("ethereum", "0x" + str(i) * 40) for i in (5, 6, 7)),
+    )
+    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2)}
+    narrow_doc = fold([vault], principals=principals, value=bare)
+    wide_doc = fold([vault], principals=principals, value=wide)
+    assert narrow_doc.confidence_pct is not None and wide_doc.confidence_pct is not None
+    assert wide_doc.confidence_pct < narrow_doc.confidence_pct
+
+
+def test_s8_a_proven_no_reach_instance_is_not_counted_as_undetermined(fold):
+    reaching = flow_sig(
+        function_name="withdraw",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        gates={"reach_magnitude_usd": Tri.proven("proven_exact", 500.0).to_json()},
+        **proven(0.9, ("caller_arbitrary_proven",)),
+        **reaches(KEY_C, bound=VALUE_BOUND_EXACT),
+    )
+    empty = flow_sig(
+        function_name="drain",
+        selector="0xabababab",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        value_state="proven_no_reach",
+        value_basis="observed_reach_value_usd=0(proven)",
+        **proven(0.9, ("caller_arbitrary_proven",)),
+    )
+    document = fold([reaching, empty], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
+    finding = document.findings[0]
+    assert finding["undetermined_instances"] == []
+    assert len(finding["proven_no_reach_instances"]) == 1
+    assert "not_determined" not in finding["value_at_stake_basis"]
+    assert "proven_no_reach" in finding["value_at_stake_basis"]
+
+
+def test_s7_the_destination_free_allow_list_exists_in_the_claims_registry():
+    """A renamed claim must not silently become 'destination-free'."""
+    from services.static.claims.matchers import discover
+    from services.static.claims.registry import registry
+    from utils.scoring_status import DESTINATION_FREE_CLAIMS
+
+    discover()
+    registry_ids = set(registry())
+    unknown = [claim for claim in DESTINATION_FREE_CLAIMS if claim not in registry_ids]
+    assert unknown == [], f"DESTINATION_FREE_CLAIMS names claims the registry does not define: {unknown}"

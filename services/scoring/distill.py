@@ -1320,14 +1320,12 @@ def _severity(
         elif owner:
             notes.add("registry_escalation_mutators_unverified")
     elif claim_id == "timelock.set_delay":
-        if self_gated:
-            # The credit rests on THIS function's own resolved gate being the
-            # contract itself: the delay cannot be shortened without first paying
-            # it. A self-gated sibling proves nothing about this path.
-            base = K.TIMELOCK_SELF_GATED_DELAY
-            basis.append("delay_change_path_self_gated")
-        else:
-            notes.add("delay_change_gate_not_self_gated")
+        # No credit either way. "Every resolved principal is the contract itself"
+        # is "no other caller RESOLVED", and the principal enumeration is a proven
+        # LOWER BOUND on the caller set — the one thing it can never witness is
+        # that the set is closed. The observation is published; the severity does
+        # not move on it.
+        notes.add("delay_gate_self_gated_lower_bound" if self_gated else "delay_change_gate_not_self_gated")
 
     return Tri.proven(SEVERITY_STATE_PROVEN, base), tuple(basis), notes
 
@@ -1335,12 +1333,14 @@ def _severity(
 def _pause_severity(entries: list[dict[str, Any]], notes: set[str]) -> tuple[Tri[float], tuple[str, ...], set[str]]:
     """Built up from zero, from proven components only.
 
-    The proven existence of a freeze capability is the first component; a proven
-    auto-expiry refines it downward. The sustainable-freeze component is added by
-    the fold, and only where key-set dependence is PROVEN — never where recovery
-    independence merely failed to be established.
+    The proven existence of a freeze capability is the first and unconditional
+    component; a proven auto-expiry refines it downward. The sustainable-freeze
+    component is added by the fold, and only where key-set dependence is PROVEN.
+    Every undetermined recovery question — no recovery claim, an unresolved
+    recovery principal, an unread freezing key set — leaves this rung exactly
+    where it is, in either direction.
     """
-    severity = K.BASE_SEVERITY["pause.set"] + K.FREEZE_KEYSET_RECOVERABLE
+    severity = K.BASE_SEVERITY["pause.set"] + K.FREEZE_CAPABILITY_PROVEN
     basis = ["freeze_capability_proven"]
     for entry in entries:
         observed = (entry.get("witness") or {}).get("observed") or {}

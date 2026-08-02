@@ -56,8 +56,16 @@ def _float(value: Any) -> float | None:
 
 @dataclass
 class ValuePlane:
-    """Per-entity value, reduced MAX per (entity, asset)."""
+    """Per-entity value, reduced MAX per (entity, asset).
 
+    ``contract_entities`` is every entity the protocol's ``contracts`` rows name,
+    priced or not. It is the confidence perimeter's base population: discovery
+    fixes it, so it does not move with what has been analysed, and an unpriced
+    contract outside the control closure still carries its unanswered weight
+    instead of vanishing from its own denominator.
+    """
+
+    contract_entities: set[str] = field(default_factory=set)
     per_asset: dict[str, dict[str, float]] = field(default_factory=dict)
     native_fact: dict[str, str] = field(default_factory=dict)
     alias: dict[str, str] = field(default_factory=dict)
@@ -103,6 +111,7 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         chain = coalesce_chain(contract.chain)
         chain_of[contract.id] = chain
         address_of[contract.id] = _lower(contract.address)
+        plane.contract_entities.add(entity_key(chain, contract.address))
         if not contract.implementation:
             continue
         impl_key = entity_key(chain, contract.implementation)
@@ -208,8 +217,10 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             }
         )
 
+    plane.contract_entities = {plane.canonical(key) for key in plane.contract_entities}
     plane.provenance = {
         "entity_key": "effective_functions.deployment_address -> contracts.address, chain-scoped",
+        "contract_entities": len(plane.contract_entities),
         "reduction": "MAX per (entity, asset)",
         "balance_rows": len(rows),
         "restaking_rows": len(positions),

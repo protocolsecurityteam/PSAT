@@ -158,6 +158,11 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
                         for r in sorted(candidates, key=lambda r: -(r.get("raw_points") or 0.0))
                     ],
                     "cause": "one row per ACCESS PATH: delayed value is charged at the delayed rung",
+                    # Computed against the top row as well: a split that ALSO
+                    # moved weakness, severity or the band must not hide behind
+                    # the split label.
+                    "caused_by": causes,
+                    "arithmetic_changed": bool(causes),
                 }
             )
         elif causes:

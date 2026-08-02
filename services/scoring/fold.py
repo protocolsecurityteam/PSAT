@@ -55,6 +55,8 @@ from utils.scoring_status import (
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
     PRINCIPAL_STATE_ENUMERATED,
+    PRINCIPAL_STATE_NONE_REQUIRED,
+    PRINCIPAL_STATE_NOT_DETERMINED,
     SCORE_TRIGGER_MANUAL,
     SEVERITY_STATE_PROVEN,
     VALUE_STATE_PROVEN_NO_REACH,
@@ -88,6 +90,25 @@ GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
 # READ as well as at construction: a string "1e12" compares and multiplies just
 # fine in Python and would charge $1T off an untyped payload.
 NUMERIC_GATES = frozenset({"reach_magnitude_usd"})
+
+# Every gate's payload SHAPE, checked before any consumer walks it. ``gate_inputs``
+# is free-form JSONB, so a list the fold iterates as dicts can arrive as a list of
+# ints; without this the walk raises out of ``compute_protocol_score`` and one bad
+# payload on one function silently costs the whole protocol its score.
+GATE_PAYLOAD_SHAPES: dict[str, str] = {
+    "exact_empty_credit": "object",
+    "latch_witness": "object",
+    "asset_identity": "object",
+    "reach_magnitude_usd": "number",
+    "token_identity": "bool",
+    "input_seeded": "bool",
+    "contract_balance_seeded": "bool",
+    "amount_capped_by_balance": "bool",
+    "asset_class": "string",
+    "destination_basis": "string",
+    "freeze_coverage_fraction": "string_list",
+    "freeze_recovery_principals": "principal_ref_list",
+}
 
 # The gates the fold WILL read for a given claim. A signal missing one of them is
 # a distiller bug, and it withholds its own row: reading a gate that was never
@@ -258,6 +279,12 @@ def compute_protocol_score(
         "exposure_gaps": exposure_gaps,
         "principal_units": units.published_units(),
         "safe_keyset_overlaps": units.overlaps,
+        "unit_evidence_scope": (
+            "principal_units and safe_keyset_overlaps cover only the Safes reachable "
+            "from claim-bearing signals: a Safe that gates nothing this scorer scored "
+            "is absent from the union-find, so an overlap it would have merged is "
+            "not_determined rather than proven absent"
+        ),
         "upgrade_history": P.load_upgrade_provenance(session, protocol_id),
         "unconsumed_reach_relations": P.unconsumed_reach_relations(session, protocol_id),
         "ledgers": P.load_ledgers(session, protocol_id),
@@ -382,9 +409,41 @@ def _malformed_gates(signal: FunctionSignal) -> list[str]:
         if tri.state not in expected:
             bad.append(name)
             continue
-        if name in NUMERIC_GATES and not _is_number(tri.value):
+        if not _payload_has_shape(name, tri.value):
             bad.append(name)
     return bad
+
+
+def _payload_has_shape(name: str, value: Any) -> bool:
+    """Whether a proven gate payload is the shape its consumers walk."""
+    shape = GATE_PAYLOAD_SHAPES.get(name)
+    if shape is None:
+        return True
+    if shape == "number":
+        return _is_number(value)
+    if shape == "bool":
+        return isinstance(value, bool)
+    if shape == "string":
+        return isinstance(value, str)
+    if shape == "object":
+        return isinstance(value, dict)
+    if shape == "string_list":
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if shape == "principal_ref_list":
+        return isinstance(value, list) and all(_is_principal_ref(item) for item in value)
+    return False
+
+
+def _is_principal_ref(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    raw_id = entry.get("function_principal_id")
+    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+        return False
+    for key in ("chain", "address"):
+        if key in entry and entry[key] is not None and not isinstance(entry[key], str):
+            return False
+    return True
 
 
 def _is_number(value: Any) -> bool:
@@ -703,20 +762,23 @@ def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
 
     out: list[Any] = []
     for signal in signals:
-        if signal.claim_id != "pause.set":
+        # Runs before the per-signal gate check in the main loop, so it repeats
+        # it: a malformed payload must not be walked HERE either.
+        if signal.claim_id != "pause.set" or _malformed_gates(signal):
             continue
         gate = _gate(signal, "freeze_recovery_principals")
         if not gate.is_determined or not isinstance(gate.value, list):
             continue
         for entry in gate.value:
-            if isinstance(entry, dict) and entry.get("function_principal_id") is not None:
+            if _is_principal_ref(entry):
                 out.append(
                     _Ref(
                         function_principal_id=int(entry["function_principal_id"]),
                         # The gate's entries are minted beside the pause signal on
                         # the same contract, so the chain is the same fact, not a
-                        # substitute for an unread one.
-                        chain=str(entry.get("chain", signal.chain)),
+                        # substitute for an unread one. A JSONB null falls back to
+                        # that same fact rather than stringifying to "None".
+                        chain=str(entry.get("chain") or signal.chain),
                         address=str(entry.get("address") or ""),
                     )
                 )
@@ -759,17 +821,20 @@ def _fold_severity(
             )
         )
     elif verdict is None:
+        # Every undetermined arm — no recovery claim, an unresolved recovery
+        # principal, an unread freezing key set — leaves the rung where the
+        # capability's proven existence put it. Raising here would move severity
+        # on an absent witness; lowering would credit one. The question itself is
+        # published instead.
         notes.add(note)
-        if note == "pauser_key_set_not_determined":
-            # The freezing key set itself was never read, so independence is not
-            # computable in either direction. The sustainable-freeze component
-            # therefore stands: an unread key set may not buy the recoverable
-            # credit, and the honest direction here is toward reporting.
-            severity = max(severity, K.FREEZE_SUSTAINABLE)
-            basis = basis + ("freeze_recovery_independence_not_determined",)
+        basis = basis + ("freeze_recovery_independence_not_determined",)
         warnings.append(_warning("freeze_recovery_independence_not_determined", signal, note))
     else:
+        # PROVEN independence: the credited rung, which equals the existence rung
+        # today, so what changes is the basis rather than the number.
+        severity = min(severity, K.FREEZE_KEYSET_RECOVERABLE)
         notes.add(note)
+        basis = basis + ("freeze_keyset_independent",)
     return severity, basis, notes
 
 
@@ -797,8 +862,8 @@ def _keyset_independence(
         return None, None, "recovery_path_not_determined_no_unset_claim"
     saw_safe = False
     best: int | None = None
-    for entry in sorted(gate.value, key=lambda e: str(e.get("address"))):
-        facts = principal_facts.get(int(entry.get("function_principal_id", -1)))
+    for entry in sorted((e for e in gate.value if _is_principal_ref(e)), key=lambda e: str(e.get("address"))):
+        facts = principal_facts.get(int(entry["function_principal_id"]))
         if facts is None or facts.resolved_type != "safe" or not facts.owners or facts.threshold is None:
             continue
         saw_safe = True
@@ -869,7 +934,7 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        per_entity, value_usd, value_basis, undetermined, reach = _row_value(row, value_plane, closure)
+        per_entity, value_usd, value_basis, undetermined, proven_no_reach, reach = _row_value(row, value_plane, closure)
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -911,6 +976,7 @@ def _aggregate(
                     else NOT_DETERMINED
                 ),
                 "undetermined_instances": undetermined,
+                "proven_no_reach_instances": proven_no_reach,
                 "severity_proven": round(severity, 4),
                 "severity_basis": sorted({b for instance in row.instances for b in instance.severity_basis}),
                 "weakness": round(row.weakness, 4),
@@ -944,11 +1010,25 @@ def _aggregate(
                 "access_path": r["access_path"],
                 "weakness": r["weakness"],
                 "raw_points": r["raw_points"],
+                "value_at_stake_usd": r["value_at_stake_usd"],
                 "n_entities": r["n_entities"],
             }
             for r in rest
         ]
         top["subsumed_raw_points"] = round(sum(r["raw_points"] for r in rest), 4)
+        # Subsumption removes a row's POINTS, never the unit's reach. Value that
+        # only a subsumed row names is still value this unit provably reaches, and
+        # dropping it from the exposure accounting would publish a smaller
+        # exposure for a unit that got no smaller.
+        exclusive: dict[str, float] = {}
+        for row in rest:
+            for key, held in row["value_by_entity"].items():
+                if key in top["value_by_entity"]:
+                    continue
+                previous = exclusive.get(key)
+                if previous is None or held > previous:
+                    exclusive[key] = held
+        top["subsumed_exclusive_value_by_entity"] = dict(sorted(exclusive.items()))
         if rest:
             top["counterfactual"] += (
                 "; this row subsumes " + ", ".join(r["capability"] for r in rest) + " — fixing the top "
@@ -963,7 +1043,7 @@ def _aggregate(
 
 def _row_value(
     row: _Row, value_plane: P.ValuePlane, closure: dict[str, set[str]]
-) -> tuple[dict[str, float], float | None, str, list[dict[str, Any]], set[str]]:
+) -> tuple[dict[str, float], float | None, str, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     """Value at stake for one row: MAX per entity, never SUM.
 
     Two functions reaching the same vault charge it once, and a witnessed
@@ -972,6 +1052,7 @@ def _row_value(
     """
     per_entity: dict[str, float] = {}
     undetermined: list[dict[str, Any]] = []
+    proven_no_reach: list[dict[str, Any]] = []
     transitive = row.capability in K.TRANSITIVE_CAPABILITIES
 
     for instance in sorted(row.instances, key=lambda i: (i.signal.deployment_address, i.signal.function_name)):
@@ -988,6 +1069,14 @@ def _row_value(
                     "entity": entity,
                     "why": "token_identity_not_decidable(unpriced branch)",
                 }
+            )
+            continue
+        if instance.signal.value_state == VALUE_STATE_PROVEN_NO_REACH:
+            # An EARNED negative, not a gap: reach was witnessed and reached
+            # nothing. Counting it among the undetermined instances would make a
+            # proven fact read as a missing one.
+            proven_no_reach.append(
+                {"function": instance.signal.function_name, "entity": entity, "basis": instance.signal.value_basis}
             )
             continue
         if instance.signal.value_state != VALUE_STATE_PROVEN_REACH:
@@ -1013,7 +1102,8 @@ def _row_value(
 
     reach = set(per_entity)
     if not per_entity:
-        return per_entity, None, "not_determined", undetermined, reach
+        basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
+        return per_entity, None, basis, undetermined, proven_no_reach, reach
     basis = (
         "transitive control closure, MAX per (entity, asset)"
         if transitive
@@ -1021,7 +1111,9 @@ def _row_value(
     )
     if undetermined:
         basis = f">= proven floor over {len(per_entity)} entity(ies); {len(undetermined)} instance(s) not_determined"
-    return per_entity, round(sum(sorted(per_entity.values())), 6), basis, undetermined, reach
+    if proven_no_reach:
+        basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
+    return per_entity, round(sum(sorted(per_entity.values())), 6), basis, undetermined, proven_no_reach, reach
 
 
 def _entity_contribution(
@@ -1087,11 +1179,15 @@ def _grade(
         mine = 0.0
         priced_entities = 0
         unpriced: list[str] = []
-        for key in finding["reach_entities"]:
+        exclusive = finding.get("subsumed_exclusive_value_by_entity") or {}
+        charged_entities = list(finding["reach_entities"]) + [
+            k for k in exclusive if k not in finding["reach_entities"]
+        ]
+        for key in charged_entities:
             # The row's OWN per-entity contribution, not its total: charging the
             # row total against each entity would multiply one witnessed
             # magnitude by the number of entities it was spread across.
-            held = finding["value_by_entity"].get(key)
+            held = finding["value_by_entity"].get(key, exclusive.get(key))
             if held is None:
                 # An unpriced entity contributes nothing AND is disclosed. Reading
                 # it as $0.00 publishes "this capability exposes nothing" out of a
@@ -1104,6 +1200,9 @@ def _grade(
             if take > 0:
                 claimed[key] += take
                 mine += take * held
+        finding["exposure_entities_charged"] = sorted(
+            key for key in charged_entities if finding["value_by_entity"].get(key, exclusive.get(key)) is not None
+        )
         if priced_entities:
             any_priced = True
             finding["exposure_usd"] = round(mine, 2)
@@ -1116,7 +1215,11 @@ def _grade(
                 {
                     "principal_unit": finding["principal_unit"],
                     "capability": finding["capability"],
-                    "unpriced_reach_entities": sorted(unpriced),
+                    # S5: repopulated from the row's own undetermined instances,
+                    # which is where an unpriced entity actually lands.
+                    "unpriced_entities": sorted(
+                        set(unpriced) | {row["entity"] for row in finding["undetermined_instances"]}
+                    ),
                     "undetermined_instances": finding["undetermined_instances"],
                     "exposure_usd": finding["exposure_usd"],
                     "reading": (
@@ -1141,17 +1244,21 @@ def _confidence(
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
 
-    The perimeter is built from the value and control planes ONLY. Seeding it
-    from the signal population as well would make the denominator move with the
-    analysis: an unpriced contract outside the closure would enter only through
-    its own signals, and LOSING those signals would drop its unanswered weight
-    and RAISE the published confidence. Three figures, and the headline is the
-    MINIMUM — knowing who can call something, knowing what it does, and being
-    able to price what it reaches are different questions.
+    The perimeter's base population is the protocol's ``contracts`` rows, unioned
+    with the value plane and the control closure. Discovery fixes that base, so it
+    does not move with what has been analysed — losing a contract's signals cannot
+    drop its unanswered weight out of its own denominator — while an unpriced
+    contract outside the closure still carries ``band(None)`` of unanswered
+    weight rather than vanishing. Seeding it from the signal population instead
+    is what let LESS analysis publish MORE confidence. Three figures, and the
+    headline is the MINIMUM — knowing who can call something, knowing what it
+    does, and being able to price what it reaches are different questions.
     """
     perimeter: dict[str, float] = {}
-    for key in sorted(value_plane.per_asset):
+    for key in sorted(value_plane.contract_entities):
         perimeter[key] = K.band(value_plane.total(key))
+    for key in sorted(value_plane.per_asset):
+        perimeter.setdefault(key, K.band(value_plane.total(key)))
     for key in sorted(closure):
         perimeter.setdefault(key, K.band(value_plane.total(key)))
         for source in sorted(closure[key]):
@@ -1196,6 +1303,7 @@ def _confidence(
                 total += perimeter[key] * (answered / seen)
         return round(total, 6)
 
+    outside = sorted({key for key in reach if key not in perimeter})
     reach_pct = round(100.0 * weighted(reach) / denominator, 1) if denominator else 0.0
     capability_pct = round(100.0 * weighted(scored) / denominator, 1) if denominator else 0.0
     priced_weight = sum(perimeter[k] for k in sorted(perimeter) if value_plane.total(k) is not None)
@@ -1207,6 +1315,11 @@ def _confidence(
         "value_priced_pct": priced_pct,
         "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
         "perimeter_entities": len(perimeter),
+        # Signals whose entity is not in the perimeter answer a question the
+        # denominator never asked, so their work is invisible to this figure.
+        # With the contracts base population this should be empty; a non-empty
+        # list is a discovery gap, published rather than absorbed.
+        "signal_entities_outside_perimeter": outside,
         "perimeter_value_weighted_denominator": denominator,
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (
@@ -1229,14 +1342,21 @@ def _collect_disclosures(
     entity = entity_key(signal.chain, signal.deployment_address)
     credit = _gate(signal, "exact_empty_credit")
     if credit.is_determined:
-        if signal.principal_state == PRINCIPAL_STATE_ENUMERATED:
-            # "No resolved caller can reach this" and "these resolved callers can"
-            # cannot both be published. The contradiction is the disclosure.
+        if signal.principal_state != PRINCIPAL_STATE_NOT_DETERMINED:
+            # "No resolved caller can reach this" cannot be published beside ANY
+            # determined caller state: ``enumerated`` names callers that reach it,
+            # and ``none_required`` is a PROVEN PUBLIC PATH — the opposite pole,
+            # and the worse contradiction of the two.
             warnings.append(
                 _warning(
                     "exact_empty_credit_contradicted_by_principals",
                     signal,
-                    "an earned empty caller set on a function whose principals resolved; credit refused",
+                    (
+                        "an earned empty caller set on a function with a proven public path"
+                        if signal.principal_state == PRINCIPAL_STATE_NONE_REQUIRED
+                        else "an earned empty caller set on a function whose principals resolved"
+                    ),
+                    principal_state=signal.principal_state,
                 )
             )
         elif (entity, signal.function_name) not in seen:

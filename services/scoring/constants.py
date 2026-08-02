@@ -81,12 +81,33 @@ DEST_SEVERITY_EXEC_SELF = 0.35
 FLOW_SEVERITY_CALLER_ARBITRARY = 0.9
 FLOW_SEVERITY_FIXED_DESTINATION = 0.10
 OWNERSHIP_DEFAULT_ADMIN_RULES = 0.35
-TIMELOCK_SELF_GATED_DELAY = 0.0
+# The self-gated delay credit is RETIRED, not tuned to zero: it rested on "no
+# other caller resolved", and the principal enumeration it read is a documented
+# LOWER BOUND. Crediting a capability-class base down to nothing on the absence
+# of a second resolved principal is the absence-as-a-witness move with the sign
+# flipped, so the arm is withdrawn until an exhaustive caller-set witness exists.
+# No constant remains, because a constant would invite the arm back.
 
 # --- freeze ladder ----------------------------------------------------------
+# Three rungs, each named for what LICENSES it rather than for the outcome it
+# happens to produce:
+#
+#   FREEZE_CAPABILITY_PROVEN   the proven existence of a freeze capability, and
+#                              nothing else. Unconditional, and the rung every
+#                              undetermined recovery question stays on — an
+#                              unread witness moves this in neither direction.
+#   FREEZE_KEYSET_RECOVERABLE  the credited rung, licensed by PROVEN key-set
+#                              independence. Equal to the existence rung today,
+#                              so proving independence changes the BASIS rather
+#                              than the number; the licensing is already correct
+#                              if the two ever diverge.
+#   FREEZE_SUSTAINABLE         added ONLY on proven key-set DEPENDENCE: this key
+#                              set can freeze and also deny the recovery quorum.
+#
 # No duration term: ``duration_bound_source`` is not_determined wherever it is
 # populated, and neither of the two values that would license one has ever
 # appeared, so duration moves severity in neither direction.
+FREEZE_CAPABILITY_PROVEN = 0.05
 FREEZE_KEYSET_RECOVERABLE = 0.05
 FREEZE_SUSTAINABLE = 0.20
 FREEZE_AUTO_EXPIRY = 0.02
@@ -208,6 +229,9 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "weakness_safe_uncredited",
     "weakness_timelock_undetermined",
     "uncredited_rung_below_proven_worst",
+    # Retired for cause rather than calibrated: see the note beside
+    # OWNERSHIP_DEFAULT_ADMIN_RULES.
+    "retired:timelock_self_gated_delay_credit",
 )
 
 
@@ -338,9 +362,15 @@ def model_parameters() -> dict[str, Any]:
             ),
         },
         "freeze_ladder": {
+            "capability_proven": FREEZE_CAPABILITY_PROVEN,
             "keyset_recoverable": FREEZE_KEYSET_RECOVERABLE,
             "sustainable": FREEZE_SUSTAINABLE,
             "auto_expiry": FREEZE_AUTO_EXPIRY,
+            "licensing": (
+                "the existence rung is unconditional and every undetermined recovery "
+                "question stays on it; SUSTAINABLE is added only on proven key-set "
+                "dependence and the RECOVERABLE credit only on proven independence"
+            ),
             "note": "no duration term: duration_bound_source is not_determined wherever populated",
         },
         "weakness_ladder": {
