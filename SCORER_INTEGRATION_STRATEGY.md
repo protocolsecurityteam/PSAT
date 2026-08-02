@@ -147,7 +147,7 @@ Extract `scorer_v3.py` into `compute_protocol_score(session, protocol_id) -> Sco
 Mirror the `contract_balances → contract_balances_latest` pattern: insert-only base
 table + a `_latest` view. Columns: `protocol_id`, `model_version`, `computed_at`,
 `trigger` (job id / loop), `grade_lambda`, `grade_exposure`, `confidence_pct`,
-`perimeter_settled` (bool — see §2), the findings document (inline JSONB if small,
+`perimeter_state` (three-state — see §2 and § Serve), the findings document (inline JSONB if small,
 else a MinIO artifact by `storage_key`), and a **provenance block** (per-plane row
 counts + max `updated_at`, plus the `selection_summary` / `perimeter_spawn_summary`
 ledger references) so a score is replayable-in-principle per inv.11. Insert-only gives
@@ -204,7 +204,7 @@ contract, appending to a running total. Layer 1 (signals) does live there; Layer
 The loop resolves all three: it fires on a dirty-mark at a settled read instant, off
 the critical path. **Perimeter-settled gate — RULED (2026-08-01): compute and stamp,
 never defer.** When the loop computes, check for queued/processing jobs with that
-`protocol_id`; if any exist, compute anyway and stamp `perimeter_settled: false` on
+`protocol_id`; if any exist, compute anyway and stamp `perimeter_state: "unsettled"` on
 the document. A mid-run score is a real fact about a partial perimeter — witness
 discipline says publish it labeled, not suppress it — and deferring would leave the
 endpoint empty for hours on a long run. The staleness sweep recomputes once the queue
@@ -408,7 +408,7 @@ row that proves unimplementable as stated, rather than improvising).
 | `contract_balance_fetches.native_status` (§1) | value | The proven-zero / fetch-failed discriminator: `native_status` decides whether an absent native balance is a real proven zero or unknown. | Fetch-failed / absent ⇒ value `not_determined`, **not counted** (and never read as zero). |
 | `flow_asset_addresses` (§3, W2) | value precondition | Makes `token_identity` decidable; gates single-asset pricing. A precondition on a value read, not a term itself. | Absent ⇒ token identity `not_determined` ⇒ falls to the **unpriced branch** (a `confidence_pct` hit, not a zero). |
 | `latch_witness` (§6b) | weakness | `consumed` = **re-openable via the proxy's upgrade authority**: at most an annotation whose strength is tied to *that authority's own* weakness. Never a permanent credit — the frontend sibling's `isInertOneShot → 0.95` is the flagged inv.10 violation, not a model to copy. | No credit. |
-| selection / spawn ledgers (§4) | provenance + `perimeter_settled` only | Coverage/omission gate; lives in the provenance block and the §2 stamping decision. | Never a severity term. |
+| selection / spawn ledgers (§4) | provenance + `perimeter_state` only | Coverage/omission gate; lives in the provenance block and the §2 stamping decision. | Never a severity term. |
 
 ### 7.2 Model constants — RULED: port verbatim as provisional
 Every prototype constant is carried over unchanged as **provisional**: `SEV_SCALE=60`,
@@ -461,7 +461,7 @@ because everything keys off their shape:
   history plane.
 - **`protocol_scores`** — insert-only base + `_latest` view (mirror
   `contract_balances_latest`). Columns per §1(4): `protocol_id`, `model_version`,
-  `computed_at`, `trigger`, `grade_*`, `confidence_pct`, `perimeter_settled`, the
+  `computed_at`, `trigger`, `grade_*`, `confidence_pct`, `perimeter_state`, the
   findings document, and the provenance block (per-plane row counts + max
   `updated_at` + ledger refs). **Document storage — ruled:** inline JSONB, with a
   MinIO `storage_key` spill only above ~1 MB (etherfi's document is well under that).
