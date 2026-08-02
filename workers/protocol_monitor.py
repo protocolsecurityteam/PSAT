@@ -30,6 +30,7 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_POLLER,
     HEARTBEAT_PROTOCOL_RESTAKING,
     HEARTBEAT_PROTOCOL_SCANNER,
+    HEARTBEAT_PROTOCOL_SCORE,
     HEARTBEAT_PROTOCOL_TVL,
     HEARTBEAT_ROLE_HOLDER_PLANE,
     record_heartbeat,
@@ -194,12 +195,14 @@ def _build_default_supervisor(rpc_url: str, interval: float | None) -> Superviso
         run_poll_loop,
         run_scan_loop,
     )
+    from services.scoring.loop import DEFAULT_SCORE_INTERVAL, run_score_loop
 
     scan_interval = interval if interval is not None else DEFAULT_SCAN_INTERVAL
     poll_interval = interval if interval is not None else DEFAULT_POLL_INTERVAL
     tvl_interval = interval if interval is not None else DEFAULT_TVL_INTERVAL
     restaking_interval = interval if interval is not None else DEFAULT_RESTAKING_INTERVAL
     role_plane_interval = interval if interval is not None else DEFAULT_ROLE_PLANE_INTERVAL
+    score_interval = interval if interval is not None else DEFAULT_SCORE_INTERVAL
 
     loops: list[tuple[str, LoopTarget]] = [
         (HEARTBEAT_PROTOCOL_SCANNER, lambda ev: run_scan_loop(rpc_url, scan_interval, stop_event=ev)),
@@ -207,6 +210,10 @@ def _build_default_supervisor(rpc_url: str, interval: float | None) -> Superviso
         (HEARTBEAT_PROTOCOL_TVL, lambda ev: run_tvl_loop(tvl_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_RESTAKING, lambda ev: run_restaking_loop(restaking_interval, stop_event=ev)),
         (HEARTBEAT_ROLE_HOLDER_PLANE, lambda ev: run_role_holder_plane_loop(role_plane_interval, stop_event=ev)),
+        # A sibling loop, not a phase of any other: the grade is a
+        # whole-protocol fold and a plane read failing in it must degrade this
+        # heartbeat alone.
+        (HEARTBEAT_PROTOCOL_SCORE, lambda ev: run_score_loop(score_interval, stop_event=ev)),
     ]
     return Supervisor(loops)
 
