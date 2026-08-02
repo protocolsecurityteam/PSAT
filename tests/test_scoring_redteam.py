@@ -1452,7 +1452,8 @@ def test_r3_a_malformed_persisted_row_withholds_itself(monkeypatch, fold, column
     hostile = _signal_row(selector="0x22222222", function_name="hostile", **over)
     monkeypatch.setattr(POP, "current_signal_rows", lambda session, protocol_id: [healthy, hostile])
 
-    signals, faults = POP.current_signals_with_faults(None, 1)
+    # ``current_signal_rows`` is stubbed, so the session is never touched.
+    signals, faults = POP.current_signals_with_faults(cast(Any, None), 1)
     assert [s.function_name for s in signals] == ["healthy"]
     assert [f["column"] for f in faults] == [column]
 
