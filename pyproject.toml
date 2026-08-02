@@ -79,3 +79,10 @@ skip_empty = true
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+# ``scoring_prototype`` is a read-only diagnostic oracle committed as spec-packet
+# material, not product code: nothing in the pipeline imports it and it is
+# explicitly not to be fixed or iterated (SCORER_INTEGRATION_STRATEGY, "Status of
+# scorer_v3.py"). The three entries after it are pyright's OWN defaults, restated
+# because setting ``exclude`` replaces them rather than adding to them — omitting
+# them walks ``.venv`` and every ``__pycache__`` into the check.
+exclude = ["scoring_prototype", "**/node_modules", "**/__pycache__", "**/.*"]

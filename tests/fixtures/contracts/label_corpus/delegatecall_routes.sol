@@ -16,6 +16,13 @@ pragma solidity ^0.8.27;
 //     parameter name, a symbol that does not exist in this contract. Both
 //     pre-existing A8 rows in production are direct/assembly routes, so this
 //     distinction had no corpus representation at all.
+//   * SELF — a literal ``address(this)``, the OZ v5 ``Multicall`` shape and the
+//     whole of the production population of unresolved destinations. The
+//     destination is a compile-time value no writer and no caller can point
+//     elsewhere, so the honest answer is the PROVEN ``self`` with a
+//     proven-constrained verdict, not the ``indeterminate`` a catch-all gives
+//     it. Carried on both routes: through the library formal (where only the
+//     binding substitution can see it) and directly.
 //   * ASSEMBLY SPLIT-PROXY — the LRTSquaredCore.fallback shape, added with the
 //     A8 matcher. The destination is not a variable at all: the fallback reads
 //     a constant slot with ``sload`` and delegatecalls whatever it holds, and
@@ -126,5 +133,21 @@ contract DelegatecallRoutes {
             let result := delegatecall(gas(), sload(slot), 0, calldatasize(), 0, 0)
             if iszero(result) { revert(0, 0) }
         }
+    }
+
+    // SELF, LIBRARY-ROUTED. The OZ v5 ``Multicall`` shape: the destination is a
+    // compile-time ``address(this)`` that reaches the opcode as the LIBRARY's
+    // formal, so only the binding substitution can see what it is. Declared
+    // last, with its direct sibling, so the assembly rows above keep the IR
+    // temporary numbering their recorded sink targets carry.
+    function execSelfViaLibrary(bytes calldata data) external {
+        AddressLib.functionDelegateCall(address(this), data);
+    }
+
+    // SELF, DIRECT. The same destination without the library, so the answer is
+    // pinned independently of the binding walk.
+    function execSelf(bytes calldata data) external {
+        (bool ok, ) = address(this).delegatecall(data);
+        require(ok, "self call failed");
     }
 }

@@ -1571,11 +1571,22 @@ def _stamp_coverage_row(
     cryptographic proof override the heuristic temporal match.
     Other statuses leave the heuristic match intact — a failed
     verification annotates but never deletes.
+
+    A status that actually CHANGES marks the protocol's score dirty:
+    ``equivalence_status='proven'`` is the admissible core of the audit axis
+    and it settles here, asynchronously, long after the effects stage that
+    produced the protocol's signals. A re-stamp to the same status changed
+    nothing and enqueues nothing.
     """
     now = now or datetime.now(timezone.utc)
+    previous = row.equivalence_status
     row.equivalence_status = status
     row.equivalence_reason = reason[:1000] if reason else None
     row.equivalence_checked_at = now
+    if status != previous and row.protocol_id is not None:
+        from services.scoring.dirty import SCORE_DIRTY_COVERAGE_VERIFY, mark_protocol_score_dirty
+
+        mark_protocol_score_dirty(session, row.protocol_id, SCORE_DIRTY_COVERAGE_VERIFY)
     if proven:
         row.match_type = "reviewed_commit"
         row.match_confidence = "high"

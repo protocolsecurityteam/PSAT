@@ -382,3 +382,86 @@ def company_audit_coverage(company_name: str) -> dict[str, Any]:
         coverage_row_count=len(coverage_rows) + len(inherited_rows),
     )
     return result
+
+
+@router.get("/api/company/{company_name}/score")
+def company_score(company_name: str) -> dict[str, Any]:
+    """The protocol's latest score, served as the ledger payload verbatim.
+
+    No projection into any other shape. Every projection attempted so far has
+    been where a three-state collapsed back into two — the payload's
+    ``grade_state``, ``perimeter_state`` and per-finding states are the
+    contract, and a consumer must branch on them rather than assume a grade.
+    In particular ``grade_state = not_determined`` is a computed verdict (the
+    fold ran and could not determine a grade), which is why the numbers are
+    ``null`` beside it instead of zeroed.
+
+    Two distinct 404s, told apart by ``detail`` because they are different
+    facts and a client that treats them alike will report a typo'd protocol as
+    "not scored yet": ``Company not found`` (no such protocol) versus ``No
+    score has been computed for this protocol yet`` (the protocol exists and
+    the fold has not run). Neither is the answer for an unreadable spilled
+    document — that is a 503, because a document that could not be fetched is
+    not an absent score.
+    """
+    from db.models import ProtocolScoreLatest
+    from services.scoring.persist import ScoreDocumentUnavailable, load_score_document
+
+    started = time.monotonic()
+    with deps.SessionLocal() as session:
+        protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
+        if protocol_row is None:
+            _log_endpoint("/api/company/{name}/score", company=company_name, started=started, outcome="not_found")
+            raise HTTPException(status_code=404, detail="Company not found")
+
+        row = session.execute(
+            select(ProtocolScoreLatest).where(ProtocolScoreLatest.protocol_id == protocol_row.id)
+        ).scalar_one_or_none()
+        if row is None:
+            _log_endpoint("/api/company/{name}/score", company=company_name, started=started, outcome="no_score")
+            raise HTTPException(status_code=404, detail="No score has been computed for this protocol yet")
+
+        try:
+            document = load_score_document(row)
+        except ScoreDocumentUnavailable as exc:
+            _log_endpoint(
+                "/api/company/{name}/score",
+                company=company_name,
+                started=started,
+                outcome="document_unavailable",
+            )
+            raise HTTPException(status_code=503, detail=f"Score document could not be read: {exc}") from exc
+
+        payload = {
+            "company": company_name,
+            "protocol_id": protocol_row.id,
+            "score_id": row.id,
+            "model_version": row.model_version,
+            "computed_at": row.computed_at.isoformat() if row.computed_at else None,
+            "trigger": row.trigger,
+            "trigger_job_id": str(row.trigger_job_id) if row.trigger_job_id else None,
+            # The three grade figures come from the document, not the columns:
+            # the columns are Numeric and would arrive as Decimal strings, and
+            # the document is what the fold actually emitted.
+            "grade_state": document.get("grade_state"),
+            "grade_lambda": document.get("grade_lambda"),
+            "grade_exposure": document.get("grade_exposure"),
+            "confidence_pct": document.get("confidence_pct"),
+            "perimeter_state": document.get("perimeter_state"),
+            "findings": document.get("findings"),
+            "earned_negatives": document.get("earned_negatives"),
+            "warnings": document.get("warnings"),
+            "model_parameters": document.get("model_parameters"),
+            "uncalibrated_arms": document.get("uncalibrated_arms"),
+            "provenance": row.provenance,
+        }
+    _log_endpoint(
+        "/api/company/{name}/score",
+        company=company_name,
+        started=started,
+        outcome="success",
+        grade_state=payload["grade_state"],
+        perimeter_state=payload["perimeter_state"],
+        finding_count=len(payload["findings"] or []),
+    )
+    return payload

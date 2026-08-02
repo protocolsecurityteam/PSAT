@@ -265,6 +265,12 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         root / "tests" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
+        # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 rules that
+        # restaking positions contribute (entity, asset) rows under the same
+        # MAX-per-entity fold, keyed by their OWN entity keys — a mandated read,
+        # and one that cannot go through the spot-balance readers precisely
+        # because a node has no ``contracts`` row.
+        root / "services" / "scoring" / "planes.py",
         # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),
     }

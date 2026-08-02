@@ -193,6 +193,7 @@ _KEY_ROOTS = frozenset(
         "audits",  # services/audits/** (never prefixed — the control)
         "exa-cache",  # utils/exa._CACHE_KEY_PREFIX
         "tavily-cache",  # utils/tavily._CACHE_KEY_PREFIX
+        "protocol_scores",  # protocol_score_document_key()
     }
 )
 
@@ -256,6 +257,18 @@ def source_file_key(job_id: UUID | str, path: str) -> str:
     """Deterministic S3 key for a source file (path is hashed to avoid unsafe chars)."""
     digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
     return f"{_key_prefix()}source_files/{job_id}/{digest}"
+
+
+def protocol_score_document_key(protocol_id: int, token: str) -> str:
+    """S3 key for a spilled ``protocol_scores`` document body.
+
+    ``token`` distinguishes two scores of the same protocol; it is minted per
+    row rather than derived from ``computed_at`` because two folds inside one
+    clock tick are reachable on the dirty-mark path, and a key collision there
+    would have the newer row's ``storage_key`` addressing the older body. The
+    key is not part of the replay contract — the document is.
+    """
+    return f"{_key_prefix()}protocol_scores/{int(protocol_id)}/{_safe_name(token)}.json"
 
 
 def serialize_artifact(data: Any | None, text_data: str | None) -> tuple[bytes, str]:

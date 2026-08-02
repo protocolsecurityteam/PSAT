@@ -186,6 +186,26 @@ def maybe_queue_reanalysis(
 
     job = create_job(session, request_dict)
 
+    # A fresh job is going to rewrite this protocol's planes, and the current
+    # score was folded over the ones it replaces. Marked after ``create_job``
+    # commits, so the mark never references a job that rolled back.
+    if mc.protocol_id:
+        from services.scoring.dirty import SCORE_DIRTY_REANALYSIS, mark_protocol_score_dirty
+
+        if mark_protocol_score_dirty(session, mc.protocol_id, SCORE_DIRTY_REANALYSIS):
+            try:
+                session.commit()
+            except Exception:
+                # The mark swallows its own failure; the commit it induces must
+                # too, or a best-effort mark would sink the job this function
+                # exists to create. ``create_job`` already committed it.
+                session.rollback()
+                logger.warning(
+                    "Re-analysis: protocol score dirty-mark commit failed for protocol %s",
+                    mc.protocol_id,
+                    exc_info=True,
+                )
+
     logger.info(
         "Queued re-analysis job %s for %s (trigger: %s)",
         job.id,

@@ -183,6 +183,17 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
+    def company_score(self, company: str) -> requests.Response:
+        # Raw Response: 404 is a legitimate answer (no fold has run yet on a
+        # fresh preview) and the caller decides whether that is a skip or a
+        # failure. Raising here would make the two indistinguishable.
+        return self._session.get(self._url(f"/api/company/{company}/score"), timeout=30)
+
+    def fleet(self) -> dict[str, Any]:
+        r = self._session.get(self._url("/api/fleet"), timeout=30)
+        r.raise_for_status()
+        return r.json()
+
     # -- address labels ------------------------------------------------------
 
     def list_address_labels(self) -> dict[str, Any]:
