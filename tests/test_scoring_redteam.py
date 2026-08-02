@@ -8,7 +8,7 @@ axis, the gate envelopes or the published document.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -159,7 +159,8 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "unconsumed_reach_relations", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_ledgers", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_audit_posture", lambda s, p: {"stub": True})
-        return FOLD.compute_protocol_score(None, 1, signals=signals)
+        # The planes are stubbed, so the fold never touches a session.
+        return FOLD.compute_protocol_score(cast(Any, None), 1, signals=signals)
 
     return _run
 
@@ -684,17 +685,24 @@ def _contract_facts(**over: Any) -> D._ContractFacts:
 
 def test_f6_the_registry_escalation_needs_mutator_selectors():
     owner = {"address": SAFE, "resolved_type": "safe", "block": 1}
-    entries = [{"claim_id": "authority.replace"}]
-    kwargs = dict(
+    entries: list[dict[str, Any]] = [{"claim_id": "authority.replace"}]
+    base, _, _ = D._severity(
+        _contract_facts(registry_owner=owner),
+        None,
         claim_id="authority.replace",
         entries=entries,
         destination=D._UNDETERMINED_DESTINATION,
         openness="restricted",
         deployment_address=C,
     )
-    base, _, _ = D._severity(_contract_facts(registry_owner=owner), None, **kwargs)
     escalated, basis, _ = D._severity(
-        _contract_facts(registry_owner=owner, solmate_mutators={"setUserRole(address,uint8,bool)"}), None, **kwargs
+        _contract_facts(registry_owner=owner, solmate_mutators={"setUserRole(address,uint8,bool)"}),
+        None,
+        claim_id="authority.replace",
+        entries=entries,
+        destination=D._UNDETERMINED_DESTINATION,
+        openness="restricted",
+        deployment_address=C,
     )
     assert base.value == 0.75
     assert escalated.value == 1.0
@@ -714,15 +722,27 @@ def test_f6_selectors_are_what_the_facts_are_built_from():
 
 
 def test_f6_the_delay_credit_examines_the_scored_functions_own_gate():
-    kwargs = dict(
+    entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
+    ungated, _, notes = D._severity(
+        _contract_facts(),
+        None,
         claim_id="timelock.set_delay",
-        entries=[{"claim_id": "timelock.set_delay"}],
+        entries=entries,
         destination=D._UNDETERMINED_DESTINATION,
         openness="restricted",
         deployment_address=C,
+        self_gated=False,
     )
-    ungated, _, notes = D._severity(_contract_facts(), None, self_gated=False, **kwargs)
-    gated, basis, _ = D._severity(_contract_facts(), None, self_gated=True, **kwargs)
+    gated, basis, _ = D._severity(
+        _contract_facts(),
+        None,
+        claim_id="timelock.set_delay",
+        entries=entries,
+        destination=D._UNDETERMINED_DESTINATION,
+        openness="restricted",
+        deployment_address=C,
+        self_gated=True,
+    )
     assert ungated.value == 0.3
     assert "delay_change_gate_not_self_gated" in notes
     assert gated.value == 0.0
