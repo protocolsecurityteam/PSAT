@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from services.scoring import constants as K
 from services.scoring import planes as P
-from services.scoring.population import current_signals_for_protocol
+from services.scoring.population import current_signals_with_faults
 from services.scoring.schema import (
     NOT_DETERMINED,
     FunctionSignal,
@@ -106,6 +106,7 @@ GATE_PAYLOAD_SHAPES: dict[str, str] = {
     "amount_capped_by_balance": "bool",
     "asset_class": "string",
     "destination_basis": "string",
+    "pause_effective": "bool",
     "freeze_coverage_fraction": "string_list",
     "freeze_recovery_principals": "principal_ref_list",
 }
@@ -172,8 +173,13 @@ def compute_protocol_score(
     path — the population comes from the one pinned query and from nowhere else,
     so no caller can hand the fold a filtered or re-ordered population.
     """
+    row_faults: list[dict[str, Any]] = []
     if signals is None:
-        signals = current_signals_for_protocol(session, protocol_id)
+        # A row whose persisted JSONB does not hold its declared shape withholds
+        # ITSELF: the schema's canonical-key checks are the right checks, but
+        # raising them through the population read costs the whole protocol its
+        # score over one bad column.
+        signals, row_faults = current_signals_with_faults(session, protocol_id)
 
     value_plane = P.load_value_plane(session, protocol_id)
     closure = P.load_control_closure(session, protocol_id)
@@ -182,7 +188,18 @@ def compute_protocol_score(
     refs.extend(_recovery_refs(signals))
     principal_facts = P.load_principal_plane(session, refs)
 
-    warnings: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = [
+        {
+            "kind": "signal_row_malformed",
+            "entity": fault["entity"],
+            "function": fault["function_name"],
+            "capability": fault["claim_id"],
+            "note": f"signal row withheld: {fault['column']} does not hold its declared shape",
+            "column": fault["column"],
+            "detail": fault["detail"],
+        }
+        for fault in row_faults
+    ]
     earned_negatives: list[dict[str, Any]] = []
     seen_negatives: set[tuple[str, str]] = set()
 
@@ -272,6 +289,7 @@ def compute_protocol_score(
             # un-analysed protocol and a fully-undetermined one both reach a
             # consumer as grade_state=not_determined.
             "disposition": _population_disposition(signals, findings),
+            "rows_withheld_malformed": len(row_faults),
         },
         "value": value_plane.provenance,
         "value_annotations": value_plane.annotations,
@@ -1020,14 +1038,20 @@ def _aggregate(
         # only a subsumed row names is still value this unit provably reaches, and
         # dropping it from the exposure accounting would publish a smaller
         # exposure for a unit that got no smaller.
-        exclusive: dict[str, float] = {}
+        #
+        # The contributing row's OWN fraction travels with the value. The top row
+        # is a different access path — often an undelayed one — and charging the
+        # delayed row's value at the undelayed fraction would re-merge in the
+        # exposure term exactly what keying rows by access path separated.
+        exclusive: dict[str, dict[str, float]] = {}
         for row in rest:
+            fraction = row["severity_proven"] * row["weakness"]
             for key, held in row["value_by_entity"].items():
                 if key in top["value_by_entity"]:
                     continue
                 previous = exclusive.get(key)
-                if previous is None or held > previous:
-                    exclusive[key] = held
+                if previous is None or held * fraction > previous["usd"] * previous["fraction"]:
+                    exclusive[key] = {"usd": held, "fraction": round(fraction, 6)}
         top["subsumed_exclusive_value_by_entity"] = dict(sorted(exclusive.items()))
         if rest:
             top["counterfactual"] += (
@@ -1187,7 +1211,13 @@ def _grade(
             # The row's OWN per-entity contribution, not its total: charging the
             # row total against each entity would multiply one witnessed
             # magnitude by the number of entities it was spread across.
-            held = finding["value_by_entity"].get(key, exclusive.get(key))
+            held = finding["value_by_entity"].get(key)
+            # An entity only a subsumed row reaches is charged at THAT row's
+            # fraction, never at this one's.
+            key_fraction = fraction
+            if held is None and key in exclusive:
+                held = exclusive[key]["usd"]
+                key_fraction = exclusive[key]["fraction"]
             if held is None:
                 # An unpriced entity contributes nothing AND is disclosed. Reading
                 # it as $0.00 publishes "this capability exposes nothing" out of a
@@ -1196,12 +1226,12 @@ def _grade(
                 continue
             priced_entities += 1
             room = max(0.0, 1.0 - claimed[key])
-            take = min(fraction, room)
+            take = min(key_fraction, room)
             if take > 0:
                 claimed[key] += take
                 mine += take * held
         finding["exposure_entities_charged"] = sorted(
-            key for key in charged_entities if finding["value_by_entity"].get(key, exclusive.get(key)) is not None
+            key for key in charged_entities if finding["value_by_entity"].get(key) is not None or key in exclusive
         )
         if priced_entities:
             any_priced = True

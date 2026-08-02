@@ -70,6 +70,89 @@ def current_signals_for_protocol(session: Session, protocol_id: int) -> list[Fun
     return [signal_from_row(row) for row in current_signal_rows(session, protocol_id)]
 
 
+def current_signals_with_faults(
+    session: Session, protocol_id: int
+) -> tuple[list[FunctionSignal], list[dict[str, object]]]:
+    """The fold's input, plus the rows that could not be typed at all.
+
+    ``function_score_signals`` carries several list- and object-shaped JSONB
+    columns with no CHECK behind their INTERIOR: the entity-key format and the
+    principal-reference envelope are Python-enforced, so a row written by
+    anything but the sanctioned writer can hold a shape the typed reader
+    rejects. Those checks are right and stay — what changes is the blast radius.
+    A row that fails one withholds ITSELF and names the column; the rest of the
+    protocol still scores, because one malformed row is not evidence about any
+    other row.
+
+    Callers that want the strict behaviour keep using
+    :func:`current_signals_for_protocol`.
+    """
+    signals: list[FunctionSignal] = []
+    faults: list[dict[str, object]] = []
+    for row in current_signal_rows(session, protocol_id):
+        # Shape first, then typing. Two of these columns type cleanly and only
+        # fail where the FOLD walks them, so checking the shape at the boundary
+        # is what keeps the failure here rather than three layers downstream.
+        column = _shape_fault(row)
+        detail = f"{column} does not hold its declared shape"
+        if column is None:
+            try:
+                signals.append(signal_from_row(row))
+                continue
+            except Exception as exc:
+                column, detail = "unknown", f"{type(exc).__name__}: {exc}"
+        faults.append(
+            {
+                "entity": f"{coalesce_chain(row.chain)}::{str(row.deployment_address or '').lower()}",
+                "function_name": row.function_name,
+                "claim_id": row.claim_id,
+                "column": column,
+                "detail": detail,
+            }
+        )
+    return signals, faults
+
+
+def _shape_fault(row: FunctionScoreSignal) -> str | None:
+    """The first column that does not hold its declared shape, or ``None``.
+
+    Named, never guessed at, and checked in the order a reader walks them.
+    ``witness_notes`` and ``severity_basis`` type cleanly and blow up only where
+    the fold iterates them, which is why the shape is checked here instead of
+    being left to the first consumer that trips over it.
+    """
+    from services.scoring.schema import is_entity_key
+
+    def _string_list(value: object) -> bool:
+        return value is None or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+
+    if not _string_list(row.severity_basis):
+        return "severity_basis"
+    refs = row.principal_refs
+    if refs is not None:
+        if not isinstance(refs, list):
+            return "principal_refs"
+        for ref in refs:
+            if not isinstance(ref, dict):
+                return "principal_refs"
+            try:
+                int(ref["function_principal_id"])
+            except (KeyError, TypeError, ValueError):
+                return "principal_refs"
+    keys = row.value_entity_keys
+    if keys is not None and (not isinstance(keys, list) or not all(is_entity_key(k) for k in keys)):
+        return "value_entity_keys"
+    if not _string_list(row.witness_notes):
+        return "witness_notes"
+    if row.citations is not None and (
+        not isinstance(row.citations, list) or not all(isinstance(c, dict) for c in row.citations)
+    ):
+        return "citations"
+    if row.gate_inputs is not None and not isinstance(row.gate_inputs, dict):
+        return "gate_inputs"
+    return None
+
+
 def order_signals(signals: list[FunctionSignal]) -> list[FunctionSignal]:
     """The population order, for signals that never went through the database.
 
