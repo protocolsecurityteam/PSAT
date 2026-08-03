@@ -13,7 +13,9 @@ import {
   fixFirst,
   groupRows,
   isProvenNoReach,
+  keysetOverlapsFor,
   ledgerSegments,
+  principalAddresses,
   principalChip,
   projectScore,
   protectionRows,
@@ -24,6 +26,7 @@ import {
   upgradeBypassCount,
   valueCell,
 } from "./derive.js";
+import { lambdaOf, recoveryFrom } from "./fold.js";
 
 const F = ETHERFI.findings;
 const view = projectScore(ETHERFI, []);
@@ -159,6 +162,21 @@ describe("derive — rows and ledger", () => {
     expect(total).toBeCloseTo(100, 2);
   });
 
+  it("charges each row the published net, not the reconstruction of it", () => {
+    // The re-fold agrees with every published net on this corpus (fold.test
+    // pins that); where they could disagree the document wins — spec §3.2
+    // pins the row to −net_points_lambda.
+    for (const row of view.rows) expect(row.net).toBe(F[row.index].net_points_lambda);
+    const doc = { findings: F.map((f, i) => (i === 0 ? { ...f, net_points_lambda: 19.5 } : f)) };
+    const rows = deductionRows(doc, buildContractIndex([]));
+    expect(rows[0].index).toBe(0);
+    expect(rows[0].net).toBe(19.5);
+    expect(rows[0].fillPct).toBeCloseTo((19.5 / 20.25) * 100, 6);
+    // A published field that is present but not a number is unwitnessed.
+    const blank = { findings: F.map((f, i) => (i === 0 ? { ...f, net_points_lambda: null } : f)) };
+    expect(deductionRows(blank, buildContractIndex([]))[0].net).toBeNull();
+  });
+
   it("shows raw points only when the document withheld the nets", () => {
     const withheld = {
       findings: F.map(({ net_points_lambda, ...rest }) => rest),
@@ -178,6 +196,41 @@ describe("derive — callouts", () => {
     expect(groups[0].sum).toBe(32.4);
     expect(groups[1].rows.map((r) => r.index)).toEqual([2]);
     expect(groups[1].kind).toBe("timelock");
+  });
+
+  it("keeps a recurrence of the same (kind, capability) apart when it is not adjacent", () => {
+    // Run-length, not group-by-key: a hole that reappears further down the
+    // ranking is a second story about a second set of rows, and merging the
+    // two would sum points that are nowhere near each other on the bar.
+    const rows = [
+      { index: 0, net: 9, capability: "flow.out", finding: { principal_kind: "eoa" } },
+      { index: 1, net: 8, capability: "pause.set", finding: { principal_kind: "eoa" } },
+      { index: 2, net: 7, capability: "flow.out", finding: { principal_kind: "eoa" } },
+    ];
+    const groups = groupRows(rows);
+    expect(groups.map((g) => g.rows.map((r) => r.index))).toEqual([[0], [1], [2]]);
+    expect(groups.map((g) => g.sum)).toEqual([9, 8, 7]);
+  });
+
+  it("has no sum for a group whose nets were never published", () => {
+    const rows = [
+      { index: 0, net: null, capability: "flow.out", finding: { principal_kind: "eoa" } },
+      { index: 1, net: null, capability: "flow.out", finding: { principal_kind: "eoa" } },
+    ];
+    const groups = groupRows(rows);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sum).toBeNull();
+    expect(groups[0].sum).not.toBe(0);
+    // …and with no λ to hang them on there is nothing to place on the bar.
+    expect(calloutsFor(rows, null)).toEqual([]);
+  });
+
+  it("names a group worth exactly the threshold", () => {
+    const rows = [
+      { index: 0, net: 5, capability: "flow.out", finding: { principal_kind: "eoa" } },
+      { index: 1, net: 4.999, capability: "pause.set", finding: { principal_kind: "safe" } },
+    ];
+    expect(calloutsFor(rows, 90).map((c) => c.text)).toEqual(["one EOA outflow path", "1 other"]);
   });
 
   it("names leading groups worth 5 points or more and collapses the rest", () => {
@@ -219,6 +272,61 @@ describe("derive — fix first", () => {
     expect(fix.subsumed).toEqual(["ownership.transfer", "pause.set"]);
     expect(fix.exampleFunction).toBe("setAuthority");
   });
+
+  it("picks etherfi's leading group because it recovers the most, not because it is first", () => {
+    const groups = groupRows(view.rows);
+    const recoveries = groups
+      .slice(0, 2)
+      .map((g) => recoveryFrom(ETHERFI.findings, g.rows.map((r) => r.index)).recovery);
+    expect(recoveries).toEqual([9.5799, 1.3424]);
+    expect(fixFirst(ETHERFI, view.rows).recovery).toBe(Math.max(...recoveries));
+  });
+
+  it("prefers a many-row group over a costlier single row when it recovers more", () => {
+    // Six equal 10-point findings: one EOA outflow, then five Safe freezes.
+    // The first group charges the most (net 10 against 13.8336 spread over
+    // five rows) but removing it only promotes the survivors one rank —
+    // 0.7776 points. Removing the five collapses the tail: 13.8336.
+    const nets = [10, 6, 3.6, 2.16, 1.296, 0.7776];
+    const doc = {
+      findings: nets.map((net, i) => ({
+        raw_points: 10,
+        net_points_lambda: net,
+        principal_kind: i === 0 ? "eoa" : "safe",
+        capability: i === 0 ? "flow.out" : "pause.set",
+      })),
+    };
+    const rows = deductionRows(doc, buildContractIndex([]));
+    const groups = groupRows(rows);
+    expect(groups.map((g) => g.sum)).toEqual([10, 13.8336]);
+    expect(recoveryFrom(doc.findings, [0]).recovery).toBe(0.7776);
+    expect(recoveryFrom(doc.findings, [1, 2, 3, 4, 5]).recovery).toBe(13.8336);
+
+    const fix = fixFirst(doc, rows);
+    expect(fix.count).toBe(5);
+    expect(fix.subject).toBe("the five Safe freeze switches");
+    expect(fix.recovery).toBe(13.8336);
+  });
+});
+
+describe("derive — the withheld projection", () => {
+  const WITHHELD = {
+    ...ETHERFI,
+    grade_state: "not_determined",
+    grade_lambda: null,
+    findings: F.map(({ net_points_lambda, ...rest }) => rest),
+  };
+
+  it("publishes no λ and nothing derived from one", () => {
+    const withheld = projectScore(WITHHELD, []);
+    expect(withheld.withheld).toBe(true);
+    expect(withheld.lambda).toBeNull();
+    expect(withheld.fix).toBeNull();
+    expect(withheld.callouts).toEqual([]);
+    // The fold could still reconstruct the withheld quantity from the raws —
+    // which is exactly why the projection must not ask it to.
+    expect(lambdaOf(WITHHELD.findings)).toBe(54.7638);
+  });
 });
 
 describe("derive — protections", () => {
@@ -254,8 +362,35 @@ describe("derive — cautions", () => {
   it("names a shared key set from the overlap table", () => {
     const cautions = cautionsFor(ETHERFI, F[3]);
     expect(cautions[0].text).toBe(
-      "shares all 7 owners with Safe 0x5ec5…adde — not an independent key set",
+      "shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
     );
+  });
+
+  it("matches every address the principal acts through, not just the displayed one", () => {
+    // finding 3's principal string carries 0xa000…cd52; its second address
+    // 0xf46d…e2b5 is witnessed only in principal_addresses[], and the overlap
+    // 0x5ec5…adde ↔ 0xf46d…e2b5 names neither the displayed address nor the
+    // principal_unit. Parsing the string alone drops it.
+    expect(principalAddresses(F[3])).toEqual([
+      "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+    ]);
+    const overlaps = keysetOverlapsFor(ETHERFI, F[3]);
+    expect(overlaps.map((o) => [o.other, o.sharedOwners])).toEqual([
+      ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 7],
+      ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 5],
+      ["ethereum::0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5", 5],
+    ]);
+    expect(cautionsFor(ETHERFI, F[3])[1].text).toBe(
+      "shares 5 owners with Safe 0x5ec5…adde — not an independent key set",
+    );
+  });
+
+  it("falls back to the principal string when no address list was published", () => {
+    const { principal_addresses, ...noList } = F[3];
+    expect(principal_addresses).toHaveLength(2);
+    expect(principalAddresses(noList)).toEqual(["0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52"]);
+    expect(principalAddresses({ principal: "ANYONE anyone" })).toEqual([]);
   });
 
   it("counts the upgrades that went round a timelock", () => {
@@ -282,7 +417,7 @@ describe("derive — cautions", () => {
     expect(cautionsFor(ETHERFI, F[2]).some((c) => c.text.includes("independent key set"))).toBe(false);
     // …while a Safe that IS witnessed as sharing its whole key set gets one.
     expect(cautionsFor(ETHERFI, F[5])[0].text).toBe(
-      "shares all 5 owners with Safe 0x2aca…8adc — not an independent key set",
+      "shares 5 owners with Safe 0x2aca…8adc — not an independent key set",
     );
   });
 });

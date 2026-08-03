@@ -40,6 +40,40 @@ describe("fold — reconstruction of the published grade", () => {
   });
 });
 
+describe("fold — an unwitnessed raw refuses the reconstruction", () => {
+  const BLANK = [{ raw_points: 20 }, { raw_points: null }];
+
+  it("never reads an absent raw_points as a proven zero", () => {
+    // Number(null) is 0: coercing here would publish a λ of 80 built on a
+    // charge nobody witnessed, and rank the blank row dead last as if it were
+    // the cheapest finding in the protocol.
+    expect(lambdaOf(BLANK)).toBeNull();
+    expect(lambdaOf(BLANK)).not.toBe(80);
+    expect(lambdaOf([{ raw_points: 20 }, {}])).toBeNull();
+    expect(foldLambda([20, null])).toBeNull();
+  });
+
+  it("refuses every counterfactual built on the same population", () => {
+    expect(lambdaWithout(BLANK, [0])).toBeNull();
+    expect(recoveryFrom(BLANK, [0])).toEqual({ before: null, after: null, recovery: null });
+    expect(lambdaAtWeaknessOne([{ raw_points: null, weakness: 0.5 }], 0)).toBeNull();
+    expect(protectionDelta([{ raw_points: null, weakness: 0.5 }], 0)).toBeNull();
+    // …and stays refused when the blank row is somebody else's.
+    expect(protectionDelta([{ raw_points: 10, weakness: 0.5 }, { raw_points: null }], 0)).toBeNull();
+  });
+
+  it("marks every net not-determined rather than publishing a partial fold", () => {
+    const ranked = rankedFindings(BLANK);
+    expect(ranked.map((r) => r.index)).toEqual([0, 1]); // the blank sorts last
+    expect(ranked.map((r) => r.raw)).toEqual([20, null]);
+    expect(ranked.map((r) => r.net)).toEqual([null, null]);
+  });
+
+  it("still folds a genuine zero, which is a witnessed charge", () => {
+    expect(lambdaOf([{ raw_points: 10 }, { raw_points: 0 }])).toBe(90);
+  });
+});
+
 describe("fold — counterfactuals", () => {
   it("recovers more than the removed nets, because rank decay promotes survivors", () => {
     const { before, after, recovery } = recoveryFrom(FINDINGS, [0, 1]);

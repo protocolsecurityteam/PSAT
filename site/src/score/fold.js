@@ -17,20 +17,39 @@ export function round4(value) {
   return Math.round(value * 1e4) / 1e4;
 }
 
-function rawOf(finding) {
-  const value = Number(finding?.raw_points);
-  return Number.isFinite(value) ? value : 0;
+// A finding whose raw_points is absent or non-numeric has an unwitnessed
+// charge, not a zero one — and `Number(null)` is 0, so coercing here would
+// publish a proven zero the document never proved (and sink the row to last
+// rank, moving every net below it). null instead, and the fold refuses.
+export function rawOf(finding) {
+  const raw = finding?.raw_points;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 
 // Rank order: raw descending, ties broken by position in the document so the
-// ordering is total and reproducible.
+// ordering is total and reproducible. An unwitnessed raw has no place in that
+// order; it sorts last so the list stays renderable, and every net goes null.
 function rankOrder(raws) {
   return raws
     .map((raw, index) => ({ raw, index }))
-    .sort((a, b) => b.raw - a.raw || a.index - b.index);
+    .sort((a, b) => {
+      if (a.raw === null || b.raw === null) {
+        if (a.raw === b.raw) return a.index - b.index;
+        return a.raw === null ? 1 : -1;
+      }
+      return b.raw - a.raw || a.index - b.index;
+    });
 }
 
+function reconstructable(raws) {
+  return raws.every((raw) => raw !== null);
+}
+
+// null — never a number — when any raw in the population is unwitnessed: one
+// missing term makes both the sum and the rank order of every other term
+// unproven, so there is no λ to publish.
 export function foldLambda(raws) {
+  if (!reconstructable(raws)) return null;
   let charged = 0;
   rankOrder(raws).forEach((entry, rank) => {
     charged += round4(entry.raw * Math.pow(DECAY, rank));
@@ -39,14 +58,16 @@ export function foldLambda(raws) {
 }
 
 // [{ index, rank, raw, net }] in rank order — the order the ledger, the
-// deduction list and the callout grouping all walk.
+// deduction list and the callout grouping all walk. `raw`/`net` are null where
+// the reconstruction refused; callers render those not-determined.
 export function rankedFindings(findings) {
   const raws = (findings || []).map(rawOf);
+  const ok = reconstructable(raws);
   return rankOrder(raws).map((entry, rank) => ({
     index: entry.index,
     rank,
     raw: entry.raw,
-    net: round4(entry.raw * Math.pow(DECAY, rank)),
+    net: ok ? round4(entry.raw * Math.pow(DECAY, rank)) : null,
   }));
 }
 
@@ -66,6 +87,7 @@ export function lambdaWithout(findings, dropIndices) {
 export function recoveryFrom(findings, dropIndices) {
   const before = lambdaOf(findings);
   const after = lambdaWithout(findings, dropIndices);
+  if (before === null || after === null) return { before, after, recovery: null };
   return { before, after, recovery: round4(after - before) };
 }
 
@@ -76,8 +98,10 @@ export function lambdaAtWeaknessOne(findings, index) {
   const finding = (findings || [])[index];
   const weakness = Number(finding?.weakness);
   if (!Number.isFinite(weakness) || weakness <= 0 || weakness >= 1) return null;
+  const own = rawOf(finding);
+  if (own === null) return null;
   const raws = findings.map(rawOf);
-  raws[index] = rawOf(finding) / weakness;
+  raws[index] = own / weakness;
   return foldLambda(raws);
 }
 
@@ -85,6 +109,7 @@ export function lambdaAtWeaknessOne(findings, index) {
 // null when the finding carries no credited strength.
 export function protectionDelta(findings, index) {
   const weakened = lambdaAtWeaknessOne(findings, index);
-  if (weakened === null) return null;
-  return round4(lambdaOf(findings) - weakened);
+  const current = lambdaOf(findings);
+  if (weakened === null || current === null) return null;
+  return round4(current - weakened);
 }

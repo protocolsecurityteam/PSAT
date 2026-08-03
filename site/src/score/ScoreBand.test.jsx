@@ -257,4 +257,48 @@ describe("ScoreBand — withheld grade", () => {
     await openBreakdown();
     expect(screen.getByText("64 reports on file")).toBeInTheDocument();
   });
+
+  it("publishes no fix-first, because its whole claim is a λ the producer withheld", async () => {
+    const { container } = renderBand({ score: WITHHELD });
+    await openBreakdown();
+    expect(container.querySelector(".sc-fix")).toBeNull();
+    expect(screen.queryByText(/modeled recovery/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/rank decay promotes/)).not.toBeInTheDocument();
+    // The λ is reconstructible from the raw points — nothing in the breakdown
+    // may quote it, under that name or as a bare number.
+    const breakdown = container.querySelector(".score-breakdown");
+    expect(breakdown.textContent).not.toContain("λ");
+    expect(breakdown.textContent).not.toContain("54.7");
+    expect(breakdown.textContent).not.toContain("64.3");
+  });
+
+  it("summarises the tail as not-determined rather than −0.00 combined", async () => {
+    renderBand({ score: WITHHELD });
+    await openBreakdown();
+    const tail = screen.getByRole("button", { name: /11 more/ });
+    expect(tail.textContent).toContain("combined points not determined");
+    expect(tail.textContent).not.toContain("0.00");
+    expect(tail.textContent).not.toContain("−");
+  });
+});
+
+describe("ScoreBand — an unwitnessed raw", () => {
+  // grade_lambda still published, but one finding's raw_points is absent: the
+  // fold cannot reconstruct that row's charge, and neither can the page.
+  const BLANK_RAW = {
+    ...ETHERFI,
+    findings: [
+      { ...ETHERFI.findings[0] },
+      { ...ETHERFI.findings[1], raw_points: null, net_points_lambda: undefined },
+    ],
+  };
+
+  it("renders the row's points as not determined, never as 0.00", async () => {
+    const { container } = renderBand({ score: BLANK_RAW });
+    await openBreakdown();
+    const points = [...container.querySelectorAll(".sc-pts")].map((n) => n.textContent);
+    expect(points).toEqual(["−20.25", "not determined"]);
+    expect(points.some((p) => p.includes("0.00"))).toBe(false);
+    expect(container.querySelectorAll(".sc-pts .sc-nd")).toHaveLength(1);
+  });
 });

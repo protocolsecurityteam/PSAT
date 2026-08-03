@@ -55,7 +55,15 @@ function DeductionRow({ row }) {
   if (row.controller) detail.push(`${row.controller.slice(0, 6)}…${row.controller.slice(-4)}`);
   return (
     <div className="sc-frow">
-      <span className="sc-pts">{row.net === null ? row.raw.toFixed(2) : `−${row.net.toFixed(2)}`}</span>
+      <span className="sc-pts">
+        {row.net !== null ? (
+          `−${row.net.toFixed(2)}`
+        ) : row.raw !== null ? (
+          row.raw.toFixed(2)
+        ) : (
+          <span className="sc-nd">not determined</span>
+        )}
+      </span>
       <div>
         <div className="sc-who">
           <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
@@ -118,7 +126,13 @@ export default function Deductions({ view }) {
   const rows = view.rows;
   const head = rows.slice(0, VISIBLE_ROWS);
   const tail = rows.slice(VISIBLE_ROWS);
-  const tailSum = Math.round(tail.reduce((sum, r) => sum + (r.net || 0), 0) * 100) / 100;
+  // A total over rows whose nets were never published is not a total. Summing
+  // them as zeroes would render "−0.00 combined" — a measured-looking figure
+  // for a quantity the document withheld.
+  const tailSummable = tail.every((r) => r.net !== null);
+  const tailSum = tailSummable
+    ? Math.round(tail.reduce((sum, r) => sum + r.net, 0) * 100) / 100
+    : null;
   const tailNd = tail.filter((r) => !r.value.determined && !r.provenNoReach).length;
 
   return (
@@ -136,7 +150,12 @@ export default function Deductions({ view }) {
             </>
           ) : (
             <>
-              + {tail.length} more · −{tailSum.toFixed(2)} combined
+              + {tail.length} more ·{" "}
+              {tailSum === null ? (
+                <i className="sc-nd">combined points not determined</i>
+              ) : (
+                `−${tailSum.toFixed(2)} combined`
+              )}
               {tailNd > 0 && (
                 <>
                   {" "}

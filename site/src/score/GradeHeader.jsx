@@ -58,6 +58,10 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
     .join(" · ");
   const subsumed = doc?.provenance?.population?.subsumed_rows;
   const exposure = doc.grade_exposure;
+  // λ can be absent outside the withheld state too — the fold refuses to
+  // reconstruct one over an unwitnessed raw. With no λ there is no number to
+  // print and no bar to lay out: "0.0 kept" would be a fabricated reading.
+  const hasLambda = typeof lambda === "number" && Number.isFinite(lambda);
 
   return (
     <>
@@ -65,7 +69,11 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
       <div className="sc-grade-left">
         {letter && <div className={`sc-grade-letter sc-tone-${tone}`}>{letter}</div>}
         <div className="sc-grade-nums">
-          <div className="sc-num">{lambda.toFixed(1)}</div>
+          {hasLambda ? (
+            <div className="sc-num">{lambda.toFixed(1)}</div>
+          ) : (
+            <div className="sc-num sc-nd">not determined</div>
+          )}
           <div className="sc-of">λ / 100</div>
           {!calibrated && (
             <div className="sc-uncal">bands uncalibrated for this model version</div>
@@ -77,38 +85,42 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
       </div>
 
       <div className="sc-grade-mid">
-        <div className="sc-ledger-bar">
-          <div className="sc-ledger-seg sc-kept" style={{ flexBasis: `${ledger.kept}%` }}>
-            <span className="sc-inlbl">{ledger.kept.toFixed(1)} kept</span>
-          </div>
-          {ledger.segments.map((segment, i) => (
-            <div
-              key={segment.id}
-              className={`sc-ledger-seg sc-ded${i === ledger.segments.length - 1 ? " sc-last" : ""}`}
-              style={{ flexBasis: `${segment.basis}%` }}
-              title={segment.title}
-            />
-          ))}
-        </div>
-        <div className="sc-ledger-callouts" title={droppedTitle || undefined}>
-          {callouts.map((callout) =>
-            hidden.has(callout.id) ? null : (
-              <span
-                key={callout.id}
-                ref={register(callout.id)}
-                className="sc-callout"
-                style={{ left: `${callout.centerPct}%` }}
-              >
-                <span className="sc-tick" />
-                <b>−{callout.sum.toFixed(1)}</b> {callout.text}
-              </span>
-            ),
-          )}
-        </div>
-        <div className="sc-ledger-foot">
-          <span className="sc-key"><span className="sc-dot sc-dot-kept" /> kept</span>
-          <span className="sc-key"><span className="sc-dot sc-dot-ded" /> deductions, worst-first</span>
-        </div>
+        {hasLambda && (
+          <>
+            <div className="sc-ledger-bar">
+              <div className="sc-ledger-seg sc-kept" style={{ flexBasis: `${ledger.kept}%` }}>
+                <span className="sc-inlbl">{ledger.kept.toFixed(1)} kept</span>
+              </div>
+              {ledger.segments.map((segment, i) => (
+                <div
+                  key={segment.id}
+                  className={`sc-ledger-seg sc-ded${i === ledger.segments.length - 1 ? " sc-last" : ""}`}
+                  style={{ flexBasis: `${segment.basis}%` }}
+                  title={segment.title}
+                />
+              ))}
+            </div>
+            <div className="sc-ledger-callouts" title={droppedTitle || undefined}>
+              {callouts.map((callout) =>
+                hidden.has(callout.id) ? null : (
+                  <span
+                    key={callout.id}
+                    ref={register(callout.id)}
+                    className="sc-callout"
+                    style={{ left: `${callout.centerPct}%` }}
+                  >
+                    <span className="sc-tick" />
+                    <b>−{callout.sum.toFixed(1)}</b> {callout.text}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="sc-ledger-foot">
+              <span className="sc-key"><span className="sc-dot sc-dot-kept" /> kept</span>
+              <span className="sc-key"><span className="sc-dot sc-dot-ded" /> deductions, worst-first</span>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="sc-grade-stats">
