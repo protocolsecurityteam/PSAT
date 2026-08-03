@@ -4,12 +4,12 @@ import ConfidenceStrip from "./ConfidenceStrip.jsx";
 import Deductions from "./Deductions.jsx";
 import GradeHeader from "./GradeHeader.jsx";
 import Protections from "./Protections.jsx";
-import { auditPosture, confidenceChannels, projectScore } from "./derive.js";
+import { projectScore } from "./derive.js";
 import { usdCompact } from "./format.js";
 
 function Shell({ children }) {
   return (
-    <section className="band score-band">
+    <section className="score-band">
       <div className="sc-band-inner">{children}</div>
     </section>
   );
@@ -99,8 +99,9 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
   }
 
   const withheld = state === "not_determined";
-  const channels = withheld ? confidenceChannels(score) : view.confidence;
-  const posture = withheld ? auditPosture(score) : view.posture;
+  // projectScore computes both unconditionally, withheld or not.
+  const channels = view.confidence;
+  const posture = view.posture;
 
   return (
     <>
@@ -124,7 +125,7 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
       </Shell>
 
       {open && (
-        <section className="band score-breakdown" data-company={companyName}>
+        <section className="score-breakdown" data-company={companyName}>
           <div className="sc-band-inner">
             <div className="sc-cols">
               <Deductions view={view} onSelect={onSelectEntity} />

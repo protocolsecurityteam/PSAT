@@ -10,7 +10,7 @@ import { shortAddr } from "../format.js";
 // of it. Without the route the card is a non-sequitur.
 //
 // Every hop is read off the payload's own control edges (the same ones the
-// canvas wash walks), and each names itself with what was witnessed: the flow
+// canvas reach chips walk), and each names itself with what was witnessed: the flow
 // type always, plus the control-graph relation and role label where a row
 // witnessed them. An edge with no witnessed relation shows its type alone —
 // never an invented name. A route this graph does not carry is its own state
@@ -42,11 +42,11 @@ export function ReachPath({ reachPath }) {
             <span className="ps-reach-step">{i + 1}</span>
             <span className="ps-reach-body">
               <span className="ps-reach-pair">
-                <span className="ps-reach-node" title={hop.from}>
+                <span title={hop.from}>
                   {hop.fromName || shortAddr(hop.from)}
                 </span>
                 <span className="ps-reach-arrow">→</span>
-                <span className="ps-reach-node" title={hop.to}>
+                <span title={hop.to}>
                   {hop.toName || shortAddr(hop.to)}
                 </span>
               </span>

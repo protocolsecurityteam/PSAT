@@ -1981,7 +1981,7 @@ def _build_flows_and_principals(
     # Filled once the contract→Contract lookup exists (below), before the first
     # add_flow call. Absent keys are the normal case: an edge the control graph
     # never witnessed a relation for carries no relation/label at all.
-    edge_witness: dict[tuple[str, str, str], dict[str, str]] = {}
+    edge_witness: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     def add_flow(from_addr: str, to_addr: str, flow_type: str, chain: str | None, lane: str = "control") -> None:
         chain_tok = _coalesce_chain(chain)

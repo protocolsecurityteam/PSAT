@@ -631,8 +631,8 @@ function ProtocolSurface({
     // pair. A same-named function the hinted controller cannot call is a
     // different action under someone else's gate; ringing it would present
     // that gate as the one the points were charged for. Function and caller
-    // are marked together or not at all, and the whole-card ring stays the
-    // last resort.
+    // are marked together or not at all — an unmarkable hint opens the card
+    // with nothing marked, and the caller's `unpaired` outcome says why.
     let marked = fnView;
     let matchedCaller = findCaller(marked, hintedController);
     let unpaired = false;
@@ -666,21 +666,8 @@ function ProtocolSurface({
     const params = new URLSearchParams(window.location.search);
     const focus = params.get("sel") || params.get("focus");
     const fn = params.get("fn");
-    let target = null;
-    if (focus && params.get("score")) {
-      target = { contractAddress: focus, functionSignature: fn || "", selector: fn || "" };
-    } else if (window.location.pathname.endsWith("/surface")) {
-      try {
-        const pending = JSON.parse(sessionStorage.getItem("psat:surfaceRadarExample") || "null");
-        if (pending?.companyName === companyName && pending?.contractAddress) {
-          target = pending;
-          sessionStorage.removeItem("psat:surfaceRadarExample");
-        }
-      } catch {
-        sessionStorage.removeItem("psat:surfaceRadarExample");
-      }
-    }
-    if (!target) return;
+    if (!focus || !params.get("score")) return;
+    const target = { contractAddress: focus, functionSignature: fn || "", selector: fn || "" };
     if (
       selectExample({
         contractAddress: target.contractAddress,
@@ -723,7 +710,7 @@ function ProtocolSurface({
 
   // Reach overlay: every contract the SELECTED entity reaches transitively over
   // the control graph, keyed to the hop distance on the shortest route. The
-  // canvas washes those nodes with fading intensity, which is the only way the
+  // canvas marks those nodes with a reach chip, which is the only way the
   // multi-hop control relation is visible — it deliberately draws no
   // control-edge lines (the fanout reads as a hairball). Memoized per selection:
   // one BFS over a few hundred edges, never a walk per render.
@@ -747,7 +734,7 @@ function ProtocolSurface({
 
   // The route a score-page click-through took to this entity: the deduction row
   // named a host the controller acts on DIRECTLY, and this contract only through
-  // the control graph. Walked over the same edges the canvas wash uses, so the
+  // the control graph. Walked over the same edges the canvas reach chips use, so the
   // card and the graph cannot disagree. A route this graph does not carry stays
   // an explicit third state (hops: null) — the card says so rather than drawing
   // a shorter path than the truth.
@@ -823,14 +810,12 @@ function ProtocolSurface({
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
   // Score-page arrivals (radar sub-mode) mark the action the warning was about
-  // on the ONE sidebar card, never a second parallel card: the contract card
-  // gets the ring when only the contract is known, the named function's row gets
-  // it when the function resolved. A principal-only selection never enters radar
-  // mode (it commits through select), so these are machine-facet only.
-  // The mark is the PAIR the warning named — the function row and, inside it,
-  // the caller chip for the controller the row named. The contract ring is the
-  // last resort: it fires only when no row on this card answered to the name,
-  // so the click still lands somewhere visible.
+  // on the ONE sidebar card, never a second parallel card. The mark is the
+  // PAIR the warning named — the function row and, inside it, the caller chip
+  // for the controller the row named — or nothing: when no row answers to the
+  // name the card simply opens unmarked. A principal-only selection never
+  // enters radar mode (it commits through select), so these are machine-facet
+  // only.
   const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
   const radarCallerAddress = radarFunctionKey ? radarSelection?.callerAddress || null : null;
 

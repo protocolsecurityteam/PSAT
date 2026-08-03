@@ -32,7 +32,6 @@ const CLAIM_VOCAB = {
     sentence: "changes logic",
     priority: 0,
     legacy: "implementation_update",
-    score: { kind: "upgrade", severity: 1 },
   },
   "proxy.admin_change": {
     family: "control_plane",
@@ -41,7 +40,6 @@ const CLAIM_VOCAB = {
     sentence: "changes proxy admin",
     priority: 0,
     legacy: null,
-    score: { kind: "admin", severity: 0.88 },
   },
 
   // ── arbitrary execution / deployment (exec family, top lane) ──────────────
@@ -52,7 +50,6 @@ const CLAIM_VOCAB = {
     sentence: "arbitrary external call",
     priority: 1,
     legacy: "arbitrary_external_call",
-    score: { kind: "execution", severity: 0.95 },
   },
   // Foreign code running in THIS contract's storage. Kept out of
   // upgrade.implementation on purpose: that claim carries the EIP-1967/UUPS
@@ -66,7 +63,6 @@ const CLAIM_VOCAB = {
     sentence: "runs foreign code in its own storage",
     priority: 1,
     legacy: "delegatecall_execution",
-    score: { kind: "execution", severity: 0.95 },
   },
   contract_deployment: {
     family: "exec",
@@ -75,7 +71,6 @@ const CLAIM_VOCAB = {
     sentence: "deploys a contract",
     priority: 1,
     legacy: "contract_deployment",
-    score: null,
   },
 
   // ── ownership (top lane) ──────────────────────────────────────────────────
@@ -86,7 +81,6 @@ const CLAIM_VOCAB = {
     sentence: "changes owner",
     priority: 2,
     legacy: "ownership_transfer",
-    score: { kind: "admin", severity: 0.88 },
   },
   "ownership.renounce": {
     family: "control_plane",
@@ -95,7 +89,6 @@ const CLAIM_VOCAB = {
     sentence: "renounces ownership",
     priority: 2,
     legacy: "ownership_transfer",
-    score: { kind: "admin", severity: 0.88 },
   },
   "ownership.accept": {
     family: "control_plane",
@@ -104,7 +97,6 @@ const CLAIM_VOCAB = {
     sentence: "accepts ownership",
     priority: 2,
     legacy: "ownership_transfer",
-    score: { kind: "admin", severity: 0.88 },
   },
 
   // ── role / authority / pointer admin (top lane) ───────────────────────────
@@ -115,7 +107,6 @@ const CLAIM_VOCAB = {
     sentence: "grants role",
     priority: 3,
     legacy: "role_management",
-    score: { kind: "admin", severity: 0.88 },
   },
   "roles.revoke": {
     family: "control_plane",
@@ -124,7 +115,6 @@ const CLAIM_VOCAB = {
     sentence: "revokes role",
     priority: 3,
     legacy: "role_management",
-    score: { kind: "admin", severity: 0.88 },
   },
   "roles.configure": {
     family: "control_plane",
@@ -133,7 +123,6 @@ const CLAIM_VOCAB = {
     sentence: "configures roles",
     priority: 3,
     legacy: "role_management",
-    score: { kind: "admin", severity: 0.88 },
   },
   "authority.replace": {
     family: "control_plane",
@@ -142,7 +131,6 @@ const CLAIM_VOCAB = {
     sentence: "changes authority",
     priority: 3,
     legacy: "authority_update",
-    score: { kind: "admin", severity: 0.88 },
   },
   "authorized_caller.rotate": {
     family: "control_plane",
@@ -151,7 +139,6 @@ const CLAIM_VOCAB = {
     sentence: "rotates caller authority",
     priority: 3,
     legacy: null,
-    score: { kind: "admin", severity: 0.88 },
   },
   // Minted only by the effects claims bridge (behavioral_observed): a simulated
   // call opened a permission gate to previously-rejected callers. Displayed like
@@ -163,7 +150,6 @@ const CLAIM_VOCAB = {
     sentence: "opens a gate",
     priority: 3,
     legacy: "authority_update",
-    score: { kind: "admin", severity: 0.88 },
   },
   "callee_pointer.rotate": {
     family: "control_plane",
@@ -172,7 +158,6 @@ const CLAIM_VOCAB = {
     sentence: "changes hook",
     priority: 3,
     legacy: "hook_update",
-    score: { kind: "config", severity: 0.78 },
   },
   "safe.signer_mgmt": {
     family: "control_plane",
@@ -181,7 +166,6 @@ const CLAIM_VOCAB = {
     sentence: "changes signers",
     priority: 3,
     legacy: null,
-    score: { kind: "admin", severity: 0.88 },
   },
   "safe.module_mgmt": {
     family: "control_plane",
@@ -190,7 +174,6 @@ const CLAIM_VOCAB = {
     sentence: "changes modules",
     priority: 3,
     legacy: null,
-    score: { kind: "admin", severity: 0.88 },
   },
   "safe.set_guard": {
     family: "control_plane",
@@ -199,7 +182,6 @@ const CLAIM_VOCAB = {
     sentence: "sets guard",
     priority: 3,
     legacy: null,
-    score: { kind: "admin", severity: 0.88 },
   },
   "lz_oapp.set_peer": {
     family: "control_plane",
@@ -208,7 +190,6 @@ const CLAIM_VOCAB = {
     sentence: "sets peer",
     priority: 3,
     legacy: null,
-    score: { kind: "config", severity: 0.78 },
   },
   "lz_oapp.set_delegate": {
     family: "control_plane",
@@ -217,7 +198,6 @@ const CLAIM_VOCAB = {
     sentence: "sets delegate",
     priority: 3,
     legacy: null,
-    score: { kind: "config", severity: 0.78 },
   },
 
   // ── pause (top lane, split set/unset) ─────────────────────────────────────
@@ -228,7 +208,6 @@ const CLAIM_VOCAB = {
     sentence: "pauses",
     priority: 4,
     legacy: "pause_toggle",
-    score: { kind: "pause", severity: 0.25 },
   },
   "pause.unset": {
     family: "control_plane",
@@ -237,7 +216,6 @@ const CLAIM_VOCAB = {
     sentence: "unpauses",
     priority: 4,
     legacy: "pause_toggle",
-    score: { kind: "unpause", severity: 0.68 },
   },
 
   // ── timelock ops (top lane) ───────────────────────────────────────────────
@@ -248,7 +226,6 @@ const CLAIM_VOCAB = {
     sentence: "schedules op",
     priority: 5,
     legacy: "timelock_operation",
-    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.execute": {
     family: "control_plane",
@@ -257,7 +234,6 @@ const CLAIM_VOCAB = {
     sentence: "executes op",
     priority: 5,
     legacy: "timelock_operation",
-    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.cancel": {
     family: "control_plane",
@@ -266,7 +242,6 @@ const CLAIM_VOCAB = {
     sentence: "cancels op",
     priority: 5,
     legacy: "timelock_operation",
-    score: { kind: "timelock", severity: 0.62 },
   },
   "timelock.set_delay": {
     family: "control_plane",
@@ -275,7 +250,6 @@ const CLAIM_VOCAB = {
     sentence: "changes delay",
     priority: 5,
     legacy: "timelock_operation",
-    score: { kind: "timelock", severity: 0.62 },
   },
 
   // ── flow / supply (inflow / outflow lanes) ────────────────────────────────
@@ -286,7 +260,6 @@ const CLAIM_VOCAB = {
     sentence: "moves value in",
     priority: 6,
     legacy: "asset_pull",
-    score: { kind: "asset_in", severity: 0.5 },
   },
   "supply.mint": {
     family: "flow",
@@ -295,7 +268,6 @@ const CLAIM_VOCAB = {
     sentence: "mints supply",
     priority: 6,
     legacy: "mint",
-    score: { kind: "asset_in", severity: 0.5 },
   },
   "flow.out": {
     family: "flow",
@@ -304,7 +276,6 @@ const CLAIM_VOCAB = {
     sentence: "moves value out",
     priority: 7,
     legacy: "asset_send",
-    score: { kind: "asset_out", severity: 0.78 },
   },
   // The entry neither holds nor sends the value — it calls a contract that does.
   // Same risk class as a direct out-flow when the routed value LEAVES that
@@ -319,7 +290,6 @@ const CLAIM_VOCAB = {
     sentence: "routes value through a contract it calls",
     priority: 7,
     legacy: null,
-    score: { kind: "asset_out", severity: 0.78 },
   },
   "supply.burn": {
     family: "flow",
@@ -328,7 +298,6 @@ const CLAIM_VOCAB = {
     sentence: "burns supply",
     priority: 7,
     legacy: "burn",
-    score: { kind: "asset_out", severity: 0.78 },
   },
 
   // ── user-plane operations (never the control lane) ────────────────────────
@@ -339,7 +308,6 @@ const CLAIM_VOCAB = {
     sentence: "wraps ETH",
     priority: 8,
     legacy: null,
-    score: null,
   },
   "weth.withdraw": {
     family: "user_plane",
@@ -348,7 +316,6 @@ const CLAIM_VOCAB = {
     sentence: "unwraps ETH",
     priority: 9,
     legacy: null,
-    score: null,
   },
   "erc20.transfer": {
     family: "user_plane",
@@ -357,7 +324,6 @@ const CLAIM_VOCAB = {
     sentence: "transfers tokens",
     priority: 9,
     legacy: null,
-    score: null,
   },
   "erc20.transfer_from": {
     family: "user_plane",
@@ -366,7 +332,6 @@ const CLAIM_VOCAB = {
     sentence: "transfers tokens",
     priority: 9,
     legacy: null,
-    score: null,
   },
   "erc20.approve": {
     family: "user_plane",
@@ -375,7 +340,6 @@ const CLAIM_VOCAB = {
     sentence: "approves allowance",
     priority: 10,
     legacy: null,
-    score: null,
   },
   "gov.delegate": {
     family: "user_plane",
@@ -384,7 +348,6 @@ const CLAIM_VOCAB = {
     sentence: "delegates votes",
     priority: 10,
     legacy: null,
-    score: null,
   },
 
   // ── facts (present for provenance; contribute nothing to severity) ────────
@@ -403,7 +366,6 @@ const CLAIM_VOCAB = {
     sentence: "passes through a rate limiter",
     priority: 11,
     legacy: null,
-    score: null,
   },
 };
 
@@ -1704,7 +1666,7 @@ export function sharedDeployerNote(principal) {
 // callouts count the rows they name. An id with no phrase renders as the id
 // itself — an unmapped capability must not be silently absorbed into a
 // neighbouring phrase.
-export const CAPABILITY_PHRASE = {
+const CAPABILITY_PHRASE = {
   "authority.replace": ["authority hole", "authority holes"],
   "authorized_caller.rotate": ["caller rotation", "caller rotations"],
   "delegatecall.execute": ["delegatecall hole", "delegatecall holes"],

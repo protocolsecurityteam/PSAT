@@ -25,11 +25,6 @@ export function pctOf(part, total) {
   return (part / total) * 100;
 }
 
-export function pctLabel(value, digits = 1) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return `${value.toFixed(digits)}%`;
-}
-
 const COUNT_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
 export function countWord(n) {

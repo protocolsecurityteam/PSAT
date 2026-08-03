@@ -176,7 +176,6 @@ describe("ScoreBand — computed grade", () => {
     renderBand({ score: ETHERFI });
     await openBreakdown();
     expect(screen.queryByText(/provably differs/)).not.toBeInTheDocument();
-    expect(document.querySelector(".sc-caut-fact")).toBeNull();
   });
 
   it("renders no earned-negatives line when the corpus has none", async () => {

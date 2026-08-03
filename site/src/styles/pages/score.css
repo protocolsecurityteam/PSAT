@@ -1,7 +1,7 @@
 /* ── Protocol score band + breakdown ──────────────────────────────────────────
-   Every class is `sc-`-prefixed and every rule is scoped to the two sections,
-   so nothing here can reach the surface, the hero, or any other page. The two
-   chart hues are the CVD-validated pair from the approved prototype. */
+   Every class is `sc-`-prefixed — a namespace no other page uses — so nothing
+   here can reach the surface, the hero, or any other page. The two chart hues
+   are the CVD-validated pair from the approved prototype. */
 
 .score-band,
 .score-breakdown {
@@ -537,7 +537,6 @@ h2.sc-band-title {
 
 .sc-fact-line { margin-top: 6px; font-size: 11.5px; color: var(--faint); }
 .sc-fact-line b { color: var(--muted); }
-.sc-caut-fact { margin-top: 8px; font-size: 11px; }
 
 /* ── confidence strip ─────────────────────────────────────────────────────── */
 

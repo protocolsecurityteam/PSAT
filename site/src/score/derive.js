@@ -319,8 +319,12 @@ export const LEDGER_TAIL_FLOOR = 0.4;
 
 export function ledgerSegments(rows, lambda) {
   const kept = typeof lambda === "number" ? lambda : 0;
-  const head = rows.filter((r) => (r.net || 0) >= LEDGER_TAIL_FLOOR);
-  const tail = rows.slice(head.length);
+  // Partition, not filter+slice: the producer publishes rank-ordered rows so
+  // the floor selects a prefix today, but a non-monotone net sequence must
+  // not double-count a row into both head and tail.
+  const head = [];
+  const tail = [];
+  for (const r of rows) ((r.net || 0) >= LEDGER_TAIL_FLOOR ? head : tail).push(r);
   const tailSum = Math.round(tail.reduce((sum, r) => sum + (r.net || 0), 0) * 1e4) / 1e4;
   const segments = head.map((row) => ({
     id: `f${row.index}`,

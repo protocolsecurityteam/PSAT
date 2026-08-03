@@ -32,10 +32,6 @@ const VALID_LANES = new Set(["top", "left", "right", "ops"]);
 // cosmetic: it is what makes "contributes nothing to severity" a property of the
 // vocabulary rather than a convention a future entry could quietly break.
 const VALID_FAMILIES = new Set(["control_plane", "flow", "exec", "user_plane", "fact"]);
-const VALID_KINDS = new Set([
-  "upgrade", "execution", "admin", "config", "pause", "unpause", "timelock", "asset_out", "asset_in",
-]);
-
 function claim(claim_id, tier = "standard_exact") {
   return { claim_id, tier, witness: {} };
 }
@@ -95,17 +91,12 @@ describe("CLAIM_VOCAB shape invariants", () => {
       expect(VALID_LANES.has(entry.lane), `${id} lane`).toBe(true);
       expect(typeof entry.sentence === "string" && entry.sentence.length > 0, `${id} sentence`).toBe(true);
       expect(Number.isFinite(entry.priority), `${id} priority`).toBe(true);
-      if (entry.score) {
-        expect(VALID_KINDS.has(entry.score.kind), `${id} score.kind`).toBe(true);
-        expect(entry.score.severity, `${id} severity`).toBeGreaterThan(0);
-      }
     }
   });
 
-  it("never scores a fact-family claim and never lanes it to control", () => {
+  it("never lanes a fact-family claim to control", () => {
     for (const [id, entry] of Object.entries(CLAIM_VOCAB)) {
       if (entry.family !== "fact") continue;
-      expect(entry.score, `${id} score`).toBeNull();
       expect(entry.lane, `${id} lane`).toBe("ops");
     }
   });

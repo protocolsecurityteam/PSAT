@@ -125,7 +125,7 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
 
       <div className="sc-grade-stats">
         <div className="sc-gstat">
-          <div className="sc-v">{typeof exposure === "number" ? exposure.toFixed(1) : "—"}</div>
+          <div className="sc-v">{typeof exposure === "number" ? exposure.toFixed(1) : <span className="sc-nd">not determined</span>}</div>
           <div className="sc-l">exposure grade</div>
           <div className="sc-s">severity-weighted</div>
         </div>

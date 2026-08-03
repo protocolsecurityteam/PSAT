@@ -1197,27 +1197,6 @@ describe("ProtocolSurface — external selection handle", () => {
     expectNoCrash();
   });
 
-  it("still consumes the sessionStorage handoff through the same path", async () => {
-    window.history.replaceState({}, "", "/company/etherfi/surface");
-    sessionStorage.setItem(
-      "psat:surfaceRadarExample",
-      JSON.stringify({
-        companyName: "etherfi",
-        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
-        functionSignature: "pause",
-      }),
-    );
-    render(<ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />);
-    const inspector = await waitFor(() => {
-      const el = document.querySelector(".ps-inspector");
-      expect(el).toBeTruthy();
-      return el;
-    });
-    expect(inspector).toHaveTextContent("pause");
-    expect(sessionStorage.getItem("psat:surfaceRadarExample")).toBeNull();
-    expectNoCrash();
-  });
-
   it("refuses an address the graph does not carry, and another chain's twin — as two different facts", async () => {
     const ref = renderWithHandle();
     await waitFor(() => expect(ref.current).toBeTruthy());
