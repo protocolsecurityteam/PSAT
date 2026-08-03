@@ -1690,4 +1690,9 @@ export function capabilityPhrase(capability, count) {
   return count === 1 ? entry[0] : entry[1];
 }
 
+// The ids the phrase table covers — the frontend's copy of the scorer's fixed
+// capability vocabulary, exported so parallel maps (the glossary) can assert
+// they cover the same set instead of drifting apart silently.
+export const CAPABILITY_PHRASE_IDS = Object.freeze(Object.keys(CAPABILITY_PHRASE));
+
 export { CLAIM_VOCAB };

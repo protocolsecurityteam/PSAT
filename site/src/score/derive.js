@@ -516,6 +516,10 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
       address: controllerAddress(finding),
       who: finding.principal_kind === "safe" ? coalitionWord(shape) : proposer?.text || null,
       what: value.determined ? `${finding.capability} on ${value.text}` : finding.capability,
+      // The same reading split apart, for consumers that wrap the capability
+      // in its own control (the glossary tag) — one derivation, two shapes.
+      capability: finding.capability,
+      valueText: value.determined ? value.text : null,
       cautions: cautionsFor(doc, finding),
     });
   });

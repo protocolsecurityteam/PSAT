@@ -304,6 +304,49 @@ h2.sc-band-title {
 }
 
 .sc-who .sc-cap { font-weight: 600; color: var(--ink); }
+
+/* Capability glossary: the "?" beside a row's capability id and its popover. */
+.sc-cap-help { position: relative; display: inline-flex; align-items: center; gap: 4px; }
+.sc-cap-q {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 50%;
+  background: none;
+  box-shadow: none;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sc-cap-q:hover,
+.sc-cap-q[aria-expanded="true"] {
+  color: var(--teal);
+  border-color: var(--teal);
+}
+.sc-cap-pop {
+  /* Fixed, anchored by inline top/left from the component: the lines this
+     tag sits in are overflow:hidden, which clips any absolute child. */
+  position: fixed;
+  z-index: 30;
+  width: 280px;
+  padding: 9px 11px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: normal;
+}
+.sc-cap-pop b { color: var(--ink); font-weight: 600; }
 .sc-who .sc-addr { color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 
 .sc-fbar { height: 8px; position: relative; margin-top: 4px; }

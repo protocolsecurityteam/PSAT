@@ -531,9 +531,10 @@ describe("ScoreBand — entities select on the surface", () => {
     await openBreakdown();
     const row = container.querySelector(".sc-frow");
     expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0x2322…2bd1");
-    // Only the target expander is a button; nothing that cannot act is one.
+    // Only controls that can act are buttons: the capability's glossary "?"
+    // and the target expander. Entity references degrade to plain spans.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
-    expect(buttons).toEqual(["+5 more"]);
+    expect(buttons).toEqual(["?", "+5 more"]);
   });
 
   it("keeps the wired row's text identical to the unwired one", async () => {
@@ -583,5 +584,19 @@ describe("ScoreBand — #score hash deep link", () => {
     expect(await screen.findByText("Deductions")).toBeInTheDocument();
     expect(window.location.hash).toBe("");
     window.history.replaceState({}, "", "/");
+  });
+});
+
+describe("ScoreBand — protections carry the capability glossary", () => {
+  it("wraps the protection row's capability in the ? tag, value suffix intact", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const what = container.querySelector(".sc-prot-what");
+    expect(what).toBeTruthy();
+    // Same reading as before, plus the glossary affordance.
+    expect(what.textContent).toMatch(/^\S+\.\S+\? on /);
+    const q = what.querySelector(".sc-cap-q");
+    await userEvent.setup().click(q);
+    expect(screen.getByRole("note")).toBeInTheDocument();
   });
 });
