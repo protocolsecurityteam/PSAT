@@ -593,15 +593,26 @@ def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePla
     proven_ids = {row.contract_id for row in proven}
     covered_value, covered_priced = _audited_value(contracts, covered_ids, value_plane)
     proven_value, proven_priced = _audited_value(contracts, proven_ids, value_plane)
+
+    reports = int(
+        session.query(sql_func.count(AuditReport.id)).filter(AuditReport.protocol_id == protocol_id).scalar() or 0
+    )
+    # A published zero is a claim that the protocol has no audits, and an empty
+    # table is that fact only where discovery is proven to have looked. A stage
+    # that never ran, or died before persisting (the billing-failure shape),
+    # leaves the same empty table and lands on not_determined instead.
+    reports_on_file = reports if reports or _audit_discovery_witnessed(session, protocol_id) else None
+    # Zero covered contracts needs its own licence: with no audit on file there
+    # was nothing that could match, but audits with no coverage row are a
+    # matcher run this fold has no witness for.
+    coverage_zero_licensed = reports_on_file == 0
     return {
         "rows": len(rows),
         "proven_equivalence": len(proven),
-        "reports_on_file": int(
-            session.query(sql_func.count(AuditReport.id)).filter(AuditReport.protocol_id == protocol_id).scalar() or 0
-        ),
+        "reports_on_file": reports_on_file,
         "contracts_total": len(contracts),
-        "contracts_covered": len(covered_ids),
-        "contracts_proven": len(proven_ids),
+        "contracts_covered": len(covered_ids) if rows or coverage_zero_licensed else None,
+        "contracts_proven": len(proven_ids) if rows or coverage_zero_licensed else None,
         "value_covered_usd": covered_value,
         "value_proven_usd": proven_value,
         "value_entities_priced": {"covered": covered_priced, "proven": proven_priced},
@@ -611,9 +622,31 @@ def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePla
             "proof_kind is banned in every value; a non-proven row is UNKNOWN, not 0. "
             "The value figures are floors over the PRICED covered entities — an unpriced "
             "audited contract contributes nothing and is never read as $0 — and null means "
-            "no covered entity was priced at all"
+            "no covered entity was priced at all. A null count is an unwitnessed stage, "
+            "never a zero: the discovery witness is the persisted audit_reports artifact, "
+            "and a failure INSIDE the row sync after that artifact committed is recorded "
+            "only in the stage_errors artifact body, which this DB-only fold does not read"
         ),
     }
+
+
+def _audit_discovery_witnessed(session: Session, protocol_id: int) -> bool:
+    """Whether audit discovery is proven to have run and persisted its result.
+
+    ``store_artifact(job, "audit_reports", ...)`` commits on the one path that
+    persists discovered reports, so the row is the witness that the stage got
+    that far. Existence only — the body lives in the bucket and this fold reads
+    the database alone.
+    """
+    from db.models import Artifact, Job
+
+    return (
+        session.query(Artifact.id)
+        .join(Job, Job.id == Artifact.job_id)
+        .filter(Job.protocol_id == protocol_id, Artifact.name == "audit_reports")
+        .order_by(Artifact.id)
+        .first()
+    ) is not None
 
 
 def _audited_value(

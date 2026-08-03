@@ -1013,3 +1013,64 @@ def test_audit_posture_value_is_null_when_no_covered_entity_is_priced(corpus, db
     # An unpriced audited contract contributes nothing and is never read as $0.
     assert posture["value_covered_usd"] is None
     assert posture["value_proven_usd"] is None
+
+
+def test_a_proven_equivalence_without_its_commit_is_not_a_proof(corpus, db_session):
+    """``equivalence_status='proven'`` alone names no commit to have proven it."""
+    token = "0x" + "d4" * 20
+    anchored = corpus.contract("0x" + "d5" * 20)
+    unanchored = corpus.contract("0x" + "d6" * 20)
+    _balance(db_session, anchored, usd="500.00", token=token)
+    _balance(db_session, unanchored, usd="700.00", token=token)
+    _coverage(
+        db_session,
+        corpus.protocol.id,
+        anchored,
+        _audit(db_session, corpus.protocol.id, "delta"),
+        status="proven",
+        commit="0" * 40,
+    )
+    _coverage(
+        db_session,
+        corpus.protocol.id,
+        unanchored,
+        _audit(db_session, corpus.protocol.id, "epsilon"),
+        status="proven",
+        commit=None,
+    )
+
+    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
+    assert posture["contracts_covered"] == 2
+    assert posture["value_covered_usd"] == 1200.0
+    # The commit-less row is covered but never proven, in the count and in the
+    # money behind it.
+    assert posture["proven_equivalence"] == 1
+    assert posture["contracts_proven"] == 1
+    assert posture["value_proven_usd"] == 500.0
+
+
+def test_audit_discovery_that_ran_and_found_nothing_publishes_zero(corpus, db_session):
+    from db.models import Artifact
+
+    corpus.contract("0x" + "d7" * 20)
+    db_session.add(Artifact(job_id=corpus.job.id, name="audit_reports", data={"reports": []}))
+    db_session.commit()
+
+    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
+    assert posture["reports_on_file"] == 0
+    # Nothing on file is nothing that could have matched, so the coverage zeros
+    # are earned too.
+    assert posture["contracts_covered"] == 0
+    assert posture["contracts_proven"] == 0
+
+
+def test_an_unwitnessed_audit_discovery_publishes_no_counts(corpus, db_session):
+    """An empty table with no discovery witness is not 'this protocol has no audits'."""
+    corpus.contract("0x" + "d8" * 20)
+
+    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
+    assert posture["reports_on_file"] is None
+    assert posture["contracts_covered"] is None
+    assert posture["contracts_proven"] is None
+    # The denominator is a discovery fact and stands on its own.
+    assert posture["contracts_total"] == 1
