@@ -132,10 +132,19 @@ export function findFunctionView(machine, target = {}) {
   const signature = String(target.functionSignature || target.fn || "").toLowerCase();
   const selector = String(target.selector || "").toLowerCase();
   if (!signature && !selector) return null;
-  return machineFunctions(machine).find((fnView) => {
+  const fns = machineFunctions(machine);
+  const exact = fns.find((fnView) => {
     const fnSig = String(fnView.signature || "").toLowerCase();
     const fnKey = String(fnView.key || "").toLowerCase();
     if (selector && fnKey.endsWith(`:${selector}`)) return true;
     return signature && fnSig === signature;
-  }) || null;
+  });
+  if (exact) return exact;
+  // The scorer names example functions by bare name ("pause"), never by
+  // signature. A bare name resolves only when it names exactly one function on
+  // the machine: with overloads present, picking one would point the user at a
+  // call site the caller never named.
+  if (!signature || signature.includes("(")) return null;
+  const byName = fns.filter((fnView) => String(fnView.name || "").toLowerCase() === signature);
+  return byName.length === 1 ? byName[0] : null;
 }

@@ -219,6 +219,7 @@ export function deductionRows(doc, index) {
       capability: finding?.capability || "",
       controller: controllerAddress(finding),
       functions: functionsLabel(finding),
+      exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
       provenNoReach: isProvenNoReach(finding),
       trackPct: maxRaw && entry.raw !== null ? (entry.raw / maxRaw) * 100 : 0,
@@ -367,6 +368,9 @@ export function fixFirst(doc, rows) {
     lambdaAfter: after,
     subsumed,
     exampleFunction: (group.rows[0].finding?.example_functions || [])[0] || null,
+    // Where that function lives, so the named function is selectable on the
+    // surface like every other function name on the page.
+    exampleTarget: group.rows[0].targets[0] || null,
   };
 }
 

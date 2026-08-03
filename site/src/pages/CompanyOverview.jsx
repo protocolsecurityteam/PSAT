@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
@@ -22,6 +22,35 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
   const [score, setScore] = useState(null);
   const [scoreError, setScoreError] = useState(null);
+  const [selectMiss, setSelectMiss] = useState(null);
+  const surfaceRef = useRef(null);
+  const surfaceBandRef = useRef(null);
+
+  // A clicked entity on the score page selects that entity on the embedded
+  // surface and brings the surface into view. The selection goes through the
+  // surface's own handle — the same transition a canvas click makes — so the
+  // score page owns no selection logic of its own. An entity the graph does
+  // not carry (a contract outside the mapped set, another chain's twin) is
+  // reported instead of leaving a click that appears to do nothing.
+  const handleSelectEntity = useCallback((target) => {
+    const selected = surfaceRef.current?.selectExample?.({
+      chain: target?.chain,
+      contractAddress: target?.address,
+      functionSignature: target?.functionSignature || "",
+    });
+    if (!selected) {
+      setSelectMiss(`${target?.label || target?.address || "That entity"} is not on the control surface.`);
+      return;
+    }
+    setSelectMiss(null);
+    surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  useEffect(() => {
+    if (!selectMiss) return undefined;
+    const timer = setTimeout(() => setSelectMiss(null), 4000);
+    return () => clearTimeout(timer);
+  }, [selectMiss]);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,10 +173,11 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         contracts={contracts}
         score={score}
         error={scoreError}
+        onSelectEntity={handleSelectEntity}
       />
 
       {/* Inline Control Surface — real ProtocolSurface, not a static preview. */}
-      <section className="company-surface-band">
+      <section className="company-surface-band" ref={surfaceBandRef}>
         <div className="company-surface-band-header">
           <div>
             <p className="eyebrow" style={{ margin: 0 }}>Control Surface</p>
@@ -217,6 +247,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               second time on every overview page-load. */}
           <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
             <ProtocolSurface
+              ref={surfaceRef}
               companyName={companyName}
               initialData={data}
               initialCoverage={auditCoverage}
@@ -226,6 +257,12 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
           </Suspense>
         </div>
       </section>
+
+      {selectMiss && (
+        <div className="company-select-toast" role="status">
+          {selectMiss}
+        </div>
+      )}
 
       {addressesModalOpen && (
         <Suspense fallback={null}>

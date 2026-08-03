@@ -76,7 +76,7 @@ function WithheldBanner({ doc }) {
   );
 }
 
-export default function ScoreBand({ companyName, contracts, score, error }) {
+export default function ScoreBand({ companyName, contracts, score, error, onSelectEntity }) {
   const [open, setOpen] = useState(false);
   // Branch on grade_state before any grade field is read: in the withheld state
   // grade_lambda / grade_exposure / confidence_pct are null and the findings do
@@ -127,7 +127,7 @@ export default function ScoreBand({ companyName, contracts, score, error }) {
         <section className="band score-breakdown" data-company={companyName}>
           <div className="sc-band-inner">
             <div className="sc-cols">
-              <Deductions view={view} />
+              <Deductions view={view} onSelect={onSelectEntity} />
               {withheld ? (
                 <Protections
                   doc={{ ...score, grade_exposure: null }}

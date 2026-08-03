@@ -6,7 +6,7 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import ProtocolSurface, { auditHighlightSet, principalOnChain } from "./ProtocolSurface.jsx";
@@ -1119,6 +1119,102 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
       return el;
     });
     expect(machineName).toHaveTextContent("GovTimelock");
+    expectNoCrash();
+  });
+});
+
+describe("ProtocolSurface — external selection handle", () => {
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  function renderWithHandle() {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+    );
+    return ref;
+  }
+
+  it("selects a contract and the named function", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let accepted;
+    await act(async () => {
+      accepted = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        functionSignature: "pause",
+      });
+    });
+    expect(accepted).toBe(true);
+    const name = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(name).toHaveTextContent("Vault");
+    // ...and the named function, not just its contract.
+    const inspector = await waitFor(() => {
+      const el = document.querySelector(".ps-inspector");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(inspector).toHaveTextContent("pause");
+    expectNoCrash();
+  });
+
+  it("selects a principal-only entity through the principal path", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let accepted;
+    await act(async () => {
+      accepted = ref.current.selectExample({ contractAddress: SAFE_PRINCIPAL.address });
+    });
+    expect(accepted).toBe(true);
+    await waitFor(() => {
+      expect(document.querySelector(".ps-principal-section")).toBeTruthy();
+    });
+    expectNoCrash();
+  });
+
+  it("still consumes the sessionStorage handoff through the same path", async () => {
+    window.history.replaceState({}, "", "/company/etherfi/surface");
+    sessionStorage.setItem(
+      "psat:surfaceRadarExample",
+      JSON.stringify({
+        companyName: "etherfi",
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        functionSignature: "pause",
+      }),
+    );
+    render(<ProtocolSurface companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} />);
+    const inspector = await waitFor(() => {
+      const el = document.querySelector(".ps-inspector");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(inspector).toHaveTextContent("pause");
+    expect(sessionStorage.getItem("psat:surfaceRadarExample")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("refuses an address the graph does not carry, and another chain's twin", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let offGraph;
+    let offChain;
+    await act(async () => {
+      offGraph = ref.current.selectExample({
+        contractAddress: "0xdead00000000000000000000000000000000dead",
+      });
+      offChain = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        chain: "base",
+      });
+    });
+    expect(offGraph).toBe(false);
+    expect(offChain).toBe(false);
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
     expectNoCrash();
   });
 });

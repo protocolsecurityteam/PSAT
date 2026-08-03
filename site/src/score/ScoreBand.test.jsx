@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -300,5 +300,93 @@ describe("ScoreBand — an unwitnessed raw", () => {
     expect(points).toEqual(["−20.25", "not determined"]);
     expect(points.some((p) => p.includes("0.00"))).toBe(false);
     expect(container.querySelectorAll(".sc-pts .sc-nd")).toHaveLength(1);
+  });
+});
+
+describe("ScoreBand — entities select on the surface", () => {
+  // Row 0 of the corpus: EOA 0x2322…, setAuthority, reaching BoringVault first.
+  const CONTROLLER = "0x2322ba43eff1542b6a7baed35e66099ea0d12bd1";
+  const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
+
+  async function openRowZero(onSelectEntity) {
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    return container.querySelector(".sc-frow");
+  }
+
+  it("selects the example function on the contract it was witnessed reaching", async () => {
+    const onSelectEntity = vi.fn();
+    const row = await openRowZero(onSelectEntity);
+    const button = within(row).getByRole("button", { name: "setAuthority" });
+    await userEvent.setup().click(button);
+    expect(onSelectEntity).toHaveBeenCalledWith({
+      chain: "ethereum",
+      address: FIRST_TARGET,
+      functionSignature: "setAuthority",
+      label: "setAuthority",
+    });
+  });
+
+  it("selects the controller named in the principal string, not a unit member", async () => {
+    const onSelectEntity = vi.fn();
+    const row = await openRowZero(onSelectEntity);
+    await userEvent.setup().click(within(row).getByRole("button", { name: /0x2322…2bd1/ }));
+    expect(onSelectEntity).toHaveBeenCalledWith({
+      chain: "ethereum",
+      address: CONTROLLER,
+      label: CONTROLLER,
+    });
+    expect(ETHERFI.findings[0].principal).toContain(CONTROLLER);
+  });
+
+  it("selects a target contract with no function", async () => {
+    const onSelectEntity = vi.fn();
+    const row = await openRowZero(onSelectEntity);
+    const targets = row.querySelector(".sc-targets");
+    await userEvent.setup().click(within(targets).getByRole("button", { name: /BoringVault/ }));
+    expect(onSelectEntity).toHaveBeenCalledWith({
+      chain: "ethereum",
+      address: FIRST_TARGET,
+      label: "BoringVault",
+    });
+  });
+
+  it("selects the function the fix-first callout names", async () => {
+    const onSelectEntity = vi.fn();
+    renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
+    await userEvent.setup().click(within(fix).getByRole("button", { name: "setAuthority" }));
+    expect(onSelectEntity).toHaveBeenCalledWith(
+      expect.objectContaining({ functionSignature: "setAuthority", address: FIRST_TARGET }),
+    );
+  });
+
+  it("activates from the keyboard, as the role it carries promises", async () => {
+    const onSelectEntity = vi.fn();
+    const row = await openRowZero(onSelectEntity);
+    within(row).getByRole("button", { name: "setAuthority" }).focus();
+    await userEvent.setup().keyboard("{Enter}");
+    expect(onSelectEntity).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the same text as plain elements with no handler wired", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const row = container.querySelector(".sc-frow");
+    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0x2322…2bd1");
+    // Only the target expander is a button; nothing that cannot act is one.
+    const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
+    expect(buttons).toEqual(["+4 more"]);
+  });
+
+  it("keeps the wired row's text identical to the unwired one", async () => {
+    const plain = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const before = plain.container.querySelector(".sc-frow").textContent;
+    plain.unmount();
+    const wired = renderBand({ score: ETHERFI, onSelectEntity: vi.fn() });
+    await openBreakdown();
+    expect(wired.container.querySelector(".sc-frow").textContent).toBe(before);
   });
 });

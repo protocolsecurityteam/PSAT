@@ -1,13 +1,39 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 const VISIBLE_ROWS = 8;
 const TARGETS_SHORT = 3;
 
-// Phase 4 turns the contract names, the controller address and the example
-// function into buttons that select the entity on the embedded surface. Until
-// that selection handle exists they render as plain text — an element that
-// looks clickable and does nothing is worse than one that doesn't.
-function TargetList({ row }) {
+// Contract names, controller addresses and example function names select the
+// entity on the embedded surface. Without a handler (the band rendered outside
+// a page that hosts a surface) they stay plain text — an element that looks
+// clickable and does nothing is worse than one that doesn't.
+//
+// A span carrying the button role, not a <button>: these sit inside lines that
+// truncate with text-overflow, and a real button is an atomic inline-block that
+// the ellipsis cannot reach into, so the trailing entity would clip with no "…"
+// to say it had. Keyboard activation is wired to match the role.
+function EntityButton({ onSelect, target, title, children }) {
+  if (!onSelect || !target?.address) return children;
+  const activate = () => onSelect(target);
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      className="sc-lnk"
+      title={title}
+      onClick={activate}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        activate();
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function TargetList({ row, onSelect }) {
   const [open, setOpen] = useState(false);
   const { targets, reachWitnessed, undeterminedCount } = row;
   if (!targets.length) return null;
@@ -23,7 +49,13 @@ function TargetList({ row }) {
       {shown.map((target, i) => (
         <span key={target.canonical}>
           {i > 0 && " · "}
-          {target.name ? <b>{target.name}</b> : null} {target.short}
+          <EntityButton
+            onSelect={onSelect}
+            target={{ chain: target.chain, address: target.address, label: target.name || target.short }}
+            title={`Show ${target.name || target.short} on the control surface`}
+          >
+            {target.name ? <b>{target.name}</b> : null} {target.short}
+          </EntityButton>
         </span>
       ))}
       {hiddenCount > 0 && (
@@ -49,10 +81,42 @@ function TargetList({ row }) {
   );
 }
 
-function DeductionRow({ row }) {
+function DeductionRow({ row, onSelect }) {
   const { chip, value } = row;
-  const detail = [...row.functions];
-  if (row.controller) detail.push(`${row.controller.slice(0, 6)}…${row.controller.slice(-4)}`);
+  // The example function lives on the row's targets; the first one is the
+  // contract the function is selected on.
+  const functionTarget = row.targets[0] || null;
+  const detail = row.functions.map((part) =>
+    part === row.exampleFunction && functionTarget ? (
+      <EntityButton
+        key={part}
+        onSelect={onSelect}
+        target={{
+          chain: functionTarget.chain,
+          address: functionTarget.address,
+          functionSignature: part,
+          label: part,
+        }}
+        title={`Show ${part} on ${functionTarget.name || functionTarget.short} in the control surface`}
+      >
+        {part}
+      </EntityButton>
+    ) : (
+      <span key={part}>{part}</span>
+    ),
+  );
+  if (row.controller) {
+    detail.push(
+      <EntityButton
+        key="controller"
+        onSelect={onSelect}
+        target={{ chain: row.finding?.chain, address: row.controller, label: row.controller }}
+        title="Show this controller on the control surface"
+      >
+        {`${row.controller.slice(0, 6)}…${row.controller.slice(-4)}`}
+      </EntityButton>,
+    );
+  }
   return (
     <div className="sc-frow">
       <span className="sc-pts">
@@ -68,14 +132,20 @@ function DeductionRow({ row }) {
         <div className="sc-who">
           <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
           <span className="sc-cap">{row.capability}</span>
-          {/* Phase 4: function name + controller become surface selections. */}
-          <span className="sc-addr">{detail.join(" · ")}</span>
+          <span className="sc-addr">
+            {detail.map((node, i) => (
+              <Fragment key={i}>
+                {i > 0 && " · "}
+                {node}
+              </Fragment>
+            ))}
+          </span>
         </div>
         <div className="sc-fbar">
           <div className="sc-track" style={{ width: `${row.trackPct}%` }} />
           <div className="sc-fill" style={{ width: `${row.fillPct}%` }} />
         </div>
-        <TargetList row={row} />
+        <TargetList row={row} onSelect={onSelect} />
       </div>
       <span className="sc-val">
         {value.determined ? (
@@ -93,7 +163,7 @@ function DeductionRow({ row }) {
   );
 }
 
-function FixFirst({ fix }) {
+function FixFirst({ fix, onSelect }) {
   if (!fix) return null;
   return (
     <div className="sc-fix">
@@ -113,7 +183,26 @@ function FixFirst({ fix }) {
                 <b>{capability}</b>
               </span>
             ))}
-            {fix.exampleFunction ? ` — fixing ${fix.exampleFunction} alone does not release them.` : "."}
+            {fix.exampleFunction ? (
+              <>
+                {" — fixing "}
+                <EntityButton
+                  onSelect={onSelect}
+                  target={{
+                    chain: fix.exampleTarget?.chain,
+                    address: fix.exampleTarget?.address,
+                    functionSignature: fix.exampleFunction,
+                    label: fix.exampleFunction,
+                  }}
+                  title={`Show ${fix.exampleFunction} on the control surface`}
+                >
+                  {fix.exampleFunction}
+                </EntityButton>
+                {" alone does not release them."}
+              </>
+            ) : (
+              "."
+            )}
           </>
         )}
       </span>
@@ -121,7 +210,7 @@ function FixFirst({ fix }) {
   );
 }
 
-export default function Deductions({ view }) {
+export default function Deductions({ view, onSelect }) {
   const [tailOpen, setTailOpen] = useState(false);
   const rows = view.rows;
   const head = rows.slice(0, VISIBLE_ROWS);
@@ -139,9 +228,9 @@ export default function Deductions({ view }) {
     <div>
       <h2 className="sc-band-title">Deductions</h2>
       {head.map((row) => (
-        <DeductionRow key={row.index} row={row} />
+        <DeductionRow key={row.index} row={row} onSelect={onSelect} />
       ))}
-      {tailOpen && tail.map((row) => <DeductionRow key={row.index} row={row} />)}
+      {tailOpen && tail.map((row) => <DeductionRow key={row.index} row={row} onSelect={onSelect} />)}
       {tail.length > 0 && (
         <button type="button" className="sc-tail-btn" onClick={() => setTailOpen((was) => !was)}>
           {tailOpen ? (
@@ -167,7 +256,7 @@ export default function Deductions({ view }) {
           )}
         </button>
       )}
-      <FixFirst fix={view.fix} />
+      <FixFirst fix={view.fix} onSelect={onSelect} />
     </div>
   );
 }

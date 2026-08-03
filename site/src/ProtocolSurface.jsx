@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -60,13 +60,13 @@ export function principalOnChain(principal, activeChain) {
   return chains.some((c) => coalesceChain(c) === activeChain);
 }
 
-export default function ProtocolSurface({
+function ProtocolSurface({
   companyName,
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
   embedded = false,
-}) {
+}, ref) {
   const isAdmin = useIsAdmin();
   // initialData / initialFunctions let a parent (CompanyOverview) hand
   // us the /api/company/{name} payload and /functions map it already
@@ -510,11 +510,42 @@ export default function ProtocolSurface({
 
   const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
-  const handleRadarExampleClick = useCallback((example) => {
-    const targetAddress = example?.contractAddress?.toLowerCase();
-    if (!targetAddress) return;
-    const machine = allMachines.find((m) => m.address?.toLowerCase() === targetAddress);
-    if (!machine) return;
+  // Clicking a Safe/Timelock/EOA node on the canvas selects the principal
+  // (opens the detail panel with signers / delay / controlled contracts)
+  // and focuses it — same behaviour as clicking a single-principal guard
+  // badge, just driven from the node itself.
+  const handleSelectPrincipal = useCallback((principal) => {
+    if (!principal) return;
+    setAgentHighlights(null);
+    setActiveAuditId(null);
+    select(principal.address);
+    syncUrl({ sel: principal.address });
+  }, [select, syncUrl]);
+
+  // The single entrypoint for a selection requested from outside the surface:
+  // the score page's entity buttons (through the imperative handle below), the
+  // ?score deep link and the sessionStorage handoff all land here, so no caller
+  // carries its own copy of the selection transition. Returns false when the
+  // request names nothing on this chain's graph, so a caller can say so rather
+  // than leave a click looking broken.
+  const selectExample = useCallback((example) => {
+    const address = String(example?.contractAddress || "").toLowerCase();
+    if (!address) return false;
+    // Identity is (chain, address) (inv. 13) and the surface renders one chain
+    // at a time: another chain's entity is off this graph, not a miss.
+    if (coalesceChain(example?.chain || activeChain) !== activeChain) return false;
+    const entry = entityIndex.get(entityKey(activeChain, address));
+    if (!entry) return false;
+    // Machine facet wins over principal — same precedence the selection hook
+    // applies, so a timelock contract opens the richer card either way.
+    if (!entry.machine) {
+      if (!entry.principal) return false;
+      setSidebarMode("detail");
+      handleSelectPrincipal(entry.principal);
+      return true;
+    }
+    const machine = entry.machine;
+    setSidebarMode("detail");
     const fnView = findFunctionView(machine, example);
     setEnabledRoles((prev) => {
       const role = machine.role || "utility";
@@ -523,12 +554,14 @@ export default function ProtocolSurface({
       next.add(role);
       return next;
     });
-    setSidebarMode("detail");
     setAgentHighlights(null);
     setActiveAuditId(null);
     radar(machine.address, fnView?.key || null);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
-  }, [allMachines, radar, syncUrl]);
+    return true;
+  }, [activeChain, entityIndex, handleSelectPrincipal, radar, syncUrl]);
+
+  useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
 
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
@@ -551,27 +584,17 @@ export default function ProtocolSurface({
       }
     }
     if (!target) return;
-    const machine = allMachines.find((m) => m.address?.toLowerCase() === target.contractAddress.toLowerCase());
-    if (!machine) return;
-    restoredExampleSelection.current = true;
-    handleRadarExampleClick({
-      contractAddress: machine.address,
-      functionSignature: target.functionSignature || "",
-      selector: target.selector || "",
-    });
-  }, [allMachines, companyName, embedded, handleRadarExampleClick]);
-
-  // Clicking a Safe/Timelock/EOA node on the canvas selects the principal
-  // (opens the detail panel with signers / delay / controlled contracts)
-  // and focuses it — same behaviour as clicking a single-principal guard
-  // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal) => {
-    if (!principal) return;
-    setAgentHighlights(null);
-    setActiveAuditId(null);
-    select(principal.address);
-    syncUrl({ sel: principal.address });
-  }, [select, syncUrl]);
+    if (
+      selectExample({
+        contractAddress: target.contractAddress,
+        chain: target.chain,
+        functionSignature: target.functionSignature || "",
+        selector: target.selector || "",
+      })
+    ) {
+      restoredExampleSelection.current = true;
+    }
+  }, [allMachines, companyName, embedded, selectExample]);
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
@@ -852,3 +875,5 @@ export default function ProtocolSurface({
     </div>
   );
 }
+
+export default forwardRef(ProtocolSurface);

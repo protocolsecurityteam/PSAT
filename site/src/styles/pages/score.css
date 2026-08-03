@@ -357,6 +357,14 @@ h2.sc-band-title {
 
 .sc-tbtn:hover { text-decoration: underline; transform: none; }
 
+/* Entity controls (contract names, controller addresses, function names). They
+   inherit everything from the line they sit in — the affordance is the cursor
+   and the same hover underline the prototype's target expander uses, so the
+   text reads exactly as it did before it became clickable. */
+.sc-lnk { cursor: pointer; }
+.sc-lnk:hover { text-decoration: underline; }
+.sc-lnk:focus-visible { outline: 1px solid var(--mark-kept); outline-offset: 2px; }
+
 .sc-kchip {
   font-size: 9.5px;
   font-weight: 700;
