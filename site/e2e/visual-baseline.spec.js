@@ -166,7 +166,7 @@ test.describe("visual baselines", () => {
   test("company overview", async ({ page }) => {
     await page.goto("/company/etherfi", { waitUntil: "domcontentloaded" });
     await page.locator(".company-hero-title").waitFor({ state: "visible" });
-    // Wait for radar SVG to settle.
+    // Wait for the score band to settle.
     await page.waitForTimeout(400);
     await expect(page).toHaveScreenshot("company-overview.png", SCREENSHOT_OPTS);
   });

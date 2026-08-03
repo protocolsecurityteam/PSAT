@@ -40,9 +40,8 @@
   cursor: inherit !important;
 }
 
-/* Empty state for the Detail sidebar tab — protocol score + radar
-   reused from the company hero, so the sidebar is informative even
-   before the user clicks anything. */
+/* Empty state for the Detail sidebar tab — the prompt shown before the
+   user clicks anything on the canvas. */
 .ps-detail-empty {
   display: flex;
   flex-direction: column;
