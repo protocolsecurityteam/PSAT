@@ -546,3 +546,42 @@ describe("ScoreBand — entities select on the surface", () => {
     expect(wired.container.querySelector(".sc-frow").textContent).toBe(before);
   });
 });
+
+describe("ScoreBand — #score hash deep link", () => {
+  it("opens the breakdown, scrolls the band into view, and consumes the hash", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    renderBand({ score: ETHERFI });
+    // The breakdown is open without anyone clicking the toggle…
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    // …the band scrolled itself into view…
+    await vi.waitFor(() => expect(scrolled).toHaveBeenCalled());
+    // …and the hash is consumed so a later popstate cannot re-trigger it.
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("a click's popstate signal opens an already-mounted band (same-page case)", async () => {
+    window.history.replaceState({}, "", "/company/etherfi");
+    renderBand({ score: ETHERFI });
+    expect(screen.queryByText("Deductions")).not.toBeInTheDocument();
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("a hash arriving while the score is still loading opens once it lands", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const view = renderBand(); // loading — no score yet
+    expect(window.location.hash).toBe("#score"); // not consumed early
+    view.rerender(
+      <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={ETHERFI} error={null} />,
+    );
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+});

@@ -945,7 +945,13 @@ function ProtocolSurface({
               the empty state. A score-page arrival lands here too — same card,
               with the highlight props set. */}
           {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
-            <DetailEmptyState companyName={companyName} companyData={scopedCompanyData} />
+            <DetailEmptyState
+              companyName={companyName}
+              companyData={scopedCompanyData}
+              machines={machines}
+              principals={visiblePrincipals}
+              onSelectAddress={select}
+            />
           )}
           {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && (
             <EntityCard
