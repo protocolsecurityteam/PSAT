@@ -88,7 +88,7 @@ export function GroupNode({ data }) {
   return (
     <div
       className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}${
-        data.reachTier ? ` ps-group-reach ps-group-reach-${data.reachTier}` : ""
+        data.reachChip ? " ps-group-reach" : ""
       }`}
       style={{
         "--principal-color": color,
@@ -97,6 +97,14 @@ export function GroupNode({ data }) {
         "--principal-header-bg-bot": `${color}77`,
       }}
     >
+      {data.reachChip && (
+        <div
+          className={`ps-node-chip ps-node-chip--reach${chip?.out ? " ps-node-chip--stacked" : ""}`}
+          title="reached from the selected entity through the control graph"
+        >
+          {data.reachChip}
+        </div>
+      )}
       {chip?.out && (
         <div className="ps-node-chip ps-node-chip--out">{chip.out}</div>
       )}

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { REACH_TIERS, SelectionLegend, buildControlsDetailMap, reachTier } from "./SurfaceCanvas.jsx";
+import { SelectionLegend, buildControlsDetailMap, reachChipText } from "./SurfaceCanvas.jsx";
 import { entityKey } from "../entityKey.js";
 
 const ADDR = "0x" + "ab".repeat(20);
@@ -30,40 +30,37 @@ describe("buildControlsDetailMap — controls_detail chain keying (inv. 13)", ()
 });
 
 
-describe("reachTier — hop distance → wash intensity", () => {
-  it("gives the directly-connected node no wash of its own", () => {
-    // Hop 1 already wears the stronger acts-on treatment; washing it too would
-    // erase the one-hop / transitive distinction the overlay exists to draw.
-    expect(reachTier(1)).toBe(0);
+describe("reachChipText — hop distance → chip label", () => {
+  it("gives the directly-connected node no reach chip of its own", () => {
+    // Hop 1 already wears the acts-on chip naming the concrete capability;
+    // a reach chip beside it would restate the relationship, more weakly.
+    expect(reachChipText(1)).toBeNull();
   });
 
-  it("fades with distance, one tier per hop", () => {
-    expect(reachTier(2)).toBe(2);
-    expect(reachTier(3)).toBe(3);
-    expect(reachTier(4)).toBe(4);
+  it("names the exact hop count at every distance", () => {
+    expect(reachChipText(2)).toBe("reach · 2 hops");
+    expect(reachChipText(3)).toBe("reach · 3 hops");
+    expect(reachChipText(4)).toBe("reach · 4 hops");
+    // Far hops keep counting rather than collapsing into a capped tier.
+    expect(reachChipText(9)).toBe("reach · 9 hops");
   });
 
-  it("caps far hops at the faintest tier rather than dropping them", () => {
-    expect(reachTier(5)).toBe(REACH_TIERS);
-    expect(reachTier(40)).toBe(REACH_TIERS);
-  });
-
-  it("treats a non-reached node as no tier", () => {
-    expect(reachTier(0)).toBe(0);
-    expect(reachTier(undefined)).toBe(0);
+  it("treats a non-reached node as no chip", () => {
+    expect(reachChipText(0)).toBeNull();
+    expect(reachChipText(undefined)).toBeNull();
   });
 });
 
 describe("SelectionLegend", () => {
-  it("names the reach wash when the selection has transitive reach", () => {
+  it("names the reach chip when the selection has transitive reach", () => {
     const { container } = render(<SelectionLegend onClear={() => {}} hasReach />);
-    expect(screen.getByText("reachable through the control graph")).toBeInTheDocument();
+    expect(screen.getByText("selected reaches this contract")).toBeInTheDocument();
     expect(container.querySelector(".ps-selection-legend-swatch--reach")).not.toBeNull();
   });
 
-  it("omits the reach row when nothing on the canvas is washed", () => {
+  it("omits the reach row when nothing on the canvas is chipped", () => {
     const { container } = render(<SelectionLegend onClear={() => {}} />);
-    expect(screen.queryByText("reachable through the control graph")).toBeNull();
+    expect(screen.queryByText("selected reaches this contract")).toBeNull();
     expect(container.querySelector(".ps-selection-legend-swatch--reach")).toBeNull();
     // The two direction rows are untouched.
     expect(screen.getByText("selected acts on this contract")).toBeInTheDocument();

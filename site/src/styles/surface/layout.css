@@ -730,40 +730,22 @@
   background: #1e3a8a;
 }
 
-/* Reach wash — the transitive control closure of the selection. Violet, so it
-   sits outside the warm/cool acts-on pair rather than reading as a third
-   strength of the same claim: reach is a WEAKER relationship, not a direction.
-   The gradient in the swatch previews the hop fade the nodes carry. */
+/* Reach legend swatch — a miniature of the chip the reached nodes wear, not a
+   color block: the overlay's only mark IS the chip, so the legend must show
+   that idiom. Violet, so it sits outside the warm/cool acts-on pair rather than
+   reading as a third strength of the same claim: reach is a WEAKER
+   relationship, not a direction. */
 .ps-selection-legend-swatch--reach {
-  background: linear-gradient(90deg, #a78bfa 0%, rgba(167, 139, 250, 0.25) 100%);
+  background: #2e1065;
+  border: 1px solid rgba(167, 139, 250, 0.75);
 }
 
-/* Transitive reach on the canvas: hop 1 keeps the full acts-on treatment (it is
-   in connectedNodes), so the wash starts at hop 2 and fades to hop 4+. The node
-   stays legible at every tier — a reachable contract the user cannot read would
-   defeat the overlay — the tint and border are what carry the distance. */
+/* Transitive reach on the canvas: the card carries no tint and no fade — a
+   reached node renders exactly as crisp as a directly-connected one, and the
+   chip above it is the whole claim. The violet border is a locator only, so the
+   eye can find the chipped cards in a large graph. */
 .ps-node-reach {
-  border-color: rgba(167, 139, 250, 0.7);
-}
-
-.ps-node-reach-2 {
-  opacity: 1;
-  background: #2a1d55;
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.8), 0 0 16px rgba(124, 58, 237, 0.45);
-}
-
-.ps-node-reach-3 {
-  opacity: 0.82;
-  background: #221a42;
-  border-color: rgba(167, 139, 250, 0.5);
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.5), 0 0 11px rgba(124, 58, 237, 0.25);
-}
-
-.ps-node-reach-4 {
-  opacity: 0.62;
-  background: #1c1732;
-  border-color: rgba(167, 139, 250, 0.3);
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.28);
+  border-color: rgba(167, 139, 250, 0.55);
 }
 
 /* A group box whose own principal is in the closure. Border only — the body
@@ -771,11 +753,6 @@
    GroupNode). */
 .ps-group-reach {
   border-color: rgba(124, 58, 237, 0.5) !important;
-}
-
-.ps-group-reach-3,
-.ps-group-reach-4 {
-  border-color: rgba(124, 58, 237, 0.3) !important;
 }
 
 /* Selection chip rendered on each related contract / group container.
@@ -820,6 +797,20 @@
   top: calc(100% + 4px);
   background: #1e3a8a;
   color: #dbeafe;
+}
+
+/* Reach chip (violet, above the card): "reach · N hops" over the control graph.
+   Shares the above-the-card slot with --out / --browse; --stacked lifts it one
+   chip-height clear when one of those is also present. */
+.ps-node-chip--reach {
+  bottom: calc(100% + 4px);
+  background: #2e1065;
+  color: #ddd6fe;
+  border: 1px solid rgba(167, 139, 250, 0.75);
+}
+
+.ps-node-chip--reach.ps-node-chip--stacked {
+  bottom: calc(100% + 26px);
 }
 
 /* Browse-fallback chip: gold like the other browse markers. Names the

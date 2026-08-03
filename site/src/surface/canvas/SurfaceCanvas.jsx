@@ -43,7 +43,7 @@ export function buildControlsDetailMap(rows, chain) {
 // specifically.
 //
 // The third row appears only when the selection HAS transitive reach: a legend
-// entry for a wash nothing on the canvas is wearing would name a relationship
+// entry for a chip nothing on the canvas is wearing would name a relationship
 // this selection does not have.
 export function SelectionLegend({ onClear, hasReach = false }) {
   return (
@@ -59,7 +59,7 @@ export function SelectionLegend({ onClear, hasReach = false }) {
       {hasReach && (
         <div className="ps-selection-legend-row">
           <span className="ps-selection-legend-swatch ps-selection-legend-swatch--reach" />
-          <span>reachable through the control graph</span>
+          <span>selected reaches this contract</span>
         </div>
       )}
       {/* Explicit deselect — the pane-click clear exists but is invisible;
@@ -71,18 +71,15 @@ export function SelectionLegend({ onClear, hasReach = false }) {
   );
 }
 
-// Hop distances past this one are visually identical: four steps of fading are
-// as much as the eye separates, and a fifth tier would read as "no wash" —
-// which is the one thing the overlay must never say about a reachable node.
-export const REACH_TIERS = 4;
-
-// Hop distance → the wash tier a node wears. Hop 1 is deliberately absent: the
-// directly-connected node already carries the stronger acts-on treatment (full
-// opacity + its capability chip), so tinting it as reach too would blur the
-// distinction the whole overlay exists to draw.
-export function reachTier(hop) {
-  if (!hop || hop < 2) return 0;
-  return Math.min(hop, REACH_TIERS);
+// Hop distance → the chip a reached node wears, or null for no chip. Hop 1 is
+// deliberately absent: the directly-connected node already carries the acts-on
+// chip naming the concrete capability, and a reach chip beside it would state
+// the same relationship a second time, more weakly. The hop count is exact at
+// every distance — an overlay that stopped counting past some tier would be
+// saying less than the walk proved.
+export function reachChipText(hop) {
+  if (!hop || hop < 2) return null;
+  return `reach · ${hop} hops`;
 }
 
 // Multichain (inv. 13): every entity this canvas receives — machines,
@@ -399,23 +396,31 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         }
       }
     }
-    // Reach wash: nodes the selection reaches transitively (hop >= 2) keep a
-    // fading tint instead of the flat non-connected dim, and their containing
-    // group un-dims with them so a washed child isn't buried inside a dark box.
+    // Reach overlay: nodes the selection reaches transitively wear a purple chip
+    // naming the hop distance, and NO card treatment of their own — a tint or a
+    // fade would be a second, weaker encoding of the same fact and (at the far
+    // tiers) an unreadable card. Two sets come out of this:
+    //   reachChips  — chip text per node, hop >= 2 only (hop 1 already carries
+    //                 the acts-on chip)
+    //   reachBright — every closure member with a node here, plus the group
+    //                 boxes holding them: exempt from the selection dim, so a
+    //                 reached contract renders exactly as crisp as a direct one.
     // Suppressed entirely under an audit/agent highlight overlay — that set is
     // the answer to a different question and already owns the dim.
     const reachActive = !hiActive && sel && reachDistances && reachDistances.size > 0;
-    const reachTiers = new Map();
+    const reachChips = new Map();
+    const reachBright = new Set();
     if (reachActive) {
       const parentOf = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n.parentId?.toLowerCase() || null]));
       for (const [addr, hop] of reachDistances) {
-        const tier = reachTier(hop);
-        if (!tier || !parentOf.has(addr)) continue;
-        reachTiers.set(addr, tier);
+        if (!parentOf.has(addr)) continue;
+        reachBright.add(addr);
+        const text = reachChipText(hop);
+        if (text) reachChips.set(addr, text);
       }
-      for (const addr of [...reachTiers.keys()]) {
+      for (const addr of [...reachBright]) {
         const parent = parentOf.get(addr);
-        if (parent && !reachTiers.has(parent)) reachTiers.set(parent, 0);
+        if (parent) reachBright.add(parent);
       }
     }
 
@@ -437,9 +442,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           browseLc &&
           n.type === "group" &&
           (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc);
-        // 0 = un-dim only (a group holding reached children); >0 = wash tier.
-        const tier = reachTiers.get(nid);
-        const dimmed = !isFoc && !hasBrowsedRow && tier === undefined &&
+        const dimmed = !isFoc && !hasBrowsedRow && !reachBright.has(nid) &&
           (hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid)));
         // Gold dotted ring = "browsing this" only. The committed node keeps
         // just the selected ring, so the two states read as different colors.
@@ -460,7 +463,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
             ...n.data,
             selected: nid === selLc,
             focused,
-            reachTier: tier || 0,
+            reachChip: reachChips.get(nid) || null,
             selectionChip: selectionChips.get(nid) || null,
             browseChip: browseChips?.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
@@ -549,7 +552,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           <Panel position="top-center">
             <SelectionLegend
               onClear={() => onSelectMachine(null)}
-              hasReach={Boolean(reachDistances && [...reachDistances.values()].some((hop) => reachTier(hop) > 0))}
+              hasReach={Boolean(reachDistances && [...reachDistances.values()].some((hop) => reachChipText(hop)))}
             />
           </Panel>
         )}
