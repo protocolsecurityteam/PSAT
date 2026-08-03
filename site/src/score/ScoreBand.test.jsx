@@ -314,17 +314,22 @@ describe("ScoreBand — entities select on the surface", () => {
     return container.querySelector(".sc-frow");
   }
 
-  it("selects the example function on the contract it was witnessed reaching", async () => {
+  it("asks for the example function by NAME, naming no host contract", async () => {
     const onSelectEntity = vi.fn();
     const row = await openRowZero(onSelectEntity);
     const button = within(row).getByRole("button", { name: "setAuthority" });
     await userEvent.setup().click(button);
+    // The document does not publish the contract this function was witnessed
+    // on — `reach_entities` is the priced closure it reaches. Passing the first
+    // reach entity as its host would navigate to a guess: row 0's EOA controls
+    // AtomicQueue, while the first reached contract is BoringVault, whose own
+    // setAuthority is gated by a Safe.
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
-      address: FIRST_TARGET,
       functionSignature: "setAuthority",
       label: "setAuthority",
     });
+    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
   });
 
   it("selects the controller named in the principal string, not a unit member", async () => {
@@ -358,8 +363,9 @@ describe("ScoreBand — entities select on the surface", () => {
     const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
     await userEvent.setup().click(within(fix).getByRole("button", { name: "setAuthority" }));
     expect(onSelectEntity).toHaveBeenCalledWith(
-      expect.objectContaining({ functionSignature: "setAuthority", address: FIRST_TARGET }),
+      expect.objectContaining({ functionSignature: "setAuthority", chain: "ethereum" }),
     );
+    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
   });
 
   it("activates from the keyboard, as the role it carries promises", async () => {
@@ -368,6 +374,79 @@ describe("ScoreBand — entities select on the surface", () => {
     within(row).getByRole("button", { name: "setAuthority" }).focus();
     await userEvent.setup().keyboard("{Enter}");
     expect(onSelectEntity).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the reach-not-witnessed qualifier into the button's own interaction", async () => {
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    const lists = [...container.querySelectorAll(".sc-targets")];
+    const unwitnessed = lists.filter((el) => el.textContent.includes("reach not witnessed"));
+    expect(unwitnessed.length).toBeGreaterThan(0);
+    for (const list of unwitnessed) {
+      const buttons = [...list.querySelectorAll('[role="button"]')];
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        // Still clickable — going to an entity is not a claim about reach —
+        // but the third state travels with the control.
+        expect(button.getAttribute("aria-label")).toMatch(/reach not witnessed$/);
+        expect(button.getAttribute("title")).toMatch(/reach not witnessed$/);
+      }
+    }
+    const witnessed = lists.filter((el) => el.querySelector(".sc-arr"));
+    for (const list of witnessed) {
+      for (const button of list.querySelectorAll('[role="button"]')) {
+        expect(button.getAttribute("title")).not.toMatch(/reach not witnessed/);
+        expect(button.getAttribute("aria-label")).toBeNull();
+      }
+    }
+  });
+
+  it("makes every protection principal and every Safe named in a caution selectable", async () => {
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    const rows = [...container.querySelectorAll(".sc-prot")];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.querySelector(".sc-kchip")).toHaveAttribute("role", "button");
+    }
+    await userEvent.setup().click(rows[0].querySelector(".sc-kchip"));
+    expect(onSelectEntity).toHaveBeenCalledWith({
+      chain: "ethereum",
+      address: "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      label: "Timelock 10d",
+    });
+
+    const caution = [...container.querySelectorAll(".sc-caut")].find((el) =>
+      el.textContent.includes("not an independent key set"),
+    );
+    onSelectEntity.mockClear();
+    await userEvent.setup().click(within(caution).getByRole("button"));
+    expect(onSelectEntity).toHaveBeenCalledWith(
+      expect.objectContaining({ address: "0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde" }),
+    );
+    // The sentence is unchanged — the control wraps text that was already there.
+    expect(caution.textContent).toBe(
+      "⚠ shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
+    );
+  });
+
+  it("leaves the protections column inert with no handler wired", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    for (const chip of container.querySelectorAll(".sc-prot .sc-kchip")) {
+      expect(chip).not.toHaveAttribute("role");
+      expect(chip.className).not.toContain("sc-lnk");
+    }
+    const caution = [...container.querySelectorAll(".sc-caut")].find((el) =>
+      el.textContent.includes("not an independent key set"),
+    );
+    expect(caution.querySelector('[role="button"]')).toBeNull();
+    expect(caution.textContent).toBe(
+      "⚠ shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
+    );
   });
 
   it("renders the same text as plain elements with no handler wired", async () => {

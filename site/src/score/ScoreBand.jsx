@@ -133,9 +133,10 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
                   doc={{ ...score, grade_exposure: null }}
                   view={{ ...view, protections: [], posture }}
                   note="Modeled protection credit is a grade quantity; with the grade withheld it is not published."
+                  onSelect={onSelectEntity}
                 />
               ) : (
-                <Protections doc={score} view={view} />
+                <Protections doc={score} view={view} onSelect={onSelectEntity} />
               )}
             </div>
             <ConfidenceStrip channels={channels} />

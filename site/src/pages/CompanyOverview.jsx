@@ -12,6 +12,25 @@ const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
 const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
 
+const SELECT_NOTICE_MS = 4000;
+
+// The surface's refusal, put into words. "Absent from this graph", "present but
+// on another chain" and "that name is on several contracts" are three separate
+// facts; collapsing them into one message would tell the user something the
+// surface never said.
+function selectMissNotice(result, label) {
+  switch (result?.kind) {
+    case "ambiguous-function":
+      return result.hosts > 1
+        ? `${label} is on ${result.hosts} contracts here — select a contract first, then the function.`
+        : `${label} has ${result.count} overloads on its contract — open the contract and pick one.`;
+    case "chain-mismatch":
+      return `${label} is on another chain; the control surface shows one chain at a time.`;
+    default:
+      return `${label} is not on the control surface.`;
+  }
+}
+
 export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
@@ -26,29 +45,54 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const surfaceRef = useRef(null);
   const surfaceBandRef = useRef(null);
 
+  const noticeSeq = useRef(0);
+  // Every notice is a fresh object even when its text repeats: an identical
+  // string would be a no-op state write, so the dismiss timer would never
+  // restart (the previous click's timer could kill the new notice in
+  // milliseconds) and the live region would have nothing to re-announce.
+  const showNotice = useCallback((text) => {
+    noticeSeq.current += 1;
+    setSelectMiss(text ? { text, nonce: noticeSeq.current } : null);
+  }, []);
+
   // A clicked entity on the score page selects that entity on the embedded
   // surface and brings the surface into view. The selection goes through the
   // surface's own handle — the same transition a canvas click makes — so the
-  // score page owns no selection logic of its own. An entity the graph does
-  // not carry (a contract outside the mapped set, another chain's twin) is
-  // reported instead of leaving a click that appears to do nothing.
+  // score page owns no selection logic of its own. Each way the request can
+  // fail to land is a different fact and gets its own words: an entity this
+  // graph does not carry, an entity on another chain, and a function name that
+  // more than one contract answers to are not the same miss.
   const handleSelectEntity = useCallback((target) => {
-    const selected = surfaceRef.current?.selectExample?.({
-      chain: target?.chain,
-      contractAddress: target?.address,
-      functionSignature: target?.functionSignature || "",
-    });
-    if (!selected) {
-      setSelectMiss(`${target?.label || target?.address || "That entity"} is not on the control surface.`);
+    const label = target?.label || target?.address || "That entity";
+    const select = surfaceRef.current?.selectExample;
+    // The surface is a lazy chunk: no handle yet means "not mounted", which is
+    // not the surface saying the entity is absent.
+    if (!select) {
+      showNotice("The control surface is still loading — try that again in a moment.");
       return;
     }
-    setSelectMiss(null);
+    const result = select({
+      chain: target?.chain,
+      contractAddress: target?.address || "",
+      functionSignature: target?.functionSignature || "",
+    });
+    if (!result?.ok) {
+      showNotice(selectMissNotice(result, label));
+      return;
+    }
+    // A contract selected while the function named on it was not found is a
+    // partial landing, not a clean one — say so, but still take the user there.
+    showNotice(
+      result.kind === "contract" && result.functionMissing
+        ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
+        : null,
+    );
     surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
+  }, [showNotice]);
 
   useEffect(() => {
     if (!selectMiss) return undefined;
-    const timer = setTimeout(() => setSelectMiss(null), 4000);
+    const timer = setTimeout(() => setSelectMiss(null), SELECT_NOTICE_MS);
     return () => clearTimeout(timer);
   }, [selectMiss]);
 
@@ -260,7 +304,9 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
       {selectMiss && (
         <div className="company-select-toast" role="status">
-          {selectMiss}
+          {/* Keyed by the nonce so a repeated notice is a removal + insertion
+              inside the live region, which is what makes it announce again. */}
+          <span key={selectMiss.nonce}>{selectMiss.text}</span>
         </div>
       )}
 

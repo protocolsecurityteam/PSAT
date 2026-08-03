@@ -160,7 +160,11 @@ export function resolveTargets(entities, index) {
     if (seen.has(canonical)) continue;
     seen.add(canonical);
     const contract = index?.byEntity?.get(entity) || index?.byEntity?.get(canonical);
-    const { chain, address } = splitEntity(entity);
+    // The CANONICAL entity, not the raw one: the label already names the
+    // canonical contract (an implementation resolves to its proxy's name), and
+    // a button that navigates to the raw address would send the user somewhere
+    // other than the thing it is labelled with.
+    const { chain, address } = splitEntity(canonical);
     out.push({
       entity,
       canonical,
@@ -368,9 +372,9 @@ export function fixFirst(doc, rows) {
     lambdaAfter: after,
     subsumed,
     exampleFunction: (group.rows[0].finding?.example_functions || [])[0] || null,
-    // Where that function lives, so the named function is selectable on the
-    // surface like every other function name on the page.
-    exampleTarget: group.rows[0].targets[0] || null,
+    // The chain the function was witnessed on. NOT a host contract — the
+    // document does not publish one; the surface graph resolves the host.
+    chain: group.rows[0].finding?.chain || null,
   };
 }
 
@@ -432,9 +436,19 @@ export function cautionsFor(doc, finding) {
   const notes = finding?.witness_notes || [];
   const out = [];
   for (const overlap of keysetOverlapsFor(doc, finding)) {
+    const other = splitEntity(overlap.other);
     out.push({
       tone: "warn",
       text: `shares ${overlap.sharedOwners} owners with Safe ${overlap.otherShort} — not an independent key set`,
+      // The Safe named in the sentence is an entity like any other on this
+      // page. `token` is the substring the caution renders it as, so the
+      // control wraps text that already exists rather than adding any.
+      link: {
+        token: overlap.otherShort,
+        chain: other.chain,
+        address: other.address,
+        label: `Safe ${overlap.otherShort}`,
+      },
     });
   }
   if (finding?.principal_kind === "timelock" && finding?.capability === "upgrade.implementation") {
@@ -480,6 +494,11 @@ export function protectionRows(doc, limit = PROTECTION_ROWS) {
       delta,
       net: netByIndex.get(index) ?? 0,
       chip: principalChip(finding),
+      // The principal's own address, so the row's kind chip selects the Safe or
+      // timelock it names on the surface — the same pathway the deduction rows'
+      // controller chips use.
+      chain: finding.chain || null,
+      address: controllerAddress(finding),
       who: finding.principal_kind === "safe" ? coalitionWord(shape) : proposer?.text || null,
       what: value.determined ? `${finding.capability} on ${value.text}` : finding.capability,
       cautions: cautionsFor(doc, finding),

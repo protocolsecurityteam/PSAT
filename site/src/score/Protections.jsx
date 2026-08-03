@@ -1,4 +1,5 @@
-import { usdCompact } from "./format.js";
+import EntityButton, { entityProps } from "./EntityButton.jsx";
+import { shortAddress, usdCompact } from "./format.js";
 
 const EXPOSURE_EXPLAINER =
   "How well the protocol's value is defended — each dollar weighted by how dangerous the control paths that can reach it are. Higher is better.";
@@ -93,7 +94,46 @@ function AuditCoverage({ posture, earnedNegatives }) {
   );
 }
 
-export default function Protections({ doc, view, note }) {
+// The caution's own sentence, with the Safe it names made selectable in place.
+// The text is sliced around the token that is already in it, so the rendered
+// characters are byte-identical to the plain form and the line cannot shift.
+function CautionBody({ caution, onSelect }) {
+  const { text, link } = caution;
+  const at = link ? text.indexOf(link.token) : -1;
+  if (!link || at < 0) return text;
+  return (
+    <>
+      {text.slice(0, at)}
+      <EntityButton
+        onSelect={onSelect}
+        target={link}
+        title={`Show ${link.label} on the control surface`}
+      >
+        {link.token}
+      </EntityButton>
+      {text.slice(at + link.token.length)}
+    </>
+  );
+}
+
+// The kind chip IS the principal on a protection row — it is the only place the
+// row names who holds the power — so the interactive props go onto the chip
+// itself rather than a wrapper: a wrapper would become the flex item and
+// change what this row lays out.
+function ProtectionChip({ row, onSelect }) {
+  const props = entityProps({
+    onSelect,
+    target: { chain: row.chain, address: row.address, label: row.chip.label },
+    title: row.address ? `Show ${shortAddress(row.address)} on the control surface` : undefined,
+  });
+  return (
+    <span className={`sc-kchip sc-kchip-${row.chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+      {row.chip.label}
+    </span>
+  );
+}
+
+export default function Protections({ doc, view, note, onSelect }) {
   const exposure = doc.grade_exposure;
   const rows = view.protections;
   return (
@@ -125,7 +165,7 @@ export default function Protections({ doc, view, note }) {
       {rows.map((row) => (
         <div className="sc-prot" key={row.index}>
           <div className="sc-prot-head">
-            <span className={`sc-kchip sc-kchip-${row.chip.kind}`}>{row.chip.label}</span>
+            <ProtectionChip row={row} onSelect={onSelect} />
             {row.who && <span className="sc-prot-who">{row.who}</span>}
             <span className="sc-prot-what">{row.what}</span>
             <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
@@ -136,7 +176,8 @@ export default function Protections({ doc, view, note }) {
           </div>
           {row.cautions.map((caution) => (
             <div key={caution.text} className={caution.tone === "warn" ? "sc-caut" : "sc-attr"}>
-              {caution.tone === "warn" ? `⚠ ${caution.text}` : caution.text}
+              {caution.tone === "warn" ? "⚠ " : null}
+              <CautionBody caution={caution} onSelect={onSelect} />
             </div>
           ))}
         </div>

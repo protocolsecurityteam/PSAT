@@ -1,37 +1,9 @@
 import { Fragment, useState } from "react";
 
+import EntityButton from "./EntityButton.jsx";
+
 const VISIBLE_ROWS = 8;
 const TARGETS_SHORT = 3;
-
-// Contract names, controller addresses and example function names select the
-// entity on the embedded surface. Without a handler (the band rendered outside
-// a page that hosts a surface) they stay plain text — an element that looks
-// clickable and does nothing is worse than one that doesn't.
-//
-// A span carrying the button role, not a <button>: these sit inside lines that
-// truncate with text-overflow, and a real button is an atomic inline-block that
-// the ellipsis cannot reach into, so the trailing entity would clip with no "…"
-// to say it had. Keyboard activation is wired to match the role.
-function EntityButton({ onSelect, target, title, children }) {
-  if (!onSelect || !target?.address) return children;
-  const activate = () => onSelect(target);
-  return (
-    <span
-      role="button"
-      tabIndex={0}
-      className="sc-lnk"
-      title={title}
-      onClick={activate}
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        e.preventDefault();
-        activate();
-      }}
-    >
-      {children}
-    </span>
-  );
-}
 
 function TargetList({ row, onSelect }) {
   const [open, setOpen] = useState(false);
@@ -46,18 +18,27 @@ function TargetList({ row, onSelect }) {
       ) : (
         <span className="sc-ndp">reach not witnessed ·</span>
       )}{" "}
-      {shown.map((target, i) => (
-        <span key={target.canonical}>
-          {i > 0 && " · "}
-          <EntityButton
-            onSelect={onSelect}
-            target={{ chain: target.chain, address: target.address, label: target.name || target.short }}
-            title={`Show ${target.name || target.short} on the control surface`}
-          >
-            {target.name ? <b>{target.name}</b> : null} {target.short}
-          </EntityButton>
-        </span>
-      ))}
+      {shown.map((target, i) => {
+        const label = target.name || target.short;
+        // Navigating to an entity is not a claim that the capability reaches
+        // it. Where reach was never witnessed the button still works, but the
+        // qualifier rides along in the interaction — a screen-reader user or a
+        // hover must not lose the third state the line carries visually.
+        const qualifier = reachWitnessed ? "" : " — reach not witnessed";
+        return (
+          <span key={target.canonical}>
+            {i > 0 && " · "}
+            <EntityButton
+              onSelect={onSelect}
+              target={{ chain: target.chain, address: target.address, label }}
+              title={`Show ${label} on the control surface${qualifier}`}
+              ariaLabel={reachWitnessed ? undefined : `${label} — reach not witnessed`}
+            >
+              {target.name ? <b>{target.name}</b> : null} {target.short}
+            </EntityButton>
+          </span>
+        );
+      })}
       {hiddenCount > 0 && (
         <>
           {" "}
@@ -83,21 +64,18 @@ function TargetList({ row, onSelect }) {
 
 function DeductionRow({ row, onSelect }) {
   const { chip, value } = row;
-  // The example function lives on the row's targets; the first one is the
-  // contract the function is selected on.
-  const functionTarget = row.targets[0] || null;
+  // The function is asked for by NAME with no host contract. The document does
+  // not publish one: `reach_entities` is the priced closure the capability
+  // reaches, not the contract the function was witnessed on, so naming the
+  // first target as its host would navigate the user to a guess. The surface
+  // graph resolves the host or declines to.
   const detail = row.functions.map((part) =>
-    part === row.exampleFunction && functionTarget ? (
+    part === row.exampleFunction ? (
       <EntityButton
         key={part}
         onSelect={onSelect}
-        target={{
-          chain: functionTarget.chain,
-          address: functionTarget.address,
-          functionSignature: part,
-          label: part,
-        }}
-        title={`Show ${part} on ${functionTarget.name || functionTarget.short} in the control surface`}
+        target={{ chain: row.finding?.chain, functionSignature: part, label: part }}
+        title={`Show ${part} on the control surface`}
       >
         {part}
       </EntityButton>
@@ -189,8 +167,7 @@ function FixFirst({ fix, onSelect }) {
                 <EntityButton
                   onSelect={onSelect}
                   target={{
-                    chain: fix.exampleTarget?.chain,
-                    address: fix.exampleTarget?.address,
+                    chain: fix.chain,
                     functionSignature: fix.exampleFunction,
                     label: fix.exampleFunction,
                   }}

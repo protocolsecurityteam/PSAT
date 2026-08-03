@@ -1124,15 +1124,35 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
 });
 
 describe("ProtocolSurface — external selection handle", () => {
+  // Only LiquidityPool carries `rebalance`; `setFee` is put on BOTH contracts
+  // below so the graph has a name that resolves to no single host — the shape
+  // the score document's bare example-function names can land in.
+  const GRAPH_UNIQUE_FN = "rebalance";
+  const GRAPH_SHARED_FN = "setFee";
+  const SHARED_NAME_DATA = {
+    ...ETHERFI_COMPANY_RICH,
+    contracts: ETHERFI_COMPANY_RICH.contracts.map((contract, i) =>
+      i === 0
+        ? contract
+        : {
+            ...contract,
+            functions: [
+              ...contract.functions,
+              ETHERFI_COMPANY_RICH.contracts[0].functions.find(
+                (f) => f.function === GRAPH_SHARED_FN,
+              ),
+            ],
+          },
+    ),
+  };
+
   beforeEach(() => {
     installApiMocks();
   });
 
-  function renderWithHandle() {
+  function renderWithHandle(data = ETHERFI_COMPANY_RICH) {
     const ref = React.createRef();
-    render(
-      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
-    );
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
     return ref;
   }
 
@@ -1146,7 +1166,7 @@ describe("ProtocolSurface — external selection handle", () => {
         functionSignature: "pause",
       });
     });
-    expect(accepted).toBe(true);
+    expect(accepted).toEqual({ ok: true, kind: "function" });
     const name = await waitFor(() => {
       const el = document.querySelector(".ps-machine-name");
       expect(el).toBeTruthy();
@@ -1170,7 +1190,7 @@ describe("ProtocolSurface — external selection handle", () => {
     await act(async () => {
       accepted = ref.current.selectExample({ contractAddress: SAFE_PRINCIPAL.address });
     });
-    expect(accepted).toBe(true);
+    expect(accepted).toEqual({ ok: true, kind: "principal" });
     await waitFor(() => {
       expect(document.querySelector(".ps-principal-section")).toBeTruthy();
     });
@@ -1198,7 +1218,7 @@ describe("ProtocolSurface — external selection handle", () => {
     expectNoCrash();
   });
 
-  it("refuses an address the graph does not carry, and another chain's twin", async () => {
+  it("refuses an address the graph does not carry, and another chain's twin — as two different facts", async () => {
     const ref = renderWithHandle();
     await waitFor(() => expect(ref.current).toBeTruthy());
     let offGraph;
@@ -1212,8 +1232,69 @@ describe("ProtocolSurface — external selection handle", () => {
         chain: "base",
       });
     });
-    expect(offGraph).toBe(false);
-    expect(offChain).toBe(false);
+    expect(offGraph).toEqual({ ok: false, kind: "not-found" });
+    expect(offChain).toEqual({ ok: false, kind: "chain-mismatch" });
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("says it selected the contract, not the function, when the contract does not carry it", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        functionSignature: "noSuchFunctionHere",
+      });
+    });
+    expect(result).toEqual({ ok: true, kind: "contract", functionMissing: true });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toBeTruthy();
+    });
+    expectNoCrash();
+  });
+
+  it("resolves a bare function name against the whole graph when no contract is named", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: GRAPH_UNIQUE_FN });
+    });
+    expect(result).toEqual({ ok: true, kind: "function" });
+    const inspector = await waitFor(() => {
+      const el = document.querySelector(".ps-inspector");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(inspector).toHaveTextContent(GRAPH_UNIQUE_FN);
+    expectNoCrash();
+  });
+
+  it("refuses a bare function name two contracts answer to, and selects nothing", async () => {
+    const ref = renderWithHandle(SHARED_NAME_DATA);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: GRAPH_SHARED_FN });
+    });
+    expect(result.ok).toBe(false);
+    expect(result.kind).toBe("ambiguous-function");
+    expect(result.hosts).toBeGreaterThan(1);
+    // Nothing was selected: a guessed host is worse than no navigation.
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("refuses a bare function name no contract on the graph carries", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: "noContractHasThis" });
+    });
+    expect(result).toEqual({ ok: false, kind: "not-found" });
     expect(document.querySelector(".ps-machine-name")).toBeNull();
     expectNoCrash();
   });

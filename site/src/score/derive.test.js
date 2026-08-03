@@ -112,8 +112,13 @@ describe("derive — targets", () => {
   it("names an implementation-only reach through its proxy's contract row", () => {
     const [target] = resolveTargets(["ethereum::0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3"], index);
     expect(target.name).toBe("WeETH");
-    // The address shown stays the entity the finding actually reached.
-    expect(target.address).toBe("0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3");
+    // Label and address name ONE entity: the canonical contract the label came
+    // from. A button carrying the raw implementation would navigate somewhere
+    // other than the "WeETH" it is labelled with. The raw entity is still on
+    // the row for anything that needs the reached key itself.
+    expect(target.address).toBe("0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee");
+    expect(target.short).toBe("0xcd5f…b7ee");
+    expect(target.entity).toBe("ethereum::0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3");
   });
 
   it("keeps an entity with no contract row rather than dropping it", () => {

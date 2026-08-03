@@ -363,7 +363,18 @@ h2.sc-band-title {
    text reads exactly as it did before it became clickable. */
 .sc-lnk { cursor: pointer; }
 .sc-lnk:hover { text-decoration: underline; }
-.sc-lnk:focus-visible { outline: 1px solid var(--mark-kept); outline-offset: 2px; }
+
+/* The ring is drawn INSIDE the element's own box and paired with a wash: these
+   controls sit in `overflow: hidden` truncating lines (.sc-who, .sc-addr), and
+   an outset ring is clipped away to two vertical slivers. A negative offset
+   costs no layout — the focused chip must not move the line it is in. */
+.sc-lnk:focus-visible {
+  outline: 1px solid var(--mark-kept);
+  outline-offset: -1px;
+  border-radius: 3px;
+  background: var(--mark-kept-wash);
+  color: var(--ink);
+}
 
 .sc-kchip {
   font-size: 9.5px;

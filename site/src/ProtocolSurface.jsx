@@ -8,7 +8,7 @@ import { useIsAdmin } from "./api/useIsAdmin.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
 import { isRoleIdAddress } from "./surface/format.js";
-import { findFunctionView } from "./surface/lane.js";
+import { findFunctionMatches, findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
@@ -522,31 +522,8 @@ function ProtocolSurface({
     syncUrl({ sel: principal.address });
   }, [select, syncUrl]);
 
-  // The single entrypoint for a selection requested from outside the surface:
-  // the score page's entity buttons (through the imperative handle below), the
-  // ?score deep link and the sessionStorage handoff all land here, so no caller
-  // carries its own copy of the selection transition. Returns false when the
-  // request names nothing on this chain's graph, so a caller can say so rather
-  // than leave a click looking broken.
-  const selectExample = useCallback((example) => {
-    const address = String(example?.contractAddress || "").toLowerCase();
-    if (!address) return false;
-    // Identity is (chain, address) (inv. 13) and the surface renders one chain
-    // at a time: another chain's entity is off this graph, not a miss.
-    if (coalesceChain(example?.chain || activeChain) !== activeChain) return false;
-    const entry = entityIndex.get(entityKey(activeChain, address));
-    if (!entry) return false;
-    // Machine facet wins over principal — same precedence the selection hook
-    // applies, so a timelock contract opens the richer card either way.
-    if (!entry.machine) {
-      if (!entry.principal) return false;
-      setSidebarMode("detail");
-      handleSelectPrincipal(entry.principal);
-      return true;
-    }
-    const machine = entry.machine;
+  const selectMachineExample = useCallback((machine, fnView) => {
     setSidebarMode("detail");
-    const fnView = findFunctionView(machine, example);
     setEnabledRoles((prev) => {
       const role = machine.role || "utility";
       if (prev.has(role)) return prev;
@@ -558,8 +535,54 @@ function ProtocolSurface({
     setActiveAuditId(null);
     radar(machine.address, fnView?.key || null);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
-    return true;
-  }, [activeChain, entityIndex, handleSelectPrincipal, radar, syncUrl]);
+  }, [radar, syncUrl]);
+
+  // The single entrypoint for a selection requested from outside the surface:
+  // the score page's entity buttons (through the imperative handle below), the
+  // ?score deep link and the sessionStorage handoff all land here, so no caller
+  // carries its own copy of the selection transition.
+  //
+  // The result is a discriminated outcome, never a bare boolean: "selected the
+  // contract but the named function is not on it", "that name is on several
+  // contracts" and "that entity is on another chain" are three different facts
+  // and a caller that collapses them tells the user something untrue. A request
+  // that names a function but no contract is resolved against the whole graph,
+  // and only a unique match selects — see findFunctionMatches.
+  const selectExample = useCallback((example) => {
+    const address = String(example?.contractAddress || "").toLowerCase();
+    const named = Boolean(example?.functionSignature || example?.selector);
+    if (!address && !named) return { ok: false, kind: "empty" };
+    // Identity is (chain, address) (inv. 13) and the surface renders one chain
+    // at a time: another chain's entity is off this graph, not a miss.
+    if (coalesceChain(example?.chain || activeChain) !== activeChain) {
+      return { ok: false, kind: "chain-mismatch" };
+    }
+    if (!address) {
+      const matches = findFunctionMatches(allMachines, example);
+      if (!matches.length) return { ok: false, kind: "not-found" };
+      if (matches.length > 1) {
+        const hosts = new Set(matches.map((m) => String(m.machine?.address || "").toLowerCase()));
+        return { ok: false, kind: "ambiguous-function", count: matches.length, hosts: hosts.size };
+      }
+      selectMachineExample(matches[0].machine, matches[0].fnView);
+      return { ok: true, kind: "function" };
+    }
+    const entry = entityIndex.get(entityKey(activeChain, address));
+    if (!entry) return { ok: false, kind: "not-found" };
+    // Machine facet wins over principal — same precedence the selection hook
+    // applies, so a timelock contract opens the richer card either way.
+    if (!entry.machine) {
+      if (!entry.principal) return { ok: false, kind: "not-found" };
+      setSidebarMode("detail");
+      handleSelectPrincipal(entry.principal);
+      return { ok: true, kind: "principal" };
+    }
+    const machine = entry.machine;
+    const fnView = findFunctionView(machine, example);
+    selectMachineExample(machine, fnView);
+    if (fnView) return { ok: true, kind: "function" };
+    return { ok: true, kind: "contract", functionMissing: named };
+  }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
 
   useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
 
@@ -590,7 +613,7 @@ function ProtocolSurface({
         chain: target.chain,
         functionSignature: target.functionSignature || "",
         selector: target.selector || "",
-      })
+      }).ok
     ) {
       restoredExampleSelection.current = true;
     }
