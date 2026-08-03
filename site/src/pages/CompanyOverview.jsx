@@ -6,6 +6,7 @@ import { entityKey } from "../surface/entityKey.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
+import ScoreBand from "../score/ScoreBand.jsx";
 
 const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
@@ -19,9 +20,13 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [functionData, setFunctionData] = useState(null);
   const [addressesModalOpen, setAddressesModalOpen] = useState(false);
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
+  const [score, setScore] = useState(null);
+  const [scoreError, setScoreError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
+    setScore(null);
+    setScoreError(null);
     api(`/api/company/${encodeURIComponent(companyName)}`)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
@@ -39,6 +44,12 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     api(`/api/company/${encodeURIComponent(companyName)}/functions`)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
       .catch(() => { /* function inspector falls back to empty data */ });
+    // Fetched here rather than inside ScoreBand so it travels in parallel with
+    // the company payload: mounting the band only after /api/company answered
+    // would serialise the two.
+    api(`/api/company/${encodeURIComponent(companyName)}/score`)
+      .then((d) => { if (!cancelled) setScore(d); })
+      .catch((e) => { if (!cancelled) setScoreError({ status: e.status, message: e.message }); });
     return () => { cancelled = true; };
   }, [companyName]);
 
@@ -127,6 +138,13 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
           </div>
         </div>
       </section>
+
+      <ScoreBand
+        companyName={companyName}
+        contracts={contracts}
+        score={score}
+        error={scoreError}
+      />
 
       {/* Inline Control Surface — real ProtocolSurface, not a static preview. */}
       <section className="company-surface-band">

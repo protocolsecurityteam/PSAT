@@ -1,0 +1,155 @@
+import { usdCompact } from "./format.js";
+
+const EXPOSURE_EXPLAINER =
+  "How well the protocol's value is defended — each dollar weighted by how dangerous the control paths that can reach it are. Higher is better.";
+
+function Nd({ children }) {
+  return <span className="sc-nd">{children || "not determined"}</span>;
+}
+
+function AuditCoverage({ posture, earnedNegatives }) {
+  if (!posture) return null;
+  const {
+    reportsOnFile,
+    contractsTotal,
+    contractsCovered,
+    contractsProven,
+    coveredUsd,
+    trackedTotalUsd,
+    valueProvenPct,
+    valueCoveredOnlyPct,
+    contractProvenPct,
+    contractCoveredOnlyPct,
+    provablyDiffers,
+  } = posture;
+
+  return (
+    <div className="sc-facts">
+      <div className="sc-fact-title">
+        <b>Audit coverage</b>
+        <span className="sc-fact-num">
+          {reportsOnFile === null ? <Nd>reports on file not determined</Nd> : `${reportsOnFile} reports on file`}
+        </span>
+      </div>
+
+      <div className="sc-fact-row">
+        <span className="sc-fact-lbl">by value</span>
+        <div className="sc-ameter">
+          {valueProvenPct !== null && <div className="sc-proven" style={{ width: `${valueProvenPct}%` }} />}
+          {valueCoveredOnlyPct !== null && (
+            <div className="sc-matched" style={{ width: `${valueCoveredOnlyPct}%` }} />
+          )}
+        </div>
+      </div>
+      <div className="sc-fact-line">
+        {coveredUsd === null || trackedTotalUsd === null ? (
+          <Nd>audited-value share not determined</Nd>
+        ) : (
+          <>
+            <b>{usdCompact(coveredUsd)}</b> of {usdCompact(trackedTotalUsd)} priced value sits in audited
+            contracts ·{" "}
+            {valueProvenPct === null ? <Nd /> : <b>{valueProvenPct.toFixed(1)}%</b>} proven to run the
+            audited code
+          </>
+        )}
+      </div>
+
+      <div className="sc-fact-row sc-fact-row-2">
+        <span className="sc-fact-lbl">by contract</span>
+        <div className="sc-ameter">
+          {contractProvenPct !== null && (
+            <div className="sc-proven" style={{ width: `${contractProvenPct}%` }} />
+          )}
+          {contractCoveredOnlyPct !== null && (
+            <div className="sc-matched" style={{ width: `${contractCoveredOnlyPct}%` }} />
+          )}
+        </div>
+      </div>
+      <div className="sc-fact-line">
+        {contractsCovered === null || contractsTotal === null ? (
+          <Nd>matched contracts not determined</Nd>
+        ) : (
+          <>
+            <b>
+              {contractsCovered} / {contractsTotal}
+            </b>{" "}
+            contracts matched to an audit ·{" "}
+            {contractsProven === null ? <Nd /> : <b>{contractsProven}</b>} proven on-chain
+          </>
+        )}
+      </div>
+
+      {provablyDiffers !== null && provablyDiffers > 0 && (
+        <div className="sc-caut sc-caut-fact">
+          ⚠ {provablyDiffers} contracts' deployed source <b>provably differs</b> from the audited source
+        </div>
+      )}
+      {earnedNegatives.length > 0 && (
+        <div className="sc-fact-line">
+          <b>{earnedNegatives.length}</b> functions proven to have no reach
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Protections({ doc, view, note }) {
+  const exposure = doc.grade_exposure;
+  const rows = view.protections;
+  return (
+    <div>
+      <h2 className="sc-band-title">Protections</h2>
+      {note && <p className="sc-notice-sub">{note}</p>}
+
+      {typeof exposure === "number" && (
+        <>
+          <div className="sc-shield">
+            <span className="sc-shield-v">
+              {exposure.toFixed(1)}
+              <span className="sc-shield-of"> / 100</span>
+            </span>
+            <span className="sc-shield-s">exposure grade</span>
+          </div>
+          <div className="sc-split-bar">
+            <div className="sc-split-a" style={{ flexBasis: `${exposure}%` }} title={`exposure grade ${exposure.toFixed(1)}`} />
+            <div
+              className="sc-split-b"
+              style={{ flexBasis: `${100 - exposure}%` }}
+              title="severity-weighted value at risk"
+            />
+          </div>
+          <div className="sc-fact-line sc-explainer">{EXPOSURE_EXPLAINER}</div>
+        </>
+      )}
+
+      {rows.map((row) => (
+        <div className="sc-prot" key={row.index}>
+          <div className="sc-prot-head">
+            <span className={`sc-kchip sc-kchip-${row.chip.kind}`}>{row.chip.label}</span>
+            {row.who && <span className="sc-prot-who">{row.who}</span>}
+            <span className="sc-prot-what">{row.what}</span>
+            <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
+          </div>
+          <div className="sc-pbar" style={{ width: `${row.widthPct}%` }}>
+            <div className="sc-avoided" style={{ flexBasis: `${row.avoidedPct}%` }} />
+            <div className="sc-charged" style={{ flexBasis: `${row.chargedPct}%` }} />
+          </div>
+          {row.cautions.map((caution) => (
+            <div key={caution.text} className={caution.tone === "warn" ? "sc-caut" : "sc-attr"}>
+              {caution.tone === "warn" ? `⚠ ${caution.text}` : caution.text}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {rows.length > 0 && (
+        <div className="sc-ledger-foot sc-prot-foot">
+          <span className="sc-key"><span className="sc-dot sc-dot-kept" /> modeled score saved (λ, not additive)</span>
+          <span className="sc-key"><span className="sc-dot sc-dot-ded" /> still charged (λ)</span>
+        </div>
+      )}
+
+      <AuditCoverage posture={view.posture} earnedNegatives={doc.earned_negatives || []} />
+    </div>
+  );
+}

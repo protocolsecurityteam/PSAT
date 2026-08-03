@@ -1,0 +1,260 @@
+import React from "react";
+import { describe, it, expect } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+
+import ETHERFI from "../test/fixtures/score_etherfi.json";
+import ScoreBand from "./ScoreBand.jsx";
+
+const CONTRACTS = [
+  { address: "0x352180974c71f84a934953cf49c4e538a6f9c997", chain: "ethereum", name: "BoringVault" },
+  {
+    address: "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+    chain: "ethereum",
+    name: "WeETH",
+    implementation: "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+  },
+];
+
+function renderBand(props = {}) {
+  return render(
+    <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={null} error={null} {...props} />,
+  );
+}
+
+async function openBreakdown() {
+  await userEvent.setup().click(screen.getByRole("button", { name: /Full score breakdown/i }));
+}
+
+describe("ScoreBand — states", () => {
+  it("renders a loading state before either answer arrives", () => {
+    renderBand();
+    expect(screen.getByText(/Loading the protocol score/i)).toBeInTheDocument();
+  });
+
+  it("tells an unknown company apart from an unscored one", () => {
+    const unknown = renderBand({
+      error: { status: 404, message: '{"detail":"Company not found"}' },
+    });
+    expect(screen.getByText(/not in the scorer's registry/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No score has been computed/i)).not.toBeInTheDocument();
+    unknown.unmount();
+
+    renderBand({
+      error: {
+        status: 404,
+        message: '{"detail":"No score has been computed for this protocol yet"}',
+      },
+    });
+    expect(screen.getByText(/No score has been computed for this protocol yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/registry/i)).not.toBeInTheDocument();
+  });
+
+  it("renders an unreadable document as a load failure, not as an absent score", () => {
+    renderBand({
+      error: {
+        status: 503,
+        message: '{"detail":"Score document could not be read: object missing"}',
+      },
+    });
+    expect(screen.getByText(/could not be loaded — try again/i)).toBeInTheDocument();
+    expect(screen.getByText(/not an absent score/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No score has been computed/i)).not.toBeInTheDocument();
+  });
+
+  it("does not crash on a payload with no findings", () => {
+    renderBand({ score: {} });
+    expect(screen.getByText(/No score has been computed/i)).toBeInTheDocument();
+  });
+});
+
+describe("ScoreBand — computed grade", () => {
+  it("renders the letter, λ, ledger and stats from the document", () => {
+    const { container } = renderBand({ score: ETHERFI });
+    expect(screen.getByText("C+")).toBeInTheDocument();
+    expect(screen.getByText("54.8")).toBeInTheDocument();
+    expect(screen.getByText(/provisional · confidence 20.7%/)).toBeInTheDocument();
+    expect(screen.getByText("54.8 kept")).toBeInTheDocument();
+    expect(screen.getByText("71.7")).toBeInTheDocument();
+    expect(screen.getByText("+41 subsumed")).toBeInTheDocument();
+    // kept + 6 deduction segments + the sub-0.4pt tail
+    expect(container.querySelectorAll(".sc-ledger-seg")).toHaveLength(8);
+    expect(container.querySelector(".sc-ledger-seg.sc-ded").getAttribute("title")).toBe(
+      "EOA · authority.replace · −20.25",
+    );
+  });
+
+  it("keeps the breakdown collapsed until asked", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    expect(container.querySelector(".score-breakdown")).toBeNull();
+    await openBreakdown();
+    expect(container.querySelector(".score-breakdown")).toBeTruthy();
+    expect(screen.getByText("Deductions")).toBeInTheDocument();
+    expect(screen.getByText("Protections")).toBeInTheDocument();
+  });
+
+  it("renders the top 8 deduction rows and hides the tail behind its summary", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
+    const tail = screen.getByRole("button", { name: /11 more/ });
+    expect(tail.textContent).toContain("−0.12 combined");
+    expect(tail.textContent).toContain("8 with value not determined");
+    await userEvent.setup().click(tail);
+    expect(container.querySelectorAll(".sc-frow")).toHaveLength(19);
+  });
+
+  it("tags a floor band and italicises an undetermined one — never $0", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    const cells = [...container.querySelectorAll(".sc-val")];
+    const floor = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
+    expect(within(floor).getByText("floor")).toBeInTheDocument();
+    const nd = cells.filter((c) => c.querySelector(".sc-nd"));
+    expect(nd).toHaveLength(8);
+    expect(nd[0].textContent).toBe("value not determined");
+    expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
+  });
+
+  it("marks unwitnessed reach differently from proven reach", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    const targets = [...container.querySelectorAll(".sc-targets")];
+    const unwitnessed = targets.filter((t) => t.textContent.includes("reach not witnessed"));
+    expect(unwitnessed.length).toBeGreaterThan(0);
+    for (const row of unwitnessed) expect(row.querySelector(".sc-arr")).toBeNull();
+    const witnessed = targets.filter((t) => t.querySelector(".sc-arr"));
+    expect(witnessed.length).toBeGreaterThan(0);
+    for (const row of witnessed) expect(row.textContent).not.toContain("reach not witnessed");
+  });
+
+  it("expands a target list in place and collapses it again", async () => {
+    const user = userEvent.setup();
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const firstRow = container.querySelector(".sc-frow .sc-targets");
+    expect(within(firstRow).getByRole("button", { name: /\+4 more/ })).toBeInTheDocument();
+    await user.click(within(firstRow).getByRole("button", { name: /\+4 more/ }));
+    expect(within(firstRow).getByRole("button", { name: "less" })).toBeInTheDocument();
+    expect(firstRow.textContent).toContain("0xeda6…4e70");
+    await user.click(within(firstRow).getByRole("button", { name: "less" }));
+    expect(within(firstRow).getByRole("button", { name: /\+4 more/ })).toBeInTheDocument();
+  });
+
+  it("renders the modeled fix-first recovery from a re-fold", async () => {
+    renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
+    expect(fix.textContent).toContain("Move the two EOA authority holes");
+    expect(fix.textContent).toContain("9.6 points");
+    expect(fix.textContent).toContain("λ 54.8 → 64.3");
+    expect(fix.textContent).toContain("ownership.transfer");
+    expect(fix.textContent).toContain("fixing setAuthority alone does not release them");
+  });
+
+  it("renders the protections column and the audit posture verbatim", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    expect(screen.getByText(/each dollar weighted by how dangerous/)).toBeInTheDocument();
+    const saved = [...container.querySelectorAll(".sc-prot-saved")].map((n) => n.textContent);
+    expect(saved).toEqual(["+41.8", "+23.3", "+11.1", "+11.1"]);
+    expect(screen.getByText("64 reports on file")).toBeInTheDocument();
+    expect(screen.getByText(/12 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
+    const byContract = screen.getByText(/contracts matched to an audit/);
+    expect(byContract.textContent).toContain("54 / 210");
+    expect(byContract.textContent).toContain("35");
+  });
+
+  it("renders no earned-negatives line when the corpus has none", async () => {
+    renderBand({ score: ETHERFI });
+    await openBreakdown();
+    expect(ETHERFI.earned_negatives).toHaveLength(0);
+    expect(screen.queryByText(/proven to have no reach/)).not.toBeInTheDocument();
+  });
+
+  it("renders an earned-negatives line when there are any", async () => {
+    renderBand({
+      score: { ...ETHERFI, earned_negatives: [{ entity: "a" }, { entity: "b" }] },
+    });
+    await openBreakdown();
+    expect(screen.getByText(/functions proven to have no reach/).textContent).toContain("2");
+  });
+
+  it("tags the confidence channel that is the minimum", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const channels = [...container.querySelectorAll(".sc-channel")];
+    expect(channels).toHaveLength(3);
+    expect(channels[0].querySelector(".sc-hd").textContent).toBe("min");
+    expect(channels[1].querySelector(".sc-hd")).toBeNull();
+    expect(channels[2].querySelector(".sc-hd")).toBeNull();
+    expect(screen.getByText(/it measures how much of the protocol the grade is built on/)).toBeInTheDocument();
+  });
+
+  it("renders λ with no letter when the model version has no band table", () => {
+    renderBand({ score: { ...ETHERFI, model_version: "9.9.9-unreleased" } });
+    expect(screen.getByText("54.8")).toBeInTheDocument();
+    expect(screen.queryByText("C+")).not.toBeInTheDocument();
+    expect(screen.getByText(/bands uncalibrated for this model version/)).toBeInTheDocument();
+  });
+
+  it("hides the provisional badge once confidence clears 50%", () => {
+    renderBand({ score: { ...ETHERFI, confidence_pct: 72.4 } });
+    expect(screen.queryByText(/provisional/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ScoreBand — withheld grade", () => {
+  const WITHHELD = {
+    ...ETHERFI,
+    grade_state: "not_determined",
+    grade_lambda: null,
+    grade_exposure: null,
+    confidence_pct: null,
+    findings: ETHERFI.findings.map(({ net_points_lambda, exposure_usd, ...rest }) => rest),
+    provenance: {
+      ...ETHERFI.provenance,
+      exposure_usd: null,
+      grade_withheld: {
+        grade_lambda_computed: 54.7638,
+        confidence_pct_computed: 20.7,
+        exposure_usd_computed: 1178742982.54,
+        reason: "no priced value in the perimeter, so the exposure denominator is not_determined",
+        per_finding: [],
+      },
+    },
+  };
+
+  it("publishes no letter, no λ and no ledger", () => {
+    const { container } = renderBand({ score: WITHHELD });
+    expect(screen.getByText("The grade is withheld.")).toBeInTheDocument();
+    expect(screen.queryByText("C+")).not.toBeInTheDocument();
+    expect(container.querySelector(".sc-ledger-bar")).toBeNull();
+    expect(container.querySelector(".sc-grade-letter")).toBeNull();
+  });
+
+  it("reads the computed figures out of provenance.grade_withheld", () => {
+    renderBand({ score: WITHHELD });
+    expect(screen.getByText(/no priced value in the perimeter/)).toBeInTheDocument();
+    expect(screen.getByText("54.76")).toBeInTheDocument();
+    expect(screen.getByText("20.7%")).toBeInTheDocument();
+  });
+
+  it("shows raw points with no net column, and no exposure tile", async () => {
+    const { container } = renderBand({ score: WITHHELD });
+    await openBreakdown();
+    const points = [...container.querySelectorAll(".sc-pts")].map((n) => n.textContent);
+    expect(points[0]).toBe("20.25");
+    expect(points.some((p) => p.startsWith("−"))).toBe(false);
+    expect(container.querySelector(".sc-shield")).toBeNull();
+    expect(container.querySelector(".sc-prot")).toBeNull();
+  });
+
+  it("still publishes the audit posture, which is not a grade quantity", async () => {
+    renderBand({ score: WITHHELD });
+    await openBreakdown();
+    expect(screen.getByText("64 reports on file")).toBeInTheDocument();
+  });
+});

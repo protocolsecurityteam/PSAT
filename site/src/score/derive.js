@@ -1,0 +1,539 @@
+// Every figure the score page renders, derived from the published document.
+// Pure functions, no React — the page is a projection of these and nothing
+// here invents a fact the document did not witness. Anything the document
+// leaves unwitnessed comes back as `null` and must render as not-determined,
+// never as zero and never as blank.
+
+import { capabilityPhrase } from "../claimsVocab.js";
+import { entityKey } from "../surface/entityKey.js";
+import {
+  countWord,
+  pctOf,
+  shortAddress,
+  splitEntity,
+} from "./format.js";
+import { lambdaOf, protectionDelta, rankedFindings, recoveryFrom } from "./fold.js";
+
+const ADDRESS_RE = /0x[0-9a-fA-F]{40}/;
+const SAFE_RE = /(\d+)\s*\/\s*(\d+)/;
+const TIMELOCK_DELAY_RE = /timelock\s+([0-9]+\s*[smhd])/i;
+
+// ── principals ──────────────────────────────────────────────────────────────
+
+// The controlling address is the one embedded in the principal DISPLAY string.
+// `principal_unit` is deliberately not used: for a Safe it can be an arbitrary
+// member of the unit, and naming a signer as the controller misattributes the
+// power to a person who only holds one key of k.
+export function controllerAddress(finding) {
+  const match = ADDRESS_RE.exec(String(finding?.principal || ""));
+  return match ? match[0].toLowerCase() : null;
+}
+
+export function safeShape(finding) {
+  if (finding?.principal_kind !== "safe") return null;
+  const match = SAFE_RE.exec(String(finding?.principal || ""));
+  if (!match) return null;
+  const k = Number(match[1]);
+  const n = Number(match[2]);
+  if (!n) return null;
+  return { k, n };
+}
+
+// The coalition word beside a Safe protection. Read off k/n rather than the
+// weakness rung: two rungs share the value 0.55, so inverting the ladder would
+// have to guess which one produced it.
+export function coalitionWord(shape) {
+  if (!shape) return null;
+  if (shape.k <= 1) return "single signer";
+  const ratio = shape.k / shape.n;
+  if (ratio >= 0.67) return "supermajority";
+  if (ratio > 0.5) return "majority";
+  return "minority";
+}
+
+export function timelockDelayLabel(finding) {
+  const match = TIMELOCK_DELAY_RE.exec(String(finding?.principal || ""));
+  return match ? match[1].replace(/\s+/g, "") : null;
+}
+
+// The routing clause of a timelock principal: who can propose through it.
+export function timelockProposer(finding) {
+  const principal = String(finding?.principal || "");
+  if (/proposer\s+not_determined/i.test(principal)) {
+    return { text: "proposer unproven", proven: false };
+  }
+  const via = /via\s+(\d+\s*\/\s*\d+)/i.exec(principal);
+  if (via) return { text: `via Safe ${via[1].replace(/\s+/g, "")}`, proven: true };
+  return null;
+}
+
+// Short chip: the shape of the principal, parsed from the display string.
+// (A structured principal_shape on the document would remove the regex; it
+// does not exist yet, and the string is the only witness of k/n and delay.)
+export function principalChip(finding) {
+  const kind = finding?.principal_kind || "";
+  if (kind === "eoa") return { kind, label: "EOA" };
+  if (kind === "anyone") return { kind, label: "Anyone" };
+  if (kind === "safe") {
+    const shape = safeShape(finding);
+    return { kind, label: shape ? `Safe ${shape.k}/${shape.n}` : "Safe" };
+  }
+  if (kind === "timelock") {
+    const delay = timelockDelayLabel(finding);
+    return { kind, label: delay ? `Timelock ${delay}` : "Timelock" };
+  }
+  return { kind, label: kind ? kind.toUpperCase() : "Principal" };
+}
+
+const KIND_WORD = {
+  eoa: "EOA",
+  anyone: "anyone-callable",
+  safe: "Safe",
+  timelock: "Timelock",
+};
+
+export function kindWord(kind) {
+  return KIND_WORD[kind] || String(kind || "").toUpperCase();
+}
+
+// ── value ───────────────────────────────────────────────────────────────────
+
+// The value cell. `determined: false` is a third state — the band was never
+// measured — and must not render as $0 or as an empty cell.
+export function valueCell(finding) {
+  const band = finding?.value_band;
+  if (!band || band === "not_determined") return { determined: false, text: null, floor: false };
+  return {
+    determined: true,
+    text: String(band).replace(/^>=\s*/, ""),
+    floor: finding?.value_at_stake_is_floor === true,
+  };
+}
+
+// An earned negative, not an unknown: the reach question was answered, and the
+// answer was "nothing". Branching on value_state alone reads it as unmeasured.
+export function isProvenNoReach(finding) {
+  return finding?.value_at_stake_basis === "proven_no_reach";
+}
+
+// ── functions / targets ─────────────────────────────────────────────────────
+
+export function functionsLabel(finding) {
+  const parts = [];
+  const example = (finding?.example_functions || [])[0];
+  if (example) parts.push(example);
+  const n = Number(finding?.n_functions);
+  if (Number.isFinite(n) && n > 1) parts.push(`${n} functions`);
+  return parts;
+}
+
+// entity → contract, plus the implementation→proxy alias. A finding can reach a
+// proxy and its implementation; they are one deployed thing, so they collapse
+// to one target rather than reading as two contracts at risk.
+export function buildContractIndex(contracts) {
+  const byEntity = new Map();
+  const implToProxy = new Map();
+  for (const contract of contracts || []) {
+    if (!contract?.address) continue;
+    const key = entityKey(contract.chain, contract.address);
+    byEntity.set(key, contract);
+    if (contract.implementation) {
+      implToProxy.set(entityKey(contract.chain, contract.implementation), key);
+    }
+    for (const secondary of contract.secondary_implementations || []) {
+      const address = typeof secondary === "string" ? secondary : secondary?.address;
+      if (address) implToProxy.set(entityKey(contract.chain, address), key);
+    }
+  }
+  return { byEntity, implToProxy };
+}
+
+export function contractName(contract) {
+  return contract?.name || contract?.contract_name || null;
+}
+
+export function resolveTargets(entities, index) {
+  const out = [];
+  const seen = new Set();
+  for (const entity of entities || []) {
+    const canonical = index?.implToProxy?.get(entity) || entity;
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    const contract = index?.byEntity?.get(entity) || index?.byEntity?.get(canonical);
+    const { chain, address } = splitEntity(entity);
+    out.push({
+      entity,
+      canonical,
+      chain,
+      address,
+      short: shortAddress(address),
+      name: contractName(contract),
+    });
+  }
+  return out;
+}
+
+// Where reach was never witnessed the instance list is all there is. It is
+// rendered in the not-determined style with no arrow, because "this is what it
+// reaches" and "this is where we could not tell" must not look alike.
+export function undeterminedTargets(finding, index) {
+  return resolveTargets(
+    [...new Set((finding?.undetermined_instances || []).map((i) => i?.entity).filter(Boolean))],
+    index,
+  );
+}
+
+// ── deduction rows ──────────────────────────────────────────────────────────
+
+export function deductionRows(doc, index) {
+  const findings = doc?.findings || [];
+  const ranked = rankedFindings(findings);
+  const maxRaw = ranked.length ? Math.max(...ranked.map((r) => r.raw)) : 0;
+  // In the withheld state the producer pops net_points_lambda off the rows;
+  // absence of the field is the signal, so the row shows raw points only.
+  const hasNet = findings.some((f) => f?.net_points_lambda !== undefined);
+  return ranked.map((entry) => {
+    const finding = findings[entry.index];
+    const proven = resolveTargets(finding?.reach_entities, index);
+    const reachWitnessed = proven.length > 0;
+    return {
+      index: entry.index,
+      rank: entry.rank,
+      finding,
+      raw: entry.raw,
+      net: hasNet ? entry.net : null,
+      chip: principalChip(finding),
+      capability: finding?.capability || "",
+      controller: controllerAddress(finding),
+      functions: functionsLabel(finding),
+      value: valueCell(finding),
+      provenNoReach: isProvenNoReach(finding),
+      trackPct: maxRaw ? (entry.raw / maxRaw) * 100 : 0,
+      fillPct: maxRaw && hasNet ? (entry.net / maxRaw) * 100 : 0,
+      reachWitnessed,
+      targets: reachWitnessed ? proven : undeterminedTargets(finding, index),
+      undeterminedCount: (finding?.undetermined_instances || []).length,
+    };
+  });
+}
+
+// ── grouping / callouts ─────────────────────────────────────────────────────
+
+// Greedy run-length grouping over the ranked rows: consecutive rows sharing a
+// (principal_kind, capability) are one story about one hole.
+export function groupRows(rows) {
+  const groups = [];
+  for (const row of rows) {
+    const kind = row.finding?.principal_kind || "";
+    const last = groups[groups.length - 1];
+    if (last && last.kind === kind && last.capability === row.capability) {
+      last.rows.push(row);
+      last.sum += row.net || 0;
+      continue;
+    }
+    groups.push({ kind, capability: row.capability, rows: [row], sum: row.net || 0 });
+  }
+  return groups.map((g) => ({ ...g, sum: Math.round(g.sum * 1e4) / 1e4 }));
+}
+
+export const CALLOUT_MIN_POINTS = 5;
+
+// Callouts sit under the ledger bar. The leading groups are named while they
+// each carry at least 5 points; the first group that does not ends the naming,
+// and everything from there collapses into one "N others".
+export function calloutsFor(rows, lambda) {
+  const groups = groupRows(rows);
+  const named = [];
+  for (const group of groups) {
+    if (group.sum < CALLOUT_MIN_POINTS) break;
+    named.push(group);
+  }
+  const callouts = [];
+  let cursor = typeof lambda === "number" ? lambda : 0;
+  let namedRows = 0;
+  for (const group of named) {
+    const start = cursor;
+    cursor += group.sum;
+    namedRows += group.rows.length;
+    callouts.push({
+      id: `g${group.rows[0].index}`,
+      sum: group.sum,
+      centerPct: (start + cursor) / 2,
+      text: `${countWord(group.rows.length)} ${kindWord(group.kind)} ${capabilityPhrase(group.capability, group.rows.length)}`,
+    });
+  }
+  const restRows = rows.length - namedRows;
+  const restSum = Math.round((100 - cursor) * 1e4) / 1e4;
+  if (restRows > 0 && restSum > 0) {
+    callouts.push({
+      id: "rest",
+      sum: restSum,
+      centerPct: (cursor + 100) / 2,
+      text: `${restRows} other${restRows === 1 ? "" : "s"}`,
+    });
+  }
+  return callouts;
+}
+
+// ── ledger ──────────────────────────────────────────────────────────────────
+
+export const LEDGER_TAIL_FLOOR = 0.4;
+
+export function ledgerSegments(rows, lambda) {
+  const kept = typeof lambda === "number" ? lambda : 0;
+  const head = rows.filter((r) => (r.net || 0) >= LEDGER_TAIL_FLOOR);
+  const tail = rows.slice(head.length);
+  const tailSum = Math.round(tail.reduce((sum, r) => sum + (r.net || 0), 0) * 1e4) / 1e4;
+  const segments = head.map((row) => ({
+    id: `f${row.index}`,
+    kind: "deduction",
+    basis: row.net,
+    title: `${row.chip.label} · ${row.capability} · −${(row.net || 0).toFixed(2)}`,
+  }));
+  if (tail.length && tailSum > 0) {
+    segments.push({
+      id: "tail",
+      kind: "deduction",
+      basis: tailSum,
+      title: `${tail.length} more finding${tail.length === 1 ? "" : "s"} · −${tailSum.toFixed(2)}`,
+    });
+  }
+  return { kept, segments };
+}
+
+// ── fix first ───────────────────────────────────────────────────────────────
+
+// The worst group, and what removing it is modeled to recover. Recovery comes
+// from a re-fold over the survivors, never from summing the group's nets: rank
+// decay promotes everything below, so the sum understates the recovery.
+export function fixFirst(doc, rows) {
+  const groups = groupRows(rows);
+  const group = groups[0];
+  if (!group || !group.rows.length) return null;
+  const findings = doc?.findings || [];
+  const indices = group.rows.map((r) => r.index);
+  const { before, after, recovery } = recoveryFrom(findings, indices);
+  if (!(recovery > 0)) return null;
+  const subsumed = [];
+  for (const row of group.rows) {
+    for (const entry of row.finding?.subsumed_capabilities || []) {
+      if (entry?.capability && !subsumed.includes(entry.capability)) subsumed.push(entry.capability);
+    }
+  }
+  const count = group.rows.length;
+  const open = group.kind === "eoa" || group.kind === "anyone";
+  return {
+    count,
+    subject: `the ${countWord(count)} ${kindWord(group.kind)} ${capabilityPhrase(group.capability, count)}`,
+    verb: open ? "Move" : "Harden",
+    remedy: open ? " behind a strong multisig or timelock" : "",
+    recovery,
+    lambdaBefore: before,
+    lambdaAfter: after,
+    subsumed,
+    exampleFunction: (group.rows[0].finding?.example_functions || [])[0] || null,
+  };
+}
+
+// ── protections ─────────────────────────────────────────────────────────────
+
+const SELF_GRANT_NOTE = "owner_may_grant_itself_any_role_on_this_registry";
+const NO_DELAY_CREDIT_NOTE = "timelock_proposer_not_determined:no_delay_credit";
+
+export function upgradeBypassCount(doc) {
+  const perContract = doc?.provenance?.upgrade_history?.per_contract || {};
+  let total = 0;
+  for (const entry of Object.values(perContract)) {
+    const direct = Number(entry?.executor_kinds?.safe_direct);
+    if (Number.isFinite(direct)) total += direct;
+  }
+  return total;
+}
+
+export function keysetOverlapsFor(doc, finding) {
+  const controller = controllerAddress(finding);
+  if (!controller) return [];
+  const key = entityKey(finding?.chain, controller);
+  const out = [];
+  for (const overlap of doc?.provenance?.safe_keyset_overlaps || []) {
+    if (!overlap?.shared_can_act_as_both) continue;
+    const isA = overlap.a === key;
+    const isB = overlap.b === key;
+    if (!isA && !isB) continue;
+    const other = isA ? overlap.b : overlap.a;
+    const ownK = SAFE_RE.exec(String(isA ? overlap.a_k_of_n : overlap.b_k_of_n) || "");
+    out.push({
+      other,
+      otherShort: shortAddress(splitEntity(other).address),
+      sharedOwners: overlap.shared_owners,
+      ownN: ownK ? Number(ownK[2]) : null,
+    });
+  }
+  return out;
+}
+
+// ⚠ notes attached to a protection: what weakens the strength being credited.
+export function cautionsFor(doc, finding) {
+  const notes = finding?.witness_notes || [];
+  const out = [];
+  for (const overlap of keysetOverlapsFor(doc, finding)) {
+    const shared =
+      overlap.ownN && overlap.sharedOwners === overlap.ownN
+        ? `all ${overlap.ownN}`
+        : String(overlap.sharedOwners);
+    out.push({
+      tone: "warn",
+      text: `shares ${shared} owners with Safe ${overlap.otherShort} — not an independent key set`,
+    });
+  }
+  if (finding?.principal_kind === "timelock" && finding?.capability === "upgrade.implementation") {
+    const bypassed = upgradeBypassCount(doc);
+    if (bypassed > 0) {
+      out.push({
+        tone: "warn",
+        text: `${bypassed} witnessed upgrades bypassed this timelock (executed directly by a Safe)`,
+      });
+    }
+  }
+  if (notes.includes(SELF_GRANT_NOTE)) {
+    out.push({ tone: "warn", text: "this owner can grant itself any role on the registry it governs" });
+  }
+  if (notes.includes(NO_DELAY_CREDIT_NOTE)) {
+    out.push({ tone: "attr", text: "no delay credit — the proposer set is unproven" });
+  }
+  return out;
+}
+
+export const PROTECTION_WEAKNESS_CEILING = 0.9;
+export const PROTECTION_ROWS = 4;
+
+// Coordination that is modeled to be holding points on. Ranked by λ-delta —
+// what the grade would lose if the principal were unconditional — not by the
+// finding's own net, which measures the opposite thing.
+export function protectionRows(doc, limit = PROTECTION_ROWS) {
+  const findings = doc?.findings || [];
+  const ranked = rankedFindings(findings);
+  const netByIndex = new Map(ranked.map((r) => [r.index, r.net]));
+  const rows = [];
+  findings.forEach((finding, index) => {
+    if (!["safe", "timelock"].includes(finding?.principal_kind)) return;
+    if (!(Number(finding?.weakness) < PROTECTION_WEAKNESS_CEILING)) return;
+    const delta = protectionDelta(findings, index);
+    if (delta === null || !(delta > 0)) return;
+    const shape = safeShape(finding);
+    const proposer = timelockProposer(finding);
+    const value = valueCell(finding);
+    rows.push({
+      index,
+      finding,
+      delta,
+      net: netByIndex.get(index) ?? 0,
+      chip: principalChip(finding),
+      who: finding.principal_kind === "safe" ? coalitionWord(shape) : proposer?.text || null,
+      what: value.determined ? `${finding.capability} on ${value.text}` : finding.capability,
+      cautions: cautionsFor(doc, finding),
+    });
+  });
+  rows.sort((a, b) => b.delta - a.delta || a.index - b.index);
+  const top = rows.slice(0, limit);
+  const scale = top.reduce((max, r) => Math.max(max, r.delta + r.net), 0);
+  return top.map((row) => ({
+    ...row,
+    widthPct: scale ? ((row.delta + row.net) / scale) * 100 : 0,
+    avoidedPct: row.delta + row.net ? (row.delta / (row.delta + row.net)) * 100 : 100,
+    chargedPct: row.delta + row.net ? (row.net / (row.delta + row.net)) * 100 : 0,
+  }));
+}
+
+// ── audit posture ───────────────────────────────────────────────────────────
+
+// Straight off provenance.audit_posture. Never re-derived from /api/company:
+// the naive join double-counts, and a page that recomputes a witnessed number
+// publishes a different one under the same name.
+export function auditPosture(doc) {
+  const posture = doc?.provenance?.audit_posture;
+  if (!posture) return null;
+  const tracked = doc?.provenance?.value?.tracked_total_usd;
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const covered = num(posture.value_covered_usd);
+  const provenValue = num(posture.value_proven_usd);
+  const total = num(tracked);
+  const contractsTotal = num(posture.contracts_total);
+  const contractsCovered = num(posture.contracts_covered);
+  const contractsProven = num(posture.contracts_proven);
+  return {
+    reportsOnFile: num(posture.reports_on_file),
+    contractsTotal,
+    contractsCovered,
+    contractsProven,
+    coveredUsd: covered,
+    provenUsd: provenValue,
+    trackedTotalUsd: total,
+    valueProvenPct: pctOf(provenValue, total),
+    valueCoveredOnlyPct:
+      covered !== null && provenValue !== null ? pctOf(covered - provenValue, total) : null,
+    contractProvenPct: pctOf(contractsProven, contractsTotal),
+    contractCoveredOnlyPct:
+      contractsCovered !== null && contractsProven !== null
+        ? pctOf(contractsCovered - contractsProven, contractsTotal)
+        : null,
+    provablyDiffers: num(posture.non_coverage_classified?.deployed_source_provably_differs),
+  };
+}
+
+// ── confidence ──────────────────────────────────────────────────────────────
+
+export const CONFIDENCE_CHANNELS = [
+  {
+    id: "capability_scored_pct",
+    name: "Capability scored",
+    desc: "Value-weighted share of the protocol's contracts whose privileged functions we could grade for what they can do.",
+  },
+  {
+    id: "reachability_answered_pct",
+    name: "Reachability",
+    desc: 'How much of that surface has a proven answer to "who can actually call this?"',
+  },
+  {
+    id: "value_priced_pct",
+    name: "Value priced",
+    desc: "Value-weighted share of the protocol's contracts holding any priced balance at all.",
+  },
+];
+
+// The headline is the MINIMUM of the three; the MIN tag goes on whichever
+// channel actually is the minimum, so a re-ordering of the channels or a shift
+// in the data can never leave the tag pointing at the wrong one.
+export function confidenceChannels(doc) {
+  const detail = doc?.model_parameters?.confidence_detail || {};
+  const channels = CONFIDENCE_CHANNELS.map((channel) => {
+    const value = detail[channel.id];
+    return { ...channel, pct: typeof value === "number" && Number.isFinite(value) ? value : null };
+  });
+  const measured = channels.filter((c) => c.pct !== null);
+  const min = measured.length ? Math.min(...measured.map((c) => c.pct)) : null;
+  let tagged = false;
+  return channels.map((channel) => {
+    const isMin = !tagged && min !== null && channel.pct === min;
+    if (isMin) tagged = true;
+    return { ...channel, isMin };
+  });
+}
+
+// ── the whole projection ────────────────────────────────────────────────────
+
+export function projectScore(doc, contracts) {
+  const index = buildContractIndex(contracts);
+  const rows = deductionRows(doc, index);
+  const lambda = typeof doc?.grade_lambda === "number" ? doc.grade_lambda : lambdaOf(doc?.findings);
+  return {
+    rows,
+    lambda,
+    ledger: ledgerSegments(rows, lambda),
+    callouts: calloutsFor(rows, lambda),
+    fix: fixFirst(doc, rows),
+    protections: protectionRows(doc),
+    posture: auditPosture(doc),
+    confidence: confidenceChannels(doc),
+  };
+}
