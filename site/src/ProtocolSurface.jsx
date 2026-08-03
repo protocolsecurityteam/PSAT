@@ -589,6 +589,10 @@ function ProtocolSurface({
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredExampleSelection.current || !allMachines.length) return;
+    // Machines exist before /functions lands, and a machine with empty lanes
+    // answers "that function is not on this contract" — which would restore the
+    // contract alone and latch, losing the named function the link carried.
+    if (functionsLoading) return;
     const params = new URLSearchParams(window.location.search);
     const focus = params.get("sel") || params.get("focus");
     const fn = params.get("fn");
@@ -617,7 +621,7 @@ function ProtocolSurface({
     ) {
       restoredExampleSelection.current = true;
     }
-  }, [allMachines, companyName, embedded, selectExample]);
+  }, [allMachines, companyName, embedded, functionsLoading, selectExample]);
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
@@ -696,26 +700,13 @@ function ProtocolSurface({
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
-  const radarExampleFlyout = sidebarMode === "detail" && radarSelection && selectedMachine && !selectedPrincipal ? (
-    <div className="ps-sidebar-flyout-content">
-      <EntityCard
-        key={`${selectedMachine.address}:radar`}
-        machine={selectedMachine}
-        onSelectGuard={handleSelectGuard}
-        onNavigate={handleNavigate}
-        onPreview={(addr) => focusPreview(addr)}
-        highlightedFunctionKey={radarSelection.functionKey}
-        highlightedContract={!radarSelection.functionKey}
-        governsIndex={governsIndex}
-        controlAdjacency={controlAdjacency}
-        machines={machines}
-        chain={activeChain}
-        showChain={isMultichain}
-        principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
-      />
-      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
-    </div>
-  ) : null;
+  // Score-page arrivals (radar sub-mode) mark the action the warning was about
+  // on the ONE sidebar card, never a second parallel card: the contract card
+  // gets the ring when only the contract is known, the named function's row gets
+  // it when the function resolved. A principal-only selection never enters radar
+  // mode (it commits through select), so these are machine-facet only.
+  const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
+  const radarContractHighlight = Boolean(selectedMachine && radarSelection && !radarSelection.functionKey);
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
@@ -777,7 +768,7 @@ function ProtocolSurface({
             }}
           />
         </ReactFlowProvider>
-        <DraggableSidebar flyout={radarExampleFlyout}>
+        <DraggableSidebar>
           <SidebarTabs
             mode={sidebarMode}
             onSetMode={setSidebarMode}
@@ -816,12 +807,12 @@ function ProtocolSurface({
           {/* One universal card for every selection. selectedMachine and
               selectedPrincipal are mutually exclusive (the selection invariant),
               so the Detail panel is: something selected → the card; nothing →
-              the empty state. Radar mode renders the card in the flyout, so the
-              main panel falls back to the empty state behind it. */}
-          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
+              the empty state. A score-page arrival lands here too — same card,
+              with the highlight props set. */}
+          {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
             <DetailEmptyState companyName={companyName} companyData={scopedCompanyData} />
           )}
-          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && !radarSelection && (
+          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && (
             <EntityCard
               key={selectedMachine ? selectedMachine.address : selectedPrincipal.address}
               machine={selectedMachine}
@@ -833,6 +824,8 @@ function ProtocolSurface({
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
               onPreview={(addr) => focusPreview(addr)}
+              highlightedFunctionKey={radarFunctionKey}
+              highlightedContract={radarContractHighlight}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}
@@ -840,7 +833,7 @@ function ProtocolSurface({
               showChain={isMultichain}
             />
           )}
-          {sidebarMode === "detail" && selectedMachine && !radarSelection && (
+          {sidebarMode === "detail" && selectedMachine && (
             <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
           )}
           {isAdmin && sidebarMode === "agent" && (

@@ -196,14 +196,6 @@
   .ps-surface { padding: 12px; }
   .ps-layout { height: calc(100vh - 120px); }
 
-  /* The right-side flyout is too complex on phones — hide it. The main
-   * sidebar (bottom sheet on mobile) carries everything that matters. */
-  .ps-sidebar-flyout,
-  .ps-sidebar-flyout-rail,
-  .ps-sidebar-flyout-toggle {
-    display: none !important;
-  }
-
   /* Sidebar becomes a bottom sheet that slides up from the bottom. The
    * sidebar's inline `width` style still applies, so we override it. */
   .ps-sidebar {

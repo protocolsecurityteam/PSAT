@@ -49,7 +49,8 @@ function reducer(state, action) {
       return { ...state, guardKey: action.key ?? null, radar: null };
     }
     case "radar": {
-      // Contract selection + radar flyout sub-mode; guardKey == the example fn.
+      // Contract selection + score-arrival sub-mode (what the sidebar card
+      // highlights); guardKey == the example fn.
       const address = action.address ? action.address.toLowerCase() : null;
       return {
         selection: address ? { address, hint: null } : null,

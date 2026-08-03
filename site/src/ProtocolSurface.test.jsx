@@ -5,7 +5,7 @@
 // InspectorCard, SearchNavigator) — each has a behavioral assertion here.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -1296,6 +1296,151 @@ describe("ProtocolSurface — external selection handle", () => {
     });
     expect(result).toEqual({ ok: false, kind: "not-found" });
     expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+});
+
+// A score-page arrival used to render a SECOND entity card in a flyout popped
+// out beside the sidebar while the sidebar itself showed the empty state. There
+// is one sidebar now: the arrival renders on the sidebar's own Detail card,
+// carrying the highlight with it.
+describe("ProtocolSurface — score arrivals land on the one sidebar card", () => {
+  const VAULT = ETHERFI_COMPANY_RICH.contracts[0];
+  const POOL = ETHERFI_COMPANY_RICH.contracts[1];
+  let scrolled;
+
+  beforeEach(() => {
+    installApiMocks();
+    scrolled = [];
+    // jsdom does no layout, so Element.scrollIntoView doesn't exist. Record the
+    // element each call was made on so "scrolled the highlighted row into view"
+    // is an assertion about that row, not just about some scroll happening.
+    Element.prototype.scrollIntoView = function scrollIntoViewStub(opts) {
+      scrolled.push({ el: this, opts });
+    };
+  });
+
+  afterEach(() => {
+    delete Element.prototype.scrollIntoView;
+  });
+
+  function renderWithHandle() {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+    );
+    return ref;
+  }
+
+  async function arrive(ref, example) {
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    return result;
+  }
+
+  function sidebar() {
+    const el = document.querySelector(".ps-sidebar-content");
+    expect(el).toBeTruthy();
+    return el;
+  }
+
+  function noFlyout() {
+    expect(
+      document.querySelectorAll(
+        ".ps-sidebar-flyout, .ps-sidebar-flyout-content, .ps-sidebar-flyout-rail, .ps-sidebar-flyout-toggle",
+      ).length,
+    ).toBe(0);
+  }
+
+  it("marks the named function on the sidebar's own card — one card, no flyout", async () => {
+    const ref = renderWithHandle();
+    expect(
+      await arrive(ref, { contractAddress: VAULT.address, functionSignature: "pause" }),
+    ).toEqual({ ok: true, kind: "function" });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("Vault");
+    });
+    // Exactly one entity card exists, and it is the sidebar's.
+    expect(document.querySelectorAll(".ps-machine").length).toBe(1);
+    noFlyout();
+
+    const marked = sidebar().querySelectorAll(".ps-port-score-highlight");
+    expect(marked.length).toBe(1);
+    expect(marked[0].querySelector(".ps-port-name")).toHaveTextContent("pause");
+    // The guard inspector for the named function rides along in the sidebar.
+    expect(sidebar().querySelector(".ps-inspector")).toHaveTextContent("pause");
+    expectNoCrash();
+  });
+
+  it("opens the tab that lists the highlighted function and scrolls its row into view", async () => {
+    const ref = renderWithHandle();
+    // withdraw is an asset_send: it is listed on Outflows, not the Control tab
+    // a card opens on by default — so the card has to go where the row is.
+    expect(
+      await arrive(ref, { contractAddress: VAULT.address, functionSignature: "withdraw" }),
+    ).toEqual({ ok: true, kind: "function" });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-tab.active")).toHaveTextContent(/Outflows/i);
+    });
+    const marked = sidebar().querySelector(".ps-port-score-highlight");
+    expect(marked.querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(scrolled.some((call) => call.el === marked)).toBe(true);
+    expectNoCrash();
+  });
+
+  it("marks the contract itself when the score row names no function", async () => {
+    const ref = renderWithHandle();
+    expect(await arrive(ref, { contractAddress: POOL.address })).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+    });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+    });
+    // Contract-level mark only — no function row claims to be the named one.
+    expect(sidebar().querySelector(".ps-port-score-highlight")).toBeNull();
+    noFlyout();
+    expectNoCrash();
+  });
+
+  it("renders a controller arrival as the sidebar's principal card, unmarked", async () => {
+    const ref = renderWithHandle();
+    expect(await arrive(ref, { contractAddress: SAFE_PRINCIPAL.address })).toEqual({
+      ok: true,
+      kind: "principal",
+    });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-principal-section")).toBeTruthy();
+    });
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    noFlyout();
+    expectNoCrash();
+  });
+
+  it("drops the highlight as soon as the next selection lands", async () => {
+    const ref = renderWithHandle();
+    await arrive(ref, { contractAddress: VAULT.address, functionSignature: "pause" });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-port-score-highlight")).toBeTruthy();
+    });
+
+    const user = userEvent.setup();
+    await user.type(searchInput(), "LiquidityPool");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
+    });
+    expect(document.querySelector(".ps-port-score-highlight")).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
     expectNoCrash();
   });
 });

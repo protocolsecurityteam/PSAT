@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 import { GuardGlyph } from "../../ui/GuardGlyph.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
 
@@ -50,8 +52,17 @@ function CallerButton({ principal, onPreview, onNavigate }) {
 export function FunctionPort({ fnView, onSelect, onNavigate, onPreview, orientation, highlighted }) {
   const guard = fnView.guard || {};
   const callers = guard.principals || [];
+  const nodeRef = useRef(null);
+  // The sidebar scrolls, so a highlighted row can land below its fold — a ring
+  // the user has to go hunting for marks nothing. ``nearest`` keeps it to the
+  // minimum movement needed and is a no-op when the row is already visible.
+  useEffect(() => {
+    if (!highlighted) return;
+    nodeRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [highlighted]);
   return (
     <div
+      ref={nodeRef}
       className={`ps-port ps-port-${orientation}${highlighted ? " ps-port-score-highlight" : ""}`}
       style={{ "--port-accent": fnView.tone }}
     >

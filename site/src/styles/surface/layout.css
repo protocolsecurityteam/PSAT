@@ -319,86 +319,6 @@
   transition: width 180ms ease, min-width 180ms ease, max-width 180ms ease;
 }
 
-.ps-sidebar-flyout {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: min(460px, calc(100% - 72px));
-  z-index: 28;
-  overflow: visible;
-  padding: 0;
-  box-sizing: border-box;
-  animation: ps-sidebar-flyout-in 180ms ease-out;
-}
-
-.ps-sidebar-flyout-content {
-  height: 100%;
-  padding: 10px;
-  box-sizing: border-box;
-  background: rgba(10, 14, 22, 0.24);
-  border: 1px solid rgba(226, 232, 240, 0.16);
-  border-right: 0;
-  box-shadow: -16px 0 34px rgba(0, 0, 0, 0.26);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  overflow-y: auto;
-}
-
-/* Minimize toggle as a small tab protruding from the flyout's outer
- * (canvas-facing) edge. Same size + vertical offset as the main
- * sidebar's ``.ps-sidebar-toggle`` so the two read as a coordinated
- * pair at opposite ends of the panel composition. */
-.ps-sidebar-flyout-toggle,
-.ps-sidebar-flyout-rail {
-  position: absolute;
-  top: 8px;
-  width: 20px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border-radius: 7px;
-  border: 1px solid rgba(226, 232, 240, 0.18);
-  background: rgba(15, 23, 42, 0.36);
-  color: #cbd5e1;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.10);
-  cursor: pointer;
-  z-index: 29;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-.ps-sidebar-flyout-toggle {
-  /* Position the tab just outside the flyout's left edge. Using
-   * translateX rather than negative ``left`` keeps the layout
-   * referenced to the wrapper, so it follows resizing automatically. */
-  left: -1px;
-  transform: translateX(-100%);
-}
-.ps-sidebar-flyout-toggle:hover,
-.ps-sidebar-flyout-rail:hover {
-  background: rgba(30, 41, 59, 0.5);
-  border-color: rgba(226, 232, 240, 0.32);
-  color: #f8fafc;
-}
-.ps-sidebar-flyout-toggle:hover {
-  /* Preserve translateX from the base rule — the global
-   * ``button:hover`` applies ``translateY(-1px)``, which on a single
-   * ``transform`` property would overwrite our X positioning and make
-   * the tab jump back inside the panel on hover. */
-  transform: translateX(-100%);
-}
-
-@keyframes ps-sidebar-flyout-in {
-  from {
-    opacity: 0;
-    transform: translateX(24px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
 .ps-sidebar::before {
   content: "";
   position: absolute;
@@ -2098,6 +2018,17 @@
 .ps-port.ps-port-score-highlight {
   border-color: rgba(251, 113, 133, 0.9);
   box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.85);
+  /* The row is scrolled into view when it takes the mark; without a margin the
+     minimal scroll parks it flush against the fold, where it reads as cut off. */
+  scroll-margin: 28px;
+}
+
+/* The warning names an action AND who can take it, so the caller chips inside
+   the highlighted row carry the mark too — otherwise only half the named pair
+   reads as marked. */
+.ps-port.ps-port-score-highlight .ps-caller-btn,
+.ps-port.ps-port-score-highlight .ps-caller-status {
+  border-color: rgba(251, 113, 133, 0.55);
 }
 
 .ps-port-copy {
