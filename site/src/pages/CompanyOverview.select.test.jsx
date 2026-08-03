@@ -166,6 +166,27 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     expect(scrollIntoView).toHaveBeenCalled();
   });
 
+  it("explains an unpaired hint: same name on the card, someone else's gate", async () => {
+    // Unlike an absent name, an unpaired one invites a wrong reading — the
+    // card shows a setAuthority row and nothing marks it, which looks broken
+    // unless the refusal is said out loud.
+    selectExample.mockReturnValue({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "unpaired", controller: "not-a-caller" },
+    });
+    const user = userEvent.setup();
+    render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
+    await openBreakdown(user);
+    const targets = firstRow().querySelector(".sc-targets");
+    await user.click(within(targets).getByRole("button", { name: /BoringVault/ }));
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "setAuthority on this contract is gated by a different controller than the deduction names",
+    );
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
   it("reports an entity the graph does not carry instead of scrolling to nothing", async () => {
     selectExample.mockReturnValue({ ok: false, kind: "not-found" });
     const user = userEvent.setup();

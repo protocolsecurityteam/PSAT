@@ -87,10 +87,16 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     }
     // A contract selected while the function named on it was not found is a
     // partial landing, not a clean one — say so, but still take the user there.
+    // Likewise an unpaired hint: the card carries a function by that name, but
+    // under a different controller than the deduction charged — silence would
+    // read as a broken highlight rather than a refused one.
+    const hintedFn = target?.highlight?.functionSignature;
     showNotice(
       result.kind === "contract" && result.functionMissing
         ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
-        : null,
+        : result.highlight?.function === "unpaired" && hintedFn
+          ? `${hintedFn} on this contract is gated by a different controller than the deduction names — this contract is reached through the control graph, so only the contract is highlighted.`
+          : null,
     );
     surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [showNotice]);
