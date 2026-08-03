@@ -80,6 +80,9 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
       contractAddress: target?.address || "",
       functionSignature: target?.functionSignature || "",
       ...(target?.highlight ? { highlight: target.highlight } : {}),
+      // Only a transitive target carries this; like the hint it rides along
+      // without being part of the request, so no outcome below is keyed on it.
+      ...(target?.reachedFrom ? { reachedFrom: target.reachedFrom } : {}),
     });
     if (!result?.ok) {
       showNotice(selectMissNotice(result, label));

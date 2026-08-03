@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session, aliased, selectinload
 
 from db.jsonb import jsonb_has_payload
 from db.models import (
+    CONTROL_EDGE_RELATIONS,
     Contract,
     ContractBalanceLatest,
     ControlGraphEdge,
@@ -1908,6 +1909,58 @@ def _build_ownership_hierarchy(
     return hierarchy
 
 
+def _control_edge_witness(
+    contracts: list[dict[str, Any]],
+    lookup_contract_by_entity: dict[str, Contract | None],
+    cge_by_cid: dict[int, list[ControlGraphEdge]],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """``(chain, flow_from, flow_to)`` → the witnessed claims on that control edge.
+
+    A ``control_graph_edges`` row is written subject-first: ``from_node_id`` is
+    the contract the row was recorded against and ``to_node_id`` the related
+    address, and for the relations in ``CONTROL_EDGE_RELATIONS`` that reads
+    "the to-node has authority over the from-node" (see ``db.models``). A
+    fund-flow control edge runs the other way — authority holder → contract —
+    so rows are indexed reversed. Only those relations are indexed: reversing
+    an ``external_call_target`` would assert an authority nobody proved.
+
+    One pair can carry several distinct claims at once (a Teller both holds
+    ``roles 2,3`` on a vault and is its ``hook`` controller-value). Collapsing
+    them to one would publish an arbitrary pick, so the single-claim case gets
+    the scalar ``relation`` / ``label`` and the multi-claim case gets the whole
+    witnessed set as ``relations``. A pair with no control-graph row at all gets
+    neither, and the edge is published with its flow type alone.
+    """
+    claims: dict[tuple[str, str, str], set[tuple[str, str | None]]] = {}
+    for entry in contracts:
+        if not entry.get("address"):
+            continue
+        lookup_c = lookup_contract_by_entity.get(_entity_key(entry.get("chain"), entry["address"]))
+        if not lookup_c:
+            continue
+        chain_tok = _coalesce_chain(entry.get("chain"))
+        for edge in cge_by_cid.get(lookup_c.id, []):
+            if edge.relation not in CONTROL_EDGE_RELATIONS:
+                continue
+            subject = (edge.from_node_id or "").replace("address:", "").lower()
+            holder = (edge.to_node_id or "").replace("address:", "").lower()
+            if not subject or not holder or subject == holder:
+                continue
+            claims.setdefault((chain_tok, holder, subject), set()).add((edge.relation, edge.label or None))
+
+    witness: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key, pairs in claims.items():
+        ordered = sorted(pairs, key=lambda p: (p[0], p[1] or ""))
+        if len(ordered) == 1:
+            relation, label = ordered[0]
+            witness[key] = {"relation": relation, **({"label": label} if label else {})}
+        else:
+            witness[key] = {
+                "relations": [{"relation": r, **({"label": lb} if lb else {})} for r, lb in ordered],
+            }
+    return witness
+
+
 def _build_flows_and_principals(
     contracts: list[dict[str, Any]],
     contracts_by_job_id: dict[Any, Contract],
@@ -1925,10 +1978,14 @@ def _build_flows_and_principals(
     # another chain keeps its own edge instead of colliding on the bare pair.
     flow_seen: set[tuple[str, str, str]] = set()
     fund_flows: list[dict[str, Any]] = []
+    # Filled once the contract→Contract lookup exists (below), before the first
+    # add_flow call. Absent keys are the normal case: an edge the control graph
+    # never witnessed a relation for carries no relation/label at all.
+    edge_witness: dict[tuple[str, str, str], dict[str, str]] = {}
 
     def add_flow(from_addr: str, to_addr: str, flow_type: str, chain: str | None, lane: str = "control") -> None:
         chain_tok = _coalesce_chain(chain)
-        key = (chain_tok, from_addr, to_addr)
+        key = (chain_tok, (from_addr or "").lower(), (to_addr or "").lower())
         if key in flow_seen:
             return
         flow_seen.add(key)
@@ -1938,6 +1995,11 @@ def _build_flows_and_principals(
                 "to": to_addr,
                 "type": flow_type,
                 "lane": lane,
+                # Additive, and present only where a control-graph row witnesses
+                # this exact pair (see _control_edge_witness) — the frontend's
+                # reach-path inspector names the hop's relation/role from it and
+                # shows the type alone when it is absent.
+                **edge_witness.get(key, {}),
                 # Filled by build_governance_view once caller_detail exists:
                 # the SOURCE's witnessed rights on the target, never the
                 # target's own capability union — an edge is a claim about the
@@ -1965,6 +2027,8 @@ def _build_flows_and_principals(
     for entry in contracts:
         if entry.get("address"):
             lookup_contract_by_entity[_entity_key(entry.get("chain"), entry["address"])] = _lookup_contract_for(entry)
+
+    edge_witness.update(_control_edge_witness(contracts, lookup_contract_by_entity, cge_by_cid))
 
     for c in contracts:
         if not c["address"]:

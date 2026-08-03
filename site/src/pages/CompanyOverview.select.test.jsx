@@ -30,6 +30,8 @@ vi.mock("../ProtocolSurface.jsx", () => ({
 const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
 const SECOND_TARGET = "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88";
 const CONTROLLER = "0x2322ba43eff1542b6a7baed35e66099ea0d12bd1";
+// The row-0 host — the contract the capability's function actually lives on.
+const HOST = "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198";
 
 // Row 0's example function is `setAuthority`, and its capability reaches
 // SEVEN contracts. Two of them carry contract rows here, so "the page asked
@@ -134,6 +136,9 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       contractAddress: FIRST_TARGET,
       functionSignature: "",
       highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      // A transitive target also names where the reach started, so the surface
+      // can walk (and show) the route the deduction only implies.
+      reachedFrom: [HOST],
     });
   });
 

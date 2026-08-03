@@ -9,6 +9,7 @@ import { BalanceTable } from "./BalanceTable.jsx";
 import { DependsOnTab } from "./DependsOnTab.jsx";
 import { GovernsTab } from "./GovernsTab.jsx";
 import { LaneColumn } from "./LaneColumn.jsx";
+import { ReachPath } from "./ReachPath.jsx";
 import { OpsLane } from "./OpsLane.jsx";
 
 // The one card for every surface selection. A `machine` facet (function lanes)
@@ -27,6 +28,7 @@ export function EntityCard({
   highlightedCaller = null,
   governsIndex,
   controlAdjacency,
+  reachPath = null,
   machines = [],
   chain = "ethereum",
   showChain = false,
@@ -182,6 +184,10 @@ export function EntityCard({
           )}
         </div>
       </header>
+
+      {/* Above the tabs, not inside one: the route is why this card is open at
+          all, so it must be readable before any tab choice is made. */}
+      <ReachPath reachPath={reachPath} />
 
       {principal?.type === "safe" && owners.length > 0 && (
         <section className="ps-principal-section">

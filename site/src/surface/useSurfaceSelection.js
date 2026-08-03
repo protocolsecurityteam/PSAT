@@ -12,7 +12,19 @@ import { machineFunctions } from "./lane.js";
 import { entityKey } from "./entityKey.js";
 import { resolveEntity } from "./layout/entities.js";
 
-const INITIAL = { selection: null, guardKey: null, radar: null, focus: null };
+const INITIAL = { selection: null, guardKey: null, radar: null, focus: null, reach: null };
+
+// A selection request may name where it was REACHED FROM — the score page's
+// deduction rows click through to contracts a controller only reaches
+// transitively, and the host it acts on directly is not derivable from the
+// target alone. Stored as keys (addresses) like the rest of this state; the
+// path itself is walked per render from the payload's control edges.
+function reachFrom(action) {
+  const hosts = (Array.isArray(action.reachedFrom) ? action.reachedFrom : action.reachedFrom ? [action.reachedFrom] : [])
+    .map((a) => String(a || "").toLowerCase())
+    .filter(Boolean);
+  return hosts.length ? { hosts } : null;
+}
 
 // Camera one-shot: a monotonic counter (NOT Date.now) so identical repeat
 // focuses still register as a new request for the canvas effect.
@@ -41,6 +53,7 @@ function reducer(state, action) {
         selection: { address, hint: action.hint ?? null },
         guardKey: null,
         radar: null,
+        reach: reachFrom(action),
         focus: bumpFocus(state, address),
       };
     }
@@ -60,6 +73,7 @@ function reducer(state, action) {
       return {
         selection: address ? { address, hint: null } : null,
         guardKey: functionKey,
+        reach: address ? reachFrom(action) : null,
         radar: {
           functionKey,
           callerAddress: functionKey && action.callerAddress ? action.callerAddress.toLowerCase() : null,
@@ -117,13 +131,13 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName, c
       dispatch({ type: "select", address: null });
       return;
     }
-    dispatch({ type: "select", address: address.toLowerCase(), hint: opts.hint });
+    dispatch({ type: "select", address: address.toLowerCase(), hint: opts.hint, reachedFrom: opts.reachedFrom });
   }, []);
 
   const guard = useCallback((key) => dispatch({ type: "guard", key }), []);
   const radar = useCallback(
-    (address, functionKey, callerAddress = null) =>
-      dispatch({ type: "radar", address, functionKey, callerAddress }),
+    (address, functionKey, callerAddress = null, reachedFrom = null) =>
+      dispatch({ type: "radar", address, functionKey, callerAddress, reachedFrom }),
     [],
   );
   const focusPreview = useCallback((address) => dispatch({ type: "focusPreview", address }), []);
@@ -155,6 +169,9 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName, c
     selection: state.selection,
     guardKey: state.guardKey,
     radarSelection: state.radar,
+    // Addresses the current selection was reached FROM (score-page click-through
+    // on a transitive target). null whenever the selection did not carry one.
+    reachHosts: state.reach?.hosts || null,
     focus: state.focus, // { address, key } — the canvas camera one-shot
     // derived-per-render entities (staleness impossible)
     selectedEntity,

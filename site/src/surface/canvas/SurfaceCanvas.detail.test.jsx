@@ -1,6 +1,7 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { buildControlsDetailMap } from "./SurfaceCanvas.jsx";
+import { REACH_TIERS, SelectionLegend, buildControlsDetailMap, reachTier } from "./SurfaceCanvas.jsx";
 import { entityKey } from "../entityKey.js";
 
 const ADDR = "0x" + "ab".repeat(20);
@@ -25,5 +26,47 @@ describe("buildControlsDetailMap — controls_detail chain keying (inv. 13)", ()
   it("tolerates null/short rows", () => {
     expect(buildControlsDetailMap(null, "ethereum").size).toBe(0);
     expect(buildControlsDetailMap([{}, { address: "" }], "ethereum").size).toBe(0);
+  });
+});
+
+
+describe("reachTier — hop distance → wash intensity", () => {
+  it("gives the directly-connected node no wash of its own", () => {
+    // Hop 1 already wears the stronger acts-on treatment; washing it too would
+    // erase the one-hop / transitive distinction the overlay exists to draw.
+    expect(reachTier(1)).toBe(0);
+  });
+
+  it("fades with distance, one tier per hop", () => {
+    expect(reachTier(2)).toBe(2);
+    expect(reachTier(3)).toBe(3);
+    expect(reachTier(4)).toBe(4);
+  });
+
+  it("caps far hops at the faintest tier rather than dropping them", () => {
+    expect(reachTier(5)).toBe(REACH_TIERS);
+    expect(reachTier(40)).toBe(REACH_TIERS);
+  });
+
+  it("treats a non-reached node as no tier", () => {
+    expect(reachTier(0)).toBe(0);
+    expect(reachTier(undefined)).toBe(0);
+  });
+});
+
+describe("SelectionLegend", () => {
+  it("names the reach wash when the selection has transitive reach", () => {
+    const { container } = render(<SelectionLegend onClear={() => {}} hasReach />);
+    expect(screen.getByText("reachable through the control graph")).toBeInTheDocument();
+    expect(container.querySelector(".ps-selection-legend-swatch--reach")).not.toBeNull();
+  });
+
+  it("omits the reach row when nothing on the canvas is washed", () => {
+    const { container } = render(<SelectionLegend onClear={() => {}} />);
+    expect(screen.queryByText("reachable through the control graph")).toBeNull();
+    expect(container.querySelector(".ps-selection-legend-swatch--reach")).toBeNull();
+    // The two direction rows are untouched.
+    expect(screen.getByText("selected acts on this contract")).toBeInTheDocument();
+    expect(screen.getByText("this contract acts on selected")).toBeInTheDocument();
   });
 });

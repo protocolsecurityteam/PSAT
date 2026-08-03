@@ -60,6 +60,12 @@ function TargetList({ row, onSelect }) {
       )}{" "}
       {shown.map((target, i) => {
         const label = target.name || target.short;
+        // Where the reach STARTED. The row's hosts are the contracts the named
+        // controller acts on directly; this entity is downstream of them, and
+        // its own card says nothing about the deduction without that. All hosts
+        // ride along — the surface picks whichever one actually reaches this
+        // entity in the graph it carries, which the score document does not say.
+        const reachedFrom = hosts.map((host) => host.address);
         // Navigating to an entity is not a claim that the capability reaches
         // it. Where reach was never witnessed the button still works, but the
         // qualifier rides along in the interaction — a screen-reader user or a
@@ -70,7 +76,13 @@ function TargetList({ row, onSelect }) {
             {i > 0 && " · "}
             <EntityButton
               onSelect={onSelect}
-              target={{ chain: target.chain, address: target.address, label, highlight: hint }}
+              target={{
+                chain: target.chain,
+                address: target.address,
+                label,
+                highlight: hint,
+                ...(reachWitnessed && reachedFrom.length ? { reachedFrom } : {}),
+              }}
               title={`Show ${label} on the control surface${qualifier}`}
               ariaLabel={reachWitnessed ? undefined : `${label} — reach not witnessed`}
             >

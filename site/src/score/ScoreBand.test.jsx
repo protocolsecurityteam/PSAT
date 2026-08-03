@@ -359,7 +359,20 @@ describe("ScoreBand — entities select on the surface", () => {
       // The contract is what is asked for; the pair the row was about rides
       // along for the card to mark if it carries it.
       highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      // …and so does the host the reach STARTED at, so the surface can show the
+      // route to a contract the controller never touches directly.
+      reachedFrom: [HOST],
     });
+  });
+
+  it("names no reach origin on the host itself", async () => {
+    // The host is where the function IS. Handing it a reached-from would say it
+    // is downstream of itself and put a route on a card that has none.
+    const onSelectEntity = vi.fn();
+    const row = await openRowZero(onSelectEntity);
+    const host = row.querySelector(".sc-targets .sc-host");
+    await userEvent.setup().click(within(host).getByRole("button", { name: /0x7c12…7198/ }));
+    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("reachedFrom");
   });
 
   it("selects the function the fix-first callout names", async () => {

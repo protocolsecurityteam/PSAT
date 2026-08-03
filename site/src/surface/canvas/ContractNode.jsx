@@ -19,7 +19,9 @@ export function ContractNode({ data }) {
   const chip = data.selectionChip;
   return (
     <div
-      className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}`}
+      className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}${
+        data.reachTier ? ` ps-node-reach ps-node-reach-${data.reachTier}` : ""
+      }`}
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >

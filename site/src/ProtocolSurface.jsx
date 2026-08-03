@@ -7,12 +7,19 @@ import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
-import { isRoleIdAddress } from "./surface/format.js";
+import { isRoleIdAddress, principalLabel, shortAddr } from "./surface/format.js";
 import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
-import { buildControlAdjacency, flowOnChain } from "./surface/layout/governancePath.js";
+import {
+  buildControlAdjacency,
+  buildControlEdgeIndex,
+  controlReach,
+  edgeClaims,
+  flowOnChain,
+  shortestControlPath,
+} from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { coalesceChain, entityKey } from "./surface/entityKey.js";
@@ -363,6 +370,14 @@ function ProtocolSurface({
     [companyData, activeChain]
   );
 
+  // Same control edges, keyed so a hop can name itself (type + the witnessed
+  // relation/role label the payload carries). Feeds the reached-from path block
+  // on the entity card; built once here, never per render inside it.
+  const controlEdgeIndex = useMemo(
+    () => buildControlEdgeIndex(companyData?.fund_flows || [], activeChain),
+    [companyData, activeChain]
+  );
+
   // Fund flows feeding the canvas are chain-scoped like the principals + the
   // adjacency: SurfaceCanvas draws contract→contract edges keyed by bare
   // address, so a same-address twin's flow on another chain must not draw onto
@@ -401,6 +416,7 @@ function ProtocolSurface({
   const {
     selection,
     radarSelection,
+    reachHosts,
     focus,
     selectedMachine,
     selectedPrincipal,
@@ -514,15 +530,15 @@ function ProtocolSurface({
   // (opens the detail panel with signers / delay / controlled contracts)
   // and focuses it — same behaviour as clicking a single-principal guard
   // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal) => {
+  const handleSelectPrincipal = useCallback((principal, reachedFrom = null) => {
     if (!principal) return;
     setAgentHighlights(null);
     setActiveAuditId(null);
-    select(principal.address);
+    select(principal.address, reachedFrom ? { reachedFrom } : {});
     syncUrl({ sel: principal.address });
   }, [select, syncUrl]);
 
-  const selectMachineExample = useCallback((machine, fnView, callerAddress = null) => {
+  const selectMachineExample = useCallback((machine, fnView, callerAddress = null, reachedFrom = null) => {
     setSidebarMode("detail");
     setEnabledRoles((prev) => {
       const role = machine.role || "utility";
@@ -533,7 +549,7 @@ function ProtocolSurface({
     });
     setAgentHighlights(null);
     setActiveAuditId(null);
-    radar(machine.address, fnView?.key || null, callerAddress);
+    radar(machine.address, fnView?.key || null, callerAddress, reachedFrom);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
   }, [radar, syncUrl]);
 
@@ -558,6 +574,12 @@ function ProtocolSurface({
     // of it has to survive a lookup against that card's own lanes to be marked.
     const hint = example?.highlight || null;
     const hintedController = String(hint?.controller || "").toLowerCase() || null;
+    // Where the request says this entity was REACHED FROM (a score-page click on
+    // a transitive target names the host the controller acts on directly). Like
+    // the hint it never changes which entity is selected or what the outcome is
+    // called — it only lets the card show the route, and the route still has to
+    // exist in this graph's own control edges to be shown.
+    const reachedFrom = example?.reachedFrom || null;
     const hintOutcome = (fnView, caller, unpaired = false) =>
       hint
         ? {
@@ -589,7 +611,7 @@ function ProtocolSurface({
       }
       const only = pool[0];
       const matchedCaller = findCaller(only.fnView, hintedController);
-      selectMachineExample(only.machine, only.fnView, matchedCaller);
+      selectMachineExample(only.machine, only.fnView, matchedCaller, reachedFrom);
       return { ok: true, kind: "function", ...hintOutcome(only.fnView, matchedCaller) };
     }
     const entry = entityIndex.get(entityKey(activeChain, address));
@@ -599,7 +621,7 @@ function ProtocolSurface({
     if (!entry.machine) {
       if (!entry.principal) return { ok: false, kind: "not-found" };
       setSidebarMode("detail");
-      handleSelectPrincipal(entry.principal);
+      handleSelectPrincipal(entry.principal, reachedFrom);
       return { ok: true, kind: "principal" };
     }
     const machine = entry.machine;
@@ -624,7 +646,7 @@ function ProtocolSurface({
         unpaired = true;
       }
     }
-    selectMachineExample(machine, marked, matchedCaller);
+    selectMachineExample(machine, marked, matchedCaller, reachedFrom);
     // The outcome describes the request the caller made, not the hint: a click
     // that asked for a contract landed on a contract even when the hint marked
     // a row inside it.
@@ -698,6 +720,58 @@ function ProtocolSurface({
     if (agentHighlights) for (const a of agentHighlights) merged.add(a);
     return merged.size ? merged : null;
   }, [auditHighlights, agentHighlights]);
+
+  // Reach overlay: every contract the SELECTED entity reaches transitively over
+  // the control graph, keyed to the hop distance on the shortest route. The
+  // canvas washes those nodes with fading intensity, which is the only way the
+  // multi-hop control relation is visible — it deliberately draws no
+  // control-edge lines (the fanout reads as a hairball). Memoized per selection:
+  // one BFS over a few hundred edges, never a walk per render.
+  const reachDistances = useMemo(() => {
+    if (!selection?.address) return null;
+    const reach = controlReach(selection.address, controlAdjacency);
+    return reach.size ? reach : null;
+  }, [selection, controlAdjacency]);
+
+  // Human name for an address on this graph: the contract's, else the
+  // principal's, else the short address. Never a bare "unknown" — the short
+  // address IS the identity when nothing else names it.
+  const nameForAddress = useCallback((addr) => {
+    const lc = String(addr || "").toLowerCase();
+    if (!lc) return "";
+    const entry = entityIndex.get(entityKey(activeChain, lc));
+    if (entry?.machine?.name) return entry.machine.name;
+    if (entry?.principal) return principalLabel(entry.principal.label, entry.principal.type, lc);
+    return shortAddr(lc);
+  }, [entityIndex, activeChain]);
+
+  // The route a score-page click-through took to this entity: the deduction row
+  // named a host the controller acts on DIRECTLY, and this contract only through
+  // the control graph. Walked over the same edges the canvas wash uses, so the
+  // card and the graph cannot disagree. A route this graph does not carry stays
+  // an explicit third state (hops: null) — the card says so rather than drawing
+  // a shorter path than the truth.
+  const reachPath = useMemo(() => {
+    const target = selection?.address;
+    if (!reachHosts?.length || !target) return null;
+    const hostNames = reachHosts.map(nameForAddress);
+    const { host, hops } = shortestControlPath(reachHosts, target, controlEdgeIndex);
+    if (!hops) return { host: null, hostName: null, hostNames, hops: null };
+    if (!hops.length) return null; // the click landed on the host itself
+    return {
+      host,
+      hostName: nameForAddress(host),
+      hostNames,
+      hops: hops.map((hop) => ({
+        from: hop.from,
+        to: hop.to,
+        fromName: nameForAddress(hop.from),
+        toName: nameForAddress(hop.to),
+        type: hop.flow?.type || null,
+        claims: edgeClaims(hop.flow),
+      })),
+    };
+  }, [reachHosts, selection, controlEdgeIndex, nameForAddress]);
 
   // Role-toggle reconciliation. Toggling a role off removes its contracts (and
   // any principal whose whole touch set was those contracts) from the visible
@@ -805,6 +879,7 @@ function ProtocolSurface({
             focusAddress={focus}
             focusedAddress={focusedAddress}
             highlightedAddresses={highlightedAddresses}
+            reachDistances={reachDistances}
             onSelectMachine={(m) => {
               // Auto-switch to Detail when the user clicks a contract
               // ON THE CANVAS so the function lanes are immediately
@@ -880,6 +955,7 @@ function ProtocolSurface({
               highlightedCaller={radarCallerAddress}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
+              reachPath={reachPath}
               machines={machines}
               chain={activeChain}
               showChain={isMultichain}

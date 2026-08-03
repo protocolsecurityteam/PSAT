@@ -87,7 +87,9 @@ export function GroupNode({ data }) {
   // top of header, `77` ≈ 47% bottom.
   return (
     <div
-      className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}`}
+      className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}${
+        data.reachTier ? ` ps-group-reach ps-group-reach-${data.reachTier}` : ""
+      }`}
       style={{
         "--principal-color": color,
         "--principal-bg": "transparent",

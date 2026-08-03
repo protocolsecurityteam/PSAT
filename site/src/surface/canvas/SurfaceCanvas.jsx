@@ -41,7 +41,11 @@ export function buildControlsDetailMap(rows, chain) {
 // the edges represent any directed relationship (controls / calls /
 // sends value / owns / proxies-to); the chip text spells out which
 // specifically.
-function SelectionLegend({ onClear }) {
+//
+// The third row appears only when the selection HAS transitive reach: a legend
+// entry for a wash nothing on the canvas is wearing would name a relationship
+// this selection does not have.
+export function SelectionLegend({ onClear, hasReach = false }) {
   return (
     <div className="ps-selection-legend">
       <div className="ps-selection-legend-row">
@@ -52,6 +56,12 @@ function SelectionLegend({ onClear }) {
         <span className="ps-selection-legend-swatch ps-selection-legend-swatch--in" />
         <span>this contract acts on selected</span>
       </div>
+      {hasReach && (
+        <div className="ps-selection-legend-row">
+          <span className="ps-selection-legend-swatch ps-selection-legend-swatch--reach" />
+          <span>reachable through the control graph</span>
+        </div>
+      )}
       {/* Explicit deselect — the pane-click clear exists but is invisible;
           this makes it discoverable and teaches the Esc shortcut. */}
       <button className="ps-selection-clear" onClick={onClear} title="Clear selection (Esc)">
@@ -61,6 +71,20 @@ function SelectionLegend({ onClear }) {
   );
 }
 
+// Hop distances past this one are visually identical: four steps of fading are
+// as much as the eye separates, and a fifth tier would read as "no wash" —
+// which is the one thing the overlay must never say about a reachable node.
+export const REACH_TIERS = 4;
+
+// Hop distance → the wash tier a node wears. Hop 1 is deliberately absent: the
+// directly-connected node already carries the stronger acts-on treatment (full
+// opacity + its capability chip), so tinting it as reach too would blur the
+// distinction the whole overlay exists to draw.
+export function reachTier(hop) {
+  if (!hop || hop < 2) return 0;
+  return Math.min(hop, REACH_TIERS);
+}
+
 // Multichain (inv. 13): every entity this canvas receives — machines,
 // principals, fund-flow endpoints — belongs to the single active `chain` (the
 // page is chain-scoped upstream in ProtocolSurface). So bare-address keys in
@@ -68,7 +92,7 @@ function SelectionLegend({ onClear }) {
 // collision-free by construction: two chains never share this dataset. The
 // entity-identity lookups (principal resolution, per-entity detail maps) key by
 // (chain, address) via entityKey so they carry chain explicitly regardless.
-export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal }) {
+export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
@@ -375,6 +399,26 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         }
       }
     }
+    // Reach wash: nodes the selection reaches transitively (hop >= 2) keep a
+    // fading tint instead of the flat non-connected dim, and their containing
+    // group un-dims with them so a washed child isn't buried inside a dark box.
+    // Suppressed entirely under an audit/agent highlight overlay — that set is
+    // the answer to a different question and already owns the dim.
+    const reachActive = !hiActive && sel && reachDistances && reachDistances.size > 0;
+    const reachTiers = new Map();
+    if (reachActive) {
+      const parentOf = new Map(initNodes.map((n) => [n.id?.toLowerCase(), n.parentId?.toLowerCase() || null]));
+      for (const [addr, hop] of reachDistances) {
+        const tier = reachTier(hop);
+        if (!tier || !parentOf.has(addr)) continue;
+        reachTiers.set(addr, tier);
+      }
+      for (const addr of [...reachTiers.keys()]) {
+        const parent = parentOf.get(addr);
+        if (parent && !reachTiers.has(parent)) reachTiers.set(parent, 0);
+      }
+    }
+
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
@@ -393,7 +437,9 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           browseLc &&
           n.type === "group" &&
           (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc);
-        const dimmed = !isFoc && !hasBrowsedRow &&
+        // 0 = un-dim only (a group holding reached children); >0 = wash tier.
+        const tier = reachTiers.get(nid);
+        const dimmed = !isFoc && !hasBrowsedRow && tier === undefined &&
           (hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid)));
         // Gold dotted ring = "browsing this" only. The committed node keeps
         // just the selected ring, so the two states read as different colors.
@@ -414,6 +460,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
             ...n.data,
             selected: nid === selLc,
             focused,
+            reachTier: tier || 0,
             selectionChip: selectionChips.get(nid) || null,
             browseChip: browseChips?.get(nid) || null,
             // Dispatch by node kind: contract nodes carry .machine,
@@ -478,7 +525,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, reachDistances, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">
@@ -500,7 +547,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         <FocusOnNode address={focusAddress?.address} focusKey={focusAddress?.key} principals={principals} />
         {selectedAddress && (
           <Panel position="top-center">
-            <SelectionLegend onClear={() => onSelectMachine(null)} />
+            <SelectionLegend
+              onClear={() => onSelectMachine(null)}
+              hasReach={Boolean(reachDistances && [...reachDistances.values()].some((hop) => reachTier(hop) > 0))}
+            />
           </Panel>
         )}
       </ReactFlow>

@@ -1219,6 +1219,149 @@ def test_fund_flows_principal_emitted_for_in_contract_function_principal(db_sess
     )
 
 
+def _seed_principal_flow(db_session, protocol, *, target_name="Vault", authority_name="Operator"):
+    """Target contract gated by an in-protocol authority via FunctionPrincipal.
+
+    Produces exactly the ``authority -> target`` type=principal flow the test
+    above pins; returns the two addresses plus the target ``Contract`` so a
+    caller can hang control-graph edges off it.
+    """
+    target_addr = _addr("target")
+    authority_addr = _addr("authority")
+
+    target_job = _add_job(db_session, address=target_addr, protocol_id=protocol.id, name=target_name)
+    authority_job = _add_job(db_session, address=authority_addr, protocol_id=protocol.id, name=authority_name)
+    target_contract = _add_contract(
+        db_session, address=target_addr, job=target_job, protocol_id=protocol.id, contract_name=target_name
+    )
+    _add_contract(
+        db_session, address=authority_addr, job=authority_job, protocol_id=protocol.id, contract_name=authority_name
+    )
+
+    ef = EffectiveFunction(
+        contract_id=target_contract.id,
+        function_name="transferFrom",
+        selector="0x23b872dd",
+        abi_signature="transferFrom(address,address,uint256)",
+        authority_public=False,
+    )
+    db_session.add(ef)
+    db_session.commit()
+    db_session.refresh(ef)
+    db_session.add(
+        FunctionPrincipal(
+            function_id=ef.id,
+            address=authority_addr.lower(),
+            resolved_type=None,
+            origin="semantic_capability:finite_set",
+            principal_type="controller",
+        )
+    )
+    db_session.commit()
+    return target_addr.lower(), authority_addr.lower(), target_contract
+
+
+def _principal_flow(payload, from_addr, to_addr):
+    return next(
+        (
+            f
+            for f in payload["fund_flows"]
+            if f["from"] == from_addr and f["to"] == to_addr and f["type"] == "principal"
+        ),
+        None,
+    )
+
+
+def test_fund_flow_carries_witnessed_relation_and_label(db_session):
+    """A control-graph row for the pair names the hop on the emitted flow.
+
+    ``control_graph_edges`` is written subject-first (from_node = the contract,
+    to_node = the address holding authority over it), which is the reverse of
+    the authority-holder → contract fund flow. The payload's control edges are
+    the only thing the frontend's reach-path inspector can name a hop from, so
+    the witnessed ``relation`` / ``label`` ride along.
+    """
+    p = _add_protocol(db_session, f"edge-label-{uuid.uuid4().hex[:8]}")
+    target, authority, target_contract = _seed_principal_flow(db_session, p)
+
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=target_contract.id,
+            from_node_id=f"address:{target}",
+            to_node_id=f"address:{authority}",
+            relation="role_principal",
+            label="roles 77",
+        )
+    )
+    db_session.commit()
+
+    flow = _principal_flow(build_company_overview(db_session, p.name), authority, target)
+    assert flow is not None
+    assert flow["relation"] == "role_principal"
+    assert flow["label"] == "roles 77"
+
+
+def test_fund_flow_omits_relation_without_a_control_graph_row(db_session):
+    """No matching row → no relation/label keys at all, rather than a default."""
+    p = _add_protocol(db_session, f"edge-nolabel-{uuid.uuid4().hex[:8]}")
+    target, authority, _ = _seed_principal_flow(db_session, p)
+
+    flow = _principal_flow(build_company_overview(db_session, p.name), authority, target)
+    assert flow is not None
+    assert "relation" not in flow
+    assert "label" not in flow
+
+
+def test_fund_flow_carries_every_claim_and_never_reverses_a_call(db_session):
+    """Two guards in one: a non-authority relation is never reversed onto the
+    flow, and a pair carrying several control claims publishes all of them.
+
+    ``external_call_target`` asserts the from-node CALLS the to-node — reversing
+    it would mint an authority claim nobody proved, so it contributes nothing.
+    The two control rows are both true of the pair (a role grant and a
+    controller-value slot); picking one would publish an arbitrary witness, so
+    the scalar fields give way to the whole set.
+    """
+    p = _add_protocol(db_session, f"edge-multi-{uuid.uuid4().hex[:8]}")
+    target, authority, target_contract = _seed_principal_flow(db_session, p)
+
+    db_session.add_all(
+        [
+            ControlGraphEdge(
+                contract_id=target_contract.id,
+                from_node_id=f"address:{authority}",
+                to_node_id=f"address:{target}",
+                relation="external_call_target",
+                label="calls",
+            ),
+            ControlGraphEdge(
+                contract_id=target_contract.id,
+                from_node_id=f"address:{target}",
+                to_node_id=f"address:{authority}",
+                relation="role_principal",
+                label="roles 2,3",
+            ),
+            ControlGraphEdge(
+                contract_id=target_contract.id,
+                from_node_id=f"address:{target}",
+                to_node_id=f"address:{authority}",
+                relation="controller_value",
+                label="hook",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    flow = _principal_flow(build_company_overview(db_session, p.name), authority, target)
+    assert flow is not None
+    assert "relation" not in flow
+    assert "label" not in flow
+    assert flow["relations"] == [
+        {"relation": "controller_value", "label": "hook"},
+        {"relation": "role_principal", "label": "roles 2,3"},
+    ]
+
+
 def test_fund_flows_controller_requires_authorization_relation(db_session):
     """A ControllerValue row pointing at another in-protocol contract
     must NOT produce a ``type=controller`` fund_flow unless the storage

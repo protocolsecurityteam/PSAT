@@ -1637,3 +1637,95 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     expectNoCrash();
   });
 });
+
+// --- Reach path: the route a score-page click-through took to get here -------
+describe("ProtocolSurface — reached-from route on the entity card", () => {
+  const { VAULT: V_ADDR, POOL: P_ADDR, SAFE: S_ADDR, EOA: E_ADDR } = RICH_ADDRESSES;
+  // The rich fixture's fund_flows carry no control edges, so give it the
+  // etherfi row-0 shape: the safe reaches the pool only THROUGH the vault.
+  const WITH_CONTROL_EDGES = {
+    ...ETHERFI_COMPANY_RICH,
+    fund_flows: [
+      ...ETHERFI_COMPANY_RICH.fund_flows,
+      { from: S_ADDR, to: V_ADDR, type: "principal", relation: "role_principal", label: "roles 77" },
+      { from: V_ADDR, to: P_ADDR, type: "controller" },
+    ],
+  };
+
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  function renderWithHandle(data = WITH_CONTROL_EDGES) {
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
+    return ref;
+  }
+
+  async function arriveFrom(example) {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    expect(result.ok).toBe(true);
+    return waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+  }
+
+  it("walks the host→target route and names each hop", async () => {
+    await arriveFrom({ contractAddress: P_ADDR, reachedFrom: [S_ADDR] });
+    const block = await waitFor(() => {
+      const el = document.querySelector(".ps-reach");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(block.querySelector(".ps-reach-hdr")).toHaveTextContent("Reached from Multisig via:");
+    const hops = [...block.querySelectorAll(".ps-reach-hop")];
+    expect(hops.map((h) => h.querySelector(".ps-reach-pair").textContent)).toEqual([
+      "Multisig→Vault",
+      "Vault→LiquidityPool",
+    ]);
+    // The witnessed role rides through from the payload; the unwitnessed hop
+    // shows its flow type alone.
+    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("principal · role_principal roles 77");
+    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controller");
+    expectNoCrash();
+  });
+
+  it("says the path is not carried when this graph has no route", async () => {
+    await arriveFrom({ contractAddress: P_ADDR, reachedFrom: [E_ADDR] });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-reach-nd")).toHaveTextContent("path not carried by this graph");
+    });
+    expect(document.querySelector(".ps-reach-hops")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("shows no route on a plain selection that names no origin", async () => {
+    await arriveFrom({ contractAddress: P_ADDR });
+    expect(document.querySelector(".ps-reach")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("drops the route when the next selection carries none", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    await act(async () => {
+      ref.current.selectExample({ contractAddress: P_ADDR, reachedFrom: [S_ADDR] });
+    });
+    await waitFor(() => expect(document.querySelector(".ps-reach")).toBeTruthy());
+    await act(async () => {
+      ref.current.selectExample({ contractAddress: V_ADDR });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toHaveTextContent("Vault");
+    });
+    expect(document.querySelector(".ps-reach")).toBeNull();
+    expectNoCrash();
+  });
+});
