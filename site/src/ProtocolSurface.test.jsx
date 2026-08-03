@@ -74,8 +74,8 @@ function searchInput() {
 }
 
 async function selectSearchMode(user, label) {
-  // Scope to the top-left search-modes bar: DetailEmptyState's radar also
-  // renders a "Safes" score-axis button that would otherwise collide.
+  // Scope to the top-left search-modes bar so a same-named button elsewhere
+  // in the surface can never satisfy the query.
   const bar = await waitFor(() => {
     const el = document.querySelector(".ps-search-modes");
     expect(el).toBeTruthy();
@@ -96,9 +96,8 @@ async function commitViaEnter(user) {
 
 async function clickSidebarTab(label) {
   const user = userEvent.setup();
-  // Scope to the sidebar tab bar: in Detail mode the DetailEmptyState radar
-  // also renders example buttons (e.g. "Upgrades …") that would otherwise
-  // collide with the same-named tab.
+  // Scope to the sidebar tab bar so a same-named button in the panel body can
+  // never satisfy the query.
   const tabBar = await waitFor(() => {
     const el = document.querySelector(".ps-sidebar-tabs");
     expect(el).toBeTruthy();
@@ -145,7 +144,7 @@ describe("ProtocolSurface — sidebar tabs", () => {
     await clickSidebarTab("Detail");
     await waitFor(() => {
       // DetailEmptyState renders when no machine/principal is selected.
-      const radarOrEmpty = document.querySelector(".protocol-radar, .ps-detail-empty, .empty");
+      const radarOrEmpty = document.querySelector(".ps-detail-empty, .empty");
       expect(radarOrEmpty).toBeTruthy();
     });
     expectNoCrash();
@@ -513,7 +512,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     await clickSidebarTab("Detail");
     await waitFor(() => {
       expect(
-        document.querySelector(".ps-detail-empty, .protocol-radar, .empty"),
+        document.querySelector(".ps-detail-empty, .empty"),
       ).toBeTruthy();
     });
     expect(screen.queryByText(/2\/3 threshold/i)).not.toBeInTheDocument();

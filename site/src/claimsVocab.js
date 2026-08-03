@@ -3,10 +3,10 @@
 // A function payload may carry `claims: [{claim_id, tier, witness}]` minted by
 // the backend registry (services/static/claims). This module is the one place
 // that maps a claim_id onto the presentation facts consumers need — family,
-// lane, tone, chip sentence, ordering priority, legacy projection, and the
-// protocol-score kind/severity. Keeping it in one map is the frontend half of
-// the rule "one vocabulary module per side": lane.js, protocolScore.js,
-// graph.js and PermissionsTab all read from here so the five sites cannot drift.
+// lane, tone, chip sentence, ordering priority, and legacy projection. Keeping
+// it in one map is the frontend half of the rule "one vocabulary module per
+// side": lane.js, graph.js and PermissionsTab all read from here so the sites
+// cannot drift.
 //
 // Precedence rule for a function with several claims: the *primary* claim is the
 // one with the lowest `priority` number (ties broken by claim_id). Lane, tone,
@@ -154,9 +154,8 @@ const CLAIM_VOCAB = {
     score: { kind: "admin", severity: 0.88 },
   },
   // Minted only by the effects claims bridge (behavioral_observed): a simulated
-  // call opened a permission gate to previously-rejected callers. Scoreable like
-  // the other control-plane authority claims, but the observed tier is
-  // neutralised in protocolScore.js while verdict consumption stays unspecified.
+  // call opened a permission gate to previously-rejected callers. Displayed like
+  // the other control-plane authority claims.
   "authority.grant": {
     family: "control_plane",
     lane: "top",
@@ -449,66 +448,6 @@ export function hasClaims(fn) {
 }
 
 export const OBSERVED_TIER = "behavioral_observed";
-
-// Provenance weighting for the SCORE path, in one place.
-//
-// `behavioral_observed` is EXCLUDED by `scoreClaimsView` below — a deferral, not
-// a weighting.
-//
-// Among the static tiers the line that matters is single-contract evidence.
-// `standard_exact` (an exact ABI-selector match) and `idiom_structural` (a
-// structural idiom in this contract's own code) both have it. `policy_derived` is
-// defined at services/static/cross_contract.py:1-21 as having NONE: it is
-// inferred from a SIBLING contract's claim across a call join, and it was scored
-// identically to an exact selector match because everything except the observed
-// tier fell through untouched — the tier is computed, ranked, labelled and
-// rendered, then discarded at the one point where provenance strength decides
-// something.
-//
-// It is NOT dropped. Dropping it would take the action out of the candidate set
-// entirely and make the protocol read SAFER for a risk nobody disproved — the
-// adverse direction. It enters at its own rank relative to an exact match, read
-// off the TIER_RANK table that already exists rather than a number invented here.
-//
-// Realised effect on the local corpus: ZERO. `policy_derived` is 0 of 679 claims
-// because the producer has never fired (`workers/policy_worker` wires the whole
-// path; the one plausible silent-swallow was checked and ruled out). The golden
-// fixture-10 row is the gate that exists precisely because no corpus row can be one.
-function tierSeverityFactor(tier) {
-  if (tier !== "policy_derived") return 1;
-  return TIER_RANK.policy_derived / TIER_RANK.standard_exact;
-}
-
-// Score-facing view of a function: the effects bridge mints observable labels at
-// the `behavioral_observed` tier, but the score must NOT consume verdicts while
-// their consumption stays unspecified. This strips the observed claims and the legacy
-// effect_labels they alone projected, so a function scores exactly as it did
-// before the bridge labeled it (byte-identical). Display consumers keep the full
-// claim set; only the score path uses this view.
-//
-// The weaker static tiers are NOT stripped here — see `tierSeverityFactor`, which
-// is where a tier that carries no single-contract evidence stops entering the
-// score at the weight of one that does.
-export function scoreClaimsView(fn) {
-  const claims = Array.isArray(fn?.claims) ? fn.claims : [];
-  const observed = claims.filter((c) => c && c.tier === OBSERVED_TIER);
-  if (!observed.length) return fn;
-  const scoreable = claims.filter((c) => !(c && c.tier === OBSERVED_TIER));
-  const scoreableLabels = new Set(
-    scoreable.map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy).filter(Boolean),
-  );
-  // Only labels contributed SOLELY by an observed claim are removed; a label a
-  // scoreable claim also projects stays (and is ignored anyway when claims exist).
-  const observedOnly = new Set(
-    observed
-      .map((c) => CLAIM_VOCAB[c?.claim_id]?.legacy)
-      .filter((l) => l && !scoreableLabels.has(l)),
-  );
-  const labels = (
-    Array.isArray(fn?.effect_labels) ? fn.effect_labels : []
-  ).filter((l) => !observedOnly.has(l));
-  return { ...fn, claims: scoreable, effect_labels: labels };
-}
 
 // The claim that drives tone / chip / ordering: lowest priority number wins,
 // ties resolved by claim_id for determinism.
@@ -1758,44 +1697,6 @@ export function sharedDeployerNote(principal) {
     otherCount,
     heuristic: sd.heuristic !== false,
   };
-}
-
-// An inbound route scored as an outflow. The vocab entry's severity is the
-// outbound default (the caller can name where the routed funds land), but the
-// same claim also covers a move INTO a vault and a pull between two third
-// parties — neither sends this unit's assets anywhere. laneForClaims already
-// splits the two on ``from_is_self``; the score has to use the same
-// discriminator or an inbound route is filed as a high-risk asset_out.
-const ROUTED_IN_SCORE = { kind: "asset_in", severity: 0.5 };
-
-function scoreOfClaim(c) {
-  const base = CLAIM_VOCAB[c.claim_id].score;
-  const score =
-    !base || c.claim_id !== "value_router"
-      ? base
-      : routedOutFlows(c.witness).length
-        ? base
-        : ROUTED_IN_SCORE;
-  if (!score) return score;
-  const factor = tierSeverityFactor(c.tier);
-  if (factor === 1) return score;
-  // `provenance_tier` rides along so the score's own prose can say WHY the
-  // severity is attenuated. Without it the tooltip would report a weaker number
-  // with no reason, which reads as a weaker risk rather than weaker evidence.
-  return { ...score, severity: score.severity * factor, provenance_tier: c.tier };
-}
-
-// {kind, severity} for protocolScore — the strongest-severity scoreable claim.
-// Returns null when a function carries only non-scoreable claims (user_plane,
-// contract_deployment), so the caller can decide how to treat it.
-export function scoreForClaims(fn) {
-  let best = null;
-  for (const c of claimsOf(fn)) {
-    const score = scoreOfClaim(c);
-    if (!score) continue;
-    if (best === null || score.severity > best.severity) best = score;
-  }
-  return best;
 }
 
 export { CLAIM_VOCAB };

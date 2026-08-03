@@ -4,10 +4,8 @@ import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 import { entityKey } from "../surface/entityKey.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
-import { computeProtocolScore } from "../protocolScore.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
-import ProtocolRadar from "../ProtocolRadar.jsx";
 
 const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
@@ -49,10 +47,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
 
-  // The score uses the full company payload: function-level authority,
-  // principal details, upgrade state, and audit coverage. Functions
-  // live on a separate endpoint now, so splice them back onto each
-  // contract for the scorer.
   // Keyed by the composite (chain, address) entity token (inv. 13): a CREATE2
   // twin on two chains keeps a coverage row each instead of one overwriting the
   // other.
@@ -64,19 +58,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     return map;
   })();
 
-  // functionData is keyed by the composite (chain, address) token (inv. 13), so
-  // each contract picks up ITS chain's functions — a same-address cross-chain
-  // pair no longer collapses to one chain's analysis.
-  const dataForScore = functionData
-    ? {
-        ...data,
-        contracts: contracts.map((c) => {
-          const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
-          return fns ? { ...c, functions: fns } : c;
-        }),
-      }
-    : data;
-  const { axes, composite, grade } = computeProtocolScore(dataForScore, auditCoverage);
   // Coverage rows include past implementations linked by audit-matcher even
   // after a proxy upgrade, so the raw count overshoots the contract count
   // (e.g. 56 covered of 32 contracts). Intersect with the current contract
@@ -87,21 +68,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     .filter((r) => bytecodeVerifiedAudits(r.audits).length > 0).length;
 
   const proxyCount = contracts.filter((c) => c.is_proxy).length;
-  const openRadarExample = (example) => {
-    if (!example?.contractAddress) return;
-    sessionStorage.setItem("psat:surfaceRadarExample", JSON.stringify({
-      companyName,
-      contractAddress: example.contractAddress,
-      functionSignature: example.functionSignature || "",
-      selector: example.selector || "",
-    }));
-    onNavigateToSurface({
-      focus: example.contractAddress,
-      fn: example.functionSignature || example.selector || "",
-      score: "1",
-    });
-  };
-
   return (
     <div className="company-page">
       {/* Hero band — edge-to-edge, no card borders */}
@@ -117,24 +83,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
           </div>
-        </div>
-      </section>
-
-      {/* Score + stats on the left, radar on the right */}
-      <section className="company-score-band">
-        <div className="company-score-left">
-          <div>
-            <p className="eyebrow" style={{ margin: 0 }}>Composite Score</p>
-            <div className={`company-hero-score grade-${grade}`}>
-              <span className="company-hero-score-value">{composite}</span>
-              <span className="company-hero-score-unit">/ 100</span>
-            </div>
-            <div className="company-hero-score-label">Grade {grade.toUpperCase()}</div>
-            <div className={`company-hero-grade-bar grade-${grade}`}>
-              <div className="company-hero-grade-bar-fill" style={{ width: `${Math.max(4, composite)}%` }} />
-            </div>
-          </div>
-
           <div className="company-hero-stats">
             {isAdmin ? (
               <button
@@ -177,11 +125,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               <div className="company-hero-stat-label">Proxies</div>
             </div>
           </div>
-        </div>
-
-        <div className="company-score-right">
-          <p className="eyebrow" style={{ margin: 0 }}>Security Radar</p>
-          <ProtocolRadar axes={axes} size={300} onExampleClick={openRadarExample} />
         </div>
       </section>
 

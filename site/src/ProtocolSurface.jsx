@@ -341,23 +341,6 @@ export default function ProtocolSurface({
     [scopedCompanyData, functionData, functionsLoading]
   );
 
-  // computeProtocolScore (used by DetailEmptyState) iterates
-  // contract.functions for its action axes. Functions live on a
-  // separate endpoint now, so splice them back onto each contract for
-  // the score-only consumer. The buildMachines call above already
-  // consumes the keyed map directly.
-  const companyDataWithFunctions = useMemo(() => {
-    if (!scopedCompanyData) return null;
-    if (!functionData || Object.keys(functionData).length === 0) return scopedCompanyData;
-    return {
-      ...scopedCompanyData,
-      contracts: (scopedCompanyData.contracts || []).map((c) => {
-        const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
-        return fns ? { ...c, functions: fns } : c;
-      }),
-    };
-  }, [scopedCompanyData, functionData]);
-
   const machines = useMemo(
     () => allMachines.filter((m) => enabledRoles.has(m.role || "utility")),
     [allMachines, enabledRoles]
@@ -790,12 +773,7 @@ export default function ProtocolSurface({
               the empty state. Radar mode renders the card in the flyout, so the
               main panel falls back to the empty state behind it. */}
           {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
-            <DetailEmptyState
-              companyName={companyName}
-              companyData={companyDataWithFunctions}
-              coverageData={coverageData}
-              onExampleClick={handleRadarExampleClick}
-            />
+            <DetailEmptyState companyName={companyName} companyData={scopedCompanyData} />
           )}
           {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && !radarSelection && (
             <EntityCard

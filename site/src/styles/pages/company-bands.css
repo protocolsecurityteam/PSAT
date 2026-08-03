@@ -34,88 +34,16 @@
   margin: 4px 0 0;
 }
 
-/* Score band: score + stats on left, radar on right. No panel. */
-.company-score-band {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 64px;
-  padding: 32px 72px;
-  border-top: 1px solid rgba(148, 163, 184, 0.10);
-  max-width: 1440px;
-  margin: 0 auto;
-  width: 100%;
-}
-
-.company-score-left {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  flex: 1;
-  min-width: 0;
-}
-
-.company-score-right {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-/* Shrink the big score a bit (from the sketch's 128px) */
-.company-score-left .company-hero-score-value {
-  font-size: 80px;
-  line-height: 0.95;
-  letter-spacing: -0.04em;
-}
-.company-score-left .company-hero-score-unit {
-  font-size: 20px;
-  font-weight: 600;
-  color: #64748b;
-}
-.company-score-left .company-hero-score-label {
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--teal);
-  margin-top: 6px;
-}
-
-.company-hero-grade-bar {
-  margin-top: 14px;
-  width: 340px;
-  max-width: 100%;
-  height: 8px;
-  background: #141a24;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 5px;
-  overflow: hidden;
-}
-
-.company-hero-grade-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #f87171 0%, #fb923c 50%, #facc15 75%, #4ade80 100%);
-  border-radius: 5px;
-  transition: width 360ms ease;
-}
-
-.company-hero-grade-bar.grade-a .company-hero-grade-bar-fill { background: #4ade80; }
-.company-hero-grade-bar.grade-b .company-hero-grade-bar-fill { background: #2dd4bf; }
-.company-hero-grade-bar.grade-c .company-hero-grade-bar-fill { background: #facc15; }
-.company-hero-grade-bar.grade-d .company-hero-grade-bar-fill { background: #fb923c; }
-.company-hero-grade-bar.grade-f .company-hero-grade-bar-fill { background: #f87171; }
-
-/* Stats stacked under the score — no panel, tight grid */
-.company-score-left .company-hero-stats {
+/* Stats sit at the far end of the hero row — no panel, tight grid */
+.company-hero-inner .company-hero-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, max-content));
   gap: 28px;
   margin-top: 0;
+  margin-left: auto;
 }
 
-.company-score-left .company-hero-stat-value {
+.company-hero-inner .company-hero-stat-value {
   font-size: 28px;
   font-weight: 700;
   color: #e2e8f0;
@@ -123,7 +51,7 @@
   letter-spacing: -0.02em;
 }
 
-.company-score-left .company-hero-stat-label {
+.company-hero-inner .company-hero-stat-label {
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.14em;
@@ -219,12 +147,7 @@
 @media (max-width: 960px) {
   .company-hero-band { padding: 32px 24px 24px; }
   .company-hero-inner { flex-direction: column; align-items: flex-start; }
-  .company-score-band {
-    flex-direction: column;
-    padding: 24px;
-    gap: 24px;
-  }
-  .company-score-right { align-items: flex-start; }
+  .company-hero-inner .company-hero-stats { margin-left: 0; }
   .company-explore-band { padding: 16px 24px 24px; }
   .company-page-rest { padding: 8px 16px 32px; }
 }
