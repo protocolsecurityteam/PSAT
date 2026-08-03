@@ -167,6 +167,18 @@ describe("ScoreBand — computed grade", () => {
     expect(byContract.textContent).toContain("35");
   });
 
+  it("publishes no provably-differs warning, whatever the count says", async () => {
+    // The classifier's "deployed source provably differs" bucket does not hold
+    // to the standard the word claims, so the line is not rendered — the number
+    // stays in the payload and in the projection (derive.test.js pins it) for a
+    // consumer that can qualify it.
+    expect(ETHERFI.provenance.audit_posture.non_coverage_classified.deployed_source_provably_differs).toBeGreaterThan(0);
+    renderBand({ score: ETHERFI });
+    await openBreakdown();
+    expect(screen.queryByText(/provably differs/)).not.toBeInTheDocument();
+    expect(document.querySelector(".sc-caut-fact")).toBeNull();
+  });
+
   it("renders no earned-negatives line when the corpus has none", async () => {
     renderBand({ score: ETHERFI });
     await openBreakdown();
@@ -363,6 +375,22 @@ describe("ScoreBand — entities select on the surface", () => {
       // route to a contract the controller never touches directly.
       reachedFrom: [HOST],
     });
+  });
+
+  it("marks the reach boundary and keeps reached names quieter than hosts", async () => {
+    // The arrow is the row's boundary between "acts on directly" (hosts, before
+    // it) and "reaches through the control graph" (after it); the two sides have
+    // to stay distinguishable at a glance, which is what the classes carry.
+    const row = await openRowZero(vi.fn());
+    const targets = row.querySelector(".sc-targets");
+    expect(targets.querySelector(".sc-arr").textContent).toBe("→ reaches");
+    expect(targets.querySelectorAll(".sc-host").length).toBeGreaterThan(0);
+    expect(targets.querySelectorAll(".sc-reached").length).toBeGreaterThan(0);
+    // Every entity after the arrow is a reached one, never a host.
+    const arrow = targets.querySelector(".sc-arr");
+    for (const el of targets.querySelectorAll(".sc-reached")) {
+      expect(arrow.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 
   it("names no reach origin on the host itself", async () => {

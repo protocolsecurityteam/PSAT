@@ -342,7 +342,19 @@ h2.sc-band-title {
 /* The host is the contract the function is ON — read it a shade stronger than
    the reach list so direct and transitive never blur. */
 .sc-targets .sc-host b { color: var(--ink); }
-.sc-targets .sc-arr { color: rgba(148, 163, 184, 0.4); }
+/* The boundary of the row: everything BEFORE it is where the named controller
+   acts directly, everything after is reach through the control graph. Carries
+   the deduction hue so it reads as part of the charge, and is the only bold
+   token in the line so the eye finds the split without reading the names. */
+.sc-targets .sc-arr {
+  color: var(--mark-deduct);
+  font-weight: 700;
+  padding: 0 1px;
+}
+
+/* Reach names stay quieter than the hosts above (.sc-host b is --ink): the
+   split only reads if the two sides differ in weight as well as position. */
+.sc-targets .sc-reached b { color: var(--muted); font-weight: 500; }
 .sc-targets .sc-ndp { color: var(--nd); font-style: italic; }
 
 .sc-tbtn {

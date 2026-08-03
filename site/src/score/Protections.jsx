@@ -21,7 +21,6 @@ function AuditCoverage({ posture, earnedNegatives }) {
     valueCoveredOnlyPct,
     contractProvenPct,
     contractCoveredOnlyPct,
-    provablyDiffers,
   } = posture;
 
   return (
@@ -80,11 +79,10 @@ function AuditCoverage({ posture, earnedNegatives }) {
         )}
       </div>
 
-      {provablyDiffers !== null && provablyDiffers > 0 && (
-        <div className="sc-caut sc-caut-fact">
-          ⚠ {provablyDiffers} contracts' deployed source <b>provably differs</b> from the audited source
-        </div>
-      )}
+      {/* posture.provablyDiffers is deliberately not rendered: the classifier's
+          "provably differs" bucket is not proven to the standard the word
+          claims, and a warning line is the wrong place to hedge. The figure
+          stays in the payload and in the projection. */}
       {earnedNegatives.length > 0 && (
         <div className="sc-fact-line">
           <b>{earnedNegatives.length}</b> functions proven to have no reach

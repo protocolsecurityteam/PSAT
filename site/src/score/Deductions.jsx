@@ -72,7 +72,7 @@ function TargetList({ row, onSelect }) {
         // hover must not lose the third state the line carries visually.
         const qualifier = reachWitnessed ? "" : " — reach not witnessed";
         return (
-          <span key={target.canonical}>
+          <span key={target.canonical} className="sc-reached">
             {i > 0 && " · "}
             <EntityButton
               onSelect={onSelect}
