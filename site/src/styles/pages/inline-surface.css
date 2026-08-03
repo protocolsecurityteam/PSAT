@@ -128,20 +128,11 @@
   .company-hero-eyebrow { font-size: 10px; }
   .company-hero-subtitle { font-size: 12px; }
 
-  .company-score-band { padding: 20px 16px; gap: 22px; }
-  .company-score-left { gap: 20px; }
-  .company-score-left .company-hero-score-value { font-size: 64px; }
-  .company-score-left .company-hero-score-unit { font-size: 16px; }
-  .company-hero-grade-bar { width: 100%; }
-
-  .company-score-left .company-hero-stats {
+  .company-hero-inner .company-hero-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
   }
-  .company-score-left .company-hero-stat-value { font-size: 22px; }
-
-  .company-score-right { width: 100%; }
-  .company-score-right svg { max-width: 100%; height: auto; }
+  .company-hero-inner .company-hero-stat-value { font-size: 22px; }
 
   .company-surface-band { padding: 10px 14px 4px; }
   .company-surface-band-header {
@@ -182,9 +173,6 @@
   .company-hero-band { padding: 20px 14px 16px; }
   .company-hero-title { font-size: 26px; }
 
-  .company-score-band { padding: 16px 14px; gap: 18px; }
-  .company-score-left .company-hero-score-value { font-size: 54px; }
-
   .company-surface-band-actions .company-surface-action {
     flex: 1 1 calc(50% - 6px);
     justify-content: center;
@@ -207,14 +195,6 @@
   }
   .ps-surface { padding: 12px; }
   .ps-layout { height: calc(100vh - 120px); }
-
-  /* The right-side flyout is too complex on phones — hide it. The main
-   * sidebar (bottom sheet on mobile) carries everything that matters. */
-  .ps-sidebar-flyout,
-  .ps-sidebar-flyout-rail,
-  .ps-sidebar-flyout-toggle {
-    display: none !important;
-  }
 
   /* Sidebar becomes a bottom sheet that slides up from the bottom. The
    * sidebar's inline `width` style still applies, so we override it. */
@@ -388,4 +368,23 @@
   .ps-surface-toolbar-overlay { padding: 4px 6px; }
   .ps-search-modes-overlay { padding: 4px 6px; }
   .ps-search-modes-overlay .ps-search-mode { padding: 2px 5px; font-size: 9.5px; }
+}
+
+/* Reported miss when a score-page entity button names something this graph
+   does not carry. Transient — the click has to say what happened rather than
+   look broken. */
+.company-select-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 9px 16px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.94);
+  color: #e2e8f0;
+  font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }

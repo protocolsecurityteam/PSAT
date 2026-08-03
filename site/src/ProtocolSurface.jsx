@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -7,12 +7,20 @@ import { api } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
-import { isRoleIdAddress } from "./surface/format.js";
-import { findFunctionView } from "./surface/lane.js";
+import { isRoleIdAddress, principalLabel, shortAddr } from "./surface/format.js";
+import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
-import { buildControlAdjacency, flowOnChain } from "./surface/layout/governancePath.js";
+import {
+  buildControlAdjacency,
+  buildControlEdgeIndex,
+  controlPathEdges,
+  controlReach,
+  edgeClaims,
+  flowOnChain,
+  shortestControlPath,
+} from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { coalesceChain, entityKey } from "./surface/entityKey.js";
@@ -60,13 +68,13 @@ export function principalOnChain(principal, activeChain) {
   return chains.some((c) => coalesceChain(c) === activeChain);
 }
 
-export default function ProtocolSurface({
+function ProtocolSurface({
   companyName,
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
   embedded = false,
-}) {
+}, ref) {
   const isAdmin = useIsAdmin();
   // initialData / initialFunctions let a parent (CompanyOverview) hand
   // us the /api/company/{name} payload and /functions map it already
@@ -341,23 +349,6 @@ export default function ProtocolSurface({
     [scopedCompanyData, functionData, functionsLoading]
   );
 
-  // computeProtocolScore (used by DetailEmptyState) iterates
-  // contract.functions for its action axes. Functions live on a
-  // separate endpoint now, so splice them back onto each contract for
-  // the score-only consumer. The buildMachines call above already
-  // consumes the keyed map directly.
-  const companyDataWithFunctions = useMemo(() => {
-    if (!scopedCompanyData) return null;
-    if (!functionData || Object.keys(functionData).length === 0) return scopedCompanyData;
-    return {
-      ...scopedCompanyData,
-      contracts: (scopedCompanyData.contracts || []).map((c) => {
-        const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
-        return fns ? { ...c, functions: fns } : c;
-      }),
-    };
-  }, [scopedCompanyData, functionData]);
-
   const machines = useMemo(
     () => allMachines.filter((m) => enabledRoles.has(m.role || "utility")),
     [allMachines, enabledRoles]
@@ -377,6 +368,14 @@ export default function ProtocolSurface({
   // no principal.controls to read). Built once, never per-render inside the card.
   const controlAdjacency = useMemo(
     () => buildControlAdjacency(companyData?.fund_flows || [], activeChain),
+    [companyData, activeChain]
+  );
+
+  // Same control edges, keyed so a hop can name itself (type + the witnessed
+  // relation/role label the payload carries). Feeds the reached-from path block
+  // on the entity card; built once here, never per render inside it.
+  const controlEdgeIndex = useMemo(
+    () => buildControlEdgeIndex(companyData?.fund_flows || [], activeChain),
     [companyData, activeChain]
   );
 
@@ -418,6 +417,7 @@ export default function ProtocolSurface({
   const {
     selection,
     radarSelection,
+    reachHosts,
     focus,
     selectedMachine,
     selectedPrincipal,
@@ -527,12 +527,20 @@ export default function ProtocolSurface({
 
   const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
-  const handleRadarExampleClick = useCallback((example) => {
-    const targetAddress = example?.contractAddress?.toLowerCase();
-    if (!targetAddress) return;
-    const machine = allMachines.find((m) => m.address?.toLowerCase() === targetAddress);
-    if (!machine) return;
-    const fnView = findFunctionView(machine, example);
+  // Clicking a Safe/Timelock/EOA node on the canvas selects the principal
+  // (opens the detail panel with signers / delay / controlled contracts)
+  // and focuses it — same behaviour as clicking a single-principal guard
+  // badge, just driven from the node itself.
+  const handleSelectPrincipal = useCallback((principal, reachedFrom = null) => {
+    if (!principal) return;
+    setAgentHighlights(null);
+    setActiveAuditId(null);
+    select(principal.address, reachedFrom ? { reachedFrom } : {});
+    syncUrl({ sel: principal.address });
+  }, [select, syncUrl]);
+
+  const selectMachineExample = useCallback((machine, fnView, callerAddress = null, reachedFrom = null) => {
+    setSidebarMode("detail");
     setEnabledRoles((prev) => {
       const role = machine.role || "utility";
       if (prev.has(role)) return prev;
@@ -540,55 +548,138 @@ export default function ProtocolSurface({
       next.add(role);
       return next;
     });
-    setSidebarMode("detail");
     setAgentHighlights(null);
     setActiveAuditId(null);
-    radar(machine.address, fnView?.key || null);
+    radar(machine.address, fnView?.key || null, callerAddress, reachedFrom);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
-  }, [allMachines, radar, syncUrl]);
+  }, [radar, syncUrl]);
+
+  // The single entrypoint for a selection requested from outside the surface:
+  // the score page's entity buttons (through the imperative handle below), the
+  // ?score deep link and the sessionStorage handoff all land here, so no caller
+  // carries its own copy of the selection transition.
+  //
+  // The result is a discriminated outcome, never a bare boolean: "selected the
+  // contract but the named function is not on it", "that name is on several
+  // contracts" and "that entity is on another chain" are three different facts
+  // and a caller that collapses them tells the user something untrue. A request
+  // that names a function but no contract is resolved against the whole graph,
+  // and only a unique match selects — see findFunctionMatches.
+  const selectExample = useCallback((example) => {
+    const address = String(example?.contractAddress || "").toLowerCase();
+    const named = Boolean(example?.functionSignature || example?.selector);
+    // The optional highlight hint: what the score row was ABOUT (its example
+    // function and the controller it named), as opposed to what the click asked
+    // to select. It never changes which entity is selected or what the outcome
+    // is called — it only says what to mark once the card is up, and every part
+    // of it has to survive a lookup against that card's own lanes to be marked.
+    const hint = example?.highlight || null;
+    const hintedController = String(hint?.controller || "").toLowerCase() || null;
+    // Where the request says this entity was REACHED FROM (a score-page click on
+    // a transitive target names the host the controller acts on directly). Like
+    // the hint it never changes which entity is selected or what the outcome is
+    // called — it only lets the card show the route, and the route still has to
+    // exist in this graph's own control edges to be shown.
+    const reachedFrom = example?.reachedFrom || null;
+    const hintOutcome = (fnView, caller, unpaired = false) =>
+      hint
+        ? {
+            highlight: {
+              function: fnView ? "marked" : unpaired ? "unpaired" : "not-on-card",
+              controller: caller ? "marked" : hintedController ? "not-a-caller" : "none",
+            },
+          }
+        : {};
+    if (!address && !named) return { ok: false, kind: "empty" };
+    // Identity is (chain, address) (inv. 13) and the surface renders one chain
+    // at a time: another chain's entity is off this graph, not a miss.
+    if (coalesceChain(example?.chain || activeChain) !== activeChain) {
+      return { ok: false, kind: "chain-mismatch" };
+    }
+    if (!address) {
+      const matches = findFunctionMatches(allMachines, example);
+      if (!matches.length) return { ok: false, kind: "not-found" };
+      // The hinted controller narrows a shared name to the witnessed pair: the
+      // graph lists callers per function, so among the contracts carrying this
+      // name, the one whose function this controller can actually call IS the
+      // action the score row charged — same-named functions under someone
+      // else's gate are different actions and never candidates.
+      const paired = hintedController ? matches.filter((m) => findCaller(m.fnView, hintedController)) : [];
+      const pool = paired.length ? paired : matches;
+      if (pool.length > 1) {
+        const hosts = new Set(pool.map((m) => String(m.machine?.address || "").toLowerCase()));
+        return { ok: false, kind: "ambiguous-function", count: pool.length, hosts: hosts.size };
+      }
+      const only = pool[0];
+      const matchedCaller = findCaller(only.fnView, hintedController);
+      selectMachineExample(only.machine, only.fnView, matchedCaller, reachedFrom);
+      return { ok: true, kind: "function", ...hintOutcome(only.fnView, matchedCaller) };
+    }
+    const entry = entityIndex.get(entityKey(activeChain, address));
+    if (!entry) return { ok: false, kind: "not-found" };
+    // Machine facet wins over principal — same precedence the selection hook
+    // applies, so a timelock contract opens the richer card either way.
+    if (!entry.machine) {
+      if (!entry.principal) return { ok: false, kind: "not-found" };
+      setSidebarMode("detail");
+      handleSelectPrincipal(entry.principal, reachedFrom);
+      return { ok: true, kind: "principal" };
+    }
+    const machine = entry.machine;
+    const fnView = findFunctionView(machine, example);
+    // A contract click carries no function of its own, so the hinted example
+    // function is resolved against THIS card's lanes — and only as the whole
+    // pair. A same-named function the hinted controller cannot call is a
+    // different action under someone else's gate; ringing it would present
+    // that gate as the one the points were charged for. Function and caller
+    // are marked together or not at all — an unmarkable hint opens the card
+    // with nothing marked, and the caller's `unpaired` outcome says why.
+    let marked = fnView;
+    let matchedCaller = findCaller(marked, hintedController);
+    let unpaired = false;
+    if (!fnView && hint?.functionSignature) {
+      const hinted = findFunctionView(machine, { functionSignature: hint.functionSignature });
+      const hintedCaller = findCaller(hinted, hintedController);
+      if (hinted && hintedCaller) {
+        marked = hinted;
+        matchedCaller = hintedCaller;
+      } else if (hinted) {
+        unpaired = true;
+      }
+    }
+    selectMachineExample(machine, marked, matchedCaller, reachedFrom);
+    // The outcome describes the request the caller made, not the hint: a click
+    // that asked for a contract landed on a contract even when the hint marked
+    // a row inside it.
+    if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
+    return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
+  }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
+
+  useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
 
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredExampleSelection.current || !allMachines.length) return;
+    // Machines exist before /functions lands, and a machine with empty lanes
+    // answers "that function is not on this contract" — which would restore the
+    // contract alone and latch, losing the named function the link carried.
+    if (functionsLoading) return;
     const params = new URLSearchParams(window.location.search);
     const focus = params.get("sel") || params.get("focus");
     const fn = params.get("fn");
-    let target = null;
-    if (focus && params.get("score")) {
-      target = { contractAddress: focus, functionSignature: fn || "", selector: fn || "" };
-    } else if (window.location.pathname.endsWith("/surface")) {
-      try {
-        const pending = JSON.parse(sessionStorage.getItem("psat:surfaceRadarExample") || "null");
-        if (pending?.companyName === companyName && pending?.contractAddress) {
-          target = pending;
-          sessionStorage.removeItem("psat:surfaceRadarExample");
-        }
-      } catch {
-        sessionStorage.removeItem("psat:surfaceRadarExample");
-      }
+    if (!focus || !params.get("score")) return;
+    const target = { contractAddress: focus, functionSignature: fn || "", selector: fn || "" };
+    if (
+      selectExample({
+        contractAddress: target.contractAddress,
+        chain: target.chain,
+        functionSignature: target.functionSignature || "",
+        selector: target.selector || "",
+      }).ok
+    ) {
+      restoredExampleSelection.current = true;
     }
-    if (!target) return;
-    const machine = allMachines.find((m) => m.address?.toLowerCase() === target.contractAddress.toLowerCase());
-    if (!machine) return;
-    restoredExampleSelection.current = true;
-    handleRadarExampleClick({
-      contractAddress: machine.address,
-      functionSignature: target.functionSignature || "",
-      selector: target.selector || "",
-    });
-  }, [allMachines, companyName, embedded, handleRadarExampleClick]);
-
-  // Clicking a Safe/Timelock/EOA node on the canvas selects the principal
-  // (opens the detail panel with signers / delay / controlled contracts)
-  // and focuses it — same behaviour as clicking a single-principal guard
-  // badge, just driven from the node itself.
-  const handleSelectPrincipal = useCallback((principal) => {
-    if (!principal) return;
-    setAgentHighlights(null);
-    setActiveAuditId(null);
-    select(principal.address);
-    syncUrl({ sel: principal.address });
-  }, [select, syncUrl]);
+  }, [allMachines, companyName, embedded, functionsLoading, selectExample]);
 
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
@@ -617,6 +708,66 @@ export default function ProtocolSurface({
     if (agentHighlights) for (const a of agentHighlights) merged.add(a);
     return merged.size ? merged : null;
   }, [auditHighlights, agentHighlights]);
+
+  // Reach overlay: every contract the SELECTED entity reaches transitively over
+  // the control graph, keyed to the hop distance on the shortest route. The
+  // canvas chips those nodes with the hop count. Memoized per selection: one BFS
+  // over a few hundred edges, never a walk per render.
+  const reachDistances = useMemo(() => {
+    if (!selection?.address) return null;
+    const reach = controlReach(selection.address, controlAdjacency);
+    return reach.size ? reach : null;
+  }, [selection, controlAdjacency]);
+
+  // The routes behind those hop counts: the BFS-tree edges of the same closure.
+  // The canvas lights the drawn edges matching these pairs, so a "reach · 3 hops"
+  // chip has a visible line back to the selection rather than asking the reader
+  // to take the number on faith. Synthesizes nothing — a pair with no drawn edge
+  // (an intra-group hop inside a collapsed box) simply lights nothing.
+  const reachPathEdges = useMemo(
+    () => (reachDistances ? controlPathEdges(selection?.address, controlAdjacency, reachDistances) : null),
+    [selection, controlAdjacency, reachDistances],
+  );
+
+  // Human name for an address on this graph: the contract's, else the
+  // principal's, else the short address. Never a bare "unknown" — the short
+  // address IS the identity when nothing else names it.
+  const nameForAddress = useCallback((addr) => {
+    const lc = String(addr || "").toLowerCase();
+    if (!lc) return "";
+    const entry = entityIndex.get(entityKey(activeChain, lc));
+    if (entry?.machine?.name) return entry.machine.name;
+    if (entry?.principal) return principalLabel(entry.principal.label, entry.principal.type, lc);
+    return shortAddr(lc);
+  }, [entityIndex, activeChain]);
+
+  // The route a score-page click-through took to this entity: the deduction row
+  // named a host the controller acts on DIRECTLY, and this contract only through
+  // the control graph. Walked over the same edges the canvas reach chips use, so the
+  // card and the graph cannot disagree. A route this graph does not carry stays
+  // an explicit third state (hops: null) — the card says so rather than drawing
+  // a shorter path than the truth.
+  const reachPath = useMemo(() => {
+    const target = selection?.address;
+    if (!reachHosts?.length || !target) return null;
+    const hostNames = reachHosts.map(nameForAddress);
+    const { host, hops } = shortestControlPath(reachHosts, target, controlEdgeIndex);
+    if (!hops) return { host: null, hostName: null, hostNames, hops: null };
+    if (!hops.length) return null; // the click landed on the host itself
+    return {
+      host,
+      hostName: nameForAddress(host),
+      hostNames,
+      hops: hops.map((hop) => ({
+        from: hop.from,
+        to: hop.to,
+        fromName: nameForAddress(hop.from),
+        toName: nameForAddress(hop.to),
+        type: hop.flow?.type || null,
+        claims: edgeClaims(hop.flow),
+      })),
+    };
+  }, [reachHosts, selection, controlEdgeIndex, nameForAddress]);
 
   // Role-toggle reconciliation. Toggling a role off removes its contracts (and
   // any principal whose whole touch set was those contracts) from the visible
@@ -667,26 +818,15 @@ export default function ProtocolSurface({
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
-  const radarExampleFlyout = sidebarMode === "detail" && radarSelection && selectedMachine && !selectedPrincipal ? (
-    <div className="ps-sidebar-flyout-content">
-      <EntityCard
-        key={`${selectedMachine.address}:radar`}
-        machine={selectedMachine}
-        onSelectGuard={handleSelectGuard}
-        onNavigate={handleNavigate}
-        onPreview={(addr) => focusPreview(addr)}
-        highlightedFunctionKey={radarSelection.functionKey}
-        highlightedContract={!radarSelection.functionKey}
-        governsIndex={governsIndex}
-        controlAdjacency={controlAdjacency}
-        machines={machines}
-        chain={activeChain}
-        showChain={isMultichain}
-        principal={principalsByAddress.get((selectedMachine.address || "").toLowerCase()) || null}
-      />
-      <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
-    </div>
-  ) : null;
+  // Score-page arrivals (radar sub-mode) mark the action the warning was about
+  // on the ONE sidebar card, never a second parallel card. The mark is the
+  // PAIR the warning named — the function row and, inside it, the caller chip
+  // for the controller the row named — or nothing: when no row answers to the
+  // name the card simply opens unmarked. A principal-only selection never
+  // enters radar mode (it commits through select), so these are machine-facet
+  // only.
+  const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
+  const radarCallerAddress = radarFunctionKey ? radarSelection?.callerAddress || null : null;
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
@@ -733,6 +873,8 @@ export default function ProtocolSurface({
             focusAddress={focus}
             focusedAddress={focusedAddress}
             highlightedAddresses={highlightedAddresses}
+            reachDistances={reachDistances}
+            reachPathEdges={reachPathEdges}
             onSelectMachine={(m) => {
               // Auto-switch to Detail when the user clicks a contract
               // ON THE CANVAS so the function lanes are immediately
@@ -748,7 +890,7 @@ export default function ProtocolSurface({
             }}
           />
         </ReactFlowProvider>
-        <DraggableSidebar flyout={radarExampleFlyout}>
+        <DraggableSidebar>
           <SidebarTabs
             mode={sidebarMode}
             onSetMode={setSidebarMode}
@@ -787,17 +929,12 @@ export default function ProtocolSurface({
           {/* One universal card for every selection. selectedMachine and
               selectedPrincipal are mutually exclusive (the selection invariant),
               so the Detail panel is: something selected → the card; nothing →
-              the empty state. Radar mode renders the card in the flyout, so the
-              main panel falls back to the empty state behind it. */}
-          {sidebarMode === "detail" && !selectedPrincipal && (!selectedMachine || radarSelection) && (
-            <DetailEmptyState
-              companyName={companyName}
-              companyData={companyDataWithFunctions}
-              coverageData={coverageData}
-              onExampleClick={handleRadarExampleClick}
-            />
+              the empty state. A score-page arrival lands here too — same card,
+              with the highlight props set. */}
+          {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
+            <DetailEmptyState companyName={companyName} companyData={scopedCompanyData} />
           )}
-          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && !radarSelection && (
+          {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && (
             <EntityCard
               key={selectedMachine ? selectedMachine.address : selectedPrincipal.address}
               machine={selectedMachine}
@@ -809,14 +946,17 @@ export default function ProtocolSurface({
               onSelectGuard={handleSelectGuard}
               onNavigate={handleNavigate}
               onPreview={(addr) => focusPreview(addr)}
+              highlightedFunctionKey={radarFunctionKey}
+              highlightedCaller={radarCallerAddress}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
+              reachPath={reachPath}
               machines={machines}
               chain={activeChain}
               showChain={isMultichain}
             />
           )}
-          {sidebarMode === "detail" && selectedMachine && !radarSelection && (
+          {sidebarMode === "detail" && selectedMachine && (
             <InspectorCard selected={selectedGuard} onNavigate={handleNavigate} onPreview={(addr) => focusPreview(addr)} />
           )}
           {isAdmin && sidebarMode === "agent" && (
@@ -874,3 +1014,5 @@ export default function ProtocolSurface({
     </div>
   );
 }
+
+export default forwardRef(ProtocolSurface);

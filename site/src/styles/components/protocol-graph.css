@@ -40,9 +40,8 @@
   cursor: inherit !important;
 }
 
-/* Empty state for the Detail sidebar tab — protocol score + radar
-   reused from the company hero, so the sidebar is informative even
-   before the user clicks anything. */
+/* Empty state for the Detail sidebar tab — the prompt shown before the
+   user clicks anything on the canvas. */
 .ps-detail-empty {
   display: flex;
   flex-direction: column;
@@ -58,30 +57,6 @@
   letter-spacing: 0.02em;
   text-align: center;
   margin-bottom: 4px;
-}
-
-.ps-detail-empty-radar {
-  width: 100%;
-  padding: 8px 0 0;
-  box-sizing: border-box;
-  display: flex;
-  justify-content: center;
-}
-
-.ps-detail-empty-radar .protocol-radar-wrap,
-.ps-detail-empty-radar .protocol-radar {
-  max-width: 100%;
-}
-
-/* Slightly smaller text so long labels (TRANSPARENCY) fit at narrow
-   sidebar widths. Doesn't affect the company-hero radar where the
-   layout has more breathing room. */
-.ps-detail-empty-radar .radar-label {
-  font-size: 9px;
-}
-
-.ps-detail-empty-radar .radar-value {
-  font-size: 8px;
 }
 
 .ps-detail-empty-hint {

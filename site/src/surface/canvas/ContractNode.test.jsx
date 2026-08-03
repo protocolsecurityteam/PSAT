@@ -90,3 +90,34 @@ describe("ContractNode — timelock marker", () => {
     expect(c.querySelector(".ps-node-role").textContent).toBe("Value Handler");
   });
 });
+
+describe("ContractNode — reach chip", () => {
+  function renderWith(data) {
+    const { container } = render(
+      <ContractNode data={{ machine: { address: "0x7", name: "BoringVault", role: "utility" }, onSelect: () => {}, ...data }} />,
+    );
+    return container;
+  }
+
+  it("renders the hop-count chip above the card and no card wash", () => {
+    const c = renderWith({ reachChip: "reach · 3 hops" });
+    const chip = c.querySelector(".ps-node-chip--reach");
+    expect(chip.textContent).toBe("reach · 3 hops");
+    expect(chip.getAttribute("title")).toMatch(/control graph/);
+    // The card wears the locator class only — no tier/wash class survives.
+    expect(c.querySelector(".ps-node").className).toContain("ps-node-reach");
+    expect(c.querySelector('[class*="ps-node-reach-"]')).toBeNull();
+  });
+
+  it("stacks the reach chip clear of an out chip in the same slot", () => {
+    const stacked = renderWith({ reachChip: "reach · 2 hops", selectionChip: { out: "pause" } });
+    expect(stacked.querySelector(".ps-node-chip--reach").className).toContain("ps-node-chip--stacked");
+    const alone = renderWith({ reachChip: "reach · 2 hops" });
+    expect(alone.querySelector(".ps-node-chip--reach").className).not.toContain("ps-node-chip--stacked");
+  });
+
+  it("renders nothing when the node is not in the closure", () => {
+    expect(renderWith({}).querySelector(".ps-node-chip--reach")).toBeNull();
+    expect(renderWith({}).querySelector(".ps-node").className).not.toContain("ps-node-reach");
+  });
+});

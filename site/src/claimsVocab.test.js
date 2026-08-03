@@ -10,7 +10,6 @@ import {
   primaryClaim,
   priorityForClaims,
   qualifierForClaims,
-  scoreForClaims,
   sentenceForClaims,
   sharedDeployerNote,
   signerOverlapNote,
@@ -33,10 +32,6 @@ const VALID_LANES = new Set(["top", "left", "right", "ops"]);
 // cosmetic: it is what makes "contributes nothing to severity" a property of the
 // vocabulary rather than a convention a future entry could quietly break.
 const VALID_FAMILIES = new Set(["control_plane", "flow", "exec", "user_plane", "fact"]);
-const VALID_KINDS = new Set([
-  "upgrade", "execution", "admin", "config", "pause", "unpause", "timelock", "asset_out", "asset_in",
-]);
-
 function claim(claim_id, tier = "standard_exact") {
   return { claim_id, tier, witness: {} };
 }
@@ -96,17 +91,12 @@ describe("CLAIM_VOCAB shape invariants", () => {
       expect(VALID_LANES.has(entry.lane), `${id} lane`).toBe(true);
       expect(typeof entry.sentence === "string" && entry.sentence.length > 0, `${id} sentence`).toBe(true);
       expect(Number.isFinite(entry.priority), `${id} priority`).toBe(true);
-      if (entry.score) {
-        expect(VALID_KINDS.has(entry.score.kind), `${id} score.kind`).toBe(true);
-        expect(entry.score.severity, `${id} severity`).toBeGreaterThan(0);
-      }
     }
   });
 
-  it("never scores a fact-family claim and never lanes it to control", () => {
+  it("never lanes a fact-family claim to control", () => {
     for (const [id, entry] of Object.entries(CLAIM_VOCAB)) {
       if (entry.family !== "fact") continue;
-      expect(entry.score, `${id} score`).toBeNull();
       expect(entry.lane, `${id} lane`).toBe("ops");
     }
   });
@@ -159,7 +149,6 @@ describe("claim helpers", () => {
     expect(toneForClaims(fn)).toBeNull();
     expect(sentenceForClaims(fn)).toBeNull();
     expect(priorityForClaims(fn)).toBeNull();
-    expect(scoreForClaims(fn)).toBeNull();
     expect(claimSummaryLine(fn)).toBeNull();
   });
 });
@@ -191,127 +180,6 @@ describe("laneForClaims — family → lane", () => {
 
   it("prefers a control claim over a co-occurring flow claim", () => {
     expect(laneForClaims({ claims: [claim("flow.out"), claim("ownership.transfer")] })).toBe("top");
-  });
-});
-
-describe("scoreForClaims — protocolScore kinds", () => {
-  it("maps the spec severity tiers", () => {
-    expect(scoreForClaims({ claims: [claim("upgrade.implementation")] })).toEqual({ kind: "upgrade", severity: 1 });
-    expect(scoreForClaims({ claims: [claim("exec.arbitrary")] })).toEqual({ kind: "execution", severity: 0.95 });
-    expect(scoreForClaims({ claims: [claim("ownership.transfer")] })).toEqual({ kind: "admin", severity: 0.88 });
-    expect(scoreForClaims({ claims: [claim("proxy.admin_change")] })).toEqual({ kind: "admin", severity: 0.88 });
-    expect(scoreForClaims({ claims: [claim("safe.signer_mgmt")] })).toEqual({ kind: "admin", severity: 0.88 });
-    expect(scoreForClaims({ claims: [claim("callee_pointer.rotate")] })).toEqual({ kind: "config", severity: 0.78 });
-    expect(scoreForClaims({ claims: [claim("pause.set")] })).toEqual({ kind: "pause", severity: 0.25 });
-    expect(scoreForClaims({ claims: [claim("pause.unset")] })).toEqual({ kind: "unpause", severity: 0.68 });
-    expect(scoreForClaims({ claims: [claim("timelock.schedule")] })).toEqual({ kind: "timelock", severity: 0.62 });
-    expect(scoreForClaims({ claims: [claim("flow.out")] })).toEqual({ kind: "asset_out", severity: 0.78 });
-    expect(scoreForClaims({ claims: [claim("flow.in")] })).toEqual({ kind: "asset_in", severity: 0.5 });
-  });
-
-  it("scores a routed INFLOW as an inflow, not as an asset outflow", () => {
-    // The same value_router claim covers both directions. A pull the entry only
-    // caused between two other parties sends none of this unit's assets
-    // anywhere, so filing it as a high-risk asset_out would raise the protocol
-    // score off a move the contract never made.
-    const inbound = {
-      claims: [
-        {
-          claim_id: "value_router",
-          tier: "standard_exact",
-          witness: { flows: [{ from_is_self: false, target_kind: { kind: "immutable" } }] },
-        },
-      ],
-    };
-    expect(scoreForClaims(inbound)).toEqual({ kind: "asset_in", severity: 0.5 });
-
-    const outbound = {
-      claims: [
-        {
-          claim_id: "value_router",
-          tier: "standard_exact",
-          witness: { flows: [{ from_is_self: true, target_kind: { kind: "param" } }] },
-        },
-      ],
-    };
-    expect(scoreForClaims(outbound)).toEqual({ kind: "asset_out", severity: 0.78 });
-  });
-
-  it("takes the strongest severity across several claims", () => {
-    expect(scoreForClaims({ claims: [claim("flow.out"), claim("upgrade.implementation")] }))
-      .toEqual({ kind: "upgrade", severity: 1 });
-  });
-
-  it("returns null for non-scoreable (user-plane / deployment) claims", () => {
-    expect(scoreForClaims({ claims: [claim("erc20.transfer")] })).toBeNull();
-    expect(scoreForClaims({ claims: [claim("contract_deployment")] })).toBeNull();
-  });
-});
-
-// The score path is the one place provenance strength decides something, and it
-// was the one place the tier lattice was discarded: everything except the observed
-// tier fell through untouched, so a cross-contract inference with NO
-// single-contract evidence entered at the weight of an exact ABI-selector match.
-describe("scoreForClaims — the tier lattice reaches the score", () => {
-  it("scores a policy_derived claim below the identical standard_exact claim", () => {
-    const exact = scoreForClaims({ claims: [claim("upgrade.implementation", "standard_exact")] });
-    const policy = scoreForClaims({ claims: [claim("upgrade.implementation", "policy_derived")] });
-    expect(exact.severity).toBe(1);
-    expect(policy.severity).toBeLessThan(exact.severity);
-    // The factor is read off TIER_RANK (1 of 3), not invented at the call site.
-    expect(policy.severity).toBeCloseTo(1 / 3, 10);
-    expect(policy.kind).toBe("upgrade");
-    // Named, so the score's prose can say WHY the number is smaller.
-    expect(policy.provenance_tier).toBe("policy_derived");
-  });
-
-  it("keeps the policy claim IN the candidate set", () => {
-    // Stripping it (the observed tier's treatment) would drop the action from
-    // protocolScore's candidate set entirely and make the protocol read SAFER for
-    // a risk nobody disproved — the adverse direction.
-    const policy = scoreForClaims({ claims: [claim("flow.out", "policy_derived")] });
-    expect(policy).not.toBeNull();
-    expect(policy.severity).toBeGreaterThan(0);
-  });
-
-  it("leaves idiom_structural and standard_exact at full weight", () => {
-    // NEGATIVE CONTROL: the attenuation is scoped to the tier that has no
-    // single-contract evidence. `idiom_structural` is a structural idiom in this
-    // contract's OWN code, and re-weighting it would move 123 real corpus claims.
-    expect(scoreForClaims({ claims: [claim("flow.out", "idiom_structural")] }).severity).toBe(0.78);
-    expect(scoreForClaims({ claims: [claim("flow.out", "standard_exact")] }).severity).toBe(0.78);
-    expect(scoreForClaims({ claims: [claim("flow.out")] }).provenance_tier).toBeUndefined();
-  });
-
-  it("attenuates the golden fixture-10 row's own claim shape", () => {
-    // The corpus gate for this defect: `policy_derived` is 0 of 679 real claims, so
-    // no corpus row could catch a consumer that mishandles the weakest tier —
-    // fixture 10 exists to be that row. This is its claim verbatim from
-    // tests/fixtures/label_corpus/golden.json (contract 0x…0100, depositTo).
-    const golden = {
-      claim_id: "flow.in",
-      tier: "policy_derived",
-      witness: {
-        callee: "0x00000000000000000000000000000000000000a0",
-        kind: "cross_contract_join",
-        selector: "0xb6b55f25",
-        sink_id: "depositTo(uint256):sink0:external_call:vault.deposit",
-        source_tier: "standard_exact",
-      },
-    };
-    const scored = scoreForClaims({ claims: [golden] });
-    const asExact = scoreForClaims({ claims: [{ ...golden, tier: "standard_exact" }] });
-    expect(scored.kind).toBe(asExact.kind);
-    expect(scored.severity).toBeLessThan(asExact.severity);
-    expect(scored.provenance_tier).toBe("policy_derived");
-  });
-
-  it("still takes the strongest severity when a policy claim sits beside a stronger one", () => {
-    const both = scoreForClaims({
-      claims: [claim("upgrade.implementation", "policy_derived"), claim("flow.out", "standard_exact")],
-    });
-    expect(both.kind).toBe("asset_out");
-    expect(both.severity).toBe(0.78);
   });
 });
 
@@ -1961,15 +1829,6 @@ describe("rate_limit.consume — a fact at zero severity weight", () => {
     expect(claimsOf({ claims: [limiterClaim] })).toHaveLength(1);
   });
 
-  it("contributes nothing to the score, alone or beside a real outflow", () => {
-    expect(scoreForClaims({ claims: [limiterClaim] })).toBeNull();
-    const withFlow = { claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] };
-    // The flow's own severity is the whole score; the limiter neither raises nor
-    // discounts it. A refilling bucket bounds throughput per window, not total
-    // loss, so a discount here would be an invented ceiling.
-    expect(scoreForClaims(withFlow)).toEqual(scoreForClaims({ claims: [flowOut({ kind: "param", tier: "dispositive_ast" })] }));
-  });
-
   it("never displaces the lane of the value move it sits beside", () => {
     expect(laneForClaims({ claims: [limiterClaim, flowOut({ kind: "param", tier: "dispositive_ast" })] })).toBe("right");
     expect(laneForClaims({ claims: [limiterClaim] })).toBe("ops");
@@ -2014,12 +1873,10 @@ describe("delegatecall.execute — where the foreign code comes from", () => {
     expect(q).not.toContain("immutable");
   });
 
-  it("scores at the execution severity and lanes to control", () => {
+  it("lanes to control and keeps its own legacy label", () => {
     // Foreign code in this contract's storage is the same severity class as an
     // arbitrary external call; what it must NOT do is join the
     // upgrade.implementation population and move that claim's statistics.
-    expect(scoreForClaims({ claims: [dc({ target_kind: "storage_setter" })] }))
-      .toEqual({ kind: "execution", severity: 0.95 });
     expect(laneForClaims({ claims: [dc({ target_kind: "storage_setter" })] })).toBe("top");
     expect(CLAIM_VOCAB["delegatecall.execute"].legacy).toBe("delegatecall_execution");
     expect(CLAIM_VOCAB["delegatecall.execute"].legacy).not.toBe(CLAIM_VOCAB["upgrade.implementation"].legacy);

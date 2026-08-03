@@ -17,12 +17,29 @@ export function ContractNode({ data }) {
     : (ROLE_META[m.role] || ROLE_META.utility).singular;
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
+  // The reach chip shares the above-the-card slot with the out/browse chip, so
+  // it stacks a row higher when one of those is present rather than landing on
+  // top of it.
+  const reachStacked = Boolean(data.browseChip || chip?.out);
   return (
     <div
-      className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}`}
+      className={`ps-node${data.selected ? " ps-node-selected" : ""}${data.focused ? " ps-node-focused" : ""}${
+        data.reachChip ? " ps-node-reach" : ""
+      }`}
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >
+      {/* Transitive reach (purple, above the card): the selection reaches this
+          contract over the control graph in N hops. The card itself is left
+          untouched — the chip is the whole claim. */}
+      {data.reachChip && (
+        <div
+          className={`ps-node-chip ps-node-chip--reach${reachStacked ? " ps-node-chip--stacked" : ""}`}
+          title="reached from the selected entity through the control graph"
+        >
+          {data.reachChip}
+        </div>
+      )}
       {/* Browse-fallback note (gold, above the card): who the browsed
           off-graph principal is and what it can call here. Takes the --out
           slot, so the selection's own out-chip yields while it's shown. */}

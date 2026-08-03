@@ -11,6 +11,7 @@ import { render, screen } from "@testing-library/react";
 
 import CompanyOverview from "./CompanyOverview.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
+import SCORE_ETHERFI from "../test/fixtures/score_etherfi.json";
 
 const ADDR = "0x1111111111111111111111111111111111111111";
 
@@ -82,6 +83,35 @@ describe("CompanyOverview — cross-chain same-address twins", () => {
     // And the Contracts stat is likewise per-entity, not deduped by address.
     const contractsLabel = screen.getByText("Contracts");
     expect(contractsLabel.closest(".company-hero-stat").querySelector(".company-hero-stat-value").textContent).toBe("2");
+  });
+});
+
+describe("CompanyOverview — score band wiring", () => {
+  it("fetches the score alongside the company payload and renders the grade", async () => {
+    installTwinMocks();
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/twinco/score",
+      () => SCORE_ETHERFI,
+    );
+    render(<CompanyOverview companyName="twinco" onNavigateToSurface={() => {}} />);
+    expect(await screen.findByText("C+")).toBeInTheDocument();
+    expect(screen.getByText("54.8")).toBeInTheDocument();
+  });
+
+  it("keeps the page usable when no score has been computed", async () => {
+    installTwinMocks();
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/twinco/score",
+      () =>
+        new Response(JSON.stringify({ detail: "No score has been computed for this protocol yet" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    render(<CompanyOverview companyName="twinco" onNavigateToSurface={() => {}} />);
+    expect(await screen.findByText(/No score has been computed/)).toBeInTheDocument();
+    // The hero and the surface band are unaffected by an absent score.
+    expect(screen.getByText("Covered")).toBeInTheDocument();
   });
 });
 

@@ -5,8 +5,8 @@
 // InspectorCard, SearchNavigator) — each has a behavioral assertion here.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import ProtocolSurface, { auditHighlightSet, principalOnChain } from "./ProtocolSurface.jsx";
@@ -74,8 +74,8 @@ function searchInput() {
 }
 
 async function selectSearchMode(user, label) {
-  // Scope to the top-left search-modes bar: DetailEmptyState's radar also
-  // renders a "Safes" score-axis button that would otherwise collide.
+  // Scope to the top-left search-modes bar so a same-named button elsewhere
+  // in the surface can never satisfy the query.
   const bar = await waitFor(() => {
     const el = document.querySelector(".ps-search-modes");
     expect(el).toBeTruthy();
@@ -96,9 +96,8 @@ async function commitViaEnter(user) {
 
 async function clickSidebarTab(label) {
   const user = userEvent.setup();
-  // Scope to the sidebar tab bar: in Detail mode the DetailEmptyState radar
-  // also renders example buttons (e.g. "Upgrades …") that would otherwise
-  // collide with the same-named tab.
+  // Scope to the sidebar tab bar so a same-named button in the panel body can
+  // never satisfy the query.
   const tabBar = await waitFor(() => {
     const el = document.querySelector(".ps-sidebar-tabs");
     expect(el).toBeTruthy();
@@ -145,7 +144,7 @@ describe("ProtocolSurface — sidebar tabs", () => {
     await clickSidebarTab("Detail");
     await waitFor(() => {
       // DetailEmptyState renders when no machine/principal is selected.
-      const radarOrEmpty = document.querySelector(".protocol-radar, .ps-detail-empty, .empty");
+      const radarOrEmpty = document.querySelector(".ps-detail-empty, .empty");
       expect(radarOrEmpty).toBeTruthy();
     });
     expectNoCrash();
@@ -513,7 +512,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     await clickSidebarTab("Detail");
     await waitFor(() => {
       expect(
-        document.querySelector(".ps-detail-empty, .protocol-radar, .empty"),
+        document.querySelector(".ps-detail-empty, .empty"),
       ).toBeTruthy();
     });
     expect(screen.queryByText(/2\/3 threshold/i)).not.toBeInTheDocument();
@@ -1120,6 +1119,592 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
       return el;
     });
     expect(machineName).toHaveTextContent("GovTimelock");
+    expectNoCrash();
+  });
+});
+
+describe("ProtocolSurface — external selection handle", () => {
+  // Only LiquidityPool carries `rebalance`; `setFee` is put on BOTH contracts
+  // below so the graph has a name that resolves to no single host — the shape
+  // the score document's bare example-function names can land in.
+  const GRAPH_UNIQUE_FN = "rebalance";
+  const GRAPH_SHARED_FN = "setFee";
+  const SHARED_NAME_DATA = {
+    ...ETHERFI_COMPANY_RICH,
+    contracts: ETHERFI_COMPANY_RICH.contracts.map((contract, i) =>
+      i === 0
+        ? contract
+        : {
+            ...contract,
+            functions: [
+              ...contract.functions,
+              ETHERFI_COMPANY_RICH.contracts[0].functions.find(
+                (f) => f.function === GRAPH_SHARED_FN,
+              ),
+            ],
+          },
+    ),
+  };
+
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  function renderWithHandle(data = ETHERFI_COMPANY_RICH) {
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
+    return ref;
+  }
+
+  it("selects a contract and the named function", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let accepted;
+    await act(async () => {
+      accepted = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        functionSignature: "pause",
+      });
+    });
+    expect(accepted).toEqual({ ok: true, kind: "function" });
+    const name = await waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(name).toHaveTextContent("Vault");
+    // ...and the named function, not just its contract.
+    const inspector = await waitFor(() => {
+      const el = document.querySelector(".ps-inspector");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(inspector).toHaveTextContent("pause");
+    expectNoCrash();
+  });
+
+  it("selects a principal-only entity through the principal path", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let accepted;
+    await act(async () => {
+      accepted = ref.current.selectExample({ contractAddress: SAFE_PRINCIPAL.address });
+    });
+    expect(accepted).toEqual({ ok: true, kind: "principal" });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-principal-section")).toBeTruthy();
+    });
+    expectNoCrash();
+  });
+
+  it("refuses an address the graph does not carry, and another chain's twin — as two different facts", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let offGraph;
+    let offChain;
+    await act(async () => {
+      offGraph = ref.current.selectExample({
+        contractAddress: "0xdead00000000000000000000000000000000dead",
+      });
+      offChain = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        chain: "base",
+      });
+    });
+    expect(offGraph).toEqual({ ok: false, kind: "not-found" });
+    expect(offChain).toEqual({ ok: false, kind: "chain-mismatch" });
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("says it selected the contract, not the function, when the contract does not carry it", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
+        functionSignature: "noSuchFunctionHere",
+      });
+    });
+    expect(result).toEqual({ ok: true, kind: "contract", functionMissing: true });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toBeTruthy();
+    });
+    expectNoCrash();
+  });
+
+  it("resolves a bare function name against the whole graph when no contract is named", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: GRAPH_UNIQUE_FN });
+    });
+    expect(result).toEqual({ ok: true, kind: "function" });
+    const inspector = await waitFor(() => {
+      const el = document.querySelector(".ps-inspector");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(inspector).toHaveTextContent(GRAPH_UNIQUE_FN);
+    expectNoCrash();
+  });
+
+  it("refuses a bare function name two contracts answer to, and selects nothing", async () => {
+    const ref = renderWithHandle(SHARED_NAME_DATA);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: GRAPH_SHARED_FN });
+    });
+    expect(result.ok).toBe(false);
+    expect(result.kind).toBe("ambiguous-function");
+    expect(result.hosts).toBeGreaterThan(1);
+    // Nothing was selected: a guessed host is worse than no navigation.
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("refuses a bare function name no contract on the graph carries", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({ functionSignature: "noContractHasThis" });
+    });
+    expect(result).toEqual({ ok: false, kind: "not-found" });
+    expect(document.querySelector(".ps-machine-name")).toBeNull();
+    expectNoCrash();
+  });
+});
+
+// A score-page arrival used to render a SECOND entity card in a flyout popped
+// out beside the sidebar while the sidebar itself showed the empty state. There
+// is one sidebar now: the arrival renders on the sidebar's own Detail card,
+// carrying the highlight with it.
+describe("ProtocolSurface — score arrivals land on the one sidebar card", () => {
+  const VAULT = ETHERFI_COMPANY_RICH.contracts[0];
+  const POOL = ETHERFI_COMPANY_RICH.contracts[1];
+  let scrolled;
+
+  beforeEach(() => {
+    installApiMocks();
+    scrolled = [];
+    // jsdom does no layout, so Element.scrollIntoView doesn't exist. Record the
+    // element each call was made on so "scrolled the highlighted row into view"
+    // is an assertion about that row, not just about some scroll happening.
+    Element.prototype.scrollIntoView = function scrollIntoViewStub(opts) {
+      scrolled.push({ el: this, opts });
+    };
+  });
+
+  afterEach(() => {
+    delete Element.prototype.scrollIntoView;
+  });
+
+  function renderWithHandle() {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+    );
+    return ref;
+  }
+
+  async function arrive(ref, example) {
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    return result;
+  }
+
+  function sidebar() {
+    const el = document.querySelector(".ps-sidebar-content");
+    expect(el).toBeTruthy();
+    return el;
+  }
+
+  function noFlyout() {
+    expect(
+      document.querySelectorAll(
+        ".ps-sidebar-flyout, .ps-sidebar-flyout-content, .ps-sidebar-flyout-rail, .ps-sidebar-flyout-toggle",
+      ).length,
+    ).toBe(0);
+  }
+
+  it("marks the named function on the sidebar's own card — one card, no flyout", async () => {
+    const ref = renderWithHandle();
+    expect(
+      await arrive(ref, { contractAddress: VAULT.address, functionSignature: "pause" }),
+    ).toEqual({ ok: true, kind: "function" });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("Vault");
+    });
+    // Exactly one entity card exists, and it is the sidebar's.
+    expect(document.querySelectorAll(".ps-machine").length).toBe(1);
+    noFlyout();
+
+    const marked = sidebar().querySelectorAll(".ps-port-score-highlight");
+    expect(marked.length).toBe(1);
+    expect(marked[0].querySelector(".ps-port-name")).toHaveTextContent("pause");
+    // The guard inspector for the named function rides along in the sidebar.
+    expect(sidebar().querySelector(".ps-inspector")).toHaveTextContent("pause");
+    expectNoCrash();
+  });
+
+  it("opens the tab that lists the highlighted function and scrolls its row into view", async () => {
+    const ref = renderWithHandle();
+    // withdraw is an asset_send: it is listed on Outflows, not the Control tab
+    // a card opens on by default — so the card has to go where the row is.
+    expect(
+      await arrive(ref, { contractAddress: VAULT.address, functionSignature: "withdraw" }),
+    ).toEqual({ ok: true, kind: "function" });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-tab.active")).toHaveTextContent(/Outflows/i);
+    });
+    const marked = sidebar().querySelector(".ps-port-score-highlight");
+    expect(marked.querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(scrolled.some((call) => call.el === marked)).toBe(true);
+    expectNoCrash();
+  });
+
+  it("opens the card unmarked when the score row names no function", async () => {
+    const ref = renderWithHandle();
+    expect(await arrive(ref, { contractAddress: POOL.address })).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+    });
+
+    // The card opening IS the landing signal — no ring dresses it up, and no
+    // function row claims to be the named one.
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
+    });
+    expect(sidebar().querySelector(".ps-port-score-highlight")).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    noFlyout();
+    expectNoCrash();
+  });
+
+  it("renders a controller arrival as the sidebar's principal card, unmarked", async () => {
+    const ref = renderWithHandle();
+    expect(await arrive(ref, { contractAddress: SAFE_PRINCIPAL.address })).toEqual({
+      ok: true,
+      kind: "principal",
+    });
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-principal-section")).toBeTruthy();
+    });
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    noFlyout();
+    expectNoCrash();
+  });
+
+  it("drops the highlight as soon as the next selection lands", async () => {
+    const ref = renderWithHandle();
+    await arrive(ref, { contractAddress: VAULT.address, functionSignature: "pause" });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-port-score-highlight")).toBeTruthy();
+    });
+
+    const user = userEvent.setup();
+    await user.type(searchInput(), "LiquidityPool");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
+    });
+    expect(document.querySelector(".ps-port-score-highlight")).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+});
+
+// The score row names a PAIR — an action and the one principal that can take
+// it — so a click on it marks that pair on the card: the function's row, and
+// inside it the caller chip for that controller. Each part is marked only where
+// the card's own lanes witness it; where they don't, the mark falls back rather
+// than being invented.
+describe("ProtocolSurface — a score arrival marks the function/caller pair", () => {
+  const VAULT = ETHERFI_COMPANY_RICH.contracts[0];
+  const { SAFE, TIMELOCK, EOA } = RICH_ADDRESSES;
+
+  beforeEach(() => {
+    installApiMocks();
+    Element.prototype.scrollIntoView = function scrollIntoViewStub() {};
+  });
+
+  afterEach(() => {
+    delete Element.prototype.scrollIntoView;
+  });
+
+  async function arrive(example) {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+    );
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    return { ref, result };
+  }
+
+  function markedRow() {
+    return document.querySelector(".ps-port-score-highlight");
+  }
+
+  function markedChips() {
+    return [...document.querySelectorAll(".ps-caller-score-highlight")];
+  }
+
+  it("marks the hinted function's row AND that row's chip for the hinted controller", async () => {
+    // pause is guarded by the Safe on this card, and the Safe is who the row
+    // named — the pair the points were charged for.
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: SAFE },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("pause");
+    const chips = markedChips();
+    expect(chips).toHaveLength(1);
+    expect(chips[0].closest(".ps-port")).toBe(markedRow());
+    expect(chips[0]).toHaveTextContent("Safe");
+    // The pair is the mark: the card outline is not also rung.
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("marks nothing inside the card when the hinted controller cannot call the hinted function", async () => {
+    // The Timelock guards `upgrade` on this same card, never `pause` — so the
+    // pause row under the Safe's gate is a DIFFERENT action from the pair the
+    // score row charged. Ringing it would present the Safe's gate as the
+    // deduced one; the card simply opens, and the caller's `unpaired` outcome
+    // carries the explanation.
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: TIMELOCK },
+    });
+    expect(result.highlight).toEqual({ function: "unpaired", controller: "not-a-caller" });
+
+    await waitFor(() => {
+      expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
+    });
+    expect(markedRow()).toBeNull();
+    expect(markedChips()).toHaveLength(0);
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("opens the card with no mark at all when no row answers to the hinted name", async () => {
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "noSuchFunctionHere", controller: SAFE },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "not-on-card", controller: "not-a-caller" },
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
+    });
+    expect(markedRow()).toBeNull();
+    expect(markedChips()).toHaveLength(0);
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("marks the caller chip on a function-name arrival the graph resolved itself", async () => {
+    // withdraw exists on one contract only, so the name alone resolves a host —
+    // and the row's controller is that function's caller there.
+    const { result } = await arrive({
+      functionSignature: "withdraw",
+      highlight: { functionSignature: "withdraw", controller: EOA },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "function",
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(markedChips()).toHaveLength(1);
+    expect(markedChips()[0]).toHaveTextContent("EOA");
+    expectNoCrash();
+  });
+
+  it("narrows a shared function name to the host whose function the hinted controller can call", async () => {
+    // `withdraw` exists on BOTH machines here, but only Vault's is gated by
+    // the hinted EOA — the pool's copy sits under the Safe. The name alone is
+    // ambiguous; the (function, controller) pair is witnessed on exactly one
+    // card, and that pair is the action the score row charged.
+    const shared = structuredClone(ETHERFI_COMPANY_RICH);
+    const vault = shared.contracts.find((c) => c.name === "Vault");
+    const pool = shared.contracts.find((c) => c.name === "LiquidityPool");
+    const vaultWithdraw = vault.functions.find((f) => f.function === "withdraw");
+    const safeGate = vault.functions.find((f) => f.function === "pause").direct_owner;
+    pool.functions.push({ ...structuredClone(vaultWithdraw), direct_owner: structuredClone(safeGate) });
+
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={shared} embedded />);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+
+    // Without the pair the name resolves to neither host.
+    let bare;
+    await act(async () => {
+      bare = ref.current.selectExample({ functionSignature: "withdraw" });
+    });
+    expect(bare).toEqual({ ok: false, kind: "ambiguous-function", count: 2, hosts: 2 });
+
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        functionSignature: "withdraw",
+        highlight: { functionSignature: "withdraw", controller: EOA },
+      });
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "function",
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(markedChips()).toHaveLength(1);
+    expect(markedChips()[0]).toHaveTextContent("EOA");
+    expectNoCrash();
+  });
+
+  it("drops the chip mark with the row mark on the next selection", async () => {
+    await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: SAFE },
+    });
+    await waitFor(() => expect(markedChips()).toHaveLength(1));
+
+    const user = userEvent.setup();
+    await user.type(searchInput(), "LiquidityPool");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
+    });
+    expect(markedChips()).toHaveLength(0);
+    expect(markedRow()).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+});
+
+// --- Reach path: the route a score-page click-through took to get here -------
+describe("ProtocolSurface — reached-from route on the entity card", () => {
+  const { VAULT: V_ADDR, POOL: P_ADDR, SAFE: S_ADDR, EOA: E_ADDR } = RICH_ADDRESSES;
+  // The rich fixture's fund_flows carry no control edges, so give it the
+  // etherfi row-0 shape: the safe reaches the pool only THROUGH the vault.
+  const WITH_CONTROL_EDGES = {
+    ...ETHERFI_COMPANY_RICH,
+    fund_flows: [
+      ...ETHERFI_COMPANY_RICH.fund_flows,
+      { from: S_ADDR, to: V_ADDR, type: "principal", relation: "role_principal", label: "roles 77" },
+      { from: V_ADDR, to: P_ADDR, type: "controller" },
+    ],
+  };
+
+  beforeEach(() => {
+    installApiMocks();
+  });
+
+  function renderWithHandle(data = WITH_CONTROL_EDGES) {
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={data} embedded />);
+    return ref;
+  }
+
+  async function arriveFrom(example) {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    expect(result.ok).toBe(true);
+    return waitFor(() => {
+      const el = document.querySelector(".ps-machine-name");
+      expect(el).toBeTruthy();
+      return el;
+    });
+  }
+
+  it("walks the host→target route and names each hop", async () => {
+    await arriveFrom({ contractAddress: P_ADDR, reachedFrom: [S_ADDR] });
+    const block = await waitFor(() => {
+      const el = document.querySelector(".ps-reach");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(block.querySelector(".ps-reach-hdr")).toHaveTextContent("Reached from Multisig via:");
+    const hops = [...block.querySelectorAll(".ps-reach-hop")];
+    expect(hops.map((h) => h.querySelector(".ps-reach-pair").textContent)).toEqual([
+      "Multisig→Vault",
+      "Vault→LiquidityPool",
+    ]);
+    // The witnessed role rides through from the payload; the unwitnessed hop
+    // shows its flow type alone.
+    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("principal · role_principal roles 77");
+    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controller");
+    expectNoCrash();
+  });
+
+  it("says the path is not carried when this graph has no route", async () => {
+    await arriveFrom({ contractAddress: P_ADDR, reachedFrom: [E_ADDR] });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-reach-nd")).toHaveTextContent("path not carried by this graph");
+    });
+    expect(document.querySelector(".ps-reach-hops")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("shows no route on a plain selection that names no origin", async () => {
+    await arriveFrom({ contractAddress: P_ADDR });
+    expect(document.querySelector(".ps-reach")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("drops the route when the next selection carries none", async () => {
+    const ref = renderWithHandle();
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    await act(async () => {
+      ref.current.selectExample({ contractAddress: P_ADDR, reachedFrom: [S_ADDR] });
+    });
+    await waitFor(() => expect(document.querySelector(".ps-reach")).toBeTruthy());
+    await act(async () => {
+      ref.current.selectExample({ contractAddress: V_ADDR });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toHaveTextContent("Vault");
+    });
+    expect(document.querySelector(".ps-reach")).toBeNull();
     expectNoCrash();
   });
 });

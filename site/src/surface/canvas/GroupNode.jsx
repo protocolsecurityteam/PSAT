@@ -87,7 +87,9 @@ export function GroupNode({ data }) {
   // top of header, `77` ≈ 47% bottom.
   return (
     <div
-      className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}`}
+      className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}${
+        data.reachChip ? " ps-group-reach" : ""
+      }`}
       style={{
         "--principal-color": color,
         "--principal-bg": "transparent",
@@ -95,6 +97,14 @@ export function GroupNode({ data }) {
         "--principal-header-bg-bot": `${color}77`,
       }}
     >
+      {data.reachChip && (
+        <div
+          className={`ps-node-chip ps-node-chip--reach${chip?.out ? " ps-node-chip--stacked" : ""}`}
+          title="reached from the selected entity through the control graph"
+        >
+          {data.reachChip}
+        </div>
+      )}
       {chip?.out && (
         <div className="ps-node-chip ps-node-chip--out">{chip.out}</div>
       )}

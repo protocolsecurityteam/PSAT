@@ -222,6 +222,15 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         "entity_key": "effective_functions.deployment_address -> contracts.address, chain-scoped",
         "contract_entities": len(plane.contract_entities),
         "reduction": "MAX per (entity, asset)",
+        # The fold's own exposure denominator, published rather than left to be
+        # back-solved from grade_exposure — which is undefined whenever the grade
+        # is withheld. An empty priced sheet is not_determined, never a zero.
+        "tracked_total_usd": plane.tracked_total if plane.per_asset else None,
+        "tracked_total_usd_reading": (
+            "MAX per (entity, asset), implementation folded onto its proxy; unpriced "
+            "entities contribute nothing and are not read as 0, so this is a floor. "
+            "null = no priced entity in the perimeter"
+        ),
         "balance_rows": len(rows),
         "restaking_rows": len(positions),
         "shared_implementations": shared_impl,
@@ -546,9 +555,19 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
     return (PERIMETER_SETTLED if pending == 0 else PERIMETER_UNSETTLED), {"pending_jobs": int(pending)}
 
 
-def load_audit_posture(session: Session, protocol_id: int) -> dict[str, Any]:
-    """Audit coverage, classified. Non-proven statuses read UNKNOWN, never 0."""
-    from db.models import AuditContractCoverage
+def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePlane) -> dict[str, Any]:
+    """Audit coverage, classified and weighted by contracts and by value.
+
+    Coverage rows are per (audit, contract), so counting them answers neither
+    "how much of the protocol is audited" nor "how much of the money is": one
+    contract reviewed by four audits is four rows and one contract, and the
+    contracts that hold the value are a handful of the total. Both weightings
+    are computed here, over the same MAX-per-(entity, asset) reduction with the
+    implementation folded onto its proxy that the fold's exposure uses — a
+    consumer joining these counts to a value plane of its own would re-introduce
+    the double count that reduction exists to remove.
+    """
+    from db.models import AuditContractCoverage, AuditReport, Contract
 
     equivalence_classes = {
         "candidate_path_missing": "our_side_data_gap",
@@ -568,15 +587,90 @@ def load_audit_posture(session: Session, protocol_id: int) -> dict[str, Any]:
         bucket = equivalence_classes.get(str(row.equivalence_status))
         if bucket:
             classified[bucket] += 1
+
+    contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
+    covered_ids = {row.contract_id for row in rows}
+    proven_ids = {row.contract_id for row in proven}
+    covered_value, covered_priced = _audited_value(contracts, covered_ids, value_plane)
+    proven_value, proven_priced = _audited_value(contracts, proven_ids, value_plane)
+
+    reports = int(
+        session.query(sql_func.count(AuditReport.id)).filter(AuditReport.protocol_id == protocol_id).scalar() or 0
+    )
+    # A published zero is a claim that the protocol has no audits, and an empty
+    # table is that fact only where discovery is proven to have looked. A stage
+    # that never ran, or died before persisting (the billing-failure shape),
+    # leaves the same empty table and lands on not_determined instead.
+    reports_on_file = reports if reports or _audit_discovery_witnessed(session, protocol_id) else None
+    # Zero covered contracts needs its own licence: with no audit on file there
+    # was nothing that could match, but audits with no coverage row are a
+    # matcher run this fold has no witness for.
+    coverage_zero_licensed = reports_on_file == 0
     return {
         "rows": len(rows),
         "proven_equivalence": len(proven),
+        "reports_on_file": reports_on_file,
+        "contracts_total": len(contracts),
+        "contracts_covered": len(covered_ids) if rows or coverage_zero_licensed else None,
+        "contracts_proven": len(proven_ids) if rows or coverage_zero_licensed else None,
+        "value_covered_usd": covered_value,
+        "value_proven_usd": proven_value,
+        "value_entities_priced": {"covered": covered_priced, "proven": proven_priced},
         "non_coverage_classified": dict(sorted(classified.items())),
         "reading": (
             "equivalence_status='proven' + matched_commit_sha is the admissible core; "
-            "proof_kind is banned in every value; a non-proven row is UNKNOWN, not 0"
+            "proof_kind is banned in every value; a non-proven row is UNKNOWN, not 0. "
+            "The value figures are floors over the PRICED covered entities — an unpriced "
+            "audited contract contributes nothing and is never read as $0 — and null means "
+            "no covered entity was priced at all. A null count is an unwitnessed stage, "
+            "never a zero: the discovery witness is the persisted audit_reports artifact, "
+            "and a failure INSIDE the row sync after that artifact committed is recorded "
+            "only in the stage_errors artifact body, which this DB-only fold does not read"
         ),
     }
+
+
+def _audit_discovery_witnessed(session: Session, protocol_id: int) -> bool:
+    """Whether audit discovery is proven to have run and persisted its result.
+
+    ``store_artifact(job, "audit_reports", ...)`` commits on the one path that
+    persists discovered reports, so the row is the witness that the stage got
+    that far. Existence only — the body lives in the bucket and this fold reads
+    the database alone.
+    """
+    from db.models import Artifact, Job
+
+    return (
+        session.query(Artifact.id)
+        .join(Job, Job.id == Artifact.job_id)
+        .filter(Job.protocol_id == protocol_id, Artifact.name == "audit_reports")
+        .order_by(Artifact.id)
+        .first()
+    ) is not None
+
+
+def _audited_value(
+    contracts: list[Any], audited_contract_ids: set[int], value_plane: ValuePlane
+) -> tuple[float | None, int]:
+    """Canonical priced value behind a set of audited contracts, and how many priced.
+
+    An entity counts when its own contract is audited OR when the implementation
+    it delegates to is: a proxy holds the balance and an audit reviews the
+    implementation's source, so keying on the audited row's contract alone would
+    report the money as unaudited.
+    """
+    audited_keys = {entity_key(c.chain, c.address) for c in contracts if c.id in audited_contract_ids}
+    entities: set[str] = set()
+    for contract in contracts:
+        own = entity_key(contract.chain, contract.address)
+        implementation = entity_key(contract.chain, contract.implementation) if contract.implementation else None
+        if own in audited_keys or (implementation is not None and implementation in audited_keys):
+            entities.add(value_plane.canonical(own))
+    totals = [value_plane.total(key) for key in sorted(entities)]
+    priced = [total for total in totals if total is not None]
+    if not priced:
+        return None, 0
+    return round(sum(sorted(priced)), 2), len(priced)
 
 
 def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:

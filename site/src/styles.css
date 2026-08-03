@@ -18,11 +18,11 @@
 @import "./styles/surface/layout.css";
 @import "./styles/pages/home-hero.css";
 @import "./styles/components/protocol-logo.css";
-@import "./styles/components/protocol-radar.css";
 @import "./styles/pages/company-hero.css";
 @import "./styles/pages/pipeline-dashboard.css";
 @import "./styles/pages/job-monitor.css";
 @import "./styles/pages/company-bands.css";
+@import "./styles/pages/score.css";
 @import "./styles/pages/inline-surface.css";
 @import "./styles/pages/audits-tab.css";
 @import "./styles/surface/audits-panel.css";

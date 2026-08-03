@@ -18,9 +18,7 @@ import AuditsAdminModal from "./AuditsAdminModal.jsx";
 import AddressLabelInline from "./AddressLabelInline.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ProtocolLogo from "./ProtocolLogo.jsx";
-import ProtocolRadar from "./ProtocolRadar.jsx";
 
-import { computeProtocolScore } from "./protocolScore.js";
 import { setFetchHandler } from "./test/fetchMock.js";
 import {
   ETHERFI_COMPANY,
@@ -213,16 +211,6 @@ describe("ProductHero", () => {
 describe("ProtocolLogo", () => {
   it("renders with a name", () => {
     render(<ProtocolLogo name="etherfi" />);
-    expectNoCrash();
-  });
-});
-
-describe("ProtocolRadar", () => {
-  it("renders with computed axes", () => {
-    const score = computeProtocolScore(ETHERFI_COMPANY, COVERAGE_FIXTURE);
-    render(<ProtocolRadar axes={score.axes} />);
-    // 6 axis labels (Authority, Audits, Upgrades, Pause, Safes, Data)
-    expect(screen.getByText(/Authority/i)).toBeInTheDocument();
     expectNoCrash();
   });
 });

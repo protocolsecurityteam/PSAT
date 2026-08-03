@@ -306,7 +306,7 @@ def compute_protocol_score(
         "upgrade_history": P.load_upgrade_provenance(session, protocol_id),
         "unconsumed_reach_relations": P.unconsumed_reach_relations(session, protocol_id),
         "ledgers": P.load_ledgers(session, protocol_id),
-        "audit_posture": P.load_audit_posture(session, protocol_id),
+        "audit_posture": P.load_audit_posture(session, protocol_id, value_plane),
         "perimeter": perimeter_detail,
         "signal_scope": (
             "a signal is keyed on a CAPABILITY, so a function carrying no claim produces "
@@ -1002,6 +1002,10 @@ def _aggregate(
                 "raw_points": round(K.SEV_SCALE * severity * row.weakness * band, 4),
                 "n_functions": len({(i.signal.deployment_address, i.signal.selector) for i in row.instances}),
                 "n_entities": len(row.seeds),
+                # The deployment entities the row's instances were witnessed ON
+                # — the direct targets — as distinct from reach_entities, the
+                # priced closure the capability reaches through control edges.
+                "host_entities": sorted(row.seeds),
                 "reach_entities": sorted(reach),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
@@ -1120,9 +1124,15 @@ def _row_value(
             if contribution is None:
                 undetermined.append({"function": instance.signal.function_name, "entity": key, "why": why})
                 continue
-            previous = per_entity.get(key)
+            # An implementation and the proxy that deploys it are ONE priced
+            # entity: the plane already folded the balance onto the proxy, so a
+            # row reaching both keys would charge that one balance twice — once
+            # in this sum and again in the exposure budget, which is keyed on
+            # these same entities.
+            canonical = value_plane.canonical(key)
+            previous = per_entity.get(canonical)
             if previous is None or contribution > previous:
-                per_entity[key] = contribution
+                per_entity[canonical] = contribution
 
     reach = set(per_entity)
     if not per_entity:

@@ -1,17 +1,35 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 import { entityKey } from "../surface/entityKey.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
-import { computeProtocolScore } from "../protocolScore.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
-import ProtocolRadar from "../ProtocolRadar.jsx";
+import ScoreBand from "../score/ScoreBand.jsx";
 
 const ProtocolSurface = lazy(() => import("../ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../AddressesModal.jsx"));
 const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
+
+const SELECT_NOTICE_MS = 4000;
+
+// The surface's refusal, put into words. "Absent from this graph", "present but
+// on another chain" and "that name is on several contracts" are three separate
+// facts; collapsing them into one message would tell the user something the
+// surface never said.
+function selectMissNotice(result, label) {
+  switch (result?.kind) {
+    case "ambiguous-function":
+      return result.hosts > 1
+        ? `${label} is on ${result.hosts} contracts here — select a contract first, then the function.`
+        : `${label} has ${result.count} overloads on its contract — open the contract and pick one.`;
+    case "chain-mismatch":
+      return `${label} is on another chain; the control surface shows one chain at a time.`;
+    default:
+      return `${label} is not on the control surface.`;
+  }
+}
 
 export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
@@ -21,9 +39,81 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const [functionData, setFunctionData] = useState(null);
   const [addressesModalOpen, setAddressesModalOpen] = useState(false);
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
+  const [score, setScore] = useState(null);
+  const [scoreError, setScoreError] = useState(null);
+  const [selectMiss, setSelectMiss] = useState(null);
+  const surfaceRef = useRef(null);
+  const surfaceBandRef = useRef(null);
+
+  const noticeSeq = useRef(0);
+  // Every notice is a fresh object even when its text repeats: an identical
+  // string would be a no-op state write, so the dismiss timer would never
+  // restart (the previous click's timer could kill the new notice in
+  // milliseconds) and the live region would have nothing to re-announce.
+  const showNotice = useCallback((text) => {
+    noticeSeq.current += 1;
+    setSelectMiss(text ? { text, nonce: noticeSeq.current } : null);
+  }, []);
+
+  // A clicked entity on the score page selects that entity on the embedded
+  // surface and brings the surface into view. The selection goes through the
+  // surface's own handle — the same transition a canvas click makes — so the
+  // score page owns no selection logic of its own. Each way the request can
+  // fail to land is a different fact and gets its own words: an entity this
+  // graph does not carry, an entity on another chain, and a function name that
+  // more than one contract answers to are not the same miss.
+  const handleSelectEntity = useCallback((target) => {
+    const label = target?.label || target?.address || "That entity";
+    const select = surfaceRef.current?.selectExample;
+    // The surface is a lazy chunk: no handle yet means "not mounted", which is
+    // not the surface saying the entity is absent.
+    if (!select) {
+      showNotice("The control surface is still loading — try that again in a moment.");
+      return;
+    }
+    // The highlight hint (what the row was about) travels with the request but
+    // is not part of it: the surface marks what its own card carries, and a
+    // hint it could not mark is never a failed click — the entity the user
+    // asked for still landed, so no outcome below is keyed on it.
+    const result = select({
+      chain: target?.chain,
+      contractAddress: target?.address || "",
+      functionSignature: target?.functionSignature || "",
+      ...(target?.highlight ? { highlight: target.highlight } : {}),
+      // Only a transitive target carries this; like the hint it rides along
+      // without being part of the request, so no outcome below is keyed on it.
+      ...(target?.reachedFrom ? { reachedFrom: target.reachedFrom } : {}),
+    });
+    if (!result?.ok) {
+      showNotice(selectMissNotice(result, label));
+      return;
+    }
+    // A contract selected while the function named on it was not found is a
+    // partial landing, not a clean one — say so, but still take the user there.
+    // Likewise an unpaired hint: the card carries a function by that name, but
+    // under a different controller than the deduction charged — silence would
+    // read as a broken highlight rather than a refused one.
+    const hintedFn = target?.highlight?.functionSignature;
+    showNotice(
+      result.kind === "contract" && result.functionMissing
+        ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
+        : result.highlight?.function === "unpaired" && hintedFn
+          ? `${hintedFn} on this contract is gated by a different controller than the deduction names — this contract is reached through the control graph; nothing on its card is the deduced action.`
+          : null,
+    );
+    surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [showNotice]);
+
+  useEffect(() => {
+    if (!selectMiss) return undefined;
+    const timer = setTimeout(() => setSelectMiss(null), SELECT_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [selectMiss]);
 
   useEffect(() => {
     let cancelled = false;
+    setScore(null);
+    setScoreError(null);
     api(`/api/company/${encodeURIComponent(companyName)}`)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
@@ -41,6 +131,12 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     api(`/api/company/${encodeURIComponent(companyName)}/functions`)
       .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
       .catch(() => { /* function inspector falls back to empty data */ });
+    // Fetched here rather than inside ScoreBand so it travels in parallel with
+    // the company payload: mounting the band only after /api/company answered
+    // would serialise the two.
+    api(`/api/company/${encodeURIComponent(companyName)}/score`)
+      .then((d) => { if (!cancelled) setScore(d); })
+      .catch((e) => { if (!cancelled) setScoreError({ status: e.status, message: e.message }); });
     return () => { cancelled = true; };
   }, [companyName]);
 
@@ -49,10 +145,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
 
-  // The score uses the full company payload: function-level authority,
-  // principal details, upgrade state, and audit coverage. Functions
-  // live on a separate endpoint now, so splice them back onto each
-  // contract for the scorer.
   // Keyed by the composite (chain, address) entity token (inv. 13): a CREATE2
   // twin on two chains keeps a coverage row each instead of one overwriting the
   // other.
@@ -64,19 +156,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     return map;
   })();
 
-  // functionData is keyed by the composite (chain, address) token (inv. 13), so
-  // each contract picks up ITS chain's functions — a same-address cross-chain
-  // pair no longer collapses to one chain's analysis.
-  const dataForScore = functionData
-    ? {
-        ...data,
-        contracts: contracts.map((c) => {
-          const fns = c.address ? functionData[entityKey(c.chain, c.address)] : null;
-          return fns ? { ...c, functions: fns } : c;
-        }),
-      }
-    : data;
-  const { axes, composite, grade } = computeProtocolScore(dataForScore, auditCoverage);
   // Coverage rows include past implementations linked by audit-matcher even
   // after a proxy upgrade, so the raw count overshoots the contract count
   // (e.g. 56 covered of 32 contracts). Intersect with the current contract
@@ -87,21 +166,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     .filter((r) => bytecodeVerifiedAudits(r.audits).length > 0).length;
 
   const proxyCount = contracts.filter((c) => c.is_proxy).length;
-  const openRadarExample = (example) => {
-    if (!example?.contractAddress) return;
-    sessionStorage.setItem("psat:surfaceRadarExample", JSON.stringify({
-      companyName,
-      contractAddress: example.contractAddress,
-      functionSignature: example.functionSignature || "",
-      selector: example.selector || "",
-    }));
-    onNavigateToSurface({
-      focus: example.contractAddress,
-      fn: example.functionSignature || example.selector || "",
-      score: "1",
-    });
-  };
-
   return (
     <div className="company-page">
       {/* Hero band — edge-to-edge, no card borders */}
@@ -117,24 +181,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
           </div>
-        </div>
-      </section>
-
-      {/* Score + stats on the left, radar on the right */}
-      <section className="company-score-band">
-        <div className="company-score-left">
-          <div>
-            <p className="eyebrow" style={{ margin: 0 }}>Composite Score</p>
-            <div className={`company-hero-score grade-${grade}`}>
-              <span className="company-hero-score-value">{composite}</span>
-              <span className="company-hero-score-unit">/ 100</span>
-            </div>
-            <div className="company-hero-score-label">Grade {grade.toUpperCase()}</div>
-            <div className={`company-hero-grade-bar grade-${grade}`}>
-              <div className="company-hero-grade-bar-fill" style={{ width: `${Math.max(4, composite)}%` }} />
-            </div>
-          </div>
-
           <div className="company-hero-stats">
             {isAdmin ? (
               <button
@@ -178,15 +224,18 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
             </div>
           </div>
         </div>
-
-        <div className="company-score-right">
-          <p className="eyebrow" style={{ margin: 0 }}>Security Radar</p>
-          <ProtocolRadar axes={axes} size={300} onExampleClick={openRadarExample} />
-        </div>
       </section>
 
+      <ScoreBand
+        companyName={companyName}
+        contracts={contracts}
+        score={score}
+        error={scoreError}
+        onSelectEntity={handleSelectEntity}
+      />
+
       {/* Inline Control Surface — real ProtocolSurface, not a static preview. */}
-      <section className="company-surface-band">
+      <section className="company-surface-band" ref={surfaceBandRef}>
         <div className="company-surface-band-header">
           <div>
             <p className="eyebrow" style={{ margin: 0 }}>Control Surface</p>
@@ -256,6 +305,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               second time on every overview page-load. */}
           <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
             <ProtocolSurface
+              ref={surfaceRef}
               companyName={companyName}
               initialData={data}
               initialCoverage={auditCoverage}
@@ -265,6 +315,14 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
           </Suspense>
         </div>
       </section>
+
+      {selectMiss && (
+        <div className="company-select-toast" role="status">
+          {/* Keyed by the nonce so a repeated notice is a removal + insertion
+              inside the live region, which is what makes it announce again. */}
+          <span key={selectMiss.nonce}>{selectMiss.text}</span>
+        </div>
+      )}
 
       {addressesModalOpen && (
         <Suspense fallback={null}>

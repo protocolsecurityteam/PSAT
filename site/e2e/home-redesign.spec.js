@@ -124,7 +124,8 @@ test.describe("home redesign", () => {
 
     // Company hero
     await expect(page.locator(".company-hero-title")).toBeVisible();
-    await expect(page.locator(".protocol-radar")).toBeVisible();
+    // Score band replaced the composite/radar column.
+    await expect(page.locator(".score-band")).toBeVisible();
     // Stage B replaced the static SurfacePreview with an inline ProtocolSurface
     // that has its own "Open fullscreen" pill in the band header.
     await expect(page.locator(".company-surface-band-header")).toBeVisible();

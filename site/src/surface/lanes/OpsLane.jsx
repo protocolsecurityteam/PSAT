@@ -3,7 +3,14 @@ import { useMemo } from "react";
 import { categorizeOps } from "../lane.js";
 import { OpsCategory } from "./OpsCategory.jsx";
 
-export function OpsLane({ items, onSelect, onNavigate, onPreview, highlightedFunctionKey }) {
+export function OpsLane({
+  items,
+  onSelect,
+  onNavigate,
+  onPreview,
+  highlightedFunctionKey,
+  highlightedCaller = null,
+}) {
   const categories = useMemo(() => categorizeOps(items), [items]);
   return (
     <section className="ps-lane ps-lane-ops">
@@ -21,6 +28,7 @@ export function OpsLane({ items, onSelect, onNavigate, onPreview, highlightedFun
               onNavigate={onNavigate}
               onPreview={onPreview}
               highlightedFunctionKey={highlightedFunctionKey}
+              highlightedCaller={highlightedCaller}
             />
           ))
         ) : (

@@ -128,14 +128,78 @@ export function tabForLane(lane) {
   return "control";
 }
 
+function normalizeFunctionTarget(target = {}) {
+  return {
+    signature: String(target.functionSignature || target.fn || "").toLowerCase(),
+    selector: String(target.selector || "").toLowerCase(),
+  };
+}
+
+function matchesExactly(fnView, signature, selector) {
+  const fnKey = String(fnView.key || "").toLowerCase();
+  if (selector && fnKey.endsWith(`:${selector}`)) return true;
+  return Boolean(signature) && String(fnView.signature || "").toLowerCase() === signature;
+}
+
+// A bare name ("pause") is only a name — it carries no argument list, so it
+// identifies a call site only where nothing else answers to it.
+function isBareName(signature) {
+  return Boolean(signature) && !signature.includes("(");
+}
+
+function matchesByName(fnView, signature) {
+  return String(fnView.name || "").toLowerCase() === signature;
+}
+
 export function findFunctionView(machine, target = {}) {
-  const signature = String(target.functionSignature || target.fn || "").toLowerCase();
-  const selector = String(target.selector || "").toLowerCase();
+  const { signature, selector } = normalizeFunctionTarget(target);
   if (!signature && !selector) return null;
-  return machineFunctions(machine).find((fnView) => {
-    const fnSig = String(fnView.signature || "").toLowerCase();
-    const fnKey = String(fnView.key || "").toLowerCase();
-    if (selector && fnKey.endsWith(`:${selector}`)) return true;
-    return signature && fnSig === signature;
-  }) || null;
+  const fns = machineFunctions(machine);
+  const exact = fns.find((fnView) => matchesExactly(fnView, signature, selector));
+  if (exact) return exact;
+  // The scorer names example functions by bare name ("pause"), never by
+  // signature. A bare name resolves only when it names exactly one function on
+  // the machine: with overloads present, picking one would point the user at a
+  // call site the caller never named.
+  if (!isBareName(signature)) return null;
+  const byName = fns.filter((fnView) => matchesByName(fnView, signature));
+  return byName.length === 1 ? byName[0] : null;
+}
+
+// The caller chip a score row's controller names on an already-resolved
+// function — or null. Only the function's OWN witnessed caller list can answer:
+// a row's controller that this function does not list is not this function's
+// caller, and marking a chip for it (or marking the chips of whoever IS listed)
+// would publish a pair the graph never witnessed.
+export function findCaller(fnView, address) {
+  const wanted = String(address || "").toLowerCase();
+  if (!fnView || !wanted) return null;
+  const hit = (fnView.guard?.principals || []).find(
+    (principal) => String(principal.address || "").toLowerCase() === wanted,
+  );
+  return hit ? String(hit.address).toLowerCase() : null;
+}
+
+// Every function on the whole graph the target names, as {machine, fnView}.
+//
+// The score document names an example function by bare name and never publishes
+// the contract it was witnessed on — `reach_entities` is the priced closure the
+// capability reaches, not the host. So the graph is the only witness to where
+// that name lives, and it witnesses a host only when the name lands in exactly
+// one place: a name carried by two contracts resolves to neither. Exact matches
+// (full signature / selector) shadow bare-name matches, so a caller that does
+// know the signature is never dragged into an ambiguity it had already
+// resolved.
+export function findFunctionMatches(machines, target = {}) {
+  const { signature, selector } = normalizeFunctionTarget(target);
+  if (!signature && !selector) return [];
+  const exact = [];
+  const named = [];
+  for (const machine of machines || []) {
+    for (const fnView of machineFunctions(machine)) {
+      if (matchesExactly(fnView, signature, selector)) exact.push({ machine, fnView });
+      else if (isBareName(signature) && matchesByName(fnView, signature)) named.push({ machine, fnView });
+    }
+  }
+  return exact.length ? exact : named;
 }

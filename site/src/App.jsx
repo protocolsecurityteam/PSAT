@@ -82,15 +82,10 @@ export default function App() {
     window.history.pushState({}, "", `/company/${encodeURIComponent(name)}`);
   }
 
-  function navigateCompanyTab(tab, params = {}) {
+  function navigateCompanyTab(tab) {
     setCompanyTab(tab);
     const suffix = tab === "overview" ? "" : `/${tab}`;
-    const query = new URLSearchParams();
-    if (params.focus) query.set("focus", params.focus);
-    if (params.fn) query.set("fn", params.fn);
-    if (params.score) query.set("score", params.score);
-    const search = query.toString();
-    window.history.pushState({}, "", `/company/${encodeURIComponent(companyName)}${suffix}${search ? `?${search}` : ""}`);
+    window.history.pushState({}, "", `/company/${encodeURIComponent(companyName)}${suffix}`);
   }
 
   async function refreshAnalyses() {
@@ -256,7 +251,7 @@ export default function App() {
       {isCompany && companyName && companyTab === "overview" && (
         <CompanyOverview
           companyName={companyName}
-          onNavigateToSurface={(params) => navigateCompanyTab("surface", params)}
+          onNavigateToSurface={() => navigateCompanyTab("surface")}
         />
       )}
       {isCompany && companyName && companyTab === "surface" && (
