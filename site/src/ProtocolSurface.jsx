@@ -558,11 +558,11 @@ function ProtocolSurface({
     // of it has to survive a lookup against that card's own lanes to be marked.
     const hint = example?.highlight || null;
     const hintedController = String(hint?.controller || "").toLowerCase() || null;
-    const hintOutcome = (fnView, caller) =>
+    const hintOutcome = (fnView, caller, unpaired = false) =>
       hint
         ? {
             highlight: {
-              function: fnView ? "marked" : "not-on-card",
+              function: fnView ? "marked" : unpaired ? "unpaired" : "not-on-card",
               controller: caller ? "marked" : hintedController ? "not-a-caller" : "none",
             },
           }
@@ -576,13 +576,21 @@ function ProtocolSurface({
     if (!address) {
       const matches = findFunctionMatches(allMachines, example);
       if (!matches.length) return { ok: false, kind: "not-found" };
-      if (matches.length > 1) {
-        const hosts = new Set(matches.map((m) => String(m.machine?.address || "").toLowerCase()));
-        return { ok: false, kind: "ambiguous-function", count: matches.length, hosts: hosts.size };
+      // The hinted controller narrows a shared name to the witnessed pair: the
+      // graph lists callers per function, so among the contracts carrying this
+      // name, the one whose function this controller can actually call IS the
+      // action the score row charged — same-named functions under someone
+      // else's gate are different actions and never candidates.
+      const paired = hintedController ? matches.filter((m) => findCaller(m.fnView, hintedController)) : [];
+      const pool = paired.length ? paired : matches;
+      if (pool.length > 1) {
+        const hosts = new Set(pool.map((m) => String(m.machine?.address || "").toLowerCase()));
+        return { ok: false, kind: "ambiguous-function", count: pool.length, hosts: hosts.size };
       }
-      const matchedCaller = findCaller(matches[0].fnView, hintedController);
-      selectMachineExample(matches[0].machine, matches[0].fnView, matchedCaller);
-      return { ok: true, kind: "function", ...hintOutcome(matches[0].fnView, matchedCaller) };
+      const only = pool[0];
+      const matchedCaller = findCaller(only.fnView, hintedController);
+      selectMachineExample(only.machine, only.fnView, matchedCaller);
+      return { ok: true, kind: "function", ...hintOutcome(only.fnView, matchedCaller) };
     }
     const entry = entityIndex.get(entityKey(activeChain, address));
     if (!entry) return { ok: false, kind: "not-found" };
@@ -597,18 +605,31 @@ function ProtocolSurface({
     const machine = entry.machine;
     const fnView = findFunctionView(machine, example);
     // A contract click carries no function of its own, so the hinted example
-    // function is resolved against THIS card's lanes — the card is the only
-    // witness to whether it lists that name. Absent there, nothing on it is
-    // marked and the whole-card ring stays the last resort.
-    const marked =
-      fnView || (hint?.functionSignature ? findFunctionView(machine, { functionSignature: hint.functionSignature }) : null);
-    const matchedCaller = findCaller(marked, hintedController);
+    // function is resolved against THIS card's lanes — and only as the whole
+    // pair. A same-named function the hinted controller cannot call is a
+    // different action under someone else's gate; ringing it would present
+    // that gate as the one the points were charged for. Function and caller
+    // are marked together or not at all, and the whole-card ring stays the
+    // last resort.
+    let marked = fnView;
+    let matchedCaller = findCaller(marked, hintedController);
+    let unpaired = false;
+    if (!fnView && hint?.functionSignature) {
+      const hinted = findFunctionView(machine, { functionSignature: hint.functionSignature });
+      const hintedCaller = findCaller(hinted, hintedController);
+      if (hinted && hintedCaller) {
+        marked = hinted;
+        matchedCaller = hintedCaller;
+      } else if (hinted) {
+        unpaired = true;
+      }
+    }
     selectMachineExample(machine, marked, matchedCaller);
     // The outcome describes the request the caller made, not the hint: a click
     // that asked for a contract landed on a contract even when the hint marked
     // a row inside it.
     if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
-    return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller) };
+    return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
   }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
 
   useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);

@@ -1509,20 +1509,22 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     expectNoCrash();
   });
 
-  it("marks the row alone when the hinted controller is not one of its callers", async () => {
-    // The Timelock guards `upgrade` on this same card, never `pause`. Marking
-    // its chip on the pause row — or marking pause's actual caller instead —
-    // would publish a pair this card does not carry.
+  it("marks nothing inside the card when the hinted controller cannot call the hinted function", async () => {
+    // The Timelock guards `upgrade` on this same card, never `pause` — so the
+    // pause row under the Safe's gate is a DIFFERENT action from the pair the
+    // score row charged. Ringing it would present the Safe's gate as the
+    // deduced one; the card ring is the honest remainder.
     const { result } = await arrive({
       contractAddress: VAULT.address,
       highlight: { functionSignature: "pause", controller: TIMELOCK },
     });
-    expect(result.highlight).toEqual({ function: "marked", controller: "not-a-caller" });
+    expect(result.highlight).toEqual({ function: "unpaired", controller: "not-a-caller" });
 
-    await waitFor(() => expect(markedRow()).toBeTruthy());
-    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("pause");
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+    });
+    expect(markedRow()).toBeNull();
     expect(markedChips()).toHaveLength(0);
-    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
     expectNoCrash();
   });
 
@@ -1560,6 +1562,50 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     });
 
     await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(markedChips()).toHaveLength(1);
+    expect(markedChips()[0]).toHaveTextContent("EOA");
+    expectNoCrash();
+  });
+
+  it("narrows a shared function name to the host whose function the hinted controller can call", async () => {
+    // `withdraw` exists on BOTH machines here, but only Vault's is gated by
+    // the hinted EOA — the pool's copy sits under the Safe. The name alone is
+    // ambiguous; the (function, controller) pair is witnessed on exactly one
+    // card, and that pair is the action the score row charged.
+    const shared = structuredClone(ETHERFI_COMPANY_RICH);
+    const vault = shared.contracts.find((c) => c.name === "Vault");
+    const pool = shared.contracts.find((c) => c.name === "LiquidityPool");
+    const vaultWithdraw = vault.functions.find((f) => f.function === "withdraw");
+    const safeGate = vault.functions.find((f) => f.function === "pause").direct_owner;
+    pool.functions.push({ ...structuredClone(vaultWithdraw), direct_owner: structuredClone(safeGate) });
+
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="etherfi" initialData={shared} embedded />);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+
+    // Without the pair the name resolves to neither host.
+    let bare;
+    await act(async () => {
+      bare = ref.current.selectExample({ functionSignature: "withdraw" });
+    });
+    expect(bare).toEqual({ ok: false, kind: "ambiguous-function", count: 2, hosts: 2 });
+
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        functionSignature: "withdraw",
+        highlight: { functionSignature: "withdraw", controller: EOA },
+      });
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "function",
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
     expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("withdraw");
     expect(markedChips()).toHaveLength(1);
     expect(markedChips()[0]).toHaveTextContent("EOA");
