@@ -82,6 +82,27 @@ export function reachChipText(hop) {
   return `reach · ${hop} hops`;
 }
 
+// Violet of the reach chips (--ps-node-chip--reach border / legend swatch), so a
+// highlighted route and the chips it ends at read as one overlay.
+const REACH_EDGE_STROKE = "#a78bfa";
+
+// Whether a drawn edge carries one of the reach-route pairs in `pathEdges`
+// (a Set of "from>to", lowercased). Cross-group edges are aggregated into
+// group→group bundles that keep the underlying contract pairs in `data.samples`,
+// so the samples are the truth about what a bundle carries; an unaggregated edge
+// is its own single pair. ANY matching sample lights the bundle — the same rule
+// that decides whether a bundle earns a connection chip.
+export function edgeOnReachPath(edge, pathEdges) {
+  if (!edge || !pathEdges || pathEdges.size === 0) return false;
+  const samples = edge.data?.samples;
+  const pairs = samples && samples.length
+    ? samples.map((s) => [s.from, s.to])
+    : [[edge.source, edge.target]];
+  return pairs.some(
+    ([from, to]) => from && to && pathEdges.has(`${from.toLowerCase()}>${to.toLowerCase()}`),
+  );
+}
+
 // Multichain (inv. 13): every entity this canvas receives — machines,
 // principals, fund-flow endpoints — belongs to the single active `chain` (the
 // page is chain-scoped upstream in ProtocolSurface). So bare-address keys in
@@ -89,7 +110,7 @@ export function reachChipText(hop) {
 // collision-free by construction: two chains never share this dataset. The
 // entity-identity lookups (principal resolution, per-entity detail maps) key by
 // (chain, address) via entityKey so they carry chain explicitly regardless.
-export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, onSelectMachine, onSelectPrincipal }) {
+export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
@@ -424,6 +445,23 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       }
     }
 
+    // Reach ROUTES: the drawn edges lying on the closure's BFS tree, so each hop
+    // chip has a visible line back to the selection instead of a bare number.
+    // Two endpoint sets fall out of the pair list and carry the highlight onto
+    // the per-contract stubs — a bundled hop is drawn as
+    // (out-stub → group bundle → in-stub), and lighting only the middle segment
+    // would break the route in exactly the places grouping hid it.
+    const reachPathActive = Boolean(reachActive && reachPathEdges && reachPathEdges.size);
+    const reachPathSources = new Set();
+    const reachPathTargets = new Set();
+    if (reachPathActive) {
+      for (const pair of reachPathEdges) {
+        const [from, to] = pair.split(">");
+        reachPathSources.add(from);
+        reachPathTargets.add(to);
+      }
+    }
+
     setNodes(
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
@@ -513,22 +551,44 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       // contract's group box.)
       const stubContractEnd = e.data?.stub ? (e.data.inbound ? tgt : src) : null;
       const stubRelated = stubContractEnd != null && connectedNodes.has(stubContractEnd);
+      // A stub is on a route when its contract end plays the matching ROLE in
+      // one: the outbound stub is where a hop leaves that contract, the inbound
+      // stub where a hop lands on it. Checking the role (not mere membership)
+      // keeps a stub that only carries unrelated traffic out of the highlight.
+      const stubOnReachPath =
+        reachPathActive &&
+        stubContractEnd != null &&
+        (e.data.inbound ? reachPathTargets.has(stubContractEnd) : reachPathSources.has(stubContractEnd));
+      const onReachPath =
+        reachPathActive && (stubOnReachPath || edgeOnReachPath(e, reachPathEdges));
+      // Edges the existing selection treatment already owns (directly connected,
+      // the selected contract's own bundles, its stubs) keep it: a hop-1 edge is
+      // stated by the acts-on chips, and restyling it violet would demote the
+      // stronger claim to the weaker one.
+      const selectionOwned = directlyConnected || relatedEdgeIds.has(e.id) || stubRelated;
       const related = hiActive
         ? edgeInAudit
-        : (!sel || directlyConnected || relatedEdgeIds.has(e.id) || stubRelated || (connectedNodes.has(src) && connectedNodes.has(tgt)));
+        : (!sel || selectionOwned || onReachPath || (connectedNodes.has(src) && connectedNodes.has(tgt)));
+      const reachStyled = !hiActive && onReachPath && !selectionOwned;
+      const baseWidth = e.style?.strokeWidth || 1;
       return {
         ...e,
         style: {
           ...e.style,
           opacity: related ? 1 : 0.08,
-          strokeWidth: related && sel ? 2 : (e.style?.strokeWidth || 1),
+          ...(reachStyled ? { stroke: REACH_EDGE_STROKE } : null),
+          strokeWidth: reachStyled
+            ? Math.max(2.5, baseWidth)
+            : related && sel
+            ? 2
+            : baseWidth,
         },
         animated: related && e.animated,
       };
     });
 
     setEdges(nextEdges);
-  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, reachDistances, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
+  }, [initNodes, initEdges, principals, chain, selectedAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal, selectController, measureBand]);
 
   return (
     <div className="ps-canvas-wrap">

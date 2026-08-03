@@ -15,6 +15,7 @@ import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import {
   buildControlAdjacency,
   buildControlEdgeIndex,
+  controlPathEdges,
   controlReach,
   edgeClaims,
   flowOnChain,
@@ -710,15 +711,23 @@ function ProtocolSurface({
 
   // Reach overlay: every contract the SELECTED entity reaches transitively over
   // the control graph, keyed to the hop distance on the shortest route. The
-  // canvas marks those nodes with a reach chip, which is the only way the
-  // multi-hop control relation is visible — it deliberately draws no
-  // control-edge lines (the fanout reads as a hairball). Memoized per selection:
-  // one BFS over a few hundred edges, never a walk per render.
+  // canvas chips those nodes with the hop count. Memoized per selection: one BFS
+  // over a few hundred edges, never a walk per render.
   const reachDistances = useMemo(() => {
     if (!selection?.address) return null;
     const reach = controlReach(selection.address, controlAdjacency);
     return reach.size ? reach : null;
   }, [selection, controlAdjacency]);
+
+  // The routes behind those hop counts: the BFS-tree edges of the same closure.
+  // The canvas lights the drawn edges matching these pairs, so a "reach · 3 hops"
+  // chip has a visible line back to the selection rather than asking the reader
+  // to take the number on faith. Synthesizes nothing — a pair with no drawn edge
+  // (an intra-group hop inside a collapsed box) simply lights nothing.
+  const reachPathEdges = useMemo(
+    () => (reachDistances ? controlPathEdges(selection?.address, controlAdjacency, reachDistances) : null),
+    [selection, controlAdjacency, reachDistances],
+  );
 
   // Human name for an address on this graph: the contract's, else the
   // principal's, else the short address. Never a bare "unknown" — the short
@@ -865,6 +874,7 @@ function ProtocolSurface({
             focusedAddress={focusedAddress}
             highlightedAddresses={highlightedAddresses}
             reachDistances={reachDistances}
+            reachPathEdges={reachPathEdges}
             onSelectMachine={(m) => {
               // Auto-switch to Detail when the user clicks a contract
               // ON THE CANVAS so the function lanes are immediately

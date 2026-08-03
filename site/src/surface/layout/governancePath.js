@@ -106,6 +106,36 @@ export function controlReach(address, adjacency) {
   return out;
 }
 
+// The BFS-tree edges of a reach closure: every control edge `u → v` where v sits
+// exactly one hop further from the start than u does. Returned as a Set of
+// "from>to" keys (both lowercased).
+//
+// Every such edge lies on SOME shortest route from the start to v, and every
+// shortest route is made only of such edges — so highlighting this set draws the
+// routes the hop counts on the reach chips were derived from, and nothing else.
+// A diamond (two hop-1 parents both reaching the same hop-2 child) contributes
+// both edges: both are genuine shortest routes, and dropping either would claim
+// a route the walk never ruled out.
+//
+// `distances` is a controlReach() result over the same adjacency (start excluded,
+// hop ≥ 1); the start is at hop 0. Edges leaving the closure, edges running
+// backwards, and same-tier edges are all excluded — none of them shortens a
+// route, so drawing them would overstate what the walk proved.
+export function controlPathEdges(address, adjacency, distances) {
+  const start = String(address || "").toLowerCase();
+  const out = new Set();
+  if (!start || !adjacency || !distances) return out;
+  const hopOf = (addr) => (addr === start ? 0 : distances.has(addr) ? distances.get(addr) : null);
+  for (const from of [start, ...distances.keys()]) {
+    const hop = hopOf(from);
+    if (hop == null) continue;
+    for (const to of adjacency.get(from) || []) {
+      if (hopOf(to) === hop + 1) out.add(`${from}>${to}`);
+    }
+  }
+  return out;
+}
+
 // Shortest control-graph route from any of `fromAddresses` to `toAddress`.
 //
 // Returns { host, hops: [{ from, to, flow }] } for a route this graph carries,

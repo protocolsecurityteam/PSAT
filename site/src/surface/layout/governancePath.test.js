@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildControlAdjacency,
   buildControlEdgeIndex,
+  controlPathEdges,
   controlReach,
   dedupeAndTagRows,
   edgeClaims,
@@ -135,6 +136,75 @@ describe("controlReach", () => {
   it("is empty for an address with no outbound control edges", () => {
     expect(controlReach(NFT, buildControlAdjacency(REACH_FLOWS)).size).toBe(0);
     expect(controlReach("", buildControlAdjacency(REACH_FLOWS)).size).toBe(0);
+  });
+});
+
+describe("controlPathEdges", () => {
+  const adj = buildControlAdjacency(REACH_FLOWS);
+  const pathEdges = controlPathEdges(POOL, adj, controlReach(POOL, adj));
+
+  it("carries every hop of the spine, in direction", () => {
+    expect(pathEdges.has(`${POOL}>${SOLVER}`)).toBe(true);
+    expect(pathEdges.has(`${SOLVER}>${TELLER}`)).toBe(true);
+    expect(pathEdges.has(`${TELLER}>${VAULT}`)).toBe(true);
+    expect(pathEdges.has(`${VAULT}>${FAR}`)).toBe(true);
+    expect(pathEdges.has(`${FAR}>${NFT}`)).toBe(true);
+  });
+
+  it("drops the cycle back to the start and the off-walk branch", () => {
+    // SOLVER→POOL runs backwards (hop 1 → hop 0) — no route it shortens.
+    expect(pathEdges.has(`${SOLVER}>${POOL}`)).toBe(false);
+    // TIMELOCK is outside the closure entirely.
+    expect(pathEdges.has(`${TIMELOCK}>${NFT}`)).toBe(false);
+    // The value flow was never a control hop.
+    expect(pathEdges.has(`${POOL}>${TELLER}`)).toBe(false);
+    expect(pathEdges.size).toBe(5);
+  });
+
+  it("keeps BOTH parents' edges into a shared child (diamond)", () => {
+    // start → A, start → B, A → C, B → C. C is hop 2 either way, so both
+    // arriving edges are shortest routes: dropping one would claim a route the
+    // walk never ruled out.
+    const dAdj = buildControlAdjacency([
+      { from: POOL, to: SOLVER, type: "controls" },
+      { from: POOL, to: TELLER, type: "controls" },
+      { from: SOLVER, to: VAULT, type: "controls" },
+      { from: TELLER, to: VAULT, type: "controls" },
+    ]);
+    const edges = controlPathEdges(POOL, dAdj, controlReach(POOL, dAdj));
+    expect([...edges].sort()).toEqual(
+      [
+        `${POOL}>${SOLVER}`,
+        `${POOL}>${TELLER}`,
+        `${SOLVER}>${VAULT}`,
+        `${TELLER}>${VAULT}`,
+      ].sort(),
+    );
+  });
+
+  it("drops a same-tier edge — it is a detour, not a route", () => {
+    const sAdj = buildControlAdjacency([
+      { from: POOL, to: SOLVER, type: "controls" },
+      { from: POOL, to: TELLER, type: "controls" },
+      { from: SOLVER, to: TELLER, type: "controls" }, // hop 1 → hop 1
+    ]);
+    const edges = controlPathEdges(POOL, sAdj, controlReach(POOL, sAdj));
+    expect(edges.has(`${SOLVER}>${TELLER}`)).toBe(false);
+    expect(edges.size).toBe(2);
+  });
+
+  it("is empty without a start, an adjacency, or distances", () => {
+    expect(controlPathEdges("", adj, controlReach(POOL, adj)).size).toBe(0);
+    expect(controlPathEdges(POOL, null, controlReach(POOL, adj)).size).toBe(0);
+    expect(controlPathEdges(POOL, adj, null).size).toBe(0);
+    // A start with no outbound control edges reaches nothing to route to.
+    expect(controlPathEdges(NFT, adj, controlReach(NFT, adj)).size).toBe(0);
+  });
+
+  it("lowercases both endpoints so canvas addresses match", () => {
+    const uAdj = buildControlAdjacency([{ from: POOL.toUpperCase(), to: SOLVER.toUpperCase(), type: "controls" }]);
+    const edges = controlPathEdges(POOL.toUpperCase(), uAdj, controlReach(POOL, uAdj));
+    expect([...edges]).toEqual([`${POOL}>${SOLVER}`]);
   });
 });
 
