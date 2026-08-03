@@ -13,10 +13,11 @@ import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import {
+  buildAgencyIndex,
   buildControlAdjacency,
   buildControlEdgeIndex,
+  controlClosure,
   controlPathEdges,
-  controlReach,
   edgeClaims,
   flowOnChain,
   shortestControlPath,
@@ -371,6 +372,14 @@ function ProtocolSurface({
     [companyData, activeChain]
   );
 
+  // Per-(controller, contract) agency witnesses — what licenses the reach walk
+  // to continue THROUGH a node rather than stop at it. Built once beside the
+  // adjacency it gates.
+  const agencyIndex = useMemo(
+    () => buildAgencyIndex(companyData?.principals || [], activeChain),
+    [companyData, activeChain]
+  );
+
   // Same control edges, keyed so a hop can name itself (type + the witnessed
   // relation/role label the payload carries). Feeds the reached-from path block
   // on the entity card; built once here, never per render inside it.
@@ -709,24 +718,28 @@ function ProtocolSurface({
     return merged.size ? merged : null;
   }, [auditHighlights, agentHighlights]);
 
-  // Reach overlay: every contract the SELECTED entity reaches transitively over
-  // the control graph, keyed to the hop distance on the shortest route. The
-  // canvas chips those nodes with the hop count. Memoized per selection: one BFS
-  // over a few hundred edges, never a walk per render.
-  const reachDistances = useMemo(() => {
+  // Reach overlay: every contract the SELECTED entity reaches over the control
+  // graph, keyed to the hop distance on the shortest route. Transitivity is
+  // licensed per hop by the agency index: where the payload witnesses what the
+  // standpoint can do to a target, only an agency-conferring capability lets
+  // the walk continue through it — a pause-only principal reaches what it
+  // pauses and nothing beyond. Memoized per selection: one BFS over a few
+  // hundred edges, never a walk per render.
+  const reachClosure = useMemo(() => {
     if (!selection?.address) return null;
-    const reach = controlReach(selection.address, controlAdjacency);
-    return reach.size ? reach : null;
-  }, [selection, controlAdjacency]);
+    const closure = controlClosure(selection.address, controlAdjacency, agencyIndex);
+    return closure.distances.size ? closure : null;
+  }, [selection, controlAdjacency, agencyIndex]);
+  const reachDistances = reachClosure ? reachClosure.distances : null;
 
-  // The routes behind those hop counts: the BFS-tree edges of the same closure.
+  // The routes behind those hop counts: the walk-tree edges of the same closure.
   // The canvas lights the drawn edges matching these pairs, so a "reach · 3 hops"
   // chip has a visible line back to the selection rather than asking the reader
   // to take the number on faith. Synthesizes nothing — a pair with no drawn edge
   // (an intra-group hop inside a collapsed box) simply lights nothing.
   const reachPathEdges = useMemo(
-    () => (reachDistances ? controlPathEdges(selection?.address, controlAdjacency, reachDistances) : null),
-    [selection, controlAdjacency, reachDistances],
+    () => (reachClosure ? controlPathEdges(selection?.address, controlAdjacency, reachClosure) : null),
+    [selection, controlAdjacency, reachClosure],
   );
 
   // Human name for an address on this graph: the contract's, else the
@@ -950,6 +963,7 @@ function ProtocolSurface({
               highlightedCaller={radarCallerAddress}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
+              agencyIndex={agencyIndex}
               reachPath={reachPath}
               machines={machines}
               chain={activeChain}

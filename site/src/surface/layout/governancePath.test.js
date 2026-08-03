@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  buildAgencyIndex,
   buildControlAdjacency,
   buildControlEdgeIndex,
+  controlClosure,
   controlPathEdges,
   controlReach,
   dedupeAndTagRows,
@@ -141,7 +143,7 @@ describe("controlReach", () => {
 
 describe("controlPathEdges", () => {
   const adj = buildControlAdjacency(REACH_FLOWS);
-  const pathEdges = controlPathEdges(POOL, adj, controlReach(POOL, adj));
+  const pathEdges = controlPathEdges(POOL, adj, controlClosure(POOL, adj));
 
   it("carries every hop of the spine, in direction", () => {
     expect(pathEdges.has(`${POOL}>${SOLVER}`)).toBe(true);
@@ -171,7 +173,7 @@ describe("controlPathEdges", () => {
       { from: SOLVER, to: VAULT, type: "controls" },
       { from: TELLER, to: VAULT, type: "controls" },
     ]);
-    const edges = controlPathEdges(POOL, dAdj, controlReach(POOL, dAdj));
+    const edges = controlPathEdges(POOL, dAdj, controlClosure(POOL, dAdj));
     expect([...edges].sort()).toEqual(
       [
         `${POOL}>${SOLVER}`,
@@ -188,23 +190,144 @@ describe("controlPathEdges", () => {
       { from: POOL, to: TELLER, type: "controls" },
       { from: SOLVER, to: TELLER, type: "controls" }, // hop 1 → hop 1
     ]);
-    const edges = controlPathEdges(POOL, sAdj, controlReach(POOL, sAdj));
+    const edges = controlPathEdges(POOL, sAdj, controlClosure(POOL, sAdj));
     expect(edges.has(`${SOLVER}>${TELLER}`)).toBe(false);
     expect(edges.size).toBe(2);
   });
 
-  it("is empty without a start, an adjacency, or distances", () => {
-    expect(controlPathEdges("", adj, controlReach(POOL, adj)).size).toBe(0);
-    expect(controlPathEdges(POOL, null, controlReach(POOL, adj)).size).toBe(0);
+  it("is empty without a start, an adjacency, or a closure", () => {
+    expect(controlPathEdges("", adj, controlClosure(POOL, adj)).size).toBe(0);
+    expect(controlPathEdges(POOL, null, controlClosure(POOL, adj)).size).toBe(0);
     expect(controlPathEdges(POOL, adj, null).size).toBe(0);
     // A start with no outbound control edges reaches nothing to route to.
-    expect(controlPathEdges(NFT, adj, controlReach(NFT, adj)).size).toBe(0);
+    expect(controlPathEdges(NFT, adj, controlClosure(NFT, adj)).size).toBe(0);
   });
 
   it("lowercases both endpoints so canvas addresses match", () => {
     const uAdj = buildControlAdjacency([{ from: POOL.toUpperCase(), to: SOLVER.toUpperCase(), type: "controls" }]);
-    const edges = controlPathEdges(POOL.toUpperCase(), uAdj, controlReach(POOL, uAdj));
+    const edges = controlPathEdges(POOL.toUpperCase(), uAdj, controlClosure(POOL, uAdj));
     expect([...edges]).toEqual([`${POOL}>${SOLVER}`]);
+  });
+});
+
+// The etherfi pause-EOA shape, in miniature: an EOA whose only witnessed power
+// on POOL is pause, while POOL is stored as VAULT's controller — the walk must
+// reach POOL and stop, never claiming VAULT through a power that confers no
+// agency. TIMELOCK is the contrast case: witnessed ownership over POOL, so the
+// walk continues through it.
+const EOA = "0x9999999999999999999999999999999999999999";
+
+const GATED_FLOWS = [
+  { from: EOA, to: POOL, type: "principal", relation: "role_principal", label: "roles 14" },
+  { from: TIMELOCK, to: POOL, type: "principal", relation: "controller_value", label: "owner" },
+  { from: POOL, to: VAULT, type: "controller", relation: "controller_value", label: "pool" },
+  { from: VAULT, to: NFT, type: "controls" },
+];
+
+const GATED_PRINCIPALS = [
+  {
+    address: EOA,
+    controls_detail: [{ address: POOL, chain: "ethereum", capabilities: ["pause"], functions: ["pauseUntil"] }],
+  },
+  {
+    address: TIMELOCK,
+    controls_detail: [{ address: POOL, chain: "ethereum", capabilities: ["ownership", "pause"], functions: ["upgradeTo"] }],
+  },
+];
+
+describe("buildAgencyIndex", () => {
+  it("keeps only agency-conferring targets, but keeps EVERY detailed principal", () => {
+    const index = buildAgencyIndex(GATED_PRINCIPALS);
+    // Pause confers no agency — the entry exists (the principal IS emitted,
+    // its powers are witnessed) and licenses nothing.
+    expect(index.get(EOA).size).toBe(0);
+    expect([...index.get(TIMELOCK)]).toEqual([POOL]);
+  });
+
+  it("has no entry for an address the payload never details — a different state from empty", () => {
+    const index = buildAgencyIndex(GATED_PRINCIPALS);
+    expect(index.has(POOL)).toBe(false);
+  });
+
+  it("scopes detail entries to the active chain (inv. 13), keeping legacy chainless entries", () => {
+    const index = buildAgencyIndex(
+      [
+        {
+          address: EOA,
+          controls_detail: [
+            { address: POOL, chain: "base", capabilities: ["ownership"] },
+            { address: VAULT, capabilities: ["upgrade"] }, // legacy, no chain
+          ],
+        },
+      ],
+      "ethereum",
+    );
+    expect(index.get(EOA).has(POOL)).toBe(false);
+    expect(index.get(EOA).has(VAULT)).toBe(true);
+  });
+});
+
+describe("controlClosure — agency gating", () => {
+  const adj = buildControlAdjacency(GATED_FLOWS);
+  const agency = buildAgencyIndex(GATED_PRINCIPALS);
+
+  it("stops at a target held only by a non-agency power: pause reaches, it never confers", () => {
+    const { distances } = controlClosure(EOA, adj, agency);
+    expect(distances.get(POOL)).toBe(1);
+    expect(distances.has(VAULT)).toBe(false);
+    expect(distances.has(NFT)).toBe(false);
+  });
+
+  it("continues through a target held by an agency power", () => {
+    const { distances } = controlClosure(TIMELOCK, adj, agency);
+    expect(distances.get(POOL)).toBe(1);
+    expect(distances.get(VAULT)).toBe(2);
+    expect(distances.get(NFT)).toBe(3);
+  });
+
+  it("walks blind from a standpoint the payload holds no capability detail for", () => {
+    // POOL is a plain contract node — the backend closure walks contract nodes
+    // blind, and so does this one.
+    const { distances } = controlClosure(POOL, adj, agency);
+    expect(distances.get(VAULT)).toBe(1);
+    expect(distances.get(NFT)).toBe(2);
+  });
+
+  it("without an agency index the walk is blind everywhere (machine-only reconstruction)", () => {
+    const { distances } = controlClosure(EOA, adj, null);
+    expect(distances.get(NFT)).toBe(3);
+  });
+
+  it("lights no route out of a terminal node", () => {
+    const closure = controlClosure(EOA, adj, agency);
+    const edges = controlPathEdges(EOA, adj, closure);
+    expect([...edges]).toEqual([`${EOA}>${POOL}`]);
+  });
+
+  it("re-enters a terminal direct target through an agency route, keeping the shorter chip", () => {
+    // S pauses B directly, but also owns A which controls B: B's chip stays
+    // hop 1, and the walk resumes through B at hop 2 — the ownership route is
+    // one the control graph carries, and hiding what lies beyond it would
+    // under-claim.
+    const dAdj = buildControlAdjacency([
+      { from: EOA, to: VAULT, type: "principal" }, // pause-only, terminal
+      { from: EOA, to: POOL, type: "principal" }, // ownership, continues
+      { from: POOL, to: VAULT, type: "controller" },
+      { from: VAULT, to: NFT, type: "controls" },
+    ]);
+    const dAgency = buildAgencyIndex([
+      {
+        address: EOA,
+        controls_detail: [
+          { address: VAULT, capabilities: ["pause"] },
+          { address: POOL, capabilities: ["ownership"] },
+        ],
+      },
+    ]);
+    const { distances, expandHops } = controlClosure(EOA, dAdj, dAgency);
+    expect(distances.get(VAULT)).toBe(1); // shortest reach: the direct pause
+    expect(expandHops.get(VAULT)).toBe(2); // expansion resumes via ownership of POOL
+    expect(distances.get(NFT)).toBe(3);
   });
 });
 

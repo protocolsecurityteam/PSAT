@@ -28,6 +28,7 @@ export function EntityCard({
   highlightedCaller = null,
   governsIndex,
   controlAdjacency,
+  agencyIndex = null,
   reachPath = null,
   machines = [],
   chain = "ethereum",
@@ -67,12 +68,14 @@ export function EntityCard({
   }, [governsIndex, address, machineByAddr]);
 
   // Governance-path rows: server reachability for a principal facet, else the
-  // client-side transitive control walk for a machine-only authority. Filtered
-  // to known machines (so we can name + focus them), deduped, proxy/impl-tagged.
+  // client-side agency-gated control walk for a machine-only authority — the
+  // same walk the canvas reach overlay draws, so the two never disagree.
+  // Filtered to known machines (so we can name + focus them), deduped,
+  // proxy/impl-tagged.
   const pathRows = useMemo(() => {
     const source = principal?.controls?.length
       ? principal.controls
-      : governancePathTargets(address, controlAdjacency);
+      : governancePathTargets(address, controlAdjacency, agencyIndex);
     const rows = [];
     for (const addr of source) {
       const m = machineByAddr.get(String(addr).toLowerCase());
@@ -80,7 +83,7 @@ export function EntityCard({
       rows.push({ address: m.address, name: m.name, is_proxy: Boolean(m.is_proxy), total_usd: m.total_usd || 0 });
     }
     return dedupeAndTagRows(rows);
-  }, [principal, address, controlAdjacency, machineByAddr]);
+  }, [principal, address, controlAdjacency, agencyIndex, machineByAddr]);
 
   const highlightedFunction = useMemo(
     () => (isMachine ? machineFunctions(machine).find((fnView) => fnView.key === highlightedFunctionKey) || null : null),
