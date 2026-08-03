@@ -483,11 +483,6 @@
   box-shadow: none;
 }
 
-.ps-machine.ps-machine-score-highlight {
-  border-color: rgba(251, 113, 133, 0.65);
-  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.45);
-}
-
 /* Contract node on canvas */
 .ps-node {
   position: relative;

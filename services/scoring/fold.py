@@ -1002,6 +1002,10 @@ def _aggregate(
                 "raw_points": round(K.SEV_SCALE * severity * row.weakness * band, 4),
                 "n_functions": len({(i.signal.deployment_address, i.signal.selector) for i in row.instances}),
                 "n_entities": len(row.seeds),
+                # The deployment entities the row's instances were witnessed ON
+                # — the direct targets — as distinct from reach_entities, the
+                # priced closure the capability reaches through control edges.
+                "host_entities": sorted(row.seeds),
                 "reach_entities": sorted(reach),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),

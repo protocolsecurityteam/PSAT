@@ -1393,7 +1393,7 @@ describe("ProtocolSurface — score arrivals land on the one sidebar card", () =
     expectNoCrash();
   });
 
-  it("marks the contract itself when the score row names no function", async () => {
+  it("opens the card unmarked when the score row names no function", async () => {
     const ref = renderWithHandle();
     expect(await arrive(ref, { contractAddress: POOL.address })).toEqual({
       ok: true,
@@ -1401,11 +1401,13 @@ describe("ProtocolSurface — score arrivals land on the one sidebar card", () =
       functionMissing: false,
     });
 
+    // The card opening IS the landing signal — no ring dresses it up, and no
+    // function row claims to be the named one.
     await waitFor(() => {
-      expect(sidebar().querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+      expect(sidebar().querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
     });
-    // Contract-level mark only — no function row claims to be the named one.
     expect(sidebar().querySelector(".ps-port-score-highlight")).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
     noFlyout();
     expectNoCrash();
   });
@@ -1513,7 +1515,8 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     // The Timelock guards `upgrade` on this same card, never `pause` — so the
     // pause row under the Safe's gate is a DIFFERENT action from the pair the
     // score row charged. Ringing it would present the Safe's gate as the
-    // deduced one; the card ring is the honest remainder.
+    // deduced one; the card simply opens, and the caller's `unpaired` outcome
+    // carries the explanation.
     const { result } = await arrive({
       contractAddress: VAULT.address,
       highlight: { functionSignature: "pause", controller: TIMELOCK },
@@ -1521,14 +1524,15 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     expect(result.highlight).toEqual({ function: "unpaired", controller: "not-a-caller" });
 
     await waitFor(() => {
-      expect(document.querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+      expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
     });
     expect(markedRow()).toBeNull();
     expect(markedChips()).toHaveLength(0);
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
     expectNoCrash();
   });
 
-  it("falls back to the whole-card ring when no row on the card answers to the name", async () => {
+  it("opens the card with no mark at all when no row answers to the hinted name", async () => {
     const { result } = await arrive({
       contractAddress: VAULT.address,
       highlight: { functionSignature: "noSuchFunctionHere", controller: SAFE },
@@ -1541,10 +1545,11 @@ describe("ProtocolSurface — a score arrival marks the function/caller pair", (
     });
 
     await waitFor(() => {
-      expect(document.querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+      expect(document.querySelector(".ps-sidebar-content .ps-machine-name")).toHaveTextContent("Vault");
     });
     expect(markedRow()).toBeNull();
     expect(markedChips()).toHaveLength(0);
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
     expectNoCrash();
   });
 

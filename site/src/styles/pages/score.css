@@ -339,6 +339,9 @@ h2.sc-band-title {
 
 .sc-targets.sc-open { white-space: normal; overflow: visible; }
 .sc-targets b { color: var(--muted); font-weight: 600; }
+/* The host is the contract the function is ON — read it a shade stronger than
+   the reach list so direct and transitive never blur. */
+.sc-targets .sc-host b { color: var(--ink); }
 .sc-targets .sc-arr { color: rgba(148, 163, 184, 0.4); }
 .sc-targets .sc-ndp { color: var(--nd); font-style: italic; }
 

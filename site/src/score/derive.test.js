@@ -141,8 +141,15 @@ describe("derive — targets", () => {
     const rows = deductionRows(ETHERFI, index);
     const row = rows.find((r) => r.index === 12);
     expect(row.reachWitnessed).toBe(false);
-    expect(row.targets.length).toBe(undeterminedTargets(F[12], index).length);
-    expect(row.targets.length).toBeGreaterThan(0);
+    // The hosts are shown apart, so the target list holds only the
+    // undetermined entities that are NOT the row's own hosts — on this row
+    // every undetermined instance IS a host, and the list is empty while the
+    // hosts still render.
+    const hostKeys = new Set(row.hosts.map((h) => h.canonical));
+    const expected = undeterminedTargets(F[12], index).filter((t) => !hostKeys.has(t.canonical));
+    expect(row.targets.length).toBe(expected.length);
+    expect(row.hosts.length).toBeGreaterThan(0);
+    expect(F[12].host_entities.length).toBe(3);
   });
 });
 

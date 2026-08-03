@@ -759,7 +759,6 @@ function ProtocolSurface({
   // so the click still lands somewhere visible.
   const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
   const radarCallerAddress = radarFunctionKey ? radarSelection?.callerAddress || null : null;
-  const radarContractHighlight = Boolean(selectedMachine && radarSelection && !radarSelection.functionKey);
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
@@ -879,7 +878,6 @@ function ProtocolSurface({
               onPreview={(addr) => focusPreview(addr)}
               highlightedFunctionKey={radarFunctionKey}
               highlightedCaller={radarCallerAddress}
-              highlightedContract={radarContractHighlight}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
               machines={machines}

@@ -135,12 +135,12 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     const firstRow = container.querySelector(".sc-frow .sc-targets");
-    expect(within(firstRow).getByRole("button", { name: /\+4 more/ })).toBeInTheDocument();
-    await user.click(within(firstRow).getByRole("button", { name: /\+4 more/ }));
+    expect(within(firstRow).getByRole("button", { name: /\+5 more/ })).toBeInTheDocument();
+    await user.click(within(firstRow).getByRole("button", { name: /\+5 more/ }));
     expect(within(firstRow).getByRole("button", { name: "less" })).toBeInTheDocument();
     expect(firstRow.textContent).toContain("0xeda6…4e70");
     await user.click(within(firstRow).getByRole("button", { name: "less" }));
-    expect(within(firstRow).getByRole("button", { name: /\+4 more/ })).toBeInTheDocument();
+    expect(within(firstRow).getByRole("button", { name: /\+5 more/ })).toBeInTheDocument();
   });
 
   it("renders the modeled fix-first recovery from a re-fold", async () => {
@@ -307,6 +307,7 @@ describe("ScoreBand — entities select on the surface", () => {
   // Row 0 of the corpus: EOA 0x2322…, setAuthority, reaching BoringVault first.
   const CONTROLLER = "0x2322ba43eff1542b6a7baed35e66099ea0d12bd1";
   const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
+  const HOST = "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198";
 
   async function openRowZero(onSelectEntity) {
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
@@ -314,25 +315,24 @@ describe("ScoreBand — entities select on the surface", () => {
     return container.querySelector(".sc-frow");
   }
 
-  it("asks for the example function by NAME, naming no host contract", async () => {
+  it("asks for the example function on its published host contract", async () => {
     const onSelectEntity = vi.fn();
     const row = await openRowZero(onSelectEntity);
     const button = within(row).getByRole("button", { name: "setAuthority" });
     await userEvent.setup().click(button);
-    // The document does not publish the contract this function was witnessed
-    // on — `reach_entities` is the priced closure it reaches. Passing the first
-    // reach entity as its host would navigate to a guess: row 0's EOA controls
-    // AtomicQueue, while the first reached contract is BoringVault, whose own
-    // setAuthority is gated by a Safe.
+    // host_entities publishes the contract the function was witnessed on —
+    // row 0's single host is AtomicQueue, never the first reach entity
+    // (BoringVault, whose own setAuthority is someone else's gate).
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
+      address: HOST,
       functionSignature: "setAuthority",
       label: "setAuthority",
       // The controller rides along as a highlight hint so the resolved row can
       // mark the caller chip the row named — it is not a second entity request.
       highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
-    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
+    expect(HOST).not.toBe(FIRST_TARGET);
   });
 
   it("selects the controller named in the principal string, not a unit member", async () => {
@@ -369,9 +369,15 @@ describe("ScoreBand — entities select on the surface", () => {
     const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
     await userEvent.setup().click(within(fix).getByRole("button", { name: "setAuthority" }));
     expect(onSelectEntity).toHaveBeenCalledWith(
-      expect.objectContaining({ functionSignature: "setAuthority", chain: "ethereum" }),
+      expect.objectContaining({
+        functionSignature: "setAuthority",
+        chain: "ethereum",
+        // The fix-first group's worst row has one host, so the callout's
+        // function click lands there directly, pair and all.
+        address: HOST,
+        highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+      }),
     );
-    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
   });
 
   it("hints the example function it displays, never the n it only counts", async () => {
@@ -407,14 +413,23 @@ describe("ScoreBand — entities select on the surface", () => {
     const unwitnessed = lists.filter((el) => el.textContent.includes("reach not witnessed"));
     expect(unwitnessed.length).toBeGreaterThan(0);
     for (const list of unwitnessed) {
-      const buttons = [...list.querySelectorAll('[role="button"]')];
-      expect(buttons.length).toBeGreaterThan(0);
+      // The host buttons are exempt: where the function LIVES is a witnessed
+      // fact regardless of what its reach turned out to be.
+      const hostButtons = [...list.querySelectorAll('.sc-host [role="button"]')];
+      for (const button of hostButtons) {
+        expect(button.getAttribute("title")).toMatch(/the function lives here$/);
+        expect(button.getAttribute("title")).not.toMatch(/reach not witnessed/);
+      }
+      const buttons = [...list.querySelectorAll('[role="button"]')].filter(
+        (b) => !b.closest(".sc-host"),
+      );
       for (const button of buttons) {
         // Still clickable — going to an entity is not a claim about reach —
         // but the third state travels with the control.
         expect(button.getAttribute("aria-label")).toMatch(/reach not witnessed$/);
         expect(button.getAttribute("title")).toMatch(/reach not witnessed$/);
       }
+      expect(hostButtons.length + buttons.length).toBeGreaterThan(0);
     }
     const witnessed = lists.filter((el) => el.querySelector(".sc-arr"));
     for (const list of witnessed) {
@@ -478,7 +493,7 @@ describe("ScoreBand — entities select on the surface", () => {
     expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0x2322…2bd1");
     // Only the target expander is a button; nothing that cannot act is one.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
-    expect(buttons).toEqual(["+4 more"]);
+    expect(buttons).toEqual(["+5 more"]);
   });
 
   it("keeps the wired row's text identical to the unwired one", async () => {

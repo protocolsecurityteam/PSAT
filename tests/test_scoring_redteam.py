@@ -637,6 +637,32 @@ def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
     assert document.grade_exposure == round(100.0 * (1.0 - fraction), 3)
 
 
+def test_host_entities_name_the_deployments_not_the_reach(fold):
+    """The row publishes WHERE its instances live, apart from what they reach.
+
+    A transitive row's reach set can omit the host entirely (the host may be
+    unpriced), leaving a consumer no way to name the contract the function is
+    actually on. host_entities carries the deployment keys verbatim.
+    """
+    signal = sig(
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_V),
+    )
+    document = fold(
+        [signal],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_V: {"usdc": 1_000.0}}),
+    )
+    finding = document.findings[0]
+    assert finding["host_entities"] == [KEY_C]
+    assert finding["reach_entities"] == [KEY_V]
+    assert finding["n_entities"] == 1
+
+
 # --------------------------------------------------------------------------
 # Gates and vocabulary
 # --------------------------------------------------------------------------

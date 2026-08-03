@@ -208,8 +208,14 @@ export function deductionRows(doc, index) {
   const hasNet = findings.some((f) => f?.net_points_lambda !== undefined);
   return ranked.map((entry) => {
     const finding = findings[entry.index];
-    const proven = resolveTargets(finding?.reach_entities, index);
-    const reachWitnessed = proven.length > 0;
+    // The hosts are the contracts the row's functions actually live on — the
+    // direct targets. Reach is the closure those functions endanger THROUGH
+    // the control graph, so a host also present in reach is shown once, as a
+    // host: the two lists answer different questions and must not blur.
+    const hosts = resolveTargets(finding?.host_entities, index);
+    const hostKeys = new Set(hosts.map((h) => h.canonical));
+    const reachWitnessed = (finding?.reach_entities || []).length > 0;
+    const proven = resolveTargets(finding?.reach_entities, index).filter((t) => !hostKeys.has(t.canonical));
     // The published net is the charge the grade was actually built from; the
     // re-fold only stands in where the producer published no net for this row.
     const net = hasNet ? publishedNet(finding, entry.net) : null;
@@ -229,7 +235,10 @@ export function deductionRows(doc, index) {
       trackPct: maxRaw && entry.raw !== null ? (entry.raw / maxRaw) * 100 : 0,
       fillPct: maxRaw && net !== null ? (net / maxRaw) * 100 : 0,
       reachWitnessed,
-      targets: reachWitnessed ? proven : undeterminedTargets(finding, index),
+      hosts,
+      targets: reachWitnessed
+        ? proven
+        : undeterminedTargets(finding, index).filter((t) => !hostKeys.has(t.canonical)),
       undeterminedCount: (finding?.undetermined_instances || []).length,
     };
   });
@@ -372,9 +381,11 @@ export function fixFirst(doc, rows) {
     lambdaAfter: after,
     subsumed,
     exampleFunction: (group.rows[0].finding?.example_functions || [])[0] || null,
-    // The chain the function was witnessed on. NOT a host contract — the
-    // document does not publish one; the surface graph resolves the host.
     chain: group.rows[0].finding?.chain || null,
+    // The host is published only when the row's instances live on exactly one
+    // contract — the displayed example function is then unambiguously on it.
+    host: group.rows[0].hosts?.length === 1 ? group.rows[0].hosts[0] : null,
+    controller: group.rows[0].controller || null,
   };
 }
 

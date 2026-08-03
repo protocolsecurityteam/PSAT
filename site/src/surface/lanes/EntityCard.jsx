@@ -25,7 +25,6 @@ export function EntityCard({
   onPreview,
   highlightedFunctionKey,
   highlightedCaller = null,
-  highlightedContract = false,
   governsIndex,
   controlAdjacency,
   machines = [],
@@ -121,7 +120,7 @@ export function EntityCard({
 
   return (
     <article
-      className={`ps-machine${highlightedContract ? " ps-machine-score-highlight" : ""}`}
+      className="ps-machine"
       style={accent ? { borderLeft: `2px solid ${accent}` } : undefined}
     >
       <header className="ps-machine-header">

@@ -92,16 +92,16 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     Element.prototype.scrollIntoView = scrollIntoView;
   });
 
-  it("asks for the example function by name and lets the graph find its host", async () => {
+  it("asks for the example function on the host the document publishes", async () => {
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
     await user.click(within(firstRow()).getByRole("button", { name: "setAuthority" }));
-    // No contractAddress: the score document publishes no host for the
-    // function, and the first reached contract is not one.
+    // host_entities names the function's own contract — the request selects it
+    // directly instead of asking the graph to resolve the bare name.
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
-      contractAddress: "",
+      contractAddress: "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198",
       functionSignature: "setAuthority",
       highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
