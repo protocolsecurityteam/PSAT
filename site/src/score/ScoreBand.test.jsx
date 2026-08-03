@@ -328,6 +328,9 @@ describe("ScoreBand — entities select on the surface", () => {
       chain: "ethereum",
       functionSignature: "setAuthority",
       label: "setAuthority",
+      // The controller rides along as a highlight hint so the resolved row can
+      // mark the caller chip the row named — it is not a second entity request.
+      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
     expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
   });
@@ -353,6 +356,9 @@ describe("ScoreBand — entities select on the surface", () => {
       chain: "ethereum",
       address: FIRST_TARGET,
       label: "BoringVault",
+      // The contract is what is asked for; the pair the row was about rides
+      // along for the card to mark if it carries it.
+      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
   });
 
@@ -366,6 +372,22 @@ describe("ScoreBand — entities select on the surface", () => {
       expect.objectContaining({ functionSignature: "setAuthority", chain: "ethereum" }),
     );
     expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
+  });
+
+  it("hints the example function it displays, never the n it only counts", async () => {
+    // Row 4 charges 60 functions and displays one of them. The hint has to be
+    // the one the user read: naming the other 59 would mark rows the row never
+    // showed, and naming none would drop the mark the click was for.
+    const onSelectEntity = vi.fn();
+    const { container } = renderBand({ score: ETHERFI, onSelectEntity });
+    await openBreakdown();
+    const row = container.querySelectorAll(".sc-frow")[4];
+    expect(row.textContent).toContain("60 functions");
+    const targets = row.querySelector(".sc-targets");
+    await userEvent.setup().click(within(targets).getAllByRole("button")[0]);
+    const { highlight } = onSelectEntity.mock.calls[0][0];
+    expect(highlight.functionSignature).toBe("setAuthority");
+    expect(highlight.controller).toBe(ETHERFI.findings[4].principal.match(/0x[0-9a-f]{40}/)[0]);
   });
 
   it("activates from the keyboard, as the role it carries promises", async () => {

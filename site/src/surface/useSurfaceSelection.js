@@ -50,12 +50,20 @@ function reducer(state, action) {
     }
     case "radar": {
       // Contract selection + score-arrival sub-mode (what the sidebar card
-      // highlights); guardKey == the example fn.
+      // highlights); guardKey == the example fn. callerAddress is the one
+      // caller chip inside that row the score row named — verified against the
+      // function's own caller list before it gets here, and dropped outright
+      // when no function resolved, since a marked chip with no marked row would
+      // claim a pair the card is not showing.
       const address = action.address ? action.address.toLowerCase() : null;
+      const functionKey = action.functionKey ?? null;
       return {
         selection: address ? { address, hint: null } : null,
-        guardKey: action.functionKey ?? null,
-        radar: { functionKey: action.functionKey ?? null },
+        guardKey: functionKey,
+        radar: {
+          functionKey,
+          callerAddress: functionKey && action.callerAddress ? action.callerAddress.toLowerCase() : null,
+        },
         focus: address ? bumpFocus(state, address) : state.focus,
       };
     }
@@ -114,7 +122,8 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName, c
 
   const guard = useCallback((key) => dispatch({ type: "guard", key }), []);
   const radar = useCallback(
-    (address, functionKey) => dispatch({ type: "radar", address, functionKey }),
+    (address, functionKey, callerAddress = null) =>
+      dispatch({ type: "radar", address, functionKey, callerAddress }),
     [],
   );
   const focusPreview = useCallback((address) => dispatch({ type: "focusPreview", address }), []);

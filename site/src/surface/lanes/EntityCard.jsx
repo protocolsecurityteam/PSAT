@@ -24,6 +24,7 @@ export function EntityCard({
   onNavigate,
   onPreview,
   highlightedFunctionKey,
+  highlightedCaller = null,
   highlightedContract = false,
   governsIndex,
   controlAdjacency,
@@ -231,6 +232,7 @@ export function EntityCard({
             onNavigate={onNavigate}
             onPreview={onPreview}
             highlightedFunctionKey={highlightedFunctionKey}
+            highlightedCaller={highlightedCaller}
           />
           {machine.lanes.ops.length > 0 && (
             <OpsLane
@@ -239,6 +241,7 @@ export function EntityCard({
               onNavigate={onNavigate}
               onPreview={onPreview}
               highlightedFunctionKey={highlightedFunctionKey}
+              highlightedCaller={highlightedCaller}
             />
           )}
         </>
@@ -252,6 +255,7 @@ export function EntityCard({
           onNavigate={onNavigate}
           onPreview={onPreview}
           highlightedFunctionKey={highlightedFunctionKey}
+          highlightedCaller={highlightedCaller}
         />
       )}
       {isMachine && activeTab === "outflows" && (
@@ -263,6 +267,7 @@ export function EntityCard({
           onNavigate={onNavigate}
           onPreview={onPreview}
           highlightedFunctionKey={highlightedFunctionKey}
+          highlightedCaller={highlightedCaller}
         />
       )}
       {isMachine && activeTab === "balances" && <BalanceTable machine={machine} />}

@@ -103,6 +103,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
       chain: "ethereum",
       contractAddress: "",
       functionSignature: "setAuthority",
+      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
     expect(scrollIntoView.mock.instances[0]).toBe(document.querySelector(".company-surface-band"));
@@ -120,17 +121,49 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     });
   });
 
-  it("asks for a target contract, with no function", async () => {
+  it("asks for a target contract, with no function, carrying the pair to mark", async () => {
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
     const targets = firstRow().querySelector(".sc-targets");
     await user.click(within(targets).getByRole("button", { name: /BoringVault/ }));
+    // The contract is the request; the row's example function + controller
+    // travel beside it as the hint, never as a second entity to resolve.
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
       contractAddress: FIRST_TARGET,
       functionSignature: "",
+      highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
+  });
+
+  it("keeps the controller's own click free of a highlight hint", async () => {
+    const user = userEvent.setup();
+    render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
+    await openBreakdown(user);
+    await user.click(within(firstRow()).getByRole("button", { name: /0x2322…2bd1/ }));
+    // The principal card is the whole answer to "who is this" — there is no
+    // function row on it to pair with.
+    expect(selectExample.mock.calls[0][0]).not.toHaveProperty("highlight");
+  });
+
+  it("says nothing when the card could not carry the hinted pair", async () => {
+    // The hint is an extra, not the request: a click that landed on the
+    // contract the user asked for is a clean landing even when nothing inside
+    // it could be marked, and a notice would report a miss that did not happen.
+    selectExample.mockReturnValue({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "not-on-card", controller: "not-a-caller" },
+    });
+    const user = userEvent.setup();
+    render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
+    await openBreakdown(user);
+    const targets = firstRow().querySelector(".sc-targets");
+    await user.click(within(targets).getByRole("button", { name: /BoringVault/ }));
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(scrollIntoView).toHaveBeenCalled();
   });
 
   it("reports an entity the graph does not carry instead of scrolling to nothing", async () => {

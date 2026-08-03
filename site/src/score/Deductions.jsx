@@ -5,10 +5,21 @@ import EntityButton from "./EntityButton.jsx";
 const VISIBLE_ROWS = 8;
 const TARGETS_SHORT = 3;
 
+// What this row is ABOUT, carried alongside the entity a click asks for: the
+// example function the row DISPLAYS (never the other n−1 it counts — the user
+// read this one) and the controller it names. The surface marks that pair on
+// the card it opens, or marks less; nothing here asserts the pair is on any
+// particular contract.
+function highlightHint(row) {
+  if (!row.exampleFunction && !row.controller) return undefined;
+  return { functionSignature: row.exampleFunction || "", controller: row.controller || "" };
+}
+
 function TargetList({ row, onSelect }) {
   const [open, setOpen] = useState(false);
   const { targets, reachWitnessed, undeterminedCount } = row;
   if (!targets.length) return null;
+  const hint = highlightHint(row);
   const shown = open ? targets : targets.slice(0, TARGETS_SHORT);
   const hiddenCount = targets.length - shown.length;
   return (
@@ -30,7 +41,7 @@ function TargetList({ row, onSelect }) {
             {i > 0 && " · "}
             <EntityButton
               onSelect={onSelect}
-              target={{ chain: target.chain, address: target.address, label }}
+              target={{ chain: target.chain, address: target.address, label, highlight: hint }}
               title={`Show ${label} on the control surface${qualifier}`}
               ariaLabel={reachWitnessed ? undefined : `${label} — reach not witnessed`}
             >
@@ -74,7 +85,14 @@ function DeductionRow({ row, onSelect }) {
       <EntityButton
         key={part}
         onSelect={onSelect}
-        target={{ chain: row.finding?.chain, functionSignature: part, label: part }}
+        target={{
+          chain: row.finding?.chain,
+          functionSignature: part,
+          label: part,
+          // The controller rides along so the resolved row can mark the caller
+          // chip too — the row names an action AND who can take it.
+          highlight: highlightHint(row),
+        }}
         title={`Show ${part} on the control surface`}
       >
         {part}

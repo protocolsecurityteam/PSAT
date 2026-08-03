@@ -2023,12 +2023,15 @@
   scroll-margin: 28px;
 }
 
-/* The warning names an action AND who can take it, so the caller chips inside
-   the highlighted row carry the mark too — otherwise only half the named pair
-   reads as marked. */
-.ps-port.ps-port-score-highlight .ps-caller-btn,
-.ps-port.ps-port-score-highlight .ps-caller-status {
-  border-color: rgba(251, 113, 133, 0.55);
+/* The warning names an action AND who can take it, so the ONE caller chip for
+   the controller it named is marked alongside the row. Only that chip: a row's
+   other callers are other principals, and a border on them would read as "these
+   are who the deduction was about" for principals it was not about. Where the
+   named controller is not among this row's callers, the row wears the mark
+   alone. */
+.ps-port.ps-port-score-highlight .ps-caller-btn.ps-caller-score-highlight {
+  border-color: rgba(251, 113, 133, 0.9);
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.7);
 }
 
 .ps-port-copy {

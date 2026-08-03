@@ -166,6 +166,20 @@ export function findFunctionView(machine, target = {}) {
   return byName.length === 1 ? byName[0] : null;
 }
 
+// The caller chip a score row's controller names on an already-resolved
+// function — or null. Only the function's OWN witnessed caller list can answer:
+// a row's controller that this function does not list is not this function's
+// caller, and marking a chip for it (or marking the chips of whoever IS listed)
+// would publish a pair the graph never witnessed.
+export function findCaller(fnView, address) {
+  const wanted = String(address || "").toLowerCase();
+  if (!fnView || !wanted) return null;
+  const hit = (fnView.guard?.principals || []).find(
+    (principal) => String(principal.address || "").toLowerCase() === wanted,
+  );
+  return hit ? String(hit.address).toLowerCase() : null;
+}
+
 // Every function on the whole graph the target names, as {machine, fnView}.
 //
 // The score document names an example function by bare name and never publishes

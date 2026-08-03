@@ -8,7 +8,7 @@ import { useIsAdmin } from "./api/useIsAdmin.js";
 import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
 import { isRoleIdAddress } from "./surface/format.js";
-import { findFunctionMatches, findFunctionView } from "./surface/lane.js";
+import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lane.js";
 import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
@@ -522,7 +522,7 @@ function ProtocolSurface({
     syncUrl({ sel: principal.address });
   }, [select, syncUrl]);
 
-  const selectMachineExample = useCallback((machine, fnView) => {
+  const selectMachineExample = useCallback((machine, fnView, callerAddress = null) => {
     setSidebarMode("detail");
     setEnabledRoles((prev) => {
       const role = machine.role || "utility";
@@ -533,7 +533,7 @@ function ProtocolSurface({
     });
     setAgentHighlights(null);
     setActiveAuditId(null);
-    radar(machine.address, fnView?.key || null);
+    radar(machine.address, fnView?.key || null, callerAddress);
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
   }, [radar, syncUrl]);
 
@@ -551,6 +551,22 @@ function ProtocolSurface({
   const selectExample = useCallback((example) => {
     const address = String(example?.contractAddress || "").toLowerCase();
     const named = Boolean(example?.functionSignature || example?.selector);
+    // The optional highlight hint: what the score row was ABOUT (its example
+    // function and the controller it named), as opposed to what the click asked
+    // to select. It never changes which entity is selected or what the outcome
+    // is called — it only says what to mark once the card is up, and every part
+    // of it has to survive a lookup against that card's own lanes to be marked.
+    const hint = example?.highlight || null;
+    const hintedController = String(hint?.controller || "").toLowerCase() || null;
+    const hintOutcome = (fnView, caller) =>
+      hint
+        ? {
+            highlight: {
+              function: fnView ? "marked" : "not-on-card",
+              controller: caller ? "marked" : hintedController ? "not-a-caller" : "none",
+            },
+          }
+        : {};
     if (!address && !named) return { ok: false, kind: "empty" };
     // Identity is (chain, address) (inv. 13) and the surface renders one chain
     // at a time: another chain's entity is off this graph, not a miss.
@@ -564,8 +580,9 @@ function ProtocolSurface({
         const hosts = new Set(matches.map((m) => String(m.machine?.address || "").toLowerCase()));
         return { ok: false, kind: "ambiguous-function", count: matches.length, hosts: hosts.size };
       }
-      selectMachineExample(matches[0].machine, matches[0].fnView);
-      return { ok: true, kind: "function" };
+      const matchedCaller = findCaller(matches[0].fnView, hintedController);
+      selectMachineExample(matches[0].machine, matches[0].fnView, matchedCaller);
+      return { ok: true, kind: "function", ...hintOutcome(matches[0].fnView, matchedCaller) };
     }
     const entry = entityIndex.get(entityKey(activeChain, address));
     if (!entry) return { ok: false, kind: "not-found" };
@@ -579,9 +596,19 @@ function ProtocolSurface({
     }
     const machine = entry.machine;
     const fnView = findFunctionView(machine, example);
-    selectMachineExample(machine, fnView);
-    if (fnView) return { ok: true, kind: "function" };
-    return { ok: true, kind: "contract", functionMissing: named };
+    // A contract click carries no function of its own, so the hinted example
+    // function is resolved against THIS card's lanes — the card is the only
+    // witness to whether it lists that name. Absent there, nothing on it is
+    // marked and the whole-card ring stays the last resort.
+    const marked =
+      fnView || (hint?.functionSignature ? findFunctionView(machine, { functionSignature: hint.functionSignature }) : null);
+    const matchedCaller = findCaller(marked, hintedController);
+    selectMachineExample(machine, marked, matchedCaller);
+    // The outcome describes the request the caller made, not the hint: a click
+    // that asked for a contract landed on a contract even when the hint marked
+    // a row inside it.
+    if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
+    return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller) };
   }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
 
   useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
@@ -705,7 +732,12 @@ function ProtocolSurface({
   // gets the ring when only the contract is known, the named function's row gets
   // it when the function resolved. A principal-only selection never enters radar
   // mode (it commits through select), so these are machine-facet only.
+  // The mark is the PAIR the warning named — the function row and, inside it,
+  // the caller chip for the controller the row named. The contract ring is the
+  // last resort: it fires only when no row on this card answered to the name,
+  // so the click still lands somewhere visible.
   const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
+  const radarCallerAddress = radarFunctionKey ? radarSelection?.callerAddress || null : null;
   const radarContractHighlight = Boolean(selectedMachine && radarSelection && !radarSelection.functionKey);
 
   return (
@@ -825,6 +857,7 @@ function ProtocolSurface({
               onNavigate={handleNavigate}
               onPreview={(addr) => focusPreview(addr)}
               highlightedFunctionKey={radarFunctionKey}
+              highlightedCaller={radarCallerAddress}
               highlightedContract={radarContractHighlight}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}

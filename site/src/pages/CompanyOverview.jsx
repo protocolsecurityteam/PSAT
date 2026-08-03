@@ -71,10 +71,15 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
       showNotice("The control surface is still loading — try that again in a moment.");
       return;
     }
+    // The highlight hint (what the row was about) travels with the request but
+    // is not part of it: the surface marks what its own card carries, and a
+    // hint it could not mark is never a failed click — the entity the user
+    // asked for still landed, so no outcome below is keyed on it.
     const result = select({
       chain: target?.chain,
       contractAddress: target?.address || "",
       functionSignature: target?.functionSignature || "",
+      ...(target?.highlight ? { highlight: target.highlight } : {}),
     });
     if (!result?.ok) {
       showNotice(selectMissNotice(result, label));

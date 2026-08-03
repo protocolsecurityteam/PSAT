@@ -1444,3 +1444,145 @@ describe("ProtocolSurface — score arrivals land on the one sidebar card", () =
     expectNoCrash();
   });
 });
+
+// The score row names a PAIR — an action and the one principal that can take
+// it — so a click on it marks that pair on the card: the function's row, and
+// inside it the caller chip for that controller. Each part is marked only where
+// the card's own lanes witness it; where they don't, the mark falls back rather
+// than being invented.
+describe("ProtocolSurface — a score arrival marks the function/caller pair", () => {
+  const VAULT = ETHERFI_COMPANY_RICH.contracts[0];
+  const { SAFE, TIMELOCK, EOA } = RICH_ADDRESSES;
+
+  beforeEach(() => {
+    installApiMocks();
+    Element.prototype.scrollIntoView = function scrollIntoViewStub() {};
+  });
+
+  afterEach(() => {
+    delete Element.prototype.scrollIntoView;
+  });
+
+  async function arrive(example) {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface ref={ref} companyName="etherfi" initialData={ETHERFI_COMPANY_RICH} embedded />,
+    );
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample(example);
+    });
+    return { ref, result };
+  }
+
+  function markedRow() {
+    return document.querySelector(".ps-port-score-highlight");
+  }
+
+  function markedChips() {
+    return [...document.querySelectorAll(".ps-caller-score-highlight")];
+  }
+
+  it("marks the hinted function's row AND that row's chip for the hinted controller", async () => {
+    // pause is guarded by the Safe on this card, and the Safe is who the row
+    // named — the pair the points were charged for.
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: SAFE },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("pause");
+    const chips = markedChips();
+    expect(chips).toHaveLength(1);
+    expect(chips[0].closest(".ps-port")).toBe(markedRow());
+    expect(chips[0]).toHaveTextContent("Safe");
+    // The pair is the mark: the card outline is not also rung.
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("marks the row alone when the hinted controller is not one of its callers", async () => {
+    // The Timelock guards `upgrade` on this same card, never `pause`. Marking
+    // its chip on the pause row — or marking pause's actual caller instead —
+    // would publish a pair this card does not carry.
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: TIMELOCK },
+    });
+    expect(result.highlight).toEqual({ function: "marked", controller: "not-a-caller" });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("pause");
+    expect(markedChips()).toHaveLength(0);
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+
+  it("falls back to the whole-card ring when no row on the card answers to the name", async () => {
+    const { result } = await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "noSuchFunctionHere", controller: SAFE },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "contract",
+      functionMissing: false,
+      highlight: { function: "not-on-card", controller: "not-a-caller" },
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine.ps-machine-score-highlight")).toBeTruthy();
+    });
+    expect(markedRow()).toBeNull();
+    expect(markedChips()).toHaveLength(0);
+    expectNoCrash();
+  });
+
+  it("marks the caller chip on a function-name arrival the graph resolved itself", async () => {
+    // withdraw exists on one contract only, so the name alone resolves a host —
+    // and the row's controller is that function's caller there.
+    const { result } = await arrive({
+      functionSignature: "withdraw",
+      highlight: { functionSignature: "withdraw", controller: EOA },
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "function",
+      highlight: { function: "marked", controller: "marked" },
+    });
+
+    await waitFor(() => expect(markedRow()).toBeTruthy());
+    expect(markedRow().querySelector(".ps-port-name")).toHaveTextContent("withdraw");
+    expect(markedChips()).toHaveLength(1);
+    expect(markedChips()[0]).toHaveTextContent("EOA");
+    expectNoCrash();
+  });
+
+  it("drops the chip mark with the row mark on the next selection", async () => {
+    await arrive({
+      contractAddress: VAULT.address,
+      highlight: { functionSignature: "pause", controller: SAFE },
+    });
+    await waitFor(() => expect(markedChips()).toHaveLength(1));
+
+    const user = userEvent.setup();
+    await user.type(searchInput(), "LiquidityPool");
+    await commitViaEnter(user);
+
+    await waitFor(() => {
+      expect(document.querySelector(".ps-machine-name")).toHaveTextContent("LiquidityPool");
+    });
+    expect(markedChips()).toHaveLength(0);
+    expect(markedRow()).toBeNull();
+    expect(document.querySelector(".ps-machine-score-highlight")).toBeNull();
+    expectNoCrash();
+  });
+});
