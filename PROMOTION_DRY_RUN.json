@@ -1,0 +1,4469 @@
+{
+  "configs": [
+    {
+      "address": "0x04c0599ae5a44757c0af6f9ec3b93da8976c150a",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "base",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xf6c83b498fdb7df735c89f482c415894fd3b757ead65de4673216e484fd1d3e5",
+      "chain": "base",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "6f4bc177-6373-4387-a0cb-98c7498f31f6",
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1509b1fdd01caf9697aff514b9574b4a27173dd2",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x7cc435c68e0c6df1ba805f9c24a433c8400f1e37660405638a249633de4a6f9e",
+      "chain": "base",
+      "contract_name": "DelayedWithdraw",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "db1d5ce3-c2b2-45a3-9759-d3fc3424222d",
+      "tiers_after": {
+        "activity": 3,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1f21ada3c59b81d7b1bcf5f80f4acfd31ba356e3",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x64f680087eb7a51a836b3f64fd638f3ed1fa001305111f8d1f017d9b9bcd48eb",
+      "chain": "base",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "c7943a2a-7f4f-4228-be9c-ca577cc17655",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x72074f41558dce6d0f225c5561de0f496f360c5843f764d3ff321249dbdbe024",
+      "chain": "base",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2653b157-9595-40dc-b770-93fd3bdadabc",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": "0x839f40c073057acad45edf599e90602065a71fd25d35e78f82e3e86be390a47c",
+      "chain": "base",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [],
+      "outcome": "keccak_bound_to_other_address",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": "305fddb9-eab5-4e61-b817-d59d8eb03b63",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "base",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x4df6b73328b639073db150c4584196c4d97053b7",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x839f40c073057acad45edf599e90602065a71fd25d35e78f82e3e86be390a47c",
+      "chain": "base",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0x566bfa809b88967c994d77ed924bebffe80bd00c",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x2d1b479ab1311588cb59bca2fb84facf436434df7a0835411905d45dc0a0245f",
+      "chain": "base",
+      "contract_name": "AtomicSolverV4",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x5d50f73e8dcae7de27ec82b85f5bd63d61f01667f1c7d79acab1e390262d0373",
+      "chain": "base",
+      "contract_name": "eBTC",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "bcaa3f84-ac50-4da1-b9e9-200de82bf3a3",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6889e57bca038c28520c0b047a75e567502ea5f6",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xe629ed1515e294cce6f474f9af89fc37e8cae5a777a08bac9ce5f433e85981aa",
+      "chain": "base",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "cacce6bb-4649-4c52-9d9d-530701ea6a5a",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6c240dda6b5c336df09a4d011139beaaa1ea2aa2",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "base",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7b6a67f1031c1d8c7bab1cf001bdaf83271241fb",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x0f444ba78182ecfa7648badd9d617478ec4bfb86159043eb95b9957b011ae06a",
+      "chain": "base",
+      "contract_name": "ETHFI Season 3 Tranche 1 Claim",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "44db352e-0e70-42cb-b1ce-8d5bdb0a5d85",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xf45ed58579899143be4b32eb73f503917006932c4c8053ce212228cbc3ad2adc",
+      "chain": "base",
+      "contract_name": "ETHFI Staking",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2c910c4c-8391-45f2-8810-525acecaf097",
+      "tiers_after": {
+        "hint": 5,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x95fe19b324be69250138fe8ee50356e9f6d17cfe",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "base",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xb149ef0f2539f1d9e1c9fd98d86e9c13a2aec17a",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x21428954ccc95c18d12b8b8afe62d44b3dd6a63e16b7c50002afc0a5e36c5ddc",
+      "chain": "base",
+      "contract_name": "AtomicQueue",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "activity": 2,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 5
+      }
+    },
+    {
+      "address": "0xb623faf559b414a1c7ef2d15f3260ca0fd239431",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x9604589256b90dcea84119f4d7fe045c1eb727492d138c10fff35643e93cca4c",
+      "chain": "base",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "cb8fbbf1-a478-4d84-879b-a6e6e54d0af5",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcf5d8bc4ac508a26b038d91e8caca318a177b6c1",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x75be604f7ab2726c5060bb8f266266a698897dc1ac1e64d308ec7390360137b3",
+      "chain": "base",
+      "contract_name": "ETHFI: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "99e68358-edde-44b9-aa3d-2fde44c87d38",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xde8a2c33655aca88f258988ed74d1511876343d1",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x7f8bf0bedf0194598158e5b9d5510568e9d30a02b3f8e80d0acf15bf46546fb4",
+      "chain": "base",
+      "contract_name": "weETH: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "274ce687-3dbb-4369-a40c-ba0e618021c0",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x4551c2cac9aa7db5a742cadfb55affff50e61154d1e028b1527f56a003bf415b",
+      "chain": "base",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2d4db5b5-7370-44ad-9f94-a8f3066f2bed",
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xeb927ef101080eb9b74c410cba50a7c71b7404a3",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6613b63fbd5e0772ca4f233688f356d90b4ded1c41f9c388ddc822e1f14a1e61",
+      "chain": "base",
+      "contract_name": "0xeb927ef101080eb9b74c410cba50a7c71b7404a3",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2c79ba28-a299-44be-98e6-b480adabd45f",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xf3086883ec44e1393ad4d4acb32c48ae849ef376",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xd55f71a86af188bdac8b1fa541a1633621ff783acc86c0384d44c78fd3fd80ee",
+      "chain": "base",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f9cc6064-d54d-47f4-b641-b32a8c1d0473",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x023af0d424754de795e61c17a521eeb04676c7fb",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xea1bf2f79268c8e2379b69c0165bd5e5ea5bf749993bc4769e2895c0faea2ff0",
+      "chain": "ethereum",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2b99b421-2fa6-4c40-af4b-a23a2964c470",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x02904af5c3be78481528e0f01780439f024109a6",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x98c1544855fb412155509409352d8853bfc1d028c924a4ca89c8982c65521029",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f288989c-7238-494f-8450-7935be6f70bd",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x04b8136820598a4e50bee21b8b6a23fe25df9bd8",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xfccad2dab1e33e5cedfee0c0d748af5c1bc12b0b9be688c265c841a39f2457fb",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0x04c0599ae5a44757c0af6f9ec3b93da8976c150a",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "config_supplied_by_caller",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x055a8b2b65d0ab4e0c17a0168d032464b7e97bdf",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x0565c8ea133ff27ba9d471330a52068a268a2b9e",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x358f865f82a62080385df2123cdfd063b8698b6c53fb43d5127c0ffcc703a696",
+      "chain": "ethereum",
+      "contract_name": "EtherFiOracle",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:BEACON_GENESIS_TIME",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 9,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 10
+      }
+    },
+    {
+      "address": "0x05a1552c5e18f5a0bb9571b5f2d6a4765ebda32b",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xebd4e5e9b845e5e78b1af25cd99e6e3c18792493f34968bb1c665bea3b3754ed",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0x08c6f91e2b681faf5e17227f2a44c307b3c1364c",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x83606d469c9a8a7d80b9918dcb2940ad420bf3e3027e698bcd684cc7c2892dae",
+      "chain": "ethereum",
+      "contract_name": "etherfi_08c6f91e",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "dd0a0f70-ca37-4fc2-a784-ea9a9e61c08a",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x126af21dc55c300b7d0bbfc4f3898f558ae8156b",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x2726cb8fea0262c1fd99bc092682b0459464c37ca6c4527cf48c2e9bc016ecfb",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0x17a16747d03006c9754548ac0d0aff48783a4a45",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xd1b9b7d71c5fad098b7e3877a3cb976f6851b8de99f8011744fd8695a8a61227",
+      "chain": "ethereum",
+      "contract_name": "LiquidityPool",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 5,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 6
+      }
+    },
+    {
+      "address": "0x183fe88858aab892cc796662200374e3df6927e3",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1b7a4c3797236a1c37f8741c0be35c2c72736fff",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1cb489ef513e1cc35c4657c91853a2e6ff1957de",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x5f709ea32a495960b81d247c17a726e06ad2d340da1a4c8e53583d6f9802942c",
+      "chain": "ethereum",
+      "contract_name": "LRTSquaredCore: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ec750784-0ee0-4d18-8de3-9293c6f4c7a0",
+      "tiers_after": {
+        "hint": 2
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1d4f0f05e50312d3e7b65659ef7d06aa74651e0c",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x939f7b4b95b651f876506f0dde244d2a1ae0919078e02e85ca85591ae0abc31c",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "25ca9080-3c3d-4bfc-bb60-c4fc3f2febf5",
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x1e02c841ae94d552025f6da0bb65642c409921d1",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1507f42b8c2b9dc41b0f977c8f71a0d04897987bfeb8a9e699ebdfde80c51b36",
+      "chain": "ethereum",
+      "contract_name": "0x1e02c841ae94d552025f6da0bb65642c409921d1",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "41c91858-31a6-4ea6-b004-cab22d732f59",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x200057a0a4a97149b0924c5dbba868f283d903a2",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x2474d68d6e9f7be77c9a343ce21dbe16f0743bd3",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xa1fbcca669afc899d649ea9a4f4b7a14351c97a74887b76fd8eea4983172dc51",
+      "chain": "ethereum",
+      "contract_name": "NodeOperatorManager: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "4fd976a9-302a-42f4-b3d7-641d12eb08e3",
+      "tiers_after": {
+        "activity": 1,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x25e8162d09239fb5be50e5df18adc1ed35533e61",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x92271e021e47ee87933964e70945a49ffe7e672ce7ab6d0157114a5f8fa92fd4",
+      "chain": "ethereum",
+      "contract_name": "PaymentSplitter",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "0a3d55d3-805f-4020-8c10-7941d1a3ae7f",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x263a74e56eb07c2a2a84fd510615a17b66e10e70",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1c9978e14248dcb6f722d1556a1f2f39d4574d61fc0b3da36bbc9ee3909efea8",
+      "chain": "ethereum",
+      "contract_name": "Liquifier: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "daf035c8-8bc0-42b9-9f5b-e68b2df56a88",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x107a472439f53984910aa0199ac81938ac60c1f3144db405bec6fb300eda593e",
+      "chain": "ethereum",
+      "contract_name": "PriceProvider",
+      "notify_gains": [],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_proven_empty",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x2aca71020de61bb532008049e1bd41e451ae8adc",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x2b90103cdc9bba6c0dbcaaf961f0b5b1920f19e3",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x308861a430be4cce5502d0a12724771fc6daf216",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3311c72a04d2779f4425c036dbc40d14fec0162b",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xd2df50b84081cfd08cd6df75917e7f0b183ad39351f4ba5113d8a7d257df291d",
+      "chain": "ethereum",
+      "contract_name": "AuctionManager",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0x352180974c71f84a934953cf49c4e538a6f9c997",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x63005ac2679438cb65360e064200d2c524a0137df94286bc18605632a7ba2ee3",
+      "chain": "ethereum",
+      "contract_name": "etherfi_35218097",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "3efb2c0a-5d66-4bf7-b698-c4cebf2f983d",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x35e7d6fef6f72add3c3e39dec6d9ccc29e3345fa",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x382d0106f308864d5462332d9d3bb54a60384b70",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xb627cba43266c89f9ad61041fbfdbdf9461a72b3a09900bc59631194b79337db",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f7fe92dc-a168-490c-84f8-d5b28cd2e294",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3994741a5b29c60d0ab318de1024f9256fe959dc",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x98c1544855fb412155509409352d8853bfc1d028c924a4ca89c8982c65521029",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "003c4471-285f-4248-8ac5-9e271a3f08a8",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3b44a093b9736af765f98f3245998f63bc757970",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x7f7400f71ceed308ec085b81131172720a6f1bcde28e48d1be43453a2765bb3c",
+      "chain": "ethereum",
+      "contract_name": "RoleRegistry",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0x3c55986cfee455e2533f4d29006634ecf9b7c03f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6da3cdc5a2d85016fc1cc84ac169ccf7149868813f24d6f10a0add8e9dc431d1",
+      "chain": "ethereum",
+      "contract_name": "UpgradeableBeacon",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "9445cd46-6e86-44c0-814d-0f52d7ae8e21",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x3e6d22a67b9728a0866d69efa16c2e20e60a8451",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3183b5a18bb208295c81d698b12192ae22b8bfa2a6f92be773b3c7f84942c84c",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "7c1a0d85-3d5e-48fa-ba03-e372f7ff18f4",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x402dff43b4f24b006bbd6520a11c169f81085039",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x52c182d907f10a129e54b3167802ebd7156da4cb69c9de09747a6764a6681e40",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "111d4cde-69c9-4994-a46b-c7c24110973c",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x41617d01362770ebaac10311ab899fbc8a4e4a7e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x74cfcc34db9cf62f1b2cf18eaf5e127db123f500d3fd08236e2a4079ea532de6",
+      "chain": "ethereum",
+      "contract_name": "WithdrawRequestNFT: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "d095c20b-073b-4507-b2b9-8a77e07c38c0",
+      "tiers_after": {
+        "activity": 1,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x417e1ef6eb82c3e6a60c2dc342e574e4c51b4d35",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x62c572d423ef6356a56f6f50e36d9842c7711e3222e8cfbc6c354b6c145217f8",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "5f02bc03-d164-4230-9ddc-a600665a8e33",
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x41dfc53b13932a2690c9790527c1967d8579a6ae",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x427989bb12f4a390d11e7647d467dea02b9d2ee3",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x45d85c0a1168726bbee2352d78e7647f70654d56",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x8b1b33e208fbd1a7ae82db6dc1d1f5f3e63ca02e0213130296fa521649cee4bc",
+      "chain": "ethereum",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "60b381b1-4e2a-4abd-93e5-f7a8b3d07cc5",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x485bde66bb668a51f2372e34e45b1c6226798122",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x52c182d907f10a129e54b3167802ebd7156da4cb69c9de09747a6764a6681e40",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "28724373-e047-4ba7-be1e-01a22d1b3a60",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x49f954c67ff235034b69b8a59fbe309a40256c8d",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3183b5a18bb208295c81d698b12192ae22b8bfa2a6f92be773b3c7f84942c84c",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "76655b8f-e524-43ec-9920-d00b023045a2",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x4a84ba0b5e716b37c78d0f5094757205626c7c1e",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x4c65e8d34ecd7404fc860c4b83b081df1538bc9e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1f352dcb0acfc5642261ede20a0845d6afa43adfc8692f6f4001808f33b6137d",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "305dad5a-d0fa-405b-a552-2a42e3b1810d",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x4de413a26fc24c3fc27cc983be70aa9c5c299387",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x1f95a60d94e742c4cc476ff52eb74e21bf377280e3be777b9f1d07125d446389",
+      "chain": "ethereum",
+      "contract_name": "LayerZeroTellerWithRateLimiting",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "activity": 19,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 20
+      }
+    },
+    {
+      "address": "0x4df6b73328b639073db150c4584196c4d97053b7",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x52c182d907f10a129e54b3167802ebd7156da4cb69c9de09747a6764a6681e40",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "32100d69-798b-4ae3-9b5e-bd8bfde74124",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x4f81c27e750a453d6206c2d10548d6566f60886c",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xbabde8db5fbd9bdb6acfcbef11fc15ee4c74c07eb1616627fbe001b2dadda268",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "da261977-7f2f-407e-bc66-aaa55e98597e",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x51357a700b309637f109a897a6479a563d5afb8e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x352d6f268deb9ed609245bc3eb5a2f9ecb9e5bd135dc72694b4da73853220b0e",
+      "chain": "ethereum",
+      "contract_name": "EtherFiRestaker: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "b4e541ee-0cdf-4f6b-bf88-e5ed46df14ff",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x523455838764e0ecf9add7eab8c1dab86b0c6d7b",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x556db8c611fe63e694413f718d795f976dcf5881",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xb29a458a315a934cac6b62f997cb2818f3b9aa3d45118a13397f3d39f28867bb",
+      "chain": "ethereum",
+      "contract_name": "UpgradeableBeacon: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "258247da-b047-4439-900e-893142cff6f7",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5585996e7cfe95f2d99e61168b8b35c66ff99b18",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x560441fa211aed16dd49f70c226380c9d4875225",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x57aaf0004c716388b21795431cd7d5f9d3bb6a41",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5979f753b417c17fcd8f8c87b86154a0eb0e2c17",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3183b5a18bb208295c81d698b12192ae22b8bfa2a6f92be773b3c7f84942c84c",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "1842d079-4df5-404c-b8ca-5de61544e4b2",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5a765826700cf3a918eb713b3a7978e9333085df",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3e1b14a64efcdabc0df79751e39e57a0d3b415cf1d8634da1e65bd6d50e39181",
+      "chain": "ethereum",
+      "contract_name": "RevokeAdmin: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "e604e0f4-ab1e-4f38-84d6-d5202da3264a",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5b083dde26fba0e43940b2e161fcd129903fc27d",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x4243e41edd5067005906dd0ee32f74225dc73f2ab881aa4b695ce73b78e760c7",
+      "chain": "ethereum",
+      "contract_name": "EtherFiAdmin: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ade2a7fd-b347-4865-9eca-b029995f3ff3",
+      "tiers_after": {
+        "activity": 4,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5d310451276d28a90cc6910449052d29a41e3abd",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xac3b4beb30a5e10a63a8d23fb6de0b11c8989edd8da0c49969031afaecf379b4",
+      "chain": "ethereum",
+      "contract_name": "EtherfiL1SyncPoolETH",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:_eEth",
+          "event_type": "initialized",
+          "signature": "Initialized(uint64)",
+          "topic0": "0xc7f505b2f371ae2175ee4913f4499e1f2633a7b5936321eed1cdaeb6115181d2",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint64)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "activity": 6,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 7
+      }
+    },
+    {
+      "address": "0x5d53b303d62a7861f88650045b8d5deb59dfb3dc",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x8c6ad6b3c44a8c969c55501f68a8b571d07d15ae3eb9a8756bd508d125ad9f1b",
+      "chain": "ethereum",
+      "contract_name": "EtherFiRedemptionManager: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "3df8ccf0-a187-47f7-a567-d66164689ef8",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5e226b1de8b0f387d7c77f78cba2571d2a1be511",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x83669a41b1e5f30565aaf823cf442f84b152e78a3aae4a8913aabae3565fca97",
+      "chain": "ethereum",
+      "contract_name": "KING Distributor: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "724ba5ba-aa5d-4964-9946-d4c29be5a698",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5f2ecb56ed33c86219840a2f89316285a1d9ee0f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xe7ec41b3a1297a0d88e8d4c56d6dd2dc3f26e9a7264e67ddf1526063cccb3f29",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "3df3d6d9-3692-4015-842b-fe3b5a2ef765",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x5f46d540b6ed704c3c8789105f30e075aa900726",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xc0df7e4ff8aa454c3cbd490a8fad8d70572f09574e1df2c3a48ec8a87cd27982",
+      "chain": "ethereum",
+      "contract_name": "etherfi_5f46d540",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "5ad3c63a-9032-42d0-8c77-15e50e8db21b",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x603064caaf2e76c414c5f7b6667d118322d311e6",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x86987c55659e5cb5841bae80a00f1393feebe4fb6d66e2eed709c52a3bb25a71",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "dcfebc6b-40d5-475b-8dd6-cce16123ac93",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x62b283d4fefb2a120e1120dba9f83be6ca41bcd7",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x4aeb729f05cb0f737c69ede2cd3c16d43feb2da5904adef0c7eaed093a7e848a",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "857defff-ecf3-4864-b308-55ea4de61e00",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x234330e221702c106745c8ad782f38c35eab27611429da087156c35ba8394a18",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ef93b6f5-9da1-4abf-8a41-28eca708862f",
+      "tiers_after": {
+        "activity": 9,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6494c198a3caf90eb0a023f1191e6edc13a41042",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x685c3ce1413ac824982e5cf47bbdb17fa291c1041953ffa138aba52ba60187ca",
+      "chain": "ethereum",
+      "contract_name": "0x200057a0a4a97149b0924c5dbba868f283d903a2: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "d67710a1-80d0-43c8-92ba-98e4c228c29a",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x65716abb00ec074c3c1991a213b41cdc54e8212b",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x657e8c867d8b37dcc18fa4caead9c45eb088c642",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xbe52f54313d462667c924083c07f493dad3169c36ca49645d7dd1c7e8552fd54",
+      "chain": "ethereum",
+      "contract_name": "eBTC",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ae1c70b2-08d4-4f4c-85c5-a7ab0bef7ae6",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x66aae0ee1f68c658401c7d8d6e417202a99545d7",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xdcef54cd8ef9f7d4284ef9ebee68573c70a0eba2190556dc08b8dbfa618db3e1",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "153d0770-42b5-462d-82fd-9c28125f8ca6",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x66e1c53e846ef3e9f3722591868afcffb7f39800",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1c2d759d412e3de9db3cdb836d95d216fc695f87304ba2d0e4e86bc6cc789ec0",
+      "chain": "ethereum",
+      "contract_name": "StakingManager: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "8ab3311f-b926-45a2-bfab-f2f3cb536045",
+      "tiers_after": {
+        "activity": 5
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6889e57bca038c28520c0b047a75e567502ea5f6",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1f352dcb0acfc5642261ede20a0845d6afa43adfc8692f6f4001808f33b6137d",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "4708a907-1682-45d4-84ab-8a66a433cf86",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x68ec1fdd4bb202b2e07ae751cb5553644aa48cfa",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6bf6acd4b22795080c719d987baa8f4fcb1ab3f8",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x8ecdbf2ebe6b79461cdf7f06c9b1e166425c91570f8eea100bd917c3676d6013",
+      "chain": "ethereum",
+      "contract_name": "RestakingRewardsRouter: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "a633dd5a-0703-4396-a938-49c03b0831ca",
+      "tiers_after": {
+        "hint": 1,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6c7c54cfc2225fa985cd25f04d923b93c60a02f8",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xfd4f3022e7d42b9ba756f0932ebb565625377cb380d53bd46887b2343b18e867",
+      "chain": "ethereum",
+      "contract_name": "EtherFiRateLimiter",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "0b81f867-a6f4-44d4-8540-fd55d9c3f4c9",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x6db24ee656843e3fe03eb8762a54d86186ba6b64",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x70a64840a353c58f63333570f53dba0948bece3d",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xd2727702edd056e113d5016fb58fce4128e444bbe7b21956fdce179d612d5be0",
+      "chain": "ethereum",
+      "contract_name": "TimelockController",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "baf695f3-2369-4f0c-9d3a-ad60a3dfd05b",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x71e2d6c34f569cc4df5802d675b208fb8ae3bcd6",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7223442cad8e9ca474fc40109ab981608f8c4273",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x2f39bb2bfcbe4bdcacf4612b52147d8806baf8a1d901f7e9bf18ec71ae8f950e",
+      "chain": "ethereum",
+      "contract_name": "etherfi_7223442c",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ab2551c0-4161-4f3a-9ee9-eb8171f5e41f",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x747cac75776b3a0bba3de3e61ec12a6a7f52232e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xac5fa04a2a4bc475a16a1d800d3b71b75d1531395166427e8e77d3c14329e31b",
+      "chain": "ethereum",
+      "contract_name": "Swapper1InchV6",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f87ad20b-0fd7-495c-8f40-0bdd58375e8a",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7623e9dc0da6ff821ddb9ebaba794054e078f8c4",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x899945192ae5bdd18a8e84d218cf3d331ffb7450c2a8eb6c58f365c1d7273ab2",
+      "chain": "ethereum",
+      "contract_name": "Early Adopter Pool",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "bf5c42e8-6f41-42bf-a92f-d08e5b9f3500",
+      "tiers_after": {
+        "activity": 2,
+        "hint": 2
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x77b929befe793367712c0c28ca8e857bf23a2296",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6b134c6c0d0ee2c72000f80c625d7ffcbb3cfd7ba6e94e492f7ec9a8eec8e626",
+      "chain": "ethereum",
+      "contract_name": "PriorityWithdrawalQueue: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "3eda0d4e-29e9-4d2e-bed1-22a258192d17",
+      "tiers_after": {
+        "activity": 1,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7837cd2f99f2e3c192e4492f580f2790a30e34f9",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xf4e89b010fa6e5c52a4a080607102e9ce2f16aa585d46c739786dd790cccf400",
+      "chain": "ethereum",
+      "contract_name": "DelayedWithdraw",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "03a49ba9-54d4-492d-8f1d-5b8b05d9c096",
+      "tiers_after": {
+        "activity": 3,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7859baa3e12b6480b15b77b069d8d0279ebc74ea",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x78c61b1ea2507c4c2b13f77951549d4e76acb52b",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x0dd4ea64b09ba3c60e5fb001283ef4e99b04f1d91428b59c48a3f255bc381eb2",
+      "chain": "ethereum",
+      "contract_name": "DelayedWithdraw",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "d02cdbd5-3ca7-4883-88b3-080c66422580",
+      "tiers_after": {
+        "activity": 3,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7a00657a45420044bc526b90ad667affaee0a868",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7b5ae07e2af1c861bcc4736d23f5f66a61e0ca5e",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6420f1b7e451828bc7ae788fe6ec77c46a08b0836647afe13901ba069b8326f7",
+      "chain": "ethereum",
+      "contract_name": "AtomicQueue",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f1afd015-5579-46d6-abdc-cd4a505be99d",
+      "tiers_after": {
+        "activity": 2,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7c5c721ff970d86cede81cbb81914dd7c2dcb234",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1507f42b8c2b9dc41b0f977c8f71a0d04897987bfeb8a9e699ebdfde80c51b36",
+      "chain": "ethereum",
+      "contract_name": "0x7c5c721ff970d86cede81cbb81914dd7c2dcb234",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f5585c8e-d761-49e4-b402-986620e2b5b0",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7d5706f6ef3f89b3951e23e557cdfbc3239d4e2c",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7dcbd5c38c128f83aa8264120bcec8662f35adaf",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3183b5a18bb208295c81d698b12192ae22b8bfa2a6f92be773b3c7f84942c84c",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "6a79844f-e7a6-4886-935d-e93276651f43",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x7ec91c297a3b35ae9caa63a3fc638f24202071d4",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1507f42b8c2b9dc41b0f977c8f71a0d04897987bfeb8a9e699ebdfde80c51b36",
+      "chain": "ethereum",
+      "contract_name": "0x7ec91c297a3b35ae9caa63a3fc638f24202071d4",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "604a2ac9-6777-4c91-aa48-0aad0e98f789",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x80ce8a917beec6db0f632f2710916fcaa621874a",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xfddb562593c11daca66d4b598334b215a59a1812602701ff3c1d7994a2da2407",
+      "chain": "ethereum",
+      "contract_name": "TimelockController",
+      "notify_gains": [],
+      "outcome": "already_current",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x829675330fdcee01022983493e71f73fb53eab45",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3183b5a18bb208295c81d698b12192ae22b8bfa2a6f92be773b3c7f84942c84c",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "358084d7-2aed-4217-8909-0d3a9748f4fa",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x83599937c2c9bea0e0e8ac096c6f32e86486b410",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xaeb5fc4bdf239c74c2e4ad080a813333de2604b7621b0055f655d7a8f791f7a1",
+      "chain": "ethereum",
+      "contract_name": "etherfi_83599937",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "cd6b861c-ee6a-41e5-9cb4-f2a6b797c4bb",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x851dd540f4d2ec78120de0a0cc87b21ede5df5c6",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x86b5780b606940eb59a062aa85a07959518c0161",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x416cc62580530b4511aba82fbe67a18a7dcba18b8531472e4a653bd076caa707",
+      "chain": "ethereum",
+      "contract_name": "BoringGovernance",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 5,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 6
+      }
+    },
+    {
+      "address": "0x89e45081437c959a827d2027135bc201ab33a2c8",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xb21b7d6fbab67601893f6996e761a4c9c358ae87a8fbf20d22cd251293fff848",
+      "chain": "ethereum",
+      "contract_name": "EtherFiNodesManager",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "e8c94a84-1f07-4eb0-a562-67f09f898d5b",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x8f08b70456eb22f6109f57b8fafe862ed28e6040",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3e6355cc4e615cdfc9f7dcba01c7f0603cd35d32871893a3e97e5e7ee816357e",
+      "chain": "ethereum",
+      "contract_name": "etherfi_917cee80",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "af62026d-5ca5-4979-9596-70720052dc76",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x91a2482ea778f3c9aae1d3768d9e558d6794b972",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x9efba2df2452c8355c036bbaa74b4e0de7bd7d85c23ed59e8d9a34b54c697e06",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "fc9a155e-c88c-4223-90a3-80de60761153",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x929b44db23740e65df3a81ea4aab716af1b88474",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x403071ccb9a43b14a944726c56462b56671d0efd005b94ef959c2b4b8663fc2a",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "6958eeeb-0b16-439b-9075-21ff36be7d9f",
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x93fff4028927f53f708534397ed349b9cd4e2f9f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x18378d35a5e52689c01da793006a9dc7e4851b516509efba401fb82f09e10d23",
+      "chain": "ethereum",
+      "contract_name": "ETHFI Season 1 - Tranche 1",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "cb6f6c90-febb-4afe-bac6-4718116de180",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x95fe19b324be69250138fe8ee50356e9f6d17cfe",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x2e8eaee26187453614c80fb882079a44ad3a80839e68b703f01c35b47b7e7039",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0x989468982b08aefa46e37cd0086142a86fa466d7",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xbdf2478155f69c675176846f41035614223971885f881a93f9fd4908d09ea981",
+      "chain": "ethereum",
+      "contract_name": "AtomicSolverV3",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "ed5a849f-79af-4a14-80b4-2f2efc72a5b8",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x99de9e5a3ec2750a6983c8732e6e795a35e7b861",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xf21024e7e2e7995bf6c8f1fb0ebc1fab4c5b35a5ab13a0bcb3fd435c98fb4086",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "216d62b1-eeca-46a3-b0cf-8385827d86a8",
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0x9ea4d0fd09b628e23b1998f2153e27e5261b1b67",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x0406ffe556a24a8a76cad91520148c289b6ed4ba01a0a753c76d92b64d3108d1",
+      "chain": "ethereum",
+      "contract_name": "EtherFiRateLimiter",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "activity": 1,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 2
+      }
+    },
+    {
+      "address": "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xbf21ebc11e4f971cbfdd8a64f63d34e737f63bc98303f223a03673bd141749f0",
+      "chain": "ethereum",
+      "contract_name": "EtherFiTimelock",
+      "notify_gains": [],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "activity": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0x9ffdf407cde9a93c47611799da23924af3ef764f",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0x9ffeef56dfb45a44c51543f3a08d0c91948e9f56",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1507f42b8c2b9dc41b0f977c8f71a0d04897987bfeb8a9e699ebdfde80c51b36",
+      "chain": "ethereum",
+      "contract_name": "0x9ffeef56dfb45a44c51543f3a08d0c91948e9f56",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "88a84981-4cba-419b-b2fa-466cb3473018",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "config_supplied_by_caller",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa24dd7b978fbe36125cc4817192f7b8aa18d213c",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xcd6922757c72dc9d9ba48359a154590123edb0912d0ffb18ad3228947b725496",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "e9487e5b-8228-42e9-987b-efd2f0f275ab",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa55a34d31af7e1bddface2966d51526eccf4f76e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x3d446aaacdb86309b7b54ee2f2845ee504732ae140a778a62625bdbaffe8ba2f",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "04119e51-00d3-479f-8fd3-0fc5e9ad6b7a",
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa6ca0607190d03cf16fe6f2865cf40c3d160ccf3",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xd43182be0eba15468f2e3f33cfe55685c9fcdda6c306156c046b6c4b076f52e7",
+      "chain": "ethereum",
+      "contract_name": "WeETH: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "de29b11e-ef18-49ca-ac87-710e568a5aa5",
+      "tiers_after": {
+        "hint": 1,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xa9dbe5c7c8172ef83a30c143892e0010420e6307",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xe99ac1d5e8a02c7ba439c6a3881120aae64f50c7c95c33196779e1a914bf908e",
+      "chain": "ethereum",
+      "contract_name": "MembershipManager: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "f77643fa-972d-4d78-820c-ddb16c094429",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xaba6ba1e95e0926a6a6b917fe4e2f19ceae4ff2e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x52c182d907f10a129e54b3167802ebd7156da4cb69c9de09747a6764a6681e40",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "0bfe9f27-5018-40b9-b20f-e63c7760161d",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xabbc3e6bccd53c55fee9a785f30a3a8202e6f61e",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x56207be2aba87cdca4a5413a96969f9083d7a7f8a1d8db631a26878a2c394b49",
+      "chain": "ethereum",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "9b2bcd91-82dd-4fd8-a89a-4433b9a2f3ef",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xaf66ad820d96ae3dd6dd6ff2296592b7ac0b975f",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xe3cfae0657d97312311de097d751931d25aa42242afd607d6053d555f5738a3b",
+      "chain": "ethereum",
+      "contract_name": "DelayedWithdraw",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "5d33c9a8-cbf8-4a65-86b9-f1ef33790f1a",
+      "tiers_after": {
+        "activity": 3,
+        "hint": 3,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xafa8c08bedb2ec1bbeb64a7ffa44c604e7cca68d",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1ff00bcf21ee40f19bc255f96387c7d672b02bf2c3e49d364701b36b9edea4ac",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "555367bc-fe08-4851-b63f-258c63299cf1",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xafb82ce44fd8a3431a64742bcd3547eeda1afea7",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x56d2e8d67e238a675827e84917168cfbdd53ef30d198ea7f9eeefaaedee057db",
+      "chain": "ethereum",
+      "contract_name": "TNFT",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0xb12fff6512712ea3b30eeab6f9dea2fe903ca6ab",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xf4e0d8fe3ef57c783ed6d58539b4b70b94ce23ef8539fd5d46d45accaa5497f0",
+      "chain": "ethereum",
+      "contract_name": "ManagerWithMerkleVerification",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "4941a37f-748f-49c4-87a0-a92b62059c8c",
+      "tiers_after": {
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xb35a429474404e2eda28548075623993a40239b6",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1f352dcb0acfc5642261ede20a0845d6afa43adfc8692f6f4001808f33b6137d",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "acdfc444-a8a6-4eb9-be9d-c891116ae212",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xb49e4420ea6e35f98060cd133842dbea9c27e479",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x0b58ec11caee361ca0c1e484c12f6e7177634222186f7639bd9183dfee9d2278",
+      "chain": "ethereum",
+      "contract_name": "MembershipNFT",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "80def67f-3fc2-4619-8cb3-4b5f78f01ddb",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xb53244f7716dc83811c8fb1a91971dc188c1c5aa",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x4cefe573b7388dad967ba5c01b874237b6b600db71d623be60e33dc991e48895",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0xb7e852e169f8104396fff7c25430299bbdac91b1",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x562df96d2d9bd50e2581b3f463f0e7082630f183f070491a5ef2d200e4b9539e",
+      "chain": "ethereum",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "d4ca71d1-5c9e-47f1-96ae-99c4abb04796",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xba538b15bbca0cb5e3ad844241c7a0d2dfc4f13b",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x203ce48a2c408c62683fec9fee29c7a371c7b77b93cc2206bc96cac57c3e095e",
+      "chain": "ethereum",
+      "contract_name": "BoringSolver",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "5e5527e8-8d39-47d2-be6e-193b74e0eae1",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xbae19b38bf727be64af0b578c34985c3d612e2ba",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x9af75214e8d932a99adce985811be2ff259759c4c004fef652b6e8737d676175",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2e73c7c9-d4eb-4d80-baef-02b794ac7c9e",
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xbc0f3b23930fff9f4894914bd745ababa9588265",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xa569497c4599c02bff7313e7f8a523044632aa4430098d9f67454415c4bd5c19",
+      "chain": "ethereum",
+      "contract_name": "etherfi_bc0f3b23",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "38ce08cb-1bb1-4163-9dea-4231994c2238",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xbc870c47c6eb10009a0720e76f166f104c124ecf",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xfce901f18b98ca9c2864cade4b71a3e5789a1155c15c395baf48cc1c75c15b27",
+      "chain": "ethereum",
+      "contract_name": "Blacklister",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 1
+      }
+    },
+    {
+      "address": "0xbe16605b22a7facef247363312121670dfe5afbe",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xbc8f88699f63c0a3239e4aa1993058218a11c64566bad94d21d9a10c497fc670",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2b16e9c9-886c-4f2f-8a42-0b4d826d60d4",
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xbe386b1fb51ffacae0522a5da099371cd4a2aaea",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x047cb57f726aeb773f488cbe57777f6702ddaead56fc5dd3c67f872ecfd58c80",
+      "chain": "ethereum",
+      "contract_name": "WeETHWithdrawAdapter: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "69ba16ed-df27-4878-a91d-91f7092706d3",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xc315d6e14ddcdc7407784e2caf815d131bc1d3e7",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0x9e3ec4e90497e8f970c30e26003a3aa8d1b08b70c28470cd5f1b505521383c47",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 9,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 10
+      }
+    },
+    {
+      "address": "0xc673ef7791724f0dcca38adb47fbb3aef3db6c80",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6bb79da7d0ad77a86e610d4328d1a2c5b6d400707575c16429f3cfcea7170243",
+      "chain": "ethereum",
+      "contract_name": "etherfi_c673ef77",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "d6e528ac-cb53-455a-914f-817f1fe7024f",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xc8c58d1567e1db8c02542e6df5241a0d71f91fe2",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x8b0eed514fe77b978c40f4d128125e2b888bd005c2ffebd67199611a208295b7",
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2c53bc2d-d70e-4729-82a3-eb3eec50a1fb",
+      "tiers_after": {
+        "activity": 9,
+        "hint": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xc9ca4f230d30913877c9a18eef7e907ee32ebef2",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1f352dcb0acfc5642261ede20a0845d6afa43adfc8692f6f4001808f33b6137d",
+      "chain": "ethereum",
+      "contract_name": "RolesAuthority",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "efe3c4ef-6ef6-4f5d-83b6-ac5b4dae03d0",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xca8711daf13d852ed2121e4be3894dae366039e4",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x10be86e8a82fb7fdeb2e2ec54f24e33e3a29406b0a1eb72a41b6284d19af42cb",
+      "chain": "ethereum",
+      "contract_name": "etherfi_ca8711da",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "b14e67ce-e491-4e69-bc3e-92fca7dd8a4a",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcd425f44758a08baab3c4908f3e3de5776e45d7a",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xade1557dee87af5dc1033d42e641b46176a2f9b8b9c341ad324837660b652778",
+      "chain": "ethereum",
+      "contract_name": "0xcd425f44758a08baab3c4908f3e3de5776e45d7a",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "6937d23b-87ed-4c26-82f7-9d6fcd2287f5",
+      "tiers_after": {
+        "activity": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcdd57d11476c22d265722f68390b036f3da48c21",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1b561bf5e77f60013968ec1c6bf9917574f41b144e3069e1134961da9672cf42",
+      "chain": "ethereum",
+      "contract_name": "EtherFiNodesManager: (impl)",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "b64c7834-b1b1-48b8-a49e-09a68cf50b81",
+      "tiers_after": {
+        "activity": 3
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd022d6bb8b6c1c357ec77d930dc6a0ad40ffc90b",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd1901dd36cbf4a81386d0162df2707f7ddb60527",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xb38468c20c9f84fb21e6488763f10d02c64722e3800d01114438ab67b76a8b08",
+      "chain": "ethereum",
+      "contract_name": "EETH: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "0e671483-3f86-40cb-b36e-652bb5504e8e",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xc8355f20e8bd9672b0bbd412850a31b3dae3419dbee46a56f40199fcd20fb6b4",
+      "chain": "ethereum",
+      "contract_name": "LRTSquaredCore: (impl): (secondary_impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_tokenInfos",
+          "event_type": "state_changed:state_variable:_tokenInfos",
+          "signature": "TokenMaxPositionWeightLimitUpdated(uint64,uint64)",
+          "topic0": "0x67cba15f5a6551b1966bc3ebb577b6d72a3850d34e1d22f95fd8d027e06e746c",
+          "witness": {
+            "args": [
+              "oldLimit",
+              "newLimit"
+            ],
+            "kind": "old_new_args_single_writer",
+            "writes": [
+              "_tokenInfos"
+            ]
+          }
+        },
+        {
+          "controller_id": "external_contract:priceProvider",
+          "event_type": "state_changed:external_contract:priceProvider",
+          "signature": "PriceProviderSet(address,address)",
+          "topic0": "0x98c01d227e3cc9d2c6f54140e668728d1cb767472f07d012d156af971734459d",
+          "witness": {
+            "args": [
+              "oldPriceProvider",
+              "newPriceProvider"
+            ],
+            "kind": "old_new_args_single_writer",
+            "writes": [
+              "priceProvider"
+            ]
+          }
+        },
+        {
+          "controller_id": "state_variable:rebalancer",
+          "event_type": "controller_changed:state_variable:rebalancer",
+          "signature": "RebalancerSet(address,address)",
+          "topic0": "0x64187bd7b97e66658c91904f3021d7c28de967281d18b1a20742348afdd6a6b3",
+          "witness": {
+            "args": [
+              "oldRebalancer",
+              "newRebalancer"
+            ],
+            "kind": "old_new_args_single_writer",
+            "writes": [
+              "rebalancer"
+            ]
+          }
+        },
+        {
+          "controller_id": "external_contract:swapper",
+          "event_type": "state_changed:external_contract:swapper",
+          "signature": "SwapperSet(address,address)",
+          "topic0": "0x8020349d0bc5072c61ea63992108fed8a34a6009921e84089e8a7c89ad03d73f",
+          "witness": {
+            "args": [
+              "oldSwapper",
+              "newSwapper"
+            ],
+            "kind": "old_new_args_single_writer",
+            "writes": [
+              "swapper"
+            ]
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "b6118ff5-3708-480a-bd68-b35bee29aeb1",
+      "tiers_after": {
+        "activity": 4,
+        "self_describing": 4
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd43d99df3d42675ce126a7cff8f7dff037620851",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0xb293b55295c3dd75727f9ad62b305503bb89c2312bfe1a9444ca4afc349803af",
+      "chain": "ethereum",
+      "contract_name": "MembershipNFT: (impl)",
+      "notify_gains": [
+        {
+          "controller_id": "state_variable:_initialized",
+          "event_type": "initialized",
+          "signature": "Initialized(uint8)",
+          "topic0": "0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498",
+          "witness": {
+            "family": "initialized",
+            "kind": "canonical_family",
+            "signature": "Initialized(uint8)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "eeb5142f-5c65-417c-a974-9b54fe1585da",
+      "tiers_after": {
+        "activity": 1,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd5edf7730abad812247f6f54d7bd31a52554e35e",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xd789870bea40d056a4d26055d0befcc8755da146",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": "TellerWithMultiAssetSupport_e2acf9f8",
+      "notify_gains": [],
+      "outcome": "job_schema_version_not_current",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": "d83ac0e3-5f04-418b-a600-e9ae773659e3",
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xeb927ef101080eb9b74c410cba50a7c71b7404a3",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x1507f42b8c2b9dc41b0f977c8f71a0d04897987bfeb8a9e699ebdfde80c51b36",
+      "chain": "ethereum",
+      "contract_name": "0xeb927ef101080eb9b74c410cba50a7c71b7404a3",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "cf768d70-5dd8-4321-b7f8-8c07fac1a44e",
+      "tiers_after": {
+        "activity": 2,
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xed87ae68bb0db3ec922004f8dace44a7c5390894",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xeda663610638e6557c27e2f4e973d3393e844e70",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x4f06756b08239baf39e907dcd8851c437a27835393ff756073f570d669c2dfca",
+      "chain": "ethereum",
+      "contract_name": "etherfi_eda66361",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "be8590a5-40d4-423a-b438-a6830e362e5f",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xf0bb20865277abd641a307ece5ee04e79073416c",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x8d5565aa50457854f5ed1ece1629cfcffc84944b3d5eb854958ece2c681cc01f",
+      "chain": "ethereum",
+      "contract_name": "etherfi_f0bb2086",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "6fbee02a-6763-4cac-b6cc-051a1b9e90ae",
+      "tiers_after": {
+        "self_describing": 1
+      },
+      "tiers_before": {}
+    },
+    {
+      "address": "0xf155a2632ef263a6a382028b3b33feb29175b8a5",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xf44bd12956a0a87c2c20113ddfe1537a442526b5",
+      "after_source": "existing_materialization",
+      "applied": null,
+      "bytecode_keccak": "0xd98674227e76f92f6b75dd38551ea19f01c54766c11c2292ebdb02050ddf4ba4",
+      "chain": "ethereum",
+      "contract_name": "AccountantWithRateProviders",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "already_current",
+      "plan_state_before": "ready_fresh_with_topics",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {
+        "hint": 11,
+        "self_describing": 1
+      },
+      "tiers_before": {
+        "unstamped": 12
+      }
+    },
+    {
+      "address": "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "no_completed_job",
+      "plan_state_before": "contract_not_analyzed",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xfbfe6b9cee0e555bad7e2e7309effc75200cbe38",
+      "after_source": "none",
+      "applied": null,
+      "bytecode_keccak": null,
+      "chain": "ethereum",
+      "contract_name": null,
+      "notify_gains": [],
+      "outcome": "job_plan_artifact_absent",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": false,
+      "source_job_id": null,
+      "tiers_after": {},
+      "tiers_before": {}
+    },
+    {
+      "address": "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb",
+      "after_source": "promoted_job_artifact",
+      "applied": null,
+      "bytecode_keccak": "0x6188ccdf81f390d37c61ea85ca893ec9f0af5135bc9eb1fd1337a4d7802ff794",
+      "chain": "ethereum",
+      "contract_name": "EtherFiGovernanceToken",
+      "notify_gains": [],
+      "outcome": "promotable",
+      "plan_state_before": "no_current_materialization",
+      "promoted_plan_present": true,
+      "source_job_id": "2e83290a-cdc0-4849-b262-bdf8f948fc91",
+      "tiers_after": {
+        "activity": 3
+      },
+      "tiers_before": {}
+    }
+  ],
+  "summary": {
+    "configs": 183,
+    "contracts_gaining_topics": 94,
+    "notify_rights_gains": 111,
+    "notify_rights_gains_by_witness": {
+      "canonical_family": 107,
+      "old_new_args_single_writer": 4
+    },
+    "notify_rights_gains_unattributed": 0,
+    "outcomes": {
+      "already_current": 23,
+      "job_plan_artifact_absent": 26,
+      "job_schema_version_not_current": 1,
+      "keccak_bound_to_other_address": 1,
+      "no_completed_job": 25,
+      "promotable": 107
+    },
+    "specs_by_tier_after": {
+      "activity": 149,
+      "hint": 209,
+      "self_describing": 111
+    },
+    "specs_by_tier_before": {
+      "unstamped": 145
+    }
+  }
+}
