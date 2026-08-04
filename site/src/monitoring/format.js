@@ -186,6 +186,52 @@ function shortenIfHex(value) {
   return /^0x[0-9a-f]{40}$/i.test(s) ? shortenAddress(s) : s;
 }
 
+// Unbounded numeric scalars (uint256 supplies/balances) are unreadable raw,
+// but the producer doesn't know the token's decimals, so no unit may be
+// assumed. Big integers render in scientific notation; the relative delta is
+// derivable from the pair alone and carries the meaning a unit would.
+const DECIMAL_INT = /^-?\d+$/;
+const COMPACT_OVER_DIGITS = 12;
+
+function isLongInt(s) {
+  return DECIMAL_INT.test(s) && s.replace("-", "").length > COMPACT_OVER_DIGITS;
+}
+
+function fmtScalar(value) {
+  const s = String(value);
+  if (!isLongInt(s)) return shortenIfHex(s);
+  const neg = s.startsWith("-");
+  const digits = neg ? s.slice(1) : s;
+  return `${neg ? "-" : ""}${digits[0]}.${digits.slice(1, 5)}e${digits.length - 1}`;
+}
+
+function pctDelta(before, after) {
+  const b = String(before);
+  const a = String(after);
+  if (!DECIMAL_INT.test(b) || !DECIMAL_INT.test(a)) return null;
+  const bi = BigInt(b);
+  const ai = BigInt(a);
+  if (bi === 0n) return null; // no base to be relative to
+  const base = bi < 0n ? -bi : bi;
+  const milliPct = ((ai - bi) * 100000n) / base;
+  const sign = ai >= bi ? "+" : "-";
+  if (milliPct === 0n) return ai === bi ? null : `${sign}<0.001%`;
+  const abs = milliPct < 0n ? -milliPct : milliPct;
+  return `${sign}${abs / 1000n}.${(abs % 1000n).toString().padStart(3, "0")}%`;
+}
+
+// old→new detail line shared by the read-witnessed renderers. Small values
+// stay verbatim; wei-scale integers compact, with the relative delta appended
+// since compaction is what hid it.
+function diffSub(before, after) {
+  if (before == null || after == null) return null;
+  const b = String(before);
+  const a = String(after);
+  const compacted = isLongInt(b) || isLongInt(a);
+  const delta = compacted ? pctDelta(b, a) : null;
+  return `${fmtScalar(b)} → ${fmtScalar(a)}${delta ? ` (${delta})` : ""}`;
+}
+
 // Per-write-target renderers. Each renderer is ``(data, event_type) → {
 // title, sub }``. The event_type is passed so paired events (paused vs
 // unpaused, granted vs revoked, scheduled vs executed, success vs
@@ -310,11 +356,9 @@ export function decodeEvent(evt) {
     const field = d.field || "state";
     const rawBefore = d.old != null ? d.old : d.old_value;
     const rawAfter = d.new != null ? d.new : d.new_value;
-    const before = rawBefore != null ? String(rawBefore) : null;
-    const after = rawAfter != null ? String(rawAfter) : null;
     return {
       title: `${field} changed (polled)`,
-      sub: before && after ? `${before} → ${after}` : null,
+      sub: diffSub(rawBefore, rawAfter),
     };
   }
 
@@ -325,11 +369,9 @@ export function decodeEvent(evt) {
   // emitter's donated write set must not re-title it as something else.
   const witnessed = witnessedSlot(type);
   if (witnessed?.stem === "value") {
-    const before = d.old != null ? shortenIfHex(d.old) : null;
-    const after = d.new != null ? shortenIfHex(d.new) : null;
     return {
       title: `${witnessed.slot} changed (verified)`,
-      sub: before && after ? `${before} → ${after}` : null,
+      sub: diffSub(d.old, d.new),
     };
   }
   if (witnessed?.stem === "member") {
