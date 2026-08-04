@@ -389,6 +389,37 @@ def test_undecodable_arguments_state_the_gap_rather_than_leaving_the_block_absen
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
 
 
+@pytest.mark.parametrize(
+    "fixture",
+    [{"hash": "x"}, {"hash": "x", "to": SAFE}, {"hash": "x", "input": "0x"}],
+    ids=["neither-field", "no-input", "no-to-key"],
+)
+def test_a_transaction_object_missing_its_fields_mints_no_finding(db_session, safe, fixture):
+    """``not_top_level_call`` is a positive finding that DEMOTES the row, so it
+    may only be minted from fields the response actually carried. A response
+    shape we cannot read is an unread transaction, not a proven indirect one."""
+    tx_hash = "0x" + "26" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+
+    (data,) = run(db_session, [event], {tx_hash: dict(fixture, hash=tx_hash)})
+
+    assert "safe_exec" not in data
+    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
+
+
+def test_a_contract_creation_is_witnessed_not_to_be_this_safes_call(db_session, safe):
+    """``to: null`` is a field the response carried, and it proves the
+    transaction called nobody — a finding, and the row collapses on it."""
+    tx_hash = "0x" + "27" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+
+    (data,) = run(db_session, [event], {tx_hash: {"hash": tx_hash, "to": None, "input": "0x6080"}})
+
+    assert data["safe_exec"] == {"status": "not_top_level_call"}
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_INDIRECT]
+
+
 def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, safe):
     """ "Not fetched" is not a finding about the transaction. No block, and the
     salience rules read that as enrichment-absent: visible, never demoted."""
@@ -913,6 +944,25 @@ def test_two_executions_in_one_transaction_do_not_claim_a_direction(db_session, 
     assert "caused_by" not in effect_data
     assert {entry["event_id"] for entry in a_data["correlated_events"]} == {str(b.id), str(effect.id)}
     assert {entry["event_id"] for entry in b_data["correlated_events"]} == {str(a.id), str(effect.id)}
+
+
+def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make_mc):
+    """``caused_by`` is read by no salience rule, so the effect side is linked
+    and NOT re-rated. Re-rating it would not be the no-op it looks like: the
+    reinitialization rule asks whether a prior ``initialized`` row exists, and
+    by the time enrichment runs the row being rated is one of the rows that
+    query can see."""
+    proxy = make_mc(address=ADDR(0x9711), contract_type="proxy")
+    tx_hash = "0x" + "c7" * 32
+    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
+    first_init = seed_event(db_session, proxy, "initialized", tx_hash, data={"version": 1}, log_index=0)
+    assert first_init.data["salience_basis"] == [sal.BASIS_NO_RULE]
+
+    _cause_data, effect_data = run(db_session, [cause, first_init], {})
+
+    assert effect_data["caused_by"]["event_id"] == str(cause.id)
+    assert effect_data["salience_basis"] == [sal.BASIS_NO_RULE]
+    assert effect_data["salience"] == sal.SALIENCE_NOT_DETERMINED
 
 
 def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_mc):

@@ -55,13 +55,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import Contract, EffectiveFunction, MonitoredContract, MonitoredEvent
 from services.monitoring.chain_rpc import chain_id_for
 from services.monitoring.salience import (
+    DATA_KEY_CORRELATED_EVENTS,
     SAFE_EXEC_BATCH_UNDECODABLE,
     SAFE_EXEC_KEY_MULTISEND_RECOGNIZED,
     SAFE_EXEC_STATUS_DECODED,
@@ -333,8 +334,6 @@ def _resolve_signatures(
     addresses = {address for address, _selector in wanted}
     selectors = {selector for _address, selector in wanted}
 
-    from sqlalchemy import func
-
     rows = session.execute(
         select(Contract.address, EffectiveFunction.selector, EffectiveFunction.abi_signature)
         .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
@@ -462,10 +461,23 @@ def _enrich_safe_exec(
         # "enrichment absent" and keep the row visible.
         return None
 
+    if "to" not in tx or not isinstance(tx.get("input"), str):
+        # ``not_top_level_call`` is a POSITIVE finding and it demotes the row,
+        # so it may only be minted from fields the response actually carried.
+        # A transaction object missing either one is an unread transaction, not
+        # a proven indirect one.
+        logger.warning(
+            "Transaction %s carries no to/input; %s publishes no decode rather than a finding",
+            tx_hash,
+            mc.address,
+        )
+        return None
+
     to = _normalize_address(tx.get("to"))
-    tx_input = tx.get("input")
-    tx_input = tx_input.lower() if isinstance(tx_input, str) else ""
+    tx_input = tx["input"].lower()
     if to is None or to != mc.address.lower() or tx_input[:10] != SAFE_EXEC_TRANSACTION:
+        # Includes ``to: null`` — a contract creation is witnessed NOT to be a
+        # call to this Safe.
         return {"safe_exec": {"status": SAFE_EXEC_STATUS_NOT_TOP_LEVEL}}
 
     from eth_abi.abi import decode as eth_abi_decode
@@ -482,7 +494,9 @@ def _enrich_safe_exec(
         )
         return {"safe_exec": {"status": SAFE_EXEC_STATUS_ARGS_UNDECODABLE}}
 
-    target = _normalize_address(args[0]) or str(args[0]).lower()
+    target = _normalize_address(args[0])
+    if target is None:
+        return {"safe_exec": {"status": SAFE_EXEC_STATUS_ARGS_UNDECODABLE}}
     value = int(args[1])
     data = args[2] if isinstance(args[2], bytes) else b""
     operation = int(args[3])
@@ -886,7 +900,15 @@ def enrich_events(
 
         linked: list[tuple[MonitoredEvent, MonitoredContract]] = []
         for event, mc, produced in correlated:
-            if _merge(produced, event, mc):
+            if not _merge(produced, event, mc):
+                continue
+            # Only the CAUSE side is re-rated. No salience rule reads
+            # ``caused_by``, so an effect row that gained only that keeps the
+            # level it was minted with — and re-rating it would not be the
+            # no-op it looks like: the reinitialization rule asks whether a
+            # prior ``initialized`` row exists, and by now the row being rated
+            # is itself one of the rows that query can see.
+            if DATA_KEY_CORRELATED_EVENTS in produced:
                 linked.append((event, mc))
         _recompute(session, linked)
 
