@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -60,25 +61,48 @@ ENROLLMENT_DIRTY_REASONS = frozenset(
 )
 
 
-def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str) -> None:
+#: How long a head-not-determined deferral waits before the drain retries it.
+#: The retry re-runs the protocol's full enrollment build (governance view
+#: included), and a chain that just failed to answer will not answer a second
+#: later — so the cadence is stated, not left at "every tick for the duration of
+#: the outage".
+DEFAULT_HEAD_RETRY_DELAY_S = 300
+
+
+def _head_retry_delay_s() -> int:
+    try:
+        return max(0, int(os.getenv("PSAT_ENROLLMENT_HEAD_RETRY_DELAY_S", str(DEFAULT_HEAD_RETRY_DELAY_S))))
+    except ValueError:
+        return DEFAULT_HEAD_RETRY_DELAY_S
+
+
+def mark_enrollment_dirty(session: Session, protocol_id: int, reason: str, *, delay_s: int = 0) -> None:
     """Enqueue *protocol_id* for the enrollment reconciler drain.
 
     One upsert: a fresh dirty row, or a bump of the existing row's
-    ``dirty_at`` to now() with the new ``reason``. The drainer
+    ``dirty_at`` with the new ``reason``. The drainer
     (``services.monitoring.reconciler.drain_enrollment_queue``) claims due
     rows, so re-marking a protocol that is mid-build simply re-arms it —
     the drain's ``dirty_at``-guarded delete keeps the re-dirtied row alive.
+
+    ``delay_s`` pushes ``dirty_at`` into the future so the row is not due until
+    then. Used by a re-mark that is retrying a condition which cannot have
+    changed in the meantime (an unreachable chain): re-arming at now() would
+    re-run the whole governance build every drain tick for as long as the
+    outage lasts. 0 (the default) keeps the immediate re-arm every other caller
+    wants.
 
     Does not commit; the caller commits so the mark lands atomically with
     (or right after) the action that triggered it. Callers mark *after* the
     triggering write commits, so a dirty row never references rolled-back work.
     """
+    dirty_at = func.now() if delay_s <= 0 else text(f"NOW() + INTERVAL '{int(delay_s)} seconds'")
     session.execute(
         pg_insert(MonitoringEnrollmentQueue)
-        .values(protocol_id=protocol_id, reason=reason)
+        .values(protocol_id=protocol_id, reason=reason, dirty_at=dirty_at)
         .on_conflict_do_update(
             index_elements=["protocol_id"],
-            set_={"dirty_at": func.now(), "reason": reason},
+            set_={"dirty_at": dirty_at, "reason": reason},
         )
     )
 
@@ -553,7 +577,7 @@ def enroll_protocol_contracts(
         # the row keeps its place and the next tick re-runs the build. It is
         # also what the coverage census counts — a deferred contract has no row
         # to be counted as.
-        mark_enrollment_dirty(session, protocol_id, HEAD_NOT_DETERMINED_REASON)
+        mark_enrollment_dirty(session, protocol_id, HEAD_NOT_DETERMINED_REASON, delay_s=_head_retry_delay_s())
         logger.warning(
             "Enrollment incomplete: %d row(s) deferred for protocol %s; re-queued",
             deferred,

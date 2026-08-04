@@ -138,6 +138,9 @@ def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, 
     ).scalar_one()
     assert row.reason == HEAD_NOT_DETERMINED_REASON
     assert row.dirty_at > claimed_at
+    # ...and not due immediately: the retry re-runs the whole build, and the
+    # chain that just failed to answer will not answer a second later.
+    assert row.dirty_at > datetime.now(timezone.utc)
 
     # The drain now runs its success bookkeeping: the delete must no-op.
     _finish_success(db_session, claim)
