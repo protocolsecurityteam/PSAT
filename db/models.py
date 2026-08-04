@@ -2496,6 +2496,11 @@ class ContractMaterialization(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     builder_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who established this row and from what: ``{produced_by, source_job_id,
+    # materialized_at}`` (see ``db.contract_materializations.build_provenance``).
+    # NULL is a row written before the column existed — no provenance was
+    # recorded, which is not the same as a producer we happen to assume.
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     materialized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()"), nullable=False
     )

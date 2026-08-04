@@ -147,6 +147,42 @@ logger = logging.getLogger(__name__)
 ANALYSIS_SCHEMA_VERSION = 5
 
 
+# ── Provenance ─────────────────────────────────────────────────────────────
+# Who established a row, and from what. Recorded because a materialization is
+# the versioned store monitoring enrolls from: invariant 7 forbids a per-job
+# artifact entering it without the source job written down, and once three
+# producers exist "which one wrote this" stops being reconstructable.
+PRODUCED_BY_RESOLUTION = "resolution"
+PRODUCED_BY_PIPELINE = "pipeline"
+PRODUCED_BY_PROMOTION_SWEEP = "promotion_sweep"
+
+# What :func:`publish_materialization` did, as a token the caller reports.
+PUBLISH_WRITTEN = "written"
+PUBLISH_ALREADY_CURRENT = "already_current"
+PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS = "keccak_bound_to_other_address"
+PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK = "address_bound_to_other_keccak"
+PUBLISH_INCOMPLETE_BUNDLE = "incomplete_bundle"
+
+
+def build_provenance(
+    produced_by: str,
+    *,
+    source_job_id: Any = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """The provenance stamp for one row write.
+
+    ``source_job_id`` is written even when it is None: the producer is known
+    and the job is not, and those are two different facts. A NULL
+    ``provenance`` column means no producer was recorded at all.
+    """
+    return {
+        "produced_by": produced_by,
+        "source_job_id": str(source_job_id) if source_job_id is not None else None,
+        "materialized_at": (now or datetime.now(timezone.utc)).isoformat(),
+    }
+
+
 def _builder_staleness_s() -> float:
     """How long a ``status='building'`` row stays trusted as in-flight.
 
@@ -186,7 +222,7 @@ def is_enabled() -> bool:
     return os.getenv("PSAT_CONTRACT_MATERIALIZATIONS", "1").lower() in ("1", "true", "yes")
 
 
-def _normalize(chain: str | None, address: str, bytecode_keccak: str) -> tuple[str, str, str]:
+def _normalize(chain: str | int | None, address: str, bytecode_keccak: str) -> tuple[str, str, str]:
     return (
         chain_cache_token(chain),
         address.lower(),
@@ -464,6 +500,13 @@ def _copy_bundle_row(
         status="ready",
         error=None,
         builder_started_at=None,
+        # The donor's bundle, recorded as this row's own provenance: the copy is
+        # the recursion's write, and which row it came from is the fact that
+        # would otherwise be unreconstructable.
+        provenance={
+            **build_provenance(PRODUCED_BY_RESOLUTION),
+            "reused_from": {"chain": donor.chain, "bytecode_keccak": donor.bytecode_keccak},
+        },
         analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
     )
     stmt = pg_insert(ContractMaterialization).values(**values)
@@ -482,6 +525,7 @@ def _copy_bundle_row(
             "status": "ready",
             "error": None,
             "builder_started_at": None,
+            "provenance": stmt.excluded.provenance,
             "analysis_schema_version": stmt.excluded.analysis_schema_version,
             "materialized_at": func.now(),
             "updated_at": func.now(),
@@ -688,6 +732,7 @@ def materialize_or_wait(
                 error=err,
                 builder_started_at=None,
                 source_content_hash=_src["hash"],
+                provenance=build_provenance(PRODUCED_BY_RESOLUTION),
                 analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
             stmt = stmt.on_conflict_do_update(
@@ -697,6 +742,7 @@ def materialize_or_wait(
                     "error": err,
                     "builder_started_at": None,
                     "source_content_hash": stmt.excluded.source_content_hash,
+                    "provenance": stmt.excluded.provenance,
                     "updated_at": func.now(),
                 },
             )
@@ -769,6 +815,11 @@ def materialize_or_wait(
             source_content_hash=_src["hash"],
             status="ready",
             builder_started_at=None,
+            # No source job: the recursion materializes whatever dependency it
+            # walks onto, so the job that happens to be walking is not the job
+            # this bundle is *of*. The producer is known, the job is not, and
+            # the stamp says exactly that.
+            provenance=build_provenance(PRODUCED_BY_RESOLUTION),
             analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         )
         stmt = stmt.on_conflict_do_update(
@@ -786,6 +837,7 @@ def materialize_or_wait(
                 "address": stmt.excluded.address,
                 "error": None,
                 "builder_started_at": None,
+                "provenance": stmt.excluded.provenance,
                 "analysis_schema_version": stmt.excluded.analysis_schema_version,
                 "materialized_at": func.now(),
                 "updated_at": func.now(),
@@ -806,3 +858,195 @@ def materialize_or_wait(
             )
         ).scalar_one()
         return ready
+
+
+def _publish_blobs(
+    chain_norm: str,
+    keccak_norm: str,
+    analysis: dict,
+    tracking_plan: dict,
+    predicate_trees: dict | None,
+) -> tuple[dict | None, dict | None, dict | None, str | None, str | None, str | None]:
+    """Upload the bundle when storage is configured; else keep it inline.
+
+    Returns ``(analysis_inline, tracking_plan_inline, predicate_trees_inline,
+    analysis_key, tracking_plan_key, predicate_trees_key)`` — the same
+    inline-or-blob split ``materialize_or_wait`` phase 2 produces. Upload
+    failures propagate: a row pointing at a key the bucket does not have reads
+    as "this contract's payload could not be produced" forever after.
+    """
+    client = get_storage_client()
+    if client is None:
+        return analysis, tracking_plan, predicate_trees, None, None, None
+    analysis_key = _blob_key(chain_norm, keccak_norm, "analysis")
+    _put_blob(client, analysis_key, analysis)
+    tracking_plan_key = _blob_key(chain_norm, keccak_norm, "tracking_plan")
+    _put_blob(client, tracking_plan_key, tracking_plan)
+    predicate_trees_key: str | None = None
+    if predicate_trees is not None:
+        predicate_trees_key = _blob_key(chain_norm, keccak_norm, "predicate_trees")
+        _put_blob(client, predicate_trees_key, predicate_trees)
+    return None, None, None, analysis_key, tracking_plan_key, predicate_trees_key
+
+
+def publish_materialization(
+    *,
+    chain: str | int | None,
+    address: str,
+    bytecode_keccak: str,
+    contract_name: str | None,
+    analysis: dict | None,
+    tracking_plan: dict | None,
+    predicate_trees: dict | None = None,
+    source_content_hash: str | None = None,
+    provenance: dict[str, Any],
+) -> str:
+    """Write a ready row for an ALREADY-BUILT bundle. Returns an outcome token.
+
+    The producer-side counterpart to :func:`materialize_or_wait`: that function
+    exists to *build* a bundle under request coalescing, this one exists to
+    *record* one the caller already holds — the main pipeline's own analysis
+    artifacts (F4a), or a completed job's artifacts promoted into the versioned
+    store (F4b). Coverage then follows from analysis having run, instead of from
+    which dependencies the authority recursion happened to visit.
+
+    **Fill-or-refresh, never a downgrade.** A ready row at the current schema
+    version is left exactly as it is (``already_current``): same ``(chain,
+    bytecode_keccak)`` means byte-identical code, so its bundle is equivalent to
+    ours and rewriting multi-MB blobs buys nothing — while flipping its
+    ``address`` to ours would silently move the row out from under the address
+    that already resolves to it. Rows that are absent, ``failed``, ``pending``,
+    still ``building``, or stamped at a superseded version are written.
+
+    Refusals, each a fact the caller reports rather than a silent no-op:
+
+    ``incomplete_bundle``
+        No analysis or no tracking plan. A ready row whose ``analysis`` is
+        absent reads to the resolution stage as *this contract has no analysis*
+        — a claim about the contract that a missing artifact never made.
+    ``keccak_bound_to_other_address``
+        A ready current row for this bytecode already names a different
+        address. One row per ``(chain, keccak)`` is the table's key, so this
+        address cannot be served by address lookup; saying so is honest, and
+        stealing the row is not.
+    ``address_bound_to_other_keccak``
+        Another row already holds ``(chain, address)`` under a different
+        keccak (``uq_contract_materializations_chain_address``). Which bytecode
+        is current at that address is not something this writer witnessed, so
+        it does not overwrite the other row's claim.
+    """
+    if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+        return PUBLISH_INCOMPLETE_BUNDLE
+
+    chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
+
+    with SessionLocal() as session:
+        existing = session.execute(
+            select(ContractMaterialization).where(
+                ContractMaterialization.chain == chain_norm,
+                ContractMaterialization.bytecode_keccak == keccak_norm,
+            )
+        ).scalar_one_or_none()
+        outcome = _publish_precheck(existing, addr_norm)
+        if outcome is not None:
+            return outcome
+        conflict = session.execute(
+            select(ContractMaterialization.bytecode_keccak).where(
+                ContractMaterialization.chain == chain_norm,
+                ContractMaterialization.address == addr_norm,
+                ContractMaterialization.bytecode_keccak != keccak_norm,
+            )
+        ).scalar_one_or_none()
+        if conflict is not None:
+            logger.warning(
+                "contract_materializations: %s/%s is already bound to keccak %s; not publishing %s",
+                chain_norm,
+                addr_norm,
+                conflict,
+                keccak_norm,
+            )
+            return PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK
+
+    # Uploads happen with no lock held and no connection idling behind them,
+    # exactly as in phase 2 of ``materialize_or_wait``.
+    (
+        analysis_inline,
+        plan_inline,
+        trees_inline,
+        analysis_key,
+        plan_key,
+        trees_key,
+    ) = _publish_blobs(chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees)
+
+    with SessionLocal() as session:
+        _advisory_lock(session, chain_norm, keccak_norm)
+        # Re-read under the lock: a builder may have finished between the
+        # pre-check and here, and its row wins.
+        existing = session.execute(
+            select(ContractMaterialization).where(
+                ContractMaterialization.chain == chain_norm,
+                ContractMaterialization.bytecode_keccak == keccak_norm,
+            )
+        ).scalar_one_or_none()
+        outcome = _publish_precheck(existing, addr_norm)
+        if outcome is not None:
+            session.commit()
+            return outcome
+
+        stmt = pg_insert(ContractMaterialization).values(
+            chain=chain_norm,
+            bytecode_keccak=keccak_norm,
+            address=addr_norm,
+            contract_name=contract_name,
+            analysis=analysis_inline,
+            tracking_plan=plan_inline,
+            predicate_trees=trees_inline,
+            analysis_blob_key=analysis_key,
+            tracking_plan_blob_key=plan_key,
+            predicate_trees_blob_key=trees_key,
+            source_content_hash=source_content_hash,
+            status="ready",
+            error=None,
+            builder_started_at=None,
+            provenance=provenance,
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="contract_materializations_pkey",
+            set_={
+                "address": stmt.excluded.address,
+                "contract_name": stmt.excluded.contract_name,
+                "analysis": stmt.excluded.analysis,
+                "tracking_plan": stmt.excluded.tracking_plan,
+                "predicate_trees": stmt.excluded.predicate_trees,
+                "analysis_blob_key": stmt.excluded.analysis_blob_key,
+                "tracking_plan_blob_key": stmt.excluded.tracking_plan_blob_key,
+                "predicate_trees_blob_key": stmt.excluded.predicate_trees_blob_key,
+                "source_content_hash": stmt.excluded.source_content_hash,
+                "status": "ready",
+                "error": None,
+                "builder_started_at": None,
+                "provenance": stmt.excluded.provenance,
+                "analysis_schema_version": stmt.excluded.analysis_schema_version,
+                "materialized_at": func.now(),
+                "updated_at": func.now(),
+            },
+        )
+        session.execute(stmt)
+        session.commit()
+    return PUBLISH_WRITTEN
+
+
+def _publish_precheck(existing: ContractMaterialization | None, addr_norm: str) -> str | None:
+    """The outcome when *existing* forbids a write, else None.
+
+    One implementation for the unlocked pre-check and the locked re-read so the
+    two cannot drift on what "already current" means.
+    """
+    if existing is None:
+        return None
+    if existing.status != "ready" or existing.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:
+        return None
+    if (existing.address or "").lower() != addr_norm:
+        return PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS
+    return PUBLISH_ALREADY_CURRENT
