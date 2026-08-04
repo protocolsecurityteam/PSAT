@@ -431,11 +431,13 @@ const RENDER_BY_WRITE_TARGET = {
   _timelock_op: (d, type) => {
     const scheduled = type === "timelock_scheduled";
     const target = d.target ? shortenAddress(d.target) : null;
-    const sel = d.selector;
+    // The backend's fleet-internal resolution when it found one; the raw
+    // selector otherwise. Never a name this side invented.
+    const sel = d.target_function?.signature || d.selector;
     const delay = fmtSeconds(d.delay);
     const subParts = [];
     if (target) subParts.push(`target ${target}`);
-    if (sel) subParts.push(`sel ${sel}`);
+    if (sel) subParts.push(d.target_function?.signature ? sel : `sel ${sel}`);
     if (scheduled && delay) subParts.push(`delay ${delay}`);
     return {
       title: `Timelock operation ${scheduled ? "scheduled" : "executed"}`,

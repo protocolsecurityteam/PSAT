@@ -405,6 +405,16 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
                 seen_keys.add(data_key)
                 fields.append({"name": label, "value": _render_event_value(value), "inline": inline})
 
+    # The timelock families publish their resolved signature in a namespaced
+    # block of their own (their ``target``/``selector`` are keys the taxonomy
+    # owns). Rendered here rather than in a branch above so the row keeps
+    # whatever its own family already renders.
+    target_function = data.get("target_function")
+    if isinstance(target_function, dict):
+        label = target_function.get("signature") or target_function.get("selector")
+        if label:
+            fields.append({"name": "Function", "value": f"`{label}`", "inline": True})
+
     if event.block_number:
         fields.append({"name": "Block", "value": str(event.block_number), "inline": True})
     if event.tx_hash:

@@ -383,6 +383,34 @@ describe("decodeEvent — enriched Safe executions", () => {
   });
 });
 
+describe("decodeEvent — timelock name resolution", () => {
+  it("shows the backend-resolved signature in place of the raw selector", () => {
+    const result = decodeEvent(
+      evt("timelock_scheduled", {
+        target: ADDR_A,
+        selector: "0x69fe0e2d",
+        delay: 86400,
+        target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+        effect_tags: { writes: ["_timelock_op"] },
+      }),
+    );
+    expect(result.sub).toContain("setFee(uint256)");
+    expect(result.sub).not.toContain("sel 0x69fe0e2d");
+  });
+
+  it("keeps the raw selector when nothing resolved it", () => {
+    const result = decodeEvent(
+      evt("timelock_scheduled", {
+        target: ADDR_A,
+        selector: "0x69fe0e2d",
+        target_function: { selector: "0x69fe0e2d", signature: null },
+        effect_tags: { writes: ["_timelock_op"] },
+      }),
+    );
+    expect(result.sub).toContain("sel 0x69fe0e2d");
+  });
+});
+
 describe("decodeEvent — timelock", () => {
   it("renders timelock_scheduled with target, selector, delay", () => {
     const result = decodeEvent(
