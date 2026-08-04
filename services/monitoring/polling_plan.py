@@ -34,6 +34,7 @@ self-describing instead of keyed off a global field→event_type table.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -335,22 +336,94 @@ _DECODABLE_TYPE_KINDS = frozenset({"address", "contract", "primitive"})
 _VENDORED_FIELD_WINS = frozenset({"implementation", "threshold", "min_delay"})
 
 
+# ABI types that occupy exactly one 32-byte word in a return. A struct getter's
+# return is projectable by word index only when EVERY member is one of these:
+# a dynamic member (``string`` / ``bytes`` / an array / a nested struct) puts an
+# offset in the head instead of the value, and the word at the member's index
+# would then be a pointer published as an address.
+_STATIC_WORD_ABI_TYPE = re.compile(
+    r"^(address|bool"
+    r"|u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128"
+    r"|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?"
+    r"|bytes([1-9]|[12][0-9]|3[0-2]))$"
+)
+
+
+def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
+    """Index of the word a struct getter's return holds this controller's
+    member in, or ``None`` when the projection is not provably that word.
+
+    A public struct variable's compiler-generated getter returns the members as
+    a flat tuple, so member *i* is word *i* — but only under two conditions the
+    analyzer's ``components`` list lets us check:
+
+      * every member is a single static word (see ``_STATIC_WORD_ABI_TYPE``),
+        which also makes the flattened auto-getter and an explicit
+        ``returns (S memory)`` getter encode identically; and
+      * no member is a mapping or array — the auto-getter OMITS those, which
+        shifts every later member's index and would publish a neighbouring
+        member's value under this controller's name.
+
+    Both are refusals to decode, not fallbacks: an unprojectable controller
+    stays unreadable, which the taxonomy already has a state for.
+    """
+    member_path = read_spec.get("member_path")
+    if not isinstance(member_path, list) or len(member_path) != 1:
+        return None
+    member = member_path[0]
+    components = read_spec.get("components")
+    if not isinstance(components, list) or not components:
+        return None
+    index: int | None = None
+    for position, component in enumerate(components):
+        if not isinstance(component, Mapping):
+            return None
+        abi_type = str(component.get("abi_type") or "")
+        if not _STATIC_WORD_ABI_TYPE.match(abi_type):
+            return None
+        if component.get("name") == member:
+            index = position
+    return index
+
+
 def _is_poll_decodable(read_spec: Mapping[str, Any]) -> bool:
-    """A controller becomes a polling entry only when we can both call
-    its getter (strategy == getter_call, no member_path projection)
-    and decode the result (type_kind in the supported set)."""
+    """A controller becomes a polling entry only when we can both call its
+    getter (strategy == getter_call) and decode the result (type_kind in the
+    supported set).
+
+    A member-path controller qualifies through the same door with one extra
+    proof: the word its member occupies in the parent getter's return must be
+    known (:func:`_member_word_index`). Without that the projection would be a
+    guess at an offset, so the controller stays unreadable."""
     if (read_spec.get("strategy") or "").lower() != "getter_call":
         return False
     type_kind = (read_spec.get("type_kind") or "").lower()
     if type_kind not in _DECODABLE_TYPE_KINDS:
         return False
-    # Struct projections carry member_path and require ABI-decoding the
-    # parent struct return — skip them rather than partially decode.
-    if read_spec.get("member_path"):
+    if read_spec.get("member_path") and _member_word_index(read_spec) is None:
         return False
     if not read_spec.get("target"):
         return False
     return True
+
+
+def project_entry_return(raw: str | None, entry: Mapping[str, Any]) -> str | None:
+    """The single ABI word *entry* reads, sliced out of a getter's return.
+
+    A no-op for every entry without a member projection. For one with a
+    projection, a body too short to hold that word yields ``None`` — the answer
+    did not contain the member, which ``decode_poll_outcome`` reports as
+    unparsed rather than as a value.
+    """
+    index = entry.get("member_word_index")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        return raw
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        return None
+    body = raw[2:]
+    if len(body) < (index + 1) * 64:
+        return None
+    return "0x" + body[index * 64 : (index + 1) * 64]
 
 
 def _entry_field_name(read_spec: Mapping[str, Any], controller_id: str | None) -> str:
@@ -364,6 +437,12 @@ def _entry_field_name(read_spec: Mapping[str, Any], controller_id: str | None) -
     """
     name = read_spec.get("state_variable_name")
     if isinstance(name, str) and name:
+        member_path = read_spec.get("member_path")
+        if isinstance(member_path, list) and member_path:
+            # A projected member is its own field. Sharing the parent's name
+            # would file one member's value under the whole struct — and
+            # collide with any entry the parent variable itself produced.
+            return ".".join([name, *(str(part) for part in member_path)])
         return name
     target = read_spec.get("target")
     if isinstance(target, str) and target:
@@ -489,6 +568,13 @@ def build_polling_plan(
                 "type": type_str,
                 "source": f"analyzer:{tc.get('controller_id') or field}",
             }
+            member_word_index = _member_word_index(read_spec)
+            if member_word_index is not None:
+                # The parent getter answers with the whole struct; this names
+                # the one word that is this controller. ``member_path`` rides
+                # along so a persisted entry says what it projects.
+                entry["member_word_index"] = member_word_index
+                entry["member_path"] = list(read_spec.get("member_path") or [])
             if suppress:
                 entry["suppress_when_scan_event_types"] = suppress
             # First-write-wins for analyzer entries so the deterministic

@@ -55,11 +55,12 @@ from services.monitoring.event_topics import (
     WITNESS_TIER_SELF_DESCRIBING,
     WITNESS_TIERS,
     classify_witness_tier,
+    is_member_changed_event_type,
     parse_any_log,
     parse_tracked_log,
     value_changed_event_type,
 )
-from services.monitoring.polling_plan import decode_poll_outcome
+from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.monitoring.tracking_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.verify_status import (
@@ -475,12 +476,19 @@ def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
     tier = spec.get("witness_tier")
     if tier in WITNESS_TIERS:
         return tier
+    event_type = spec.get("event_type")
     return classify_witness_tier(
-        event_type=spec.get("event_type"),
+        event_type=event_type,
         controller_id=spec.get("controller_id"),
         inputs=spec.get("inputs"),
         effect_tags=spec.get("effect_tags"),
-        member_witness=spec.get("member_witness"),
+        # The member witness promotes only a spec that publishes under the
+        # member vocabulary. Enrollment refuses to mint that type when the
+        # qualification cannot be published (no mapping named, a type that would
+        # overflow the column, a key outside the event's args) — honouring the
+        # record here regardless would promote a row that publishes under the
+        # slot stem, and every slot-shaped consumer downstream keys off the type.
+        member_witness=spec.get("member_witness") if is_member_changed_event_type(event_type) else None,
         writer_openness=spec.get("writer_openness"),
         poll_decodable=_poll_entry_for_controller(mc, spec.get("controller_id")) is not None,
     )
@@ -906,7 +914,7 @@ def _resolve_verification_reads(
                         flag_modified(mc, "last_poll_status")
                     continue
                 new_value, parsed_ok = decode_poll_outcome(
-                    raw if isinstance(raw, str) else None,
+                    project_entry_return(raw if isinstance(raw, str) else None, member.entry),
                     member.entry.get("type_kind"),
                     member.entry.get("type"),
                 )
@@ -1642,9 +1650,15 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
     via ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — covers monitoring_config
     rows persisted before tag synthesis landed.
     """
-    state = dict(mc.last_known_state or {})
     event_type = parsed["event_type"]
+    # A qualified member change proves one ENTRY moved. The reflection below
+    # resolves a single "new value" per write target and would store this
+    # entry's key or value as the whole mapping's — a value the mapping does
+    # not have and nothing observed.
+    if is_member_changed_event_type(event_type):
+        return
 
+    state = dict(mc.last_known_state or {})
     tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
     writes = tags.get("writes") or []
 
@@ -1710,6 +1724,12 @@ def _sync_relational_tables(
         return
 
     event_type = parsed["event_type"]
+    # Same reason as in ``_update_state_from_event``: a ``ControllerValue`` row
+    # is the slot's current value, and one entry of a mapping is not that. The
+    # entry change is published as its own event and stops there.
+    if is_member_changed_event_type(event_type):
+        return
+
     tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
     writes = tags.get("writes") or []
     delegates = bool(tags.get("delegates"))
@@ -2071,7 +2091,7 @@ def _apply_poll_result(
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
         return False
-    new_value, parsed = decode_poll_outcome(raw, entry.get("type_kind"), entry.get("type"))
+    new_value, parsed = decode_poll_outcome(project_entry_return(raw, entry), entry.get("type_kind"), entry.get("type"))
     if new_value is None:
         return parsed
 

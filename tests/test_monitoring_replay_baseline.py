@@ -134,9 +134,12 @@ def test_replay_classifies_every_window_spec(db_session):
 
     ``_balances`` and ``locked`` are activity — neither controller has a
     poll-decodable read spec, so no verification read exists to witness them.
-    ``locked`` is the Solmate reentrancy guard: it is ``private``, exposes no
-    getter, and is therefore not readable until F8 adds the analyzer-derived
-    storage-slot emitter. The two ``authority_updated`` specs stay
+    ``locked`` is the Solmate reentrancy guard: it is ``private`` and exposes no
+    getter, so it is not readable at all. F7 closes that residual from the other
+    end — a latch written and restored inside one call is no longer a writer of
+    anything, so it stops being a controller and this spec is not derived at
+    all on a re-analysed contract. The row here is the PERSISTED one, which is
+    what the fixture pins. The two ``authority_updated`` specs stay
     self_describing (canonical family, signature-corroborated) — they emitted
     no logs in this window, which is why nothing was ADDED.
     """
@@ -184,6 +187,12 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
     writer. Anything weaker than ``restricted`` — including the absent third
     state — leaves them silent, which is invariant 4 measured on real traffic
     rather than on a synthetic spec.
+
+    The injected record is one that could actually be PUBLISHED: it names the
+    mapping whose entry moved, and the spec publishes under that vocabulary. A
+    record naming no mapping does not promote anything (a slot-typed row
+    carrying an entry key is what the member guards exist to prevent), so
+    injecting one here would test the refusal, not the liveness.
     """
     fixture = copy.deepcopy(load_replay_fixture())
     for contract in fixture["contracts"]:
@@ -191,7 +200,12 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
             continue
         for spec in contract["monitoring_config"]["tracked_topics"]:
             if spec["topic0"] == TRANSFER_TOPIC0:
-                spec["member_witness"] = {"key_position": 0, "direction": "set"}
+                spec["member_witness"] = {
+                    "mapping_name": "_balances",
+                    "key_position": 0,
+                    "direction": "set",
+                }
+                spec["event_type"] = "member_changed:_balances"
                 if openness is not None:
                     spec["writer_openness"] = openness
 
@@ -203,6 +217,6 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
 
     if openness == "restricted":
         assert len(produced) == 388
-        assert {et for _a, et, _t, _l in produced} == {"state_changed:state_variable:_balances"}
+        assert {et for _a, et, _t, _l in produced} == {"member_changed:_balances"}
     else:
         assert produced == set()
