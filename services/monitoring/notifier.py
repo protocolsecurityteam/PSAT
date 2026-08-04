@@ -115,6 +115,13 @@ def _resolve_embed_color(event_type: str, data: dict | None) -> int:
     override = _EVENT_TYPE_COLOR_OVERRIDES.get(event_type)
     if override is not None:
         return override
+    if event_type.startswith("value_changed"):
+        # The proven field, not the emitter's donated write set: the read is
+        # what says which slot moved.
+        field = (data or {}).get("field")
+        if isinstance(field, str) and field in _WRITE_TARGET_TO_COLOR:
+            return _WRITE_TARGET_TO_COLOR[field]
+        return _EVENT_TYPE_COLOR_OVERRIDES["state_changed_poll"]
     tags = (data or {}).get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
     writes = set(tags.get("writes") or [])
     for write_target in _COLOR_PRIORITY:
@@ -280,6 +287,17 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
             fields.append({"name": "Old", "value": f"`{data['old_value']}`", "inline": True})
         if data.get("new_value"):
             fields.append({"name": "New", "value": f"`{data['new_value']}`", "inline": True})
+    elif event.event_type.startswith("value_changed"):
+        # Read-verified diff: the old→new pair IS the witness, so it renders
+        # from the event's own data rather than through the emitter's donated
+        # write set (which is what the tag-driven path below reads).
+        if data.get("field"):
+            fields.append({"name": "Field", "value": data["field"], "inline": True})
+        if data.get("old") is not None:
+            fields.append({"name": "Old", "value": _render_event_value(data["old"]), "inline": True})
+        if data.get("new") is not None:
+            fields.append({"name": "New", "value": _render_event_value(data["new"]), "inline": True})
+        fields.append({"name": "Witness", "value": "verification read", "inline": True})
     else:
         tags = data.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event.event_type) or {}
         writes = tags.get("writes") or []
@@ -338,19 +356,63 @@ _FILTER_GROUP_EXPANSIONS: dict[str, set[str]] = {
     "threshold_changed": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
 }
 
+# The three controller_id spellings the analyzer emits, so a seed naming a
+# write target expands to whichever form the tracking plan actually used.
+_CONTROLLER_ID_PREFIXES = ("", "state_variable:", "external_contract:")
+
+
+def _value_changed_forms(write_target: str) -> set[str]:
+    return {f"value_changed:{prefix}{write_target}" for prefix in _CONTROLLER_ID_PREFIXES}
+
 
 def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     """Expand legacy webhook event-type filters to include grouped successors.
 
     Cheap forward-compat shim so adding a new event type to an existing
     UI grouping doesn't silently strand pre-existing webhook filters.
+
+    Two expansions:
+
+      * the historical UI groupings above;
+      * the witness taxonomy's read-verified vocabulary. A filter saved
+        against ``ownership_transferred`` (or against the neutral
+        ``state_changed:<controller_id>`` the terminal fallback used to mint)
+        is asking to hear about the owner slot moving, so the
+        ``value_changed:<controller_id>`` that now carries that fact is
+        allowed alongside it. Without this the taxonomy would silently mute
+        every pre-existing subscription for exactly the events it strengthened.
+
+    ``member_changed:<mapping_var>`` is deliberately NOT expanded from any
+    seed: no legacy filter ever covered those mappings (their occurrences
+    published under a neutral ``state_changed`` type or not at all), so
+    inventing coverage for them would be a claim about the subscriber's
+    intent rather than a reading of it.
     """
     if not allowed_types:
         return set()
     expanded: set[str] = set(allowed_types)
     for seed in allowed_types:
         expanded |= _FILTER_GROUP_EXPANSIONS.get(seed, set())
+        stem, sep, controller_id = seed.partition(":")
+        if sep and stem in ("state_changed", "controller_changed") and controller_id:
+            expanded.add(f"value_changed:{controller_id}")
+            continue
+        for write_target in (_HANDROLLED_EVENT_TYPE_TO_TAGS.get(seed) or {}).get("writes") or []:
+            if isinstance(write_target, str) and not write_target.startswith("_"):
+                expanded |= _value_changed_forms(write_target)
     return expanded
+
+
+# Tiers whose occurrences prove only that a writer ran. They never reach the
+# notify list from the scanner (no row is inserted at all), so this is the
+# second lock on the same door: any caller handing the notifier a hint- or
+# activity-tier row is refused rather than trusted.
+_NON_NOTIFYING_TIERS = frozenset({"hint", "activity"})
+
+
+def _may_notify(event: MonitoredEvent) -> bool:
+    data = event.data if isinstance(event.data, dict) else {}
+    return data.get("witness_tier") not in _NON_NOTIFYING_TIERS
 
 
 def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> None:
@@ -362,9 +424,13 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
     if not events:
         return
 
-    # Group events by protocol_id
+    # Group events by protocol_id. Side effects follow claim strength
+    # (invariant 5): an occurrence that only proves a writer ran never pages
+    # anyone, whatever route handed it to this function.
     events_by_protocol: dict[int, list[MonitoredEvent]] = {}
     for event in events:
+        if not _may_notify(event):
+            continue
         mc = event.monitored_contract
         if mc and mc.protocol_id:
             events_by_protocol.setdefault(mc.protocol_id, []).append(event)
