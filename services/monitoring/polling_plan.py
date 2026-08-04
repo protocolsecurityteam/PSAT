@@ -341,7 +341,12 @@ _VENDORED_FIELD_WINS = frozenset({"implementation", "threshold", "min_delay"})
 # a dynamic member (``string`` / ``bytes`` / an array / a nested struct) puts an
 # offset in the head instead of the value, and the word at the member's index
 # would then be a pointer published as an address.
-_STATIC_WORD_ABI_TYPE = re.compile(r"^(address|bool|u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?|bytes([1-9]|[12][0-9]|3[0-2]))$")
+_STATIC_WORD_ABI_TYPE = re.compile(
+    r"^(address|bool"
+    r"|u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128"
+    r"|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?"
+    r"|bytes([1-9]|[12][0-9]|3[0-2]))$"
+)
 
 
 def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:

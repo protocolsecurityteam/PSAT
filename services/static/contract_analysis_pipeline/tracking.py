@@ -386,9 +386,7 @@ class _EventQualification:
         of a write at all and the openness is demoted rather than proven.
         """
         witnesses = [
-            record
-            for var in sorted(target_vars)
-            if (record := self._witness_by_pair.get((var, signature))) is not None
+            record for var in sorted(target_vars) if (record := self._witness_by_pair.get((var, signature))) is not None
         ]
         if len(witnesses) != 1:
             # Zero: no correspondence was proven. More than one: the same event

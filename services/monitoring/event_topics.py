@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from eth_utils.crypto import keccak
+from typing_extensions import TypeGuard
 
 from services.discovery.upgrade_history import (
     EVENT_TOPICS as PROXY_EVENT_TOPICS,
@@ -844,7 +845,7 @@ def normalized_writer_openness(raw: object) -> str:
     return WRITER_OPENNESS_NOT_DETERMINED
 
 
-def is_member_witness(raw: object) -> bool:
+def is_member_witness(raw: object) -> TypeGuard[dict]:
     """True only for a populated correspondence record.
 
     This is the G2↔G3 trust boundary and the strongest promotion in the

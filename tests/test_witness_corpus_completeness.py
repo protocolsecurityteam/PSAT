@@ -168,7 +168,7 @@ def corpus(tmp_path_factory):
         "controller_tracking": targets,
     }
     plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
-    specs = extract_governance_topics(plan)
+    specs = extract_governance_topics(dict(plan))
     planned = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     polling = build_polling_plan(contract_type="regular", tracking_plan=plan, tracked_topics=specs)
     return {
@@ -279,7 +279,8 @@ def test_member_controller_drops_a_sibling_members_event(corpus):
     writers = _state_writers_from_effects(corpus["effects"])
     assert "updateExchangeRate(uint96)" in writers.get("accountantState", set())
 
-    signatures = {e["signature"] for e in corpus["targets"]["state_variable:accountantState.payoutAddress"]["associated_events"]}
+    payout = corpus["targets"]["state_variable:accountantState.payoutAddress"]
+    signatures = {e["signature"] for e in payout["associated_events"]}
     assert signatures == {"PayoutAddressUpdated(address,address)"}
     assert _topic0("ExchangeRateUpdated(uint96,uint96)") not in corpus["specs"]
 
