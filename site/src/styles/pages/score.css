@@ -317,7 +317,6 @@ h2.sc-band-title {
   border: 1px solid var(--panel-border);
   border-radius: 50%;
   background: none;
-  box-shadow: none;
   font-size: 9px;
   font-weight: 700;
   line-height: 1;

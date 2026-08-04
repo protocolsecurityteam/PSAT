@@ -133,17 +133,17 @@ export const MACHINE_TABS = [
   { key: "balances", label: "Balances" },
 ];
 
-// `label` is the plural category name (Roles filter chips, with counts);
-// `singular` names one entity (canvas node + card badges). Kept explicit rather
+// `singular` names one entity (canvas node + card badges); `label` is the
+// plural category name, kept for any grouped display. Both explicit rather
 // than derived so "Factories"→"Factory" / "Utilities"→"Utility" are correct
 // (a naive trailing-`s` strip yields "Factorie"/"Utilitie").
 export const ROLE_META = {
-  value_handler: { label: "Value Handlers", singular: "Value Handler", color: "#6a9e94", defaultOn: true },
-  token:         { label: "Tokens",         singular: "Token",         color: "#6a8a9e", defaultOn: true },
-  governance:    { label: "Governance",     singular: "Governance",    color: "#8a6a9e", defaultOn: true },
-  bridge:        { label: "Bridges",        singular: "Bridge",        color: "#9e8a6a", defaultOn: true },
-  factory:       { label: "Factories",      singular: "Factory",       color: "#6a9e8a", defaultOn: true },
-  utility:       { label: "Utilities",      singular: "Utility",       color: "#7a7a7a", defaultOn: true },
+  value_handler: { label: "Value Handlers", singular: "Value Handler", color: "#6a9e94" },
+  token:         { label: "Tokens",         singular: "Token",         color: "#6a8a9e" },
+  governance:    { label: "Governance",     singular: "Governance",    color: "#8a6a9e" },
+  bridge:        { label: "Bridges",        singular: "Bridge",        color: "#9e8a6a" },
+  factory:       { label: "Factories",      singular: "Factory",       color: "#6a9e8a" },
+  utility:       { label: "Utilities",      singular: "Utility",       color: "#7a7a7a" },
 };
 export const ALL_ROLES = Object.keys(ROLE_META);
 
@@ -156,11 +156,11 @@ export const PRINCIPAL_COLORS = {
 
 export const SEARCH_MODES = [
   // Contracts-only — NOT a superset of the Safes/EOAs/Timelocks modes.
-  { key: "contracts", icon: "📄", label: "Contracts", accent: "#94a3b8" },
-  { key: "safe", icon: "🔒", label: "Safes", accent: "#6a9e94" },
-  { key: "eoa", icon: "👤", label: "EOAs", accent: "#a09870" },
-  { key: "timelock", icon: "⏳", label: "Timelocks", accent: "#9a8a6e" },
-  { key: "funds", icon: "💰", label: "Has Funds", accent: "#f59e0b" },
+  { key: "contracts", label: "Contracts", accent: "#94a3b8" },
+  { key: "safe", label: "Safes", accent: "#6a9e94" },
+  { key: "eoa", label: "EOAs", accent: "#a09870" },
+  { key: "timelock", label: "Timelocks", accent: "#9a8a6e" },
+  { key: "funds", label: "Has Funds", accent: "#f59e0b" },
 ];
 
 export const SORT_OPTIONS = [

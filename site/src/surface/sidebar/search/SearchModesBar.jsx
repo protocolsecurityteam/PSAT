@@ -11,7 +11,6 @@ export function SearchModesBar({ mode, setMode }) {
           onClick={() => setMode(m.key)}
           title={m.label}
         >
-          <span className="ps-search-mode-icon">{m.icon}</span>
           <span className="ps-search-mode-label">{m.label}</span>
         </button>
       ))}

@@ -189,7 +189,6 @@
   border: 0;
   border-radius: 7px;
   background: none;
-  box-shadow: none; /* the app-wide button glow reads as a phantom selection here */
   font: inherit;
   font-size: 11.5px;
   color: var(--ink);

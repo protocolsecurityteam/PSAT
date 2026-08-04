@@ -154,7 +154,7 @@
   top: 16px;
   left: 16px;
   z-index: 20;
-  width: 540px;
+  width: 440px;
   max-width: calc(100vw - 32px);
   box-sizing: border-box;
   overflow: hidden;
@@ -162,7 +162,47 @@
   backdrop-filter: blur(12px);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 10px;
-  padding: 9px 10px;
+  padding: 8px 9px;
+}
+
+/* Collapsed: the panel folds to just the pill. Width follows the pill, so the
+   toggle occupies the same top-left spot in both states. */
+.ps-filter-overlay--collapsed {
+  width: auto;
+  padding: 0;
+}
+
+/* The pill IS the expand/collapse toggle, first element of the panel in both
+   states so it never moves under the pointer. */
+.ps-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.ps-filter-pill:hover { color: #e2e8f0; transform: none; }
+
+/* Expanded: the pill becomes the panel's header row. */
+.ps-filter-overlay:not(.ps-filter-overlay--collapsed) .ps-filter-pill {
+  padding: 0 2px 6px;
+}
+
+.ps-filter-chev { font-size: 9px; color: #64748b; }
+
+.ps-filter-chain {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 4px;
+  font-weight: 500;
+  color: #94a3b8;
 }
 
 .ps-filter-bar {
@@ -191,22 +231,9 @@
 }
 
 .ps-filter-row .ps-search-modes,
-.ps-filter-row .ps-role-bar {
-  flex: 1 1 auto;
-  min-width: 0;
-  flex-wrap: wrap;
-  padding: 0;
-}
-
-/* Every <button> in the panel (Type pills, Role chips, browse arrows) inherits
-   the global forms.css button chrome — a teal box-shadow glow + hover lift.
-   Zero it panel-wide so the filters read flat, not glowing. */
-.ps-filter-overlay button {
-  box-shadow: none;
-}
-
+.ps-filter-row /* Every <button> in the panel inherits the global forms.css hover lift;
+   flatten it so the filter chips don't bounce. */
 .ps-filter-overlay button:hover {
-  box-shadow: none;
   transform: none;
 }
 
@@ -1187,11 +1214,6 @@
   color: var(--mode-accent, #94a3b8);
 }
 
-.ps-search-mode-icon {
-  font-size: 12px;
-  line-height: 1;
-}
-
 .ps-search-mode-label {
   font-size: 10px;
 }
@@ -1210,16 +1232,6 @@
   min-width: 130px;
 }
 
-.ps-search-field-ic {
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 11px;
-  color: #64748b;
-  pointer-events: none;
-}
-
 .ps-search-input {
   flex: 1 1 auto;
   width: 100%;
@@ -1227,7 +1239,7 @@
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 5px;
-  padding: 4px 8px 4px 26px;
+  padding: 4px 8px;
   color: #e2e8f0;
   font-size: 11px;
   outline: none;
@@ -1365,57 +1377,6 @@
   border: 1px solid rgba(148, 163, 184, 0.2);
   background: rgba(148, 163, 184, 0.08);
   white-space: nowrap;
-}
-
-.ps-role-bar {
-  display: flex;
-  gap: 6px;
-  padding: 8px 0;
-  flex-wrap: wrap;
-}
-
-.ps-role-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(148, 163, 184, 0.15);
-  background: rgba(20, 24, 32, 0.6);
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.ps-role-chip:hover {
-  border-color: rgba(148, 163, 184, 0.3);
-}
-
-.ps-role-chip-on {
-  border-color: var(--role-color);
-  color: #e2e8f0;
-  background: color-mix(in srgb, var(--role-color) 12%, #141820);
-}
-
-.ps-role-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--role-color);
-  opacity: 0.4;
-  flex-shrink: 0;
-}
-
-.ps-role-chip-on .ps-role-dot {
-  opacity: 1;
-}
-
-.ps-role-count {
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.6;
 }
 
 /* Chain switcher row — pills reuse the role-chip shape (see ChainSwitcher.jsx).
