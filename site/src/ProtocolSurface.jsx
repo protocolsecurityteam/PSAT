@@ -551,6 +551,11 @@ function ProtocolSurface({
   // and a caller that collapses them tells the user something untrue. A request
   // that names a function but no contract is resolved against the whole graph,
   // and only a unique match selects — see findFunctionMatches.
+  // A cross-chain request parks here while handleSelectChain re-scopes the
+  // graph; the effect below selectExample re-runs it once the active chain
+  // matches, on the freshly scoped entity index.
+  const pendingCrossChain = useRef(null);
+
   const selectExample = useCallback((example) => {
     const address = String(example?.contractAddress || "").toLowerCase();
     const named = Boolean(example?.functionSignature || example?.selector);
@@ -578,9 +583,26 @@ function ProtocolSurface({
         : {};
     if (!address && !named) return { ok: false, kind: "empty" };
     // Identity is (chain, address) (inv. 13) and the surface renders one chain
-    // at a time: another chain's entity is off this graph, not a miss.
-    if (coalesceChain(example?.chain || activeChain) !== activeChain) {
-      return { ok: false, kind: "chain-mismatch" };
+    // at a time. Another chain's entity is not a miss when the payload
+    // witnesses it there: switch the page's scope to that chain and park the
+    // request — the effect below re-runs it once the graph has re-scoped, so
+    // there is never a second copy of the selection logic. A chain the payload
+    // does NOT witness the entity on refuses as not-found: "it is on that
+    // chain" is exactly the claim this graph cannot make.
+    const requestedChain = coalesceChain(example?.chain || activeChain);
+    if (requestedChain !== activeChain) {
+      const witnessedThere =
+        Boolean(address) &&
+        ((companyData?.contracts || []).some(
+          (c) => coalesceChain(c.chain) === requestedChain && (c.address || "").toLowerCase() === address,
+        ) ||
+          (companyData?.principals || []).some(
+            (p) => (p.address || "").toLowerCase() === address && principalOnChain(p, requestedChain),
+          ));
+      if (!witnessedThere) return { ok: false, kind: "not-found" };
+      pendingCrossChain.current = example;
+      handleSelectChain(requestedChain);
+      return { ok: true, kind: "chain-switch", chain: requestedChain };
     }
     if (!address) {
       const matches = findFunctionMatches(allMachines, example);
@@ -639,7 +661,15 @@ function ProtocolSurface({
     // a row inside it.
     if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
     return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
-  }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
+  }, [activeChain, allMachines, companyData, entityIndex, handleSelectChain, handleSelectPrincipal, selectMachineExample]);
+
+  useEffect(() => {
+    const pending = pendingCrossChain.current;
+    if (!pending) return;
+    if (coalesceChain(pending.chain || activeChain) !== activeChain) return;
+    pendingCrossChain.current = null;
+    selectExample(pending);
+  }, [activeChain, selectExample]);
 
   useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
 

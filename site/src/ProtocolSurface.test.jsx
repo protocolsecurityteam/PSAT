@@ -313,6 +313,34 @@ describe("ProtocolSurface — multichain chain switcher", () => {
     await waitFor(() => expect(scopedMachineCount()).toBe(1));
     expectNoCrash();
   });
+
+  // The score page's deduction rows click through with a (chain, address)
+  // pair. A base entity clicked while the page shows ethereum must switch the
+  // page's chain scope and land the selection — and the collapsed filter pill
+  // must wear the new chain so the switch is visible without opening anything.
+  it("a cross-chain selectExample switches the chain scope and lands the selection", async () => {
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="multi" initialData={MULTICHAIN_COMPANY} embedded />);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        contractAddress: "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+        chain: "base",
+      });
+    });
+    expect(result).toEqual({ ok: true, kind: "chain-switch", chain: "base" });
+
+    // The parked request re-ran after the re-scope: the base contract's card
+    // is up, and the pill wears Base.
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("BaseToken");
+      expect(document.querySelector(".ps-machine")).toBeTruthy();
+    });
+    expect(document.querySelector(".ps-filter-chain").textContent).toContain("Base");
+    expectNoCrash();
+  });
 });
 
 // The /functions endpoint payload is keyed by the composite "<chain>::<address>"
@@ -1163,7 +1191,7 @@ describe("ProtocolSurface — external selection handle", () => {
     expectNoCrash();
   });
 
-  it("refuses an address the graph does not carry, and another chain's twin — as two different facts", async () => {
+  it("refuses an address the graph does not carry, and a chain the payload never witnessed it on", async () => {
     const ref = renderWithHandle();
     await waitFor(() => expect(ref.current).toBeTruthy());
     let offGraph;
@@ -1172,13 +1200,15 @@ describe("ProtocolSurface — external selection handle", () => {
       offGraph = ref.current.selectExample({
         contractAddress: "0xdead00000000000000000000000000000000dead",
       });
+      // This protocol has no base deployment: "it is on base" is a claim the
+      // payload never witnessed, so the request refuses rather than switching.
       offChain = ref.current.selectExample({
         contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
         chain: "base",
       });
     });
     expect(offGraph).toEqual({ ok: false, kind: "not-found" });
-    expect(offChain).toEqual({ ok: false, kind: "chain-mismatch" });
+    expect(offChain).toEqual({ ok: false, kind: "not-found" });
     expect(document.querySelector(".ps-machine-name")).toBeNull();
     expectNoCrash();
   });
