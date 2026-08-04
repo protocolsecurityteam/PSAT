@@ -78,6 +78,16 @@ function upgradeSub(im, isFirst) {
   return isFirst ? addr : `→ ${addr}`;
 }
 
+// The reciprocal half of the backend's same-transaction join (§3.4). Sharing a
+// transaction hash is a witnessed fact, so the row may say what caused it — and
+// it says only what the backend published, with no client-side re-derivation.
+function withCause(sub, ev) {
+  const cause = ev?.data?.caused_by;
+  if (!cause || typeof cause !== "object" || !cause.event_type) return sub;
+  const note = `caused by ${eventKindLabel(cause.event_type)}`;
+  return sub ? `${sub} · ${note}` : note;
+}
+
 // buildTimeline({ events, proxy, enrollmentBlock, isProxy }) →
 //   { above, below, boundaryBlock }
 // `above` = live-captured rows (block ≥ enrollment); `below` = upgrade-only
@@ -112,7 +122,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
       severity: eventSeverity(ev),
       salience: eventSalience(ev),
       title: decoded.title,
-      sub: decoded.sub,
+      sub: withCause(decoded.sub, ev),
       block,
       timestamp: ev.detected_at ? Date.parse(ev.detected_at) : null,
       txHash: ev.tx_hash || null,

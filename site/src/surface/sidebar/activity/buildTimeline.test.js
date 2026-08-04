@@ -257,6 +257,29 @@ describe("buildTimeline — salience", () => {
   });
 });
 
+describe("buildTimeline — the reciprocal correlation link", () => {
+  it("names what caused an effect row, from the backend's join only", () => {
+    const { above } = buildTimeline({
+      events: [
+        ev("a", "ownership_transferred", 400, {
+          new_owner: I1,
+          caused_by: { event_id: "cause-1", event_type: "safe_tx_executed" },
+        }),
+      ],
+      enrollmentBlock: 300,
+    });
+    expect(above[0].sub).toContain("caused by Safe tx");
+  });
+
+  it("says nothing when the backend published no link", () => {
+    const { above } = buildTimeline({
+      events: [ev("a", "ownership_transferred", 400, { new_owner: I1 })],
+      enrollmentBlock: 300,
+    });
+    expect(above[0].sub || "").not.toContain("caused by");
+  });
+});
+
 describe("filterTimelineBySalience", () => {
   const built = () =>
     buildTimeline({
