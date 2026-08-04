@@ -46,6 +46,7 @@ from db.queue import (
 )
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
 from services.monitoring.tracking_plan_state import plan_coverage_counts
+from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 from .audits_pipeline import build_audits_pipeline
@@ -411,6 +412,13 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         # the same reason a healthy one is, and without this census the two are
         # indistinguishable on the page.
         "plan_coverage": plan_coverage_counts(session),
+        # The other half of "what is it running with": a plan can be current and
+        # its hint controllers still unverified, because the read failed, was
+        # skipped over budget, or is bound to nothing. Point-in-time by
+        # construction (``basis``) — the per-pass counts that do not depend on a
+        # marker surviving ride the scanner's own heartbeat, published above as
+        # ``daemons[protocol_scanner].detail.verification_reads_*``.
+        "verification_gaps": count_verification_read_gaps(session),
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}

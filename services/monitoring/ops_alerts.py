@@ -43,6 +43,7 @@ from db.queue import (
 from services.monitoring.notifier import _send_discord
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
 from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
+from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,9 @@ _BEHIND_SUFFIX = ":behind"
 # plan (dated, or none at all). Not a daemon — the processes are all fresh; the
 # thing that has degraded is what they are watching FOR.
 _COVERAGE_KEY = "tracking_plan_coverage"
+
+# Log-only, never an alert dedupe key — see :func:`collect_verification_gaps`.
+_VERIFICATION_GAP_KEY = "verification_read_gaps"
 
 
 def _interval_s() -> int:
@@ -227,6 +231,37 @@ def collect_plan_coverage(session: Session) -> dict[str, Any]:
     "quiet because nothing is being watched" must not be a per-surface judgment.
     """
     return plan_coverage_counts(session)
+
+
+def collect_verification_gaps(session: Session) -> dict[str, Any]:
+    """Verification-read gap census for the monitored fleet (F9b on the F9a
+    surface).
+
+    Same pass-through role :func:`collect_plan_coverage` plays, and deliberately
+    **not** a fourth alarm family: the census counts markers present at read
+    time, not gaps that occurred, so a threshold over it would fire on when the
+    poller last rewrote a status map as much as on anything about the reads. The
+    counts are published unconditionally instead — here, on ``/api/fleet``, and
+    per-pass on the scanner heartbeat — and the tick logs them when non-zero so
+    the condition has a timestamped record even after the markers are erased.
+    """
+    return count_verification_read_gaps(session)
+
+
+def _log_verification_gaps(gaps: dict[str, Any]) -> None:
+    """One INFO per tick carrying the census, only when something is marked.
+
+    Sums every marker bucket — ``contracts_affected`` is excluded because it
+    counts contracts, not markers.
+    """
+    marked = sum(v for key, v in gaps.items() if isinstance(v, int) and key != "contracts_affected")
+    if not marked:
+        return
+    logger.info(
+        "ops: %d verification read(s) currently marked not determined",
+        marked,
+        extra={"daemon": _VERIFICATION_GAP_KEY, **gaps},
+    )
 
 
 def _current_problems(
@@ -428,6 +463,7 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
         ).scalar()
 
     coverage = collect_plan_coverage(session) if _coverage_alert_threshold() else None
+    _log_verification_gaps(collect_verification_gaps(session))
     problems = _current_problems(beats, now, coverage)
     cooldown = _cooldown_s()
 

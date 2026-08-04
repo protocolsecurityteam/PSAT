@@ -18,12 +18,19 @@ wholesale on every answered pass, so a marker states "the most recent
 observation of this field was a verification read that did not answer", not a
 durable history. It is an ops signal, not evidence.
 
-``count_verification_read_gaps`` is the F9b counter. It is self-contained on
-purpose — the fleet/ops surfaces it feeds are owned by another lane and are
-wired to it separately.
+``count_verification_read_gaps`` is the F9b counter, published on the F9a
+surface as ``watchers.verification_gaps`` (``services/aggregations/fleet.py``)
+and collected by ``ops_alerts.collect_verification_gaps``. Because of that
+lifetime it is a **census of the markers present when it runs**, not a tally of
+what happened — see the function's own contract, and the scanner heartbeat's
+pass-scoped counters (``verification_reads_failed`` /
+``verification_reads_over_budget``) for the complement that does not depend on a
+marker surviving.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -99,8 +106,16 @@ def record_unresolvable_read(mc: MonitoredContract, controller_id: str | None) -
     return True
 
 
-def count_verification_read_gaps(session: Session) -> dict[str, int]:
-    """Fleet counts of verification reads that produced no observation (F9b).
+#: What the counts below are counts OF, carried in the payload rather than only
+#: in this docstring: the markers a read of ``last_poll_status`` finds AT THAT
+#: INSTANT. The poller rewrites that map wholesale on every answered pass, so a
+#: bucket at 0 means "no marker is present now" — it is not proof that no
+#: verification read failed or was skipped since the last poll.
+CENSUS_BASIS = "current_markers"
+
+
+def count_verification_read_gaps(session: Session) -> dict[str, Any]:
+    """Fleet census of verification reads that produced no observation (F9b).
 
     Three buckets, all counting KEYS, plus ``contracts_affected`` counting
     distinct contracts carrying at least one. They stay apart because they are
@@ -109,6 +124,13 @@ def count_verification_read_gaps(session: Session) -> dict[str, int]:
     plan, and a missing read binding is a fact about the analysis — the
     controller was classified readable at enrollment but no polling entry is
     proven to read it.
+
+    **A zero here is not an earned negative.** The numbers are a point-in-time
+    marker census (``basis``), and markers live only until the poller's next
+    answered pass over the contract, so an intermittent failure is routinely
+    erased before anyone reads this. The per-pass counters on the scanner
+    heartbeat are what state how many reads failed or were skipped in a given
+    pass; the two are complements and neither substitutes for the other.
     """
     rows = session.execute(
         select(MonitoredContract.last_poll_status).where(MonitoredContract.is_active == True)  # noqa: E712
@@ -134,4 +156,5 @@ def count_verification_read_gaps(session: Session) -> dict[str, int]:
         "over_budget": over_budget,
         "no_read_binding": no_read_binding,
         "contracts_affected": contracts_affected,
+        "basis": CENSUS_BASIS,
     }

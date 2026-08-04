@@ -37,6 +37,7 @@ from services.monitoring.unified_watcher import (
     scan_for_events,
 )
 from services.monitoring.verify_status import (
+    CENSUS_BASIS,
     VERIFY_ERROR,
     VERIFY_NO_READ_BINDING,
     VERIFY_OVER_BUDGET,
@@ -529,7 +530,61 @@ def test_over_budget_reads_are_recorded_not_dropped(db_session, seeded, monkeypa
     db_session.refresh(mc)
     assert mc.last_poll_status == {"rate": VERIFY_OVER_BUDGET}
     gaps = count_verification_read_gaps(db_session)
-    assert gaps == {"read_failed": 0, "over_budget": 1, "no_read_binding": 0, "contracts_affected": 1}
+    assert gaps == {
+        "read_failed": 0,
+        "over_budget": 1,
+        "no_read_binding": 0,
+        "contracts_affected": 1,
+        # The census says what it is counting: markers present now, which the
+        # poller erases — never a cumulative tally.
+        "basis": CENSUS_BASIS,
+    }
+
+
+def _scan_detail(db_session, *, batch_result, **kwargs) -> dict:
+    """One pass's heartbeat ``extra_detail``."""
+    with patch("services.monitoring.unified_watcher.emit_monitor_cycle") as beat:
+        _run_scan(db_session, batch_result=batch_result, **kwargs)
+    return beat.call_args.kwargs["extra_detail"]
+
+
+def test_failed_read_is_counted_on_the_pass_not_only_marked(db_session, seeded):
+    """F9b wiring: the markers are erased by the poller's next answered pass, so
+    on a healthy fleet the census is usually blind to a failure that happened.
+    The pass counts its own outcomes, and the heartbeat carries them."""
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [(None, "error")])
+    assert detail["verification_reads_failed"] == 1
+    assert detail["verification_reads_over_budget"] == 0
+
+
+def test_over_budget_skips_are_counted_on_the_pass(db_session, seeded, monkeypatch):
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    monkeypatch.setenv("PSAT_SCAN_MAX_VERIFY_READS_PER_PASS", "0")
+    detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x", "ok")])
+    assert detail["verification_reads_over_budget"] == 1
+    assert detail["verification_reads_failed"] == 0
+
+
+def test_an_answered_pass_reports_earned_zeroes(db_session, seeded):
+    """Every dirty controller was read and answered — the zeroes are proven."""
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(7)[2:].zfill(64), "ok")])
+    assert detail["verification_reads_failed"] == 0
+    assert detail["verification_reads_over_budget"] == 0
+
+
+def test_a_verification_pass_that_died_reports_not_determined_not_zero(db_session, seeded):
+    """A pass that never got to its outcomes has nothing to report — publishing
+    0 there would state an earned negative the pass did not earn."""
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    with patch(
+        "services.monitoring.unified_watcher._resolve_verification_reads",
+        side_effect=RuntimeError("verification exploded"),
+    ):
+        detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x", "ok")])
+    assert detail["verification_reads_failed"] is None
+    assert detail["verification_reads_over_budget"] is None
 
 
 def test_verified_control_slot_change_triggers_reanalysis(db_session):

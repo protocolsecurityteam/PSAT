@@ -9,6 +9,7 @@ keeps them apart on ``/api/fleet`` and in the ops watchdog.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import pytest
@@ -28,6 +29,13 @@ from services.monitoring.tracking_plan_state import (
     TRACKED_TOPICS_STALE_SINCE_KEY,
     UNCLASSIFIED,
     plan_coverage_counts,
+)
+from services.monitoring.verify_status import (
+    CENSUS_BASIS,
+    CONTROLLER_STATUS_PREFIX,
+    VERIFY_ERROR,
+    VERIFY_NO_READ_BINDING,
+    VERIFY_OVER_BUDGET,
 )
 
 _TOPICS = [{"topic0": "0x" + "ab" * 32, "event_type": "authority_updated"}]
@@ -245,6 +253,89 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
     fleet.commit()
     third = ops_alerts.run_ops_alert_tick(fleet)
     assert third["posted_recovery"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Verification-read gaps (F9b's counter, wired onto this surface)
+# ---------------------------------------------------------------------------
+
+
+def _marked(session, n: int):
+    """One contract on a current plan whose hint controllers went unverified."""
+    mc = _mk(session, n, {TRACKED_TOPICS_KEY: _TOPICS})
+    mc.last_poll_status = {
+        "rate": VERIFY_ERROR,
+        "fee": VERIFY_OVER_BUDGET,
+        f"{CONTROLLER_STATUS_PREFIX}state_variable:owner": VERIFY_NO_READ_BINDING,
+    }
+    session.commit()
+    return mc
+
+
+def test_fleet_publishes_the_verification_gap_census(db_session):
+    """A current plan does not mean its hint controllers were verified — the two
+    censuses answer different questions, and both ride the fleet payload."""
+    _marked(db_session, 11)
+
+    watchers = build_fleet_status(db_session)["watchers"]
+    assert watchers["plan_coverage"][READY_FRESH_WITH_TOPICS] == 1
+    gaps = watchers["verification_gaps"]
+    assert gaps["read_failed"] == 1
+    assert gaps["over_budget"] == 1
+    assert gaps["no_read_binding"] == 1
+    assert gaps["contracts_affected"] == 1
+
+
+def test_the_gap_census_says_what_its_zeroes_mean(api_client, fleet):
+    """No marker anywhere. The payload names its own basis rather than letting
+    four zeroes read as "no verification read has ever failed" — the poller
+    erases markers, so this is a point-in-time census, not a tally."""
+    gaps = api_client.get("/api/fleet").json()["watchers"]["verification_gaps"]
+    assert gaps == {
+        "read_failed": 0,
+        "over_budget": 0,
+        "no_read_binding": 0,
+        "contracts_affected": 0,
+        "basis": CENSUS_BASIS,
+    }
+
+
+def test_ops_collects_the_gap_census_without_a_new_alarm_family(db_session):
+    """Published unconditionally, on G1's precedent — and no invented threshold:
+    a marker census would page on when the poller last ran as much as on the
+    reads."""
+    from services.monitoring import ops_alerts
+
+    _marked(db_session, 12)
+    assert ops_alerts.collect_verification_gaps(db_session)["read_failed"] == 1
+    problems = ops_alerts._current_problems({}, _now(), None)
+    assert not [key for key in problems if "verification" in key]
+
+
+def test_the_tick_records_the_census_only_when_something_is_marked(db_session, _clean_heartbeats, monkeypatch, caplog):
+    """The log line is what survives the markers: it is timestamped, so an
+    erased marker still leaves a record that the gap existed."""
+    from services.monitoring import ops_alerts
+
+    monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
+    mc = _mk(db_session, 13, {TRACKED_TOPICS_KEY: _TOPICS})
+
+    with caplog.at_level(logging.INFO, logger="services.monitoring.ops_alerts"):
+        ops_alerts.run_ops_alert_tick(db_session)
+    assert not _gap_records(caplog)
+
+    mc.last_poll_status = {"rate": VERIFY_ERROR}
+    db_session.commit()
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="services.monitoring.ops_alerts"):
+        ops_alerts.run_ops_alert_tick(db_session)
+    record = _gap_records(caplog)[0]
+    assert record.read_failed == 1
+    assert record.basis == CENSUS_BASIS
+
+
+def _gap_records(caplog):
+    return [r for r in caplog.records if "verification read" in r.getMessage()]
 
 
 def _now():
