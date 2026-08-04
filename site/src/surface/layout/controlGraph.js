@@ -1,55 +1,43 @@
-// Walks the per-contract control graphs to surface direct vs. indirect callers.
+// Direct callers per function, and the indirect callers above them.
 // Pure — no React, no I/O.
+//
+// Indirect callers are derived from the SAME witnessed-agency reach walk the
+// canvas overlay and the Governs tab use (governancePath.js): a principal is
+// an indirect caller of a function only when the closure from that principal
+// was licensed to STAND ON one of the function's contract-typed direct
+// callers — every hop down to it witnessed as agency-conferring. A principal
+// that merely reaches a direct caller through a terminal power (pause-only,
+// say) holds no route to the function and is not published as one.
 
 import { isRoleIdAddress } from "../format.js";
+import { principalOnChain } from "../entityKey.js";
+import {
+  agencyRoute,
+  buildAgencyIndex,
+  buildControlAdjacency,
+  buildControlEdgeIndex,
+  controlClosure,
+  edgeClaims,
+} from "./governancePath.js";
 
-// buildMachines + guardSummary both call this once per function (~2× per fn).
-// Cache by companyData identity so the index is built once per
+// Node identity (type/label/details) over every contract's control_graph —
+// buildMachines flags passthrough timelocks off it. Built once per
 // /api/company response; WeakMap entries die with the payload.
-const indexCache = new WeakMap();
+const nodeIndexCache = new WeakMap();
 
-// Build a minimal nodeInfo + edge lookup over the per-contract control graphs
-// so we can surface *indirect* upstream governance context without flattening
-// function-level direct callers into it.
-export function buildControlGraphIndex(companyData) {
-  if (!companyData) return { controllerOf: new Map(), nodeInfo: new Map() };
-  const cached = indexCache.get(companyData);
+export function buildControlNodeIndex(companyData) {
+  if (!companyData) return new Map();
+  const cached = nodeIndexCache.get(companyData);
   if (cached) return cached;
-  const controllerOf = new Map(); // from-address → [{to, relation}]
   const nodeInfo = new Map();
   for (const contract of companyData.contracts || []) {
-    const cg = contract.control_graph;
-    if (!cg) continue;
-    for (const node of cg.nodes || []) {
+    for (const node of contract.control_graph?.nodes || []) {
       const addr = (node.address || "").toLowerCase();
       if (addr) nodeInfo.set(addr, node);
     }
-    for (const edge of cg.edges || []) {
-      // safe_owner edges are UI noise — owners are rendered nested under their Safe.
-      if (edge.relation === "safe_owner") continue;
-      // external_call_target says the from-node CALLS the to-node. Walking it
-      // in collectIndirectPath would publish the callee's owner Safe as
-      // "governance context" for a function that Safe cannot reach — the
-      // frontend half of the gate/callee conflation.
-      if (edge.relation === "external_call_target") continue;
-      // controller_value_unattributed says the target's authority_provenance
-      // was ABSENT — nothing proved it gates anyone. Walking it would publish
-      // an unproven governance path (a widened provenance tree enrolled pure
-      // constants and non-authority mappings this way).
-      if (edge.relation === "controller_value_unattributed") continue;
-      const from = (edge.from || "").toLowerCase();
-      const to = (edge.to || "").toLowerCase();
-      if (!from || !to || from === to) continue;
-      if (!controllerOf.has(from)) controllerOf.set(from, []);
-      const existing = controllerOf.get(from);
-      if (!existing.some((e) => e.to === to)) {
-        existing.push({ to, relation: edge.relation });
-      }
-    }
   }
-  const index = { controllerOf, nodeInfo };
-  indexCache.set(companyData, index);
-  return index;
+  nodeIndexCache.set(companyData, nodeInfo);
+  return nodeInfo;
 }
 
 // Direct callers = exactly what effective_permissions emits for the function:
@@ -57,7 +45,7 @@ export function buildControlGraphIndex(companyData) {
 // principals stay as contracts — we do NOT replace them with "first reachable
 // Safe/timelock/EOA" via the control graph, because that produces false claims
 // like "Safe can pause" when the function is role-gated and the Safe doesn't
-// hold that role. See ProtocolSurface note at ~line 236.
+// hold that role.
 export function collectDirectCallers(fn) {
   const byAddress = new Map();
 
@@ -99,55 +87,89 @@ export function collectDirectCallers(fn) {
   return [...byAddress.values()].sort((a, b) => a.address.localeCompare(b.address));
 }
 
-// Indirect control path = walk outgoing edges from each direct-caller contract
-// principal until we hit non-contract principals (safes, timelocks, EOAs).
-// Reported separately so the UI can present it as "governance context" rather
-// than claiming those principals can directly call the function.
-export function collectIndirectPath(directCallers, graphIndex) {
-  const { controllerOf, nodeInfo } = graphIndex;
-  const out = new Map();
-  const visited = new Set();
+// Shared context for the indirect-caller derivation: the payload's principals
+// (chain-scoped, inv. 13) plus the same adjacency / agency / edge indexes the
+// reach overlay walks, and a per-principal closure cache — one BFS per
+// principal per payload, not one per function. Keyed by payload identity and
+// chain token so a chain switch gets its own scoped indexes.
+const indirectCtxCache = new WeakMap();
 
-  function walk(addr, depth, trail) {
-    if (!addr || visited.has(addr) || depth > 6) return;
-    visited.add(addr);
-    const edges = controllerOf.get(addr) || [];
-    for (const edge of edges) {
-      const to = edge.to;
-      if (!to) continue;
-      const node = nodeInfo.get(to);
-      const isContract = node && node.type === "contract";
-      if (!isContract && !isRoleIdAddress(to)) {
-        // Keep the first path we discover to each principal — shorter paths
-        // are more informative and dedupe visual clutter.
-        if (!out.has(to)) {
-          out.set(to, {
-            address: to,
-            resolvedType: String(node?.type || "unknown"),
-            details: node?.details && typeof node.details === "object" ? { ...node.details } : {},
-            label: node?.label || null,
-            path: [...trail, { address: to, relation: edge.relation }],
-          });
-        }
-      }
-      if (isContract) {
-        walk(to, depth + 1, [...trail, { address: to, relation: edge.relation }]);
-      }
-    }
+export function buildIndirectCallerContext(companyData, activeChain = null) {
+  const chainTok = activeChain || "";
+  let byChain = indirectCtxCache.get(companyData);
+  if (!byChain) {
+    byChain = new Map();
+    indirectCtxCache.set(companyData, byChain);
   }
-
-  for (const caller of directCallers) {
-    if (caller.resolvedType !== "contract") continue;
-    visited.clear();
-    walk(caller.address, 0, [{ address: caller.address, relation: "direct" }]);
-  }
-
-  return [...out.values()].sort((a, b) => a.address.localeCompare(b.address));
+  if (byChain.has(chainTok)) return byChain.get(chainTok);
+  const flows = companyData?.fund_flows || [];
+  const principals = (companyData?.principals || []).filter(
+    (p) => p?.address && !isRoleIdAddress(p.address) && principalOnChain(p, activeChain)
+  );
+  const ctx = {
+    principals,
+    adjacency: buildControlAdjacency(flows, activeChain),
+    agencyIndex: buildAgencyIndex(companyData?.principals || [], activeChain),
+    edgeIndex: buildControlEdgeIndex(flows, activeChain),
+    closures: new Map(),
+  };
+  byChain.set(chainTok, ctx);
+  return ctx;
 }
 
-export function collectPrincipals(fn, companyData) {
-  const direct = collectDirectCallers(fn);
-  const graphIndex = buildControlGraphIndex(companyData);
-  const indirect = collectIndirectPath(direct, graphIndex);
-  return { direct, indirect };
+function closureFor(ctx, address) {
+  let closure = ctx.closures.get(address);
+  if (!closure) {
+    closure = controlClosure(address, ctx.adjacency, ctx.agencyIndex);
+    ctx.closures.set(address, closure);
+  }
+  return closure;
+}
+
+// The witnessed relation naming a hop, for the path trail: the edge's control
+// claims where the graph carries them, the flow type otherwise, null when the
+// pair has no carried edge at all — never an invented name.
+function hopRelation(flow) {
+  const claims = edgeClaims(flow);
+  if (claims.length) return claims.map((c) => c.relation).join(" · ");
+  return flow?.type || null;
+}
+
+// Indirect callers = the payload principals whose agency-licensed reach walk
+// can stand on one of the function's contract-typed direct callers. Reported
+// separately so the UI presents governance standing above the caller, not a
+// direct call right. Each entry carries the agency route as `path`, ordered
+// direct-caller-first to principal-last (the shape the inspector's "via" line
+// reads); a principal licensed onto several direct callers keeps the shortest
+// route.
+export function collectIndirectCallers(directCallers, ctx) {
+  const directAddrs = new Set(directCallers.map((c) => c.address));
+  const contractCallers = directCallers.filter((c) => c.resolvedType === "contract");
+  if (!contractCallers.length) return [];
+
+  const out = [];
+  for (const principal of ctx.principals) {
+    const address = principal.address.toLowerCase();
+    if (directAddrs.has(address)) continue;
+    const closure = closureFor(ctx, address);
+    let best = null;
+    for (const caller of contractCallers) {
+      const route = agencyRoute(caller.address, closure, ctx.edgeIndex);
+      if (route && route.length && (!best || route.length < best.length)) best = route;
+    }
+    if (!best) continue;
+    // agencyRoute runs principal → caller; the trail renders caller-upward.
+    const path = [{ address: best[best.length - 1].to, relation: "direct" }];
+    for (let i = best.length - 1; i >= 0; i -= 1) {
+      path.push({ address: best[i].from, relation: hopRelation(best[i].flow) });
+    }
+    out.push({
+      address,
+      resolvedType: String(principal.type || "unknown"),
+      details: principal.details && typeof principal.details === "object" ? { ...principal.details } : {},
+      label: principal.label || null,
+      path,
+    });
+  }
+  return out.sort((a, b) => a.address.localeCompare(b.address));
 }

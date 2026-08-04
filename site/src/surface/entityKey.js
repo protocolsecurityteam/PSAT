@@ -20,3 +20,14 @@ export function coalesceChain(chain) {
 export function entityKey(chain, address) {
   return `${coalesceChain(chain)}::${String(address || "").toLowerCase()}`;
 }
+
+// Whether a principal governs on ``activeChain``. Principals carry a ``chains``
+// list (every chain the server saw them govern on); a legacy principal without
+// one is kept on any chain, and no active chain means the page is single-chain
+// and everything is kept.
+export function principalOnChain(principal, activeChain) {
+  if (!activeChain) return true;
+  const chains = Array.isArray(principal?.chains) ? principal.chains : null;
+  if (!chains || !chains.length) return true;
+  return chains.some((c) => coalesceChain(c) === activeChain);
+}

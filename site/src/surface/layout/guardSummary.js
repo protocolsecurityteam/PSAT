@@ -3,7 +3,7 @@
 
 import { TYPE_META } from "../meta.js";
 import { formatDelay, shortAddr } from "../format.js";
-import { collectPrincipals } from "./controlGraph.js";
+import { collectDirectCallers } from "./controlGraph.js";
 import { oneShotState } from "../../oneShot.js";
 
 // Address → on-canvas contract name (the cards collapse a proxy onto its
@@ -103,10 +103,11 @@ function openShape(fn) {
 }
 
 export function guardSummary(fn, companyData) {
-  const { direct, indirect } = collectPrincipals(fn, companyData);
-  // `principals` stays as the direct list for backward compatibility — every
-  // consumer that reads `fnView.guard.principals` only cares about who can
-  // actually call the function *now*, not the governance chain above that.
+  // `principals` is the direct-callers list — every consumer that reads
+  // `fnView.guard.principals` only cares about who can actually call the
+  // function *now*; the governance chain above that is buildMachines'
+  // `indirectPrincipals`, derived from the reach walk.
+  const direct = collectDirectCallers(fn);
   const principals = direct.map((p) => ({ ...p, display: describeCaller(p, companyData) }));
 
   if (!direct.length) {
@@ -117,12 +118,12 @@ export function guardSummary(fn, companyData) {
     if (fn.authority_public && latch === "consumed") {
       const meta = TYPE_META.resolved_empty;
       return { kind: "resolved_empty", shape: "one_shot_consumed", label: meta.label,
-        sublabel: "one-shot · consumed", accent: meta.accent, principals, indirect };
+        sublabel: "one-shot · consumed", accent: meta.accent, principals };
     }
     if (fn.authority_public && latch === "live") {
       const meta = TYPE_META.one_shot_live;
       return { kind: "one_shot_live", shape: "one_shot_live", label: meta.label,
-        sublabel: "one-shot · LIVE", accent: meta.accent, principals, indirect };
+        sublabel: "one-shot · LIVE", accent: meta.accent, principals };
     }
     const kind = fn.authority_public ? "open" : isResolvedEmptyFunction(fn) ? "resolved_empty" : "unknown";
     const meta = TYPE_META[kind];
@@ -144,7 +145,6 @@ export function guardSummary(fn, companyData) {
           : "unresolved",
       accent: meta.accent,
       principals,
-      indirect,
     };
   }
 
@@ -155,7 +155,6 @@ export function guardSummary(fn, companyData) {
       sublabel: "mixed",
       accent: TYPE_META.many.accent,
       principals,
-      indirect,
     };
   }
 
@@ -188,6 +187,5 @@ export function guardSummary(fn, companyData) {
     sublabel,
     accent: type.accent,
     principals,
-    indirect,
   };
 }

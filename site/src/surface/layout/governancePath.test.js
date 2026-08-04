@@ -19,15 +19,19 @@ const VAULT = "0x3333333333333333333333333333333333333333";
 const NFT = "0x4444444444444444444444444444444444444444";
 
 describe("buildControlAdjacency", () => {
-  it("keeps control-relation edges and drops value flows", () => {
+  it("keeps control-relation edges — controls_value included — and drops typeless value rows", () => {
     const adj = buildControlAdjacency([
       { from: TIMELOCK, to: POOL, type: "principal" },
       { from: TIMELOCK, to: VAULT, type: "controller" },
       { from: POOL, to: NFT, type: "controls" },
-      { from: POOL, to: VAULT, type: "controls_value" }, // value → excluded
+      // The backend emits controls_value INSTEAD OF controls for an owner
+      // whose target moves value — it is an ownership hop, not value movement.
+      { from: POOL, to: VAULT, type: "controls_value" },
+      { from: VAULT, to: NFT, label: "rebalance", usd: 5 }, // value row → excluded
     ]);
     expect([...adj.get(TIMELOCK)]).toEqual(expect.arrayContaining([POOL, VAULT]));
-    expect([...adj.get(POOL)]).toEqual([NFT]); // controls_value dropped
+    expect([...adj.get(POOL)].sort()).toEqual([VAULT, NFT].sort());
+    expect(adj.has(VAULT)).toBe(false); // the typeless value row is never a hop
   });
 
   it("ignores self-edges and lowercases", () => {
@@ -111,7 +115,7 @@ const REACH_FLOWS = [
   { from: FAR, to: NFT, type: "controls" },
   { from: SOLVER, to: POOL, type: "principal" }, // cycle back to the start
   { from: TIMELOCK, to: NFT, type: "principal" }, // decoy branch, off the walk
-  { from: POOL, to: TELLER, type: "controls_value" }, // value, never a control hop
+  { from: POOL, to: TELLER, label: "swap", usd: 5 }, // typeless value row, never a control hop
 ];
 
 describe("controlReach", () => {
@@ -131,7 +135,7 @@ describe("controlReach", () => {
 
   it("excludes what only a value flow would have reached", () => {
     // TELLER is reached at hop 2 through the control chain, never at hop 1
-    // through the controls_value edge.
+    // through the typeless value row.
     expect(controlReach(POOL, buildControlAdjacency(REACH_FLOWS)).get(TELLER)).toBe(2);
   });
 

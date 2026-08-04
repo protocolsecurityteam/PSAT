@@ -1427,6 +1427,127 @@ def test_fund_flows_controller_requires_authorization_relation(db_session):
     )
 
 
+def _controller_flow(payload, from_addr, to_addr):
+    return next(
+        (
+            f
+            for f in payload["fund_flows"]
+            if f["from"] == from_addr and f["to"] == to_addr and f["type"] == "controller"
+        ),
+        None,
+    )
+
+
+def test_fund_flows_controller_admitted_for_reach_witnessed_authority(db_session):
+    """A ControlGraphEdge relation the scorer's closure walks admits the pair
+    as a ``type=controller`` fund_flow even with no FunctionPrincipal row.
+
+    Regression for the RolesAuthority route gap: ``load_control_closure``
+    (services/scoring/planes.py) walks ``controller_value`` edges, so the score
+    document publishes "authority reaches vault" — but the FP-gated flow pass
+    never emitted the edge (a RolesAuthority gates functions without being a
+    FunctionPrincipal itself), so the surface graph carried no route and every
+    score-page click-through landed on "path not carried by this graph".
+    """
+    p = _add_protocol(db_session, f"reach-witness-{uuid.uuid4().hex[:8]}")
+
+    vault_addr = _addr("vault")
+    authority_addr = _addr("authority")
+
+    vault_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="BoringVault")
+    authority_job = _add_job(db_session, address=authority_addr, protocol_id=p.id, name="RolesAuthority")
+    vault_contract = _add_contract(
+        db_session, address=vault_addr, job=vault_job, protocol_id=p.id, contract_name="BoringVault"
+    )
+    _add_contract(
+        db_session, address=authority_addr, job=authority_job, protocol_id=p.id, contract_name="RolesAuthority"
+    )
+
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=vault_contract.id,
+            from_node_id=f"address:{vault_addr.lower()}",
+            to_node_id=f"address:{authority_addr.lower()}",
+            relation="controller_value",
+            label="authority",
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    flow = _controller_flow(payload, authority_addr.lower(), vault_addr.lower())
+    assert flow is not None, (
+        "A controller_value-witnessed in-protocol authority must be carried as "
+        "a type=controller fund_flow — the scorer's control closure walks this "
+        "exact pair, and dropping it publishes a reach the surface cannot "
+        f"route. Got flows into the vault: "
+        f"{[f for f in payload['fund_flows'] if f['to'] == vault_addr.lower()]}"
+    )
+    assert flow["relation"] == "controller_value"
+    assert flow["label"] == "authority"
+
+
+def test_fund_flows_controller_not_admitted_for_non_reach_witness(db_session):
+    """A witnessed relation the scorer's closure does NOT walk decorates an
+    emitted edge but never admits one.
+
+    ``capability_principal`` is in ``CONTROL_EDGE_RELATIONS`` (it may name a
+    hop on a flow another gate emitted) but the scorer excludes it from reach
+    (budget-gated materialization — see planes.UNCONSUMED_REACH_RELATIONS), so
+    admitting the pair here would draw a route the score document does not
+    vouch for.
+    """
+    p = _add_protocol(db_session, f"nonreach-witness-{uuid.uuid4().hex[:8]}")
+
+    vault_addr = _addr("vault")
+    other_addr = _addr("other")
+
+    vault_job = _add_job(db_session, address=vault_addr, protocol_id=p.id, name="Vault")
+    other_job = _add_job(db_session, address=other_addr, protocol_id=p.id, name="Helper")
+    vault_contract = _add_contract(
+        db_session, address=vault_addr, job=vault_job, protocol_id=p.id, contract_name="Vault"
+    )
+    _add_contract(db_session, address=other_addr, job=other_job, protocol_id=p.id, contract_name="Helper")
+
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=vault_contract.id,
+            from_node_id=f"address:{vault_addr.lower()}",
+            to_node_id=f"address:{other_addr.lower()}",
+            relation="capability_principal",
+        )
+    )
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    assert _controller_flow(payload, other_addr.lower(), vault_addr.lower()) is None
+
+
+def test_fund_flows_carries_in_protocol_admin_edge(db_session):
+    """``Contract.admin`` pointing at an in-protocol contract is carried as a
+    ``type=controller`` fund_flow — ``load_control_closure`` reads the admin
+    column directly (no ControlGraphEdge needed), so the surface graph must
+    carry the same pair to route the reach the scorer publishes.
+    """
+    p = _add_protocol(db_session, f"admin-edge-{uuid.uuid4().hex[:8]}")
+
+    proxy_addr = _addr("proxy")
+    admin_addr = _addr("padmin")
+
+    proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, name="VaultProxy", is_proxy=True)
+    admin_job = _add_job(db_session, address=admin_addr, protocol_id=p.id, name="ProxyAdmin")
+    proxy_contract = _add_contract(
+        db_session, address=proxy_addr, job=proxy_job, protocol_id=p.id, is_proxy=True, contract_name="VaultProxy"
+    )
+    _add_contract(db_session, address=admin_addr, job=admin_job, protocol_id=p.id, contract_name="ProxyAdmin")
+
+    proxy_contract.admin = admin_addr.lower()
+    db_session.commit()
+
+    payload = build_company_overview(db_session, p.name)
+    assert _controller_flow(payload, admin_addr.lower(), proxy_addr.lower()) is not None
+
+
 def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
     """The active owner — not pendingOwner — must be returned as the
     contract's ``owner`` field.

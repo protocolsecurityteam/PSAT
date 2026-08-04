@@ -15,10 +15,13 @@
 
 import { coalesceChain } from "../entityKey.js";
 
-// Control-relation edge types the walk follows. Value movement (controls_value)
-// is deliberately excluded — that is the Inflows/Outflows dimension, not
-// governance.
-const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls"]);
+// Control-relation edge types the walk follows. `controls_value` belongs here:
+// the backend emits it INSTEAD OF `controls` for an owner edge whose target
+// moves value (company_overview._build_flows_and_principals) — it is an
+// ownership edge wearing a value marker, not a value-movement edge, and the
+// scorer's closure walks the same pair. Excluding it hid every owner →
+// value-moving-contract hop from the reach walk.
+const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls", "controls_value"]);
 
 // Whether a fund_flows edge belongs to ``activeChain``. A flow is intra-chain
 // (``from_chain`` === ``to_chain`` in the payload), so ``to_chain`` is
@@ -143,8 +146,8 @@ function walkContinues(agencyIndex, from, to) {
 
 // The reach closure from `address` over the control adjacency.
 //
-// Returns { distances, expandHops }, both Map<addrLc, hop> with the start
-// excluded from distances:
+// Returns { distances, expandHops, expandParent }; the first two are
+// Map<addrLc, hop> with the start excluded from distances:
 //  - distances:  every reached address at the hop count of the SHORTEST route
 //    to it — what the reach chips show;
 //  - expandHops: the hop at which the walk could first CONTINUE from an
@@ -153,11 +156,17 @@ function walkContinues(agencyIndex, from, to) {
 //    It can still be re-entered later through an agency route (its chip keeps
 //    the shorter hop; expansion resumes at the longer one) — dropping that
 //    re-entry would hide routes the control graph carries.
+//  - expandParent: Map<addrLc, addrLc> — the node the walk stood on when it
+//    licensed continuing through the key. Following it back to the start
+//    reconstructs one agency-licensed route (every hop on it passed
+//    walkContinues), which is a stronger claim than the shortest-route edges
+//    in controlPathEdges: those justify a hop COUNT, this justifies standing.
 export function controlClosure(address, adjacency, agencyIndex = null) {
   const start = String(address || "").toLowerCase();
   const distances = new Map();
   const expandHops = new Map();
-  if (!start || !adjacency) return { distances, expandHops };
+  const expandParent = new Map();
+  if (!start || !adjacency) return { distances, expandHops, expandParent };
   expandHops.set(start, 0);
   const queue = [[start, 0]];
   for (let head = 0; head < queue.length; head += 1) {
@@ -167,11 +176,34 @@ export function controlClosure(address, adjacency, agencyIndex = null) {
       if (!distances.has(to)) distances.set(to, hop + 1);
       if (!expandHops.has(to) && walkContinues(agencyIndex, current, to)) {
         expandHops.set(to, hop + 1);
+        expandParent.set(to, current);
         queue.push([to, hop + 1]);
       }
     }
   }
-  return { distances, expandHops };
+  return { distances, expandHops, expandParent };
+}
+
+// The agency-licensed route the closure walked from its start to `target`,
+// as [{ from, to, flow }] hops in walk order — or null when the closure was
+// never licensed to stand on `target` (absent from expandHops). Every hop on
+// the route passed the witnessed-agency gate, so the route supports "the
+// start can act AS the target", not merely "the start reaches it". `flow` is
+// read off `edgeIndex` so a consumer can name the hop with what was
+// witnessed; a hop whose pair the index does not carry keeps flow: null
+// rather than inventing one.
+export function agencyRoute(target, closure, edgeIndex) {
+  const goal = String(target || "").toLowerCase();
+  if (!goal || !closure?.expandHops?.has(goal) || !closure?.expandParent) return null;
+  const hops = [];
+  let node = goal;
+  while (closure.expandParent.has(node)) {
+    const from = closure.expandParent.get(node);
+    hops.push({ from, to: node, flow: edgeIndex?.get(from)?.get(node) || null });
+    node = from;
+  }
+  hops.reverse();
+  return hops;
 }
 
 // Map<addrLc, hop distance ≥ 1> — every address reachable from `address`, at
