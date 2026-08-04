@@ -952,6 +952,25 @@ def _event_states_the_change(
     return has_new and has_old
 
 
+# Slot shapes whose value an old/new argument pair can actually be ABOUT: a
+# single cell. Everything else — mapping, array, struct, enum — holds many
+# values at once, so a bare pair names no particular one of them.
+_SCALAR_SLOT_TYPE_KINDS = frozenset({"address", "contract", "primitive"})
+
+
+def read_spec_is_scalar_slot(read_spec: object) -> bool:
+    """True only when the controller's slot is PROVEN to hold a single value.
+
+    Absent, empty or unrecognized ``type_kind`` returns False. That is the
+    not-determined state and it refuses, because this predicate gates a
+    promotion: the absence of a proof that the slot is scalar is not a proof
+    that it is (invariant 4).
+    """
+    if not isinstance(read_spec, dict):
+        return False
+    return str(read_spec.get("type_kind") or "").strip().lower() in _SCALAR_SLOT_TYPE_KINDS
+
+
 def classify_witness_tier(
     *,
     event_type: str | None,
@@ -961,6 +980,7 @@ def classify_witness_tier(
     member_witness: object = None,
     writer_openness: object = None,
     poll_decodable: bool = False,
+    controller_scalar_proven: bool = False,
 ) -> str:
     """Assign the witness tier for one enrolled event spec.
 
@@ -974,6 +994,11 @@ def classify_witness_tier(
     projected polling entry at runtime. When F8 teaches that predicate to
     project struct members, member-path controllers become ``hint`` here with
     no change to this function.
+
+    *controller_scalar_proven* is the caller's proof that the slot holds a
+    single value (:func:`read_spec_is_scalar_slot`). It gates the old/new arm
+    only, and defaults to False so a caller that cannot prove it gets the
+    refusal rather than the promotion.
     """
     if is_member_witness(member_witness) and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED:
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
@@ -982,7 +1007,17 @@ def classify_witness_tier(
     if _is_canonical_family(event_type):
         return WITNESS_TIER_SELF_DESCRIBING
 
-    if _event_states_the_change(inputs, effect_tags, controller_id):
+    # The old/new arm requires the slot to be a single cell as well as the pair
+    # to be attributable. On a mapping the pair is a keyless ENTRY transition:
+    # ``TokenMaxPositionWeightLimitUpdated(oldLimit, newLimit)`` writes
+    # ``_tokenInfos`` and names no key, so publishing it under the slot stem
+    # ``state_changed:state_variable:_tokenInfos`` lands one entry's limit in
+    # ``last_known_state`` and ``ControllerValue`` as the whole mapping's value
+    # — the P1c wrong-claim shape, and reached without the member-witness
+    # guards, which key off the ``member_changed`` type this stem is not.
+    # A member-witness-qualified spec never arrives here: that arm returns
+    # above, which is what makes the key-carrying case still publishable.
+    if controller_scalar_proven and _event_states_the_change(inputs, effect_tags, controller_id):
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
             return WITNESS_TIER_SELF_DESCRIBING
 
@@ -1025,6 +1060,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
         controller_id = tc.get("controller_id")
         read_spec = tc.get("read_spec")
         poll_decodable = _is_poll_decodable(read_spec) if isinstance(read_spec, dict) else False
+        controller_scalar_proven = read_spec_is_scalar_slot(read_spec)
         for ev in ew.get("events") or []:
             topic0 = (ev.get("topic0") or "").lower()
             if not topic0 or not topic0.startswith("0x"):
@@ -1085,6 +1121,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
                     member_witness=witness_for_tier,
                     writer_openness=writer_openness,
                     poll_decodable=poll_decodable,
+                    controller_scalar_proven=controller_scalar_proven,
                 ),
                 # Published even when not determined: the third state has to
                 # be visible to a consumer, not inferred from a missing key.

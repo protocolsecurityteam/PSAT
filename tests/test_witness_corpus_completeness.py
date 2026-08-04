@@ -79,6 +79,8 @@ contract WitnessCorpus {
     mapping(address => bool) public marks;
     mapping(address => uint256) public balances;
     mapping(uint256 => uint128) public gasLimits;
+    mapping(address => uint64) internal _tokenInfos;
+    uint64 public depositLimit;
     uint256 private _status = 1;
     bool public locked;
 
@@ -95,6 +97,8 @@ contract WitnessCorpus {
     event ChainSetGasLimit(uint256 indexed id, uint128 limit);
     event Deposited(address indexed user, uint256 amount);
     event Locked(address indexed by);
+    event TokenMaxWeightUpdated(uint64 oldLimit, uint64 newLimit);
+    event DepositLimitUpdated(uint64 oldLimit, uint64 newLimit);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -219,6 +223,30 @@ contract WitnessCorpus {
 
     function withdraw() external view {
         require(!locked, "paused");
+    }
+
+    // The mapping-typed old/new shape (live: LRTSquaredCore
+    // TokenMaxPositionWeightLimitUpdated). Owner-gated, writes exactly one
+    // slot, and the event states a transition — but it names no KEY, so the
+    // pair is about one entry nobody can identify.
+    function setTokenMaxWeight(address token, uint64 limit) external onlyOwner {
+        uint64 old = _tokenInfos[token];
+        _tokenInfos[token] = limit;
+        emit TokenMaxWeightUpdated(old, limit);
+    }
+
+    function depositToken(address token, uint256 amount) external view {
+        require(_tokenInfos[token] > 0, "not whitelisted");
+        require(amount <= depositLimit, "cap");
+    }
+
+    // The SCALAR old/new shape (live: PriceProviderSet / RebalancerSet /
+    // SwapperSet). Same emitter discipline, but the slot holds one value, so
+    // the pair can only be about that value.
+    function setDepositLimit(uint64 limit) external onlyOwner {
+        uint64 old = depositLimit;
+        depositLimit = limit;
+        emit DepositLimitUpdated(old, limit);
     }
 }
 """
@@ -786,3 +814,71 @@ def test_canonical_family_is_unchanged_by_qualification(corpus):
     assert spec["event_type"] == "ownership_transferred"
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
     assert "member_witness" not in spec
+
+
+# ---------------------------------------------------------------------------
+# 6. Keyless old/new on a mapping — the P1c wrong-claim shape
+# ---------------------------------------------------------------------------
+
+
+def test_keyless_old_new_on_a_mapping_is_not_self_describing(corpus):
+    """An old/new pair naming no key states that ONE ENTRY moved, not that the
+    mapping did.
+
+    Publishing it under the slot stem ``state_changed:state_variable:_tokenInfos``
+    puts one entry's limit into ``last_known_state`` and ``ControllerValue`` as
+    the whole mapping's value — and the member-change guards downstream key off
+    the ``member_changed`` type, which this stem is not, so they never fire.
+    The live case is LRTSquaredCore's ``TokenMaxPositionWeightLimitUpdated``.
+    """
+    spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
+
+    # Non-vacuity, both halves of the shape: the emitter really is a
+    # single-write RESTRICTED writer (so nothing else is doing the demoting),
+    # and the ABI really does carry the old/new pair.
+    target = corpus["targets"]["state_variable:_tokenInfos"]
+    assert str((target.get("read_spec") or {}).get("type_kind")) == "mapping"
+    assert spec["effect_tags"]["writes"] == ["_tokenInfos"]
+    names = [i.get("name") for i in spec["inputs"]]
+    assert names == ["oldLimit", "newLimit"]
+    # The emitter is owner-gated in the corpus source, so nothing about the
+    # WRITER is doing the demoting here.
+    assert "function setTokenMaxWeight(address token, uint64 limit) external onlyOwner" in CORPUS_SOURCE
+    # ... and no key rides in the args, which is why no member witness saves it.
+    assert "member_witness" not in spec
+
+    assert spec["witness_tier"] != WITNESS_TIER_SELF_DESCRIBING
+    assert not spec["event_type"].startswith("member_changed")
+
+
+def test_the_same_pair_on_a_scalar_slot_still_qualifies(corpus):
+    """The guard refuses the slot shape, not the old/new arm.
+
+    Identical emitter discipline and identical ABI shape over a slot that holds
+    ONE value: the pair can only be about that value, so it still publishes
+    directly. The live cases are LRTSquaredCore's PriceProviderSet /
+    RebalancerSet / SwapperSet.
+    """
+    spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
+
+    target = corpus["targets"]["state_variable:depositLimit"]
+    assert str((target.get("read_spec") or {}).get("type_kind")) == "primitive"
+    assert spec["effect_tags"]["writes"] == ["depositLimit"]
+    assert [i.get("name") for i in spec["inputs"]] == ["oldLimit", "newLimit"]
+
+    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
+
+
+def test_the_two_old_new_shapes_differ_only_in_the_slot(corpus):
+    """The differential itself: same writer discipline, same arg shape, same
+    single-write attribution — only the slot's own type_kind separates them, so
+    neither assertion above can be passing for an unrelated reason."""
+    mapping_spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
+    scalar_spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
+
+    # Openness is the same on both (neither carries a mapping-writer record),
+    # so it cannot be what separates them.
+    assert mapping_spec["writer_openness"] == scalar_spec["writer_openness"]
+    assert [i.get("name") for i in mapping_spec["inputs"]] == [i.get("name") for i in scalar_spec["inputs"]]
+    assert len(mapping_spec["effect_tags"]["writes"]) == len(scalar_spec["effect_tags"]["writes"]) == 1
+    assert mapping_spec["witness_tier"] != scalar_spec["witness_tier"]

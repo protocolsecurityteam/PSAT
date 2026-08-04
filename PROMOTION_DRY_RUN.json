@@ -4078,22 +4078,6 @@
       "contract_name": "LRTSquaredCore: (impl): (secondary_impl)",
       "notify_gains": [
         {
-          "controller_id": "state_variable:_tokenInfos",
-          "event_type": "state_changed:state_variable:_tokenInfos",
-          "signature": "TokenMaxPositionWeightLimitUpdated(uint64,uint64)",
-          "topic0": "0x67cba15f5a6551b1966bc3ebb577b6d72a3850d34e1d22f95fd8d027e06e746c",
-          "witness": {
-            "args": [
-              "oldLimit",
-              "newLimit"
-            ],
-            "kind": "old_new_args_single_writer",
-            "writes": [
-              "_tokenInfos"
-            ]
-          }
-        },
-        {
           "controller_id": "external_contract:priceProvider",
           "event_type": "state_changed:external_contract:priceProvider",
           "signature": "PriceProviderSet(address,address)",
@@ -4147,8 +4131,8 @@
       "promoted_plan_present": true,
       "source_job_id": "b6118ff5-3708-480a-bd68-b35bee29aeb1",
       "tiers_after": {
-        "activity": 4,
-        "self_describing": 4
+        "activity": 5,
+        "self_describing": 3
       },
       "tiers_before": {}
     },
@@ -4459,10 +4443,10 @@
   "summary": {
     "configs": 183,
     "contracts_gaining_topics": 95,
-    "notify_rights_gains": 112,
+    "notify_rights_gains": 111,
     "notify_rights_gains_by_witness": {
       "canonical_family": 108,
-      "old_new_args_single_writer": 4
+      "old_new_args_single_writer": 3
     },
     "notify_rights_gains_unattributed": 0,
     "outcomes": {
@@ -4473,9 +4457,9 @@
       "promotable": 108
     },
     "specs_by_tier_after": {
-      "activity": 159,
+      "activity": 160,
       "hint": 211,
-      "self_describing": 112
+      "self_describing": 111
     },
     "specs_by_tier_before": {
       "unstamped": 145

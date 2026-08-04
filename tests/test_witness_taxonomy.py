@@ -25,6 +25,7 @@ from services.monitoring.event_topics import (
     extract_governance_topics,
     member_changed_event_type,
     normalized_writer_openness,
+    read_spec_is_scalar_slot,
     value_changed_event_type,
 )
 from services.monitoring.polling_plan import build_polling_plan
@@ -146,13 +147,15 @@ def test_old_new_pair_qualifies_only_when_attributable():
         {"name": "oldRate", "type": "uint256", "indexed": False},
         {"name": "newRate", "type": "uint256", "indexed": False},
     ]
-    # Single-write emitter naming this controller: the pair can only be about it.
+    # Single-write emitter naming this controller, over a slot PROVEN to hold a
+    # single value: the pair can only be about that value.
     assert (
         classify_witness_tier(
             event_type="state_changed:state_variable:rate",
             controller_id="state_variable:rate",
             inputs=inputs,
             effect_tags={"writes": ["rate"]},
+            controller_scalar_proven=True,
         )
         == WITNESS_TIER_SELF_DESCRIBING
     )
@@ -164,6 +167,7 @@ def test_old_new_pair_qualifies_only_when_attributable():
             controller_id="state_variable:rate",
             inputs=inputs,
             effect_tags={"writes": ["rate", "lastUpdate"]},
+            controller_scalar_proven=True,
         )
         == WITNESS_TIER_ACTIVITY
     )
@@ -174,6 +178,60 @@ def test_old_new_pair_qualifies_only_when_attributable():
             controller_id="state_variable:rate",
             inputs=inputs,
             effect_tags={"writes": ["lastUpdate"]},
+            controller_scalar_proven=True,
+        )
+        == WITNESS_TIER_ACTIVITY
+    )
+
+
+@pytest.mark.parametrize(
+    "read_spec,scalar",
+    [
+        ({"type_kind": "address"}, True),
+        ({"type_kind": "contract"}, True),
+        ({"type_kind": "primitive"}, True),
+        ({"type_kind": "mapping"}, False),
+        ({"type_kind": "array"}, False),
+        ({"type_kind": "struct"}, False),
+        ({"type_kind": "unknown"}, False),
+        ({"type_kind": ""}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+def test_only_a_proven_single_cell_slot_takes_the_old_new_arm(read_spec, scalar):
+    """An old/new pair over a MAPPING states that one entry moved and names no
+    key, so publishing it under the slot stem puts one entry's value where
+    consumers read the slot's — the P1c wrong-claim shape. An absent or
+    unrecognized type_kind is the not-determined state and refuses too:
+    the absence of a proof that the slot is scalar is not a proof that it is.
+    """
+    assert read_spec_is_scalar_slot(read_spec) is scalar
+    tier = classify_witness_tier(
+        event_type="state_changed:state_variable:x",
+        controller_id="state_variable:x",
+        inputs=[
+            {"name": "oldLimit", "type": "uint64", "indexed": False},
+            {"name": "newLimit", "type": "uint64", "indexed": False},
+        ],
+        effect_tags={"writes": ["x"]},
+        controller_scalar_proven=read_spec_is_scalar_slot(read_spec),
+    )
+    assert (tier == WITNESS_TIER_SELF_DESCRIBING) is scalar
+
+
+def test_the_old_new_arm_defaults_to_refusing():
+    """A caller that does not supply the proof gets the refusal, not the
+    promotion — the default is the not-determined state."""
+    assert (
+        classify_witness_tier(
+            event_type="state_changed:state_variable:rate",
+            controller_id="state_variable:rate",
+            inputs=[
+                {"name": "oldRate", "type": "uint256", "indexed": False},
+                {"name": "newRate", "type": "uint256", "indexed": False},
+            ],
+            effect_tags={"writes": ["rate"]},
         )
         == WITNESS_TIER_ACTIVITY
     )

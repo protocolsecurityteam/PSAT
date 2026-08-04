@@ -58,6 +58,7 @@ from services.monitoring.event_topics import (
     is_member_changed_event_type,
     parse_any_log,
     parse_tracked_log,
+    read_spec_is_scalar_slot,
     value_changed_event_type,
 )
 from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
@@ -477,6 +478,7 @@ def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
     if tier in WITNESS_TIERS:
         return tier
     event_type = spec.get("event_type")
+    poll_entry = _poll_entry_for_controller(mc, spec.get("controller_id"))
     return classify_witness_tier(
         event_type=event_type,
         controller_id=spec.get("controller_id"),
@@ -490,7 +492,13 @@ def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
         # slot stem, and every slot-shaped consumer downstream keys off the type.
         member_witness=spec.get("member_witness") if is_member_changed_event_type(event_type) else None,
         writer_openness=spec.get("writer_openness"),
-        poll_decodable=_poll_entry_for_controller(mc, spec.get("controller_id")) is not None,
+        poll_decodable=poll_entry is not None,
+        # A legacy spec carries no read_spec, so the only scalar proof on the
+        # row is the projected polling entry: ``build_polling_plan`` emits one
+        # solely for a slot it can decode as a single value, and stamps that
+        # slot's own ``type_kind`` on it. No entry is not-determined, which
+        # refuses — a demotion, which legacy rows are allowed to take.
+        controller_scalar_proven=read_spec_is_scalar_slot(poll_entry),
     )
 
 

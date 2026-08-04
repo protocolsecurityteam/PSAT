@@ -13,10 +13,10 @@ stamp, not a tier.
 {
   "configs": 183,
   "contracts_gaining_topics": 95,
-  "notify_rights_gains": 112,
+  "notify_rights_gains": 111,
   "notify_rights_gains_by_witness": {
     "canonical_family": 108,
-    "old_new_args_single_writer": 4
+    "old_new_args_single_writer": 3
   },
   "notify_rights_gains_unattributed": 0,
   "outcomes": {
@@ -27,9 +27,9 @@ stamp, not a tier.
     "promotable": 108
   },
   "specs_by_tier_after": {
-    "activity": 159,
+    "activity": 160,
     "hint": 211,
-    "self_describing": 112
+    "self_describing": 111
   },
   "specs_by_tier_before": {
     "unstamped": 145
@@ -209,7 +209,7 @@ stamp, not a tier.
 | `0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05` | ethereum | no_current_materialization | promotable | yes | - | acti=3 | 0 |
 | `0xd022d6bb8b6c1c357ec77d930dc6a0ad40ffc90b` | ethereum | contract_not_analyzed | no_completed_job | no | - | - | 0 |
 | `0xd1901dd36cbf4a81386d0162df2707f7ddb60527` | ethereum | no_current_materialization | promotable | yes | - | self=1 | 1 |
-| `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | ethereum | no_current_materialization | promotable | yes | - | self=4 acti=4 | 4 |
+| `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | ethereum | no_current_materialization | promotable | yes | - | self=3 acti=5 | 3 |
 | `0xd43d99df3d42675ce126a7cff8f7dff037620851` | ethereum | no_current_materialization | promotable | yes | - | self=1 acti=1 | 1 |
 | `0xd5edf7730abad812247f6f54d7bd31a52554e35e` | ethereum | no_current_materialization | job_plan_artifact_absent | no | - | - | 0 |
 | `0xd789870bea40d056a4d26055d0befcc8755da146` | ethereum | no_current_materialization | job_plan_artifact_absent | no | - | - | 0 |
@@ -335,7 +335,6 @@ the arm of `classify_witness_tier` that earns it.
 | `0xc9ca4f230d30913877c9a18eef7e907ee32ebef2` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
 | `0xca8711daf13d852ed2121e4be3894dae366039e4` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
 | `0xd1901dd36cbf4a81386d0162df2707f7ddb60527` | Initialized(uint8) (initialized) | state_variable:_initialized | canonical_family | `{"family": "initialized", "signature": "Initialized(uint8)"}` |
-| `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | TokenMaxPositionWeightLimitUpdated(uint64,uint64) (state_changed:state_variable:_tokenInfos) | state_variable:_tokenInfos | old_new_args_single_writer | `{"args": ["oldLimit", "newLimit"], "writes": ["_tokenInfos"]}` |
 | `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | PriceProviderSet(address,address) (state_changed:external_contract:priceProvider) | external_contract:priceProvider | old_new_args_single_writer | `{"args": ["oldPriceProvider", "newPriceProvider"], "writes": ["priceProvider"]}` |
 | `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | RebalancerSet(address,address) (controller_changed:state_variable:rebalancer) | state_variable:rebalancer | old_new_args_single_writer | `{"args": ["oldRebalancer", "newRebalancer"], "writes": ["rebalancer"]}` |
 | `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | SwapperSet(address,address) (state_changed:external_contract:swapper) | external_contract:swapper | old_new_args_single_writer | `{"args": ["oldSwapper", "newSwapper"], "writes": ["swapper"]}` |
