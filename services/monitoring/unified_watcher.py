@@ -60,7 +60,7 @@ from services.monitoring.event_topics import (
     parse_tracked_log,
     value_changed_event_type,
 )
-from services.monitoring.polling_plan import decode_poll_outcome
+from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
 from services.monitoring.reanalysis import maybe_queue_reanalysis
 from services.monitoring.tracking_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.verify_status import (
@@ -889,7 +889,7 @@ def _resolve_verification_reads(
                         flag_modified(mc, "last_poll_status")
                     continue
                 new_value, parsed_ok = decode_poll_outcome(
-                    raw if isinstance(raw, str) else None,
+                    project_entry_return(raw if isinstance(raw, str) else None, member.entry),
                     member.entry.get("type_kind"),
                     member.entry.get("type"),
                 )
@@ -2049,7 +2049,7 @@ def _apply_poll_result(
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
         return False
-    new_value, parsed = decode_poll_outcome(raw, entry.get("type_kind"), entry.get("type"))
+    new_value, parsed = decode_poll_outcome(project_entry_return(raw, entry), entry.get("type_kind"), entry.get("type"))
     if new_value is None:
         return parsed
 
