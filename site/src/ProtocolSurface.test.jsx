@@ -295,7 +295,7 @@ describe("ProtocolSurface — multichain chain switcher", () => {
     await waitFor(() => expect(document.querySelector(".ps-filter-chain")).toBeTruthy());
     expect(document.querySelector(".ps-filter-chain").textContent).toContain("Ethereum");
 
-    // The chain bar and role counts live inside the expanded panel.
+    // The chain bar (and the search counter) live inside the expanded panel.
     expandFiltersIfCollapsed();
     const bar = await waitFor(() => {
       const el = document.querySelector(".ps-chain-bar");

@@ -600,3 +600,18 @@ describe("ScoreBand — protections carry the capability glossary", () => {
     expect(screen.getByRole("note")).toBeInTheDocument();
   });
 });
+
+describe("ScoreBand — #score hash on an unopenable band", () => {
+  it("leaves the hash alone in the error state, then opens when the score lands", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const view = renderBand({ error: { status: 503, message: "boom" } });
+    // Nothing to open — the request must not be eaten.
+    expect(window.location.hash).toBe("#score");
+    view.rerender(
+      <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={ETHERFI} error={null} />,
+    );
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+});

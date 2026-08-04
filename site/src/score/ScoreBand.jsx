@@ -91,11 +91,13 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
   // A `#score` hash is a request to land ON the breakdown, open — the surface
   // sidebar's "Full score breakdown →" sets it, whether that click navigated
   // here or happened further down this very page. Consumed (and cleared) only
-  // once the band is actually renderable, so a click that raced the score
-  // fetch still opens when the document arrives. The pushState-based router
-  // never fires `hashchange` on its own, so the manual PopStateEvent the link
-  // dispatches is the signal; hashchange covers direct hash edits.
-  const ready = state !== "loading";
+  // once a breakdown can actually open, so a click that raced the score fetch
+  // still opens when the document arrives — and an error/absent band leaves
+  // the hash alone rather than eating the request while showing nothing. The
+  // pushState-based router never fires `hashchange` on its own, so the manual
+  // PopStateEvent the link dispatches is the signal; hashchange covers direct
+  // hash edits.
+  const ready = (state === "computed" || state === "not_determined") && Boolean(view);
   useEffect(() => {
     function maybeOpen() {
       if (window.location.hash !== "#score" || !ready) return;

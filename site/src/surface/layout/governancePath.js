@@ -195,14 +195,22 @@ export function controlReach(address, adjacency, agencyIndex = null) {
 // all excluded — none of them carried a claim, so drawing them would overstate
 // what the walk proved.
 //
-// `closure` is a controlClosure() result over the same adjacency.
+// `closure` is a controlClosure() result over the same adjacency. Two kinds of
+// edge light: shortest-arrival edges (they justify the chip's hop count) and
+// expansion-tree edges (they justify the walk CONTINUING — the agency route
+// back into a node first reached by a terminal power). Without the second
+// kind, a node beyond a re-entered one would wear a hop chip with no complete
+// lit route back to the selection. On a walk with no re-entry the two sets
+// coincide, so nothing extra lights in the common case.
 export function controlPathEdges(address, adjacency, closure) {
   const start = String(address || "").toLowerCase();
   const out = new Set();
   if (!start || !adjacency || !closure?.distances || !closure?.expandHops) return out;
   for (const [from, hop] of closure.expandHops) {
     for (const to of adjacency.get(from) || []) {
-      if (closure.distances.get(to) === hop + 1) out.add(`${from}>${to}`);
+      if (closure.distances.get(to) === hop + 1 || closure.expandHops.get(to) === hop + 1) {
+        out.add(`${from}>${to}`);
+      }
     }
   }
   return out;

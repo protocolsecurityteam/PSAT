@@ -50,15 +50,6 @@
   padding: 18px 16px;
 }
 
-.ps-detail-empty-hdr {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--ink);
-  letter-spacing: 0.02em;
-  text-align: center;
-  margin-bottom: 4px;
-}
-
 .ps-detail-empty-hint {
   margin-top: 12px;
   font-size: 11px;

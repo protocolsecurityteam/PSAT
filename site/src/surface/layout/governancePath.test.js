@@ -328,6 +328,15 @@ describe("controlClosure — agency gating", () => {
     expect(distances.get(VAULT)).toBe(1); // shortest reach: the direct pause
     expect(expandHops.get(VAULT)).toBe(2); // expansion resumes via ownership of POOL
     expect(distances.get(NFT)).toBe(3);
+
+    // Every hop chip has a COMPLETE lit route: the licensing edge into the
+    // re-entered node (POOL→VAULT, an expansion edge that shortens no
+    // distance) lights alongside the shortest-arrival edges, so NFT's chip
+    // traces EOA→POOL→VAULT→NFT without a gap.
+    const edges = controlPathEdges(EOA, dAdj, controlClosure(EOA, dAdj, dAgency));
+    expect(edges.has(`${EOA}>${POOL}`)).toBe(true);
+    expect(edges.has(`${POOL}>${VAULT}`)).toBe(true);
+    expect(edges.has(`${VAULT}>${NFT}`)).toBe(true);
   });
 });
 

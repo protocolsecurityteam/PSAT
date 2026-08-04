@@ -133,19 +133,15 @@ export const MACHINE_TABS = [
   { key: "balances", label: "Balances" },
 ];
 
-// `singular` names one entity (canvas node + card badges); `label` is the
-// plural category name, kept for any grouped display. Both explicit rather
-// than derived so "Factories"→"Factory" / "Utilities"→"Utility" are correct
-// (a naive trailing-`s` strip yields "Factorie"/"Utilitie").
+// `singular` names one entity (canvas node + card badges, search labels).
 export const ROLE_META = {
-  value_handler: { label: "Value Handlers", singular: "Value Handler", color: "#6a9e94" },
-  token:         { label: "Tokens",         singular: "Token",         color: "#6a8a9e" },
-  governance:    { label: "Governance",     singular: "Governance",    color: "#8a6a9e" },
-  bridge:        { label: "Bridges",        singular: "Bridge",        color: "#9e8a6a" },
-  factory:       { label: "Factories",      singular: "Factory",       color: "#6a9e8a" },
-  utility:       { label: "Utilities",      singular: "Utility",       color: "#7a7a7a" },
+  value_handler: { singular: "Value Handler", color: "#6a9e94" },
+  token:         { singular: "Token",         color: "#6a8a9e" },
+  governance:    { singular: "Governance",    color: "#8a6a9e" },
+  bridge:        { singular: "Bridge",        color: "#9e8a6a" },
+  factory:       { singular: "Factory",       color: "#6a9e8a" },
+  utility:       { singular: "Utility",       color: "#7a7a7a" },
 };
-export const ALL_ROLES = Object.keys(ROLE_META);
 
 export const PRINCIPAL_COLORS = {
   safe: "#6a9e94",
