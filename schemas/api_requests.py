@@ -85,12 +85,15 @@ class ProtocolSubscribeRequest(BaseModel):
 #: silently discarded value would leave the caller believing the monitor is doing
 #: something it is not.
 #:
-#: These are the only two. The remaining keys the builder writes are the ``watch_*``
-#: booleans, which only gate whether an already-detected event notifies
-#: (``unified_watcher._should_watch``) — no wire call, no minted finding, so a
-#: caller preference and settable — and ``tracking_plan_not_determined``, which the
-#: route OWNS by overwriting (``routers.monitored._stamp_caller_supplied``);
-#: overwriting defeats forgery without breaking a read-modify-write of a stamped row.
+#: These are the only two analysis-derived keys. The rest of the config splits as:
+#: the ``watch_*`` booleans, which only gate whether an already-detected event
+#: notifies (``unified_watcher._should_watch``) — no wire call, no minted finding,
+#: so a caller preference and settable; ``tracking_plan_not_determined``, which the
+#: route OWNS by overwriting (``routers.monitored._stamp_caller_supplied``),
+#: defeating forgery without breaking a read-modify-write of a stamped row; the two
+#: staleness stamps (``tracked_topics_stale_since`` / ``polling_plan_stale_since``),
+#: which are meaningless without the analyzer-owned keys they date and so cannot
+#: assert anything on their own; and ``scan_gaps``, rejected below.
 _ANALYZER_OWNED_CONFIG_KEYS = {
     "tracked_topics": (
         "monitoring_config.tracked_topics is derived from the contract's tracking-plan "
@@ -104,8 +107,25 @@ _ANALYZER_OWNED_CONFIG_KEYS = {
 }
 
 
+#: Keys the SCANNER owns: records of what monitoring did or did not observe.
+#: ``scan_gaps`` names block intervals a row's scanner never covered — written
+#: only by ``scripts/clamp_monitoring_cursors.py`` and carried across every
+#: config rebuild by ``tracking_plan_state.preserve_scan_plane_facts``. That
+#: durability is exactly why it cannot be caller-settable: a fabricated entry
+#: would be indistinguishable from a clamp-authored one and would outlive every
+#: subsequent enrollment, asserting a coverage hole (or, by omission, continuous
+#: coverage) that nothing observed.
+_SCANNER_OWNED_CONFIG_KEYS = {
+    "scan_gaps": (
+        "monitoring_config.scan_gaps records block intervals this row's scanner never "
+        "covered and is written only by the cursor-clamp repair; it cannot be supplied "
+        "by a caller"
+    ),
+}
+
+
 def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
-    """Neither ``tracked_topics`` nor ``polling_plan`` is a caller-settable flag.
+    """``tracked_topics``, ``polling_plan`` and ``scan_gaps`` are not caller-settable.
 
     ``services/monitoring/unified_watcher._scan_topics_union`` unions
     ``monitoring_config->'tracked_topics'`` over every active row straight into
@@ -121,10 +141,14 @@ def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
     stamp cannot substitute for this rejection: the stamp records where the
     CONFIG came from, while the event the plan produces carries no provenance
     at all.
+
+    ``scan_gaps`` is the scanner's own record rather than an analysis output,
+    but it fails the same test: it is a claim about what was observed, a caller
+    has no witness for it, and it now survives every config rebuild.
     """
     if not isinstance(value, dict):
         return value
-    for key, message in _ANALYZER_OWNED_CONFIG_KEYS.items():
+    for key, message in {**_ANALYZER_OWNED_CONFIG_KEYS, **_SCANNER_OWNED_CONFIG_KEYS}.items():
         if key in value:
             raise ValueError(message)
     return value

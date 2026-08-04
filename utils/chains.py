@@ -139,6 +139,15 @@ class ChainInfo:
     explorer_base_url: str
     confirmation_depth: int
     max_getlogs_range: int
+    # Nominal seconds per block — the chain's published/target block time. It
+    # exists so a wall-clock budget can be expressed in blocks (the scanner's
+    # runaway-cursor threshold: "further behind than N days of this chain"),
+    # which a fleet-wide block count cannot do — 1M blocks is ~4 months of
+    # mainnet and ~3 weeks of Base. Required per entry, with no default: a
+    # borrowed 12s would silently misjudge every L2. It is NEVER a claim about
+    # any particular block's timestamp; anything that needs a real elapsed time
+    # must read block timestamps.
+    block_time_s: float
     # Populated at Phase 2 chain enablement (inv. 15); empty until then.
     bridge_executors: tuple[str, ...]
     cross_domain_messengers: tuple[str, ...]
@@ -177,6 +186,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://etherscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=12,  # Ethereum: 12s slot
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -189,6 +199,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://arbiscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=0.25,  # Arbitrum One: ~0.25s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -201,6 +212,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://optimistic.etherscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # OP-stack: 2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -214,6 +226,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://polygonscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2.1,  # Polygon PoS: ~2.1s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -232,6 +245,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         # possible until the L1 batch is posted, so we track the L1 window.
         confirmation_depth=75,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # OP-stack: 2s
         # OP-stack L2 predeploys for authority recognition (inv. 15). The
         # L2StandardBridge *executes* bridged deposits/withdrawals → bridge
         # executor; the L2CrossDomainMessenger *relays* L1↔L2 messages and is
@@ -249,6 +263,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://snowtrace.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # Avalanche C-chain: ~2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -261,6 +276,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://bscscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=3,  # BNB Smart Chain: 3s
         bridge_executors=(),
         cross_domain_messengers=(),
         # BSC rejects the default "ethprice" action; BNB is priced under "bnbprice".
@@ -275,6 +291,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://lineascan.build",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # Linea: 2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -287,6 +304,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://scrollscan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=3,  # Scroll: ~3s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -299,6 +317,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://era.zksync.network",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=1,  # zkSync Era: ~1s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -311,6 +330,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://blastscan.io",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # OP-stack: 2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -323,6 +343,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://explorer.mode.network",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # OP-stack: 2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),
@@ -335,6 +356,7 @@ _CHAINS: tuple[ChainInfo, ...] = (
         explorer_base_url="https://berascan.com",
         confirmation_depth=DEFAULT_CONFIRMATION_DEPTH,
         max_getlogs_range=MAX_GETLOGS_RANGE,
+        block_time_s=2,  # Berachain: ~2s
         bridge_executors=(),
         cross_domain_messengers=(),
     ),

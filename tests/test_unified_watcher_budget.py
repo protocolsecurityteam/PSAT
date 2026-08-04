@@ -222,6 +222,103 @@ def test_budget_not_exhausted_when_caught_up(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Runaway-cursor backstop (F6)
+# ---------------------------------------------------------------------------
+
+
+def test_runaway_cohort_yields_to_the_fleet_and_is_capped(db_session, monkeypatch):
+    """A cursor implausibly far behind head (the audited floor-0 legacy row,
+    ~16M blocks back) must not win most-behind-first every pass forever.
+
+    It is served last and capped at one window per pass: still advancing —
+    behind is not skipped — while the contracts at head get scanned in the same
+    pass. The condition is counted, not silently absorbed.
+    """
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    head = 2_000_000
+    runaway_id = _mk(db_session, ADDR(1), cursor=0)  # 2M behind — past the 1M default
+    healthy_id = _mk(db_session, ADDR(2), cursor=head - 1000)  # at head
+    wire = Wire(head=head).install(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    # The fleet was served first, despite the runaway's much larger lag.
+    assert {a.lower() for a in wire.getlogs_calls[0]["address"]} == {ADDR(2).lower()}
+    assert _cursor(db_session, healthy_id) == head
+    # The runaway advanced by exactly its capped slice — one window.
+    assert _cursor(db_session, runaway_id) == MAX_BLOCK_RANGE
+    assert result.windows_scanned == 2
+    assert result.runaway_cohorts == 1
+
+
+def test_runaway_cap_is_per_pass_not_per_turn(db_session, monkeypatch):
+    """With nothing else to scan, the runaway still gets only its per-pass
+    slice — otherwise the backstop would just re-serve it in a loop."""
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    monkeypatch.setenv("PSAT_SCAN_RUNAWAY_WINDOWS_PER_PASS", "3")
+    mc_id = _mk(db_session, ADDR(1), cursor=0)
+    Wire(head=2_000_000).install(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    assert result.windows_scanned == 3
+    assert _cursor(db_session, mc_id) == 3 * MAX_BLOCK_RANGE
+    assert result.runaway_cohorts == 1
+
+
+def test_runaway_threshold_is_chain_time_not_block_count(db_session, monkeypatch):
+    """Review finding 3: the budget is wall clock on the cohort's OWN chain.
+
+    A uniform block count means different things per chain — 1M blocks is ~139
+    days of mainnet and ~23 days of Base — so a Base fleet coming back from a
+    month-long outage would be demoted to one window per pass exactly when
+    catch-up matters. The same 2M-block lag is a runaway on ethereum
+    (``test_runaway_cap_is_per_pass_not_per_turn``) and normal backfill here.
+    """
+    from services.monitoring.unified_watcher import _runaway_lag_blocks_for, scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    assert _runaway_lag_blocks_for("ethereum") == 1_000_000  # 12s blocks
+    assert _runaway_lag_blocks_for("base") == 6_000_000  # 2s blocks
+    assert _runaway_lag_blocks_for("not-a-chain") == 0  # no block time ⇒ no demotion
+
+    mc_id = _mk(db_session, ADDR(1), cursor=0, chain="base")
+    Wire(head=2_000_000).install(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    assert result.runaway_cohorts == 0  # 2M Base blocks ≈ 46 days
+    assert result.windows_scanned == 50  # full pass budget, not the 1-window cap
+    assert _cursor(db_session, mc_id) == 50 * MAX_BLOCK_RANGE
+
+
+def test_backstop_disabled_restores_the_starvation_it_prevents(db_session, monkeypatch):
+    """The threshold is an operator lever; 0 turns the backstop off. The same
+    fleet then reproduces the observed failure — the runaway consumes the whole
+    pass budget across repeated turns and the contract at head is never scanned.
+    """
+    from services.monitoring.unified_watcher import scan_for_events
+
+    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
+    monkeypatch.setenv("PSAT_SCAN_RUNAWAY_LAG_SECONDS", "0")
+    runaway_id = _mk(db_session, ADDR(1), cursor=0)
+    healthy_id = _mk(db_session, ADDR(2), cursor=1_999_000)
+    wire = Wire(head=2_000_000).install(monkeypatch)
+
+    result = scan_for_events(db_session, "http://stub")
+
+    assert {a.lower() for a in wire.getlogs_calls[0]["address"]} == {ADDR(1).lower()}
+    assert result.windows_scanned == 50  # the entire pass budget
+    assert _cursor(db_session, runaway_id) == 50 * MAX_BLOCK_RANGE
+    assert _cursor(db_session, healthy_id) == 1_999_000  # starved
+    assert result.runaway_cohorts == 0
+
+
+# ---------------------------------------------------------------------------
 # Confirmation depth
 # ---------------------------------------------------------------------------
 

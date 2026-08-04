@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, preserve_scan_plane_facts
 from utils.chains import UnsupportedChainError, require_supported_chain
 from utils.rpc import rpc_request
 
@@ -22,16 +23,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _current_head_block(chain: str | None) -> int:
-    """Best-effort current head on the enrolled contract's OWN chain, used to seed
-    a manually-added contract's scan cursor and enrollment floor.
+def _current_head_block(chain: str | None) -> int | None:
+    """Current head on the enrolled contract's OWN chain, used to seed a
+    manually-added contract's scan cursor and enrollment floor. ``None`` when
+    the read did not answer.
 
     ``chain`` selects the RPC route: mainnet (and any unresolvable chain) keeps
     ``deps.DEFAULT_RPC_URL`` verbatim, a second chain resolves its own eRPC route
     from the registry (same ``rpc_for_chain`` the scanner uses). Without this a
     non-mainnet enrollment seeded ``enrollment_block`` from the MAINNET head — a
-    wrong, immutable pre-watch floor. Falls back to 0 on RPC failure — the same
-    degradation the enrollment path accepts (``enrollment.py``)."""
+    wrong, immutable pre-watch floor.
+
+    A failed read is not-determined and block 0 is not its stand-in: it seeds a
+    cursor claiming the whole chain as backlog and a floor that licenses every
+    historical event as live. The caller refuses the enrollment instead (same
+    rule as ``enrollment._block_for``)."""
     try:
         return int(
             rpc_request(
@@ -46,9 +52,9 @@ def _current_head_block(chain: str | None) -> int:
         logger.warning(
             "Could not read head block for monitoring upsert: %s",
             exc,
-            extra={"exc_type": type(exc).__name__, "chain": chain},
+            extra={"exc_type": type(exc).__name__, "chain": chain, "reason": "head_read_not_determined"},
         )
-        return 0
+        return None
 
 
 #: Stamped into every caller-supplied ``monitoring_config``. The auto-enrollment
@@ -61,10 +67,13 @@ def _current_head_block(chain: str | None) -> int:
 #: key would read as a builder output that never existed. This token is the
 #: honest answer for the caller-authored case and keeps the builder's states
 #: earned; NEITHER key survives only on rows that predate the discriminant.
-CALLER_SUPPLIED_TRACKING_PLAN = "config_supplied_by_caller"
+CALLER_SUPPLIED_TRACKING_PLAN = CONFIG_SUPPLIED_BY_CALLER
 
 
-def _stamp_caller_supplied(monitoring_config: dict[str, Any] | None) -> dict[str, Any]:
+def _stamp_caller_supplied(
+    monitoring_config: dict[str, Any] | None,
+    existing_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """The stored config for a caller-authored enrollment, provenance-stamped.
 
     The route OWNS ``tracking_plan_not_determined`` here: a caller value is
@@ -79,10 +88,15 @@ def _stamp_caller_supplied(monitoring_config: dict[str, Any] | None) -> dict[str
     caller their topics are being scanned / their slots polled. The stamp cannot
     substitute for that rejection: it marks the CONFIG's provenance, while the
     event a caller-authored ``polling_plan`` would mint carries none.
+
+    *existing_config* supplies the row's scan-plane record (``scan_gaps``),
+    which is carried across the overwrite: it states which block intervals this
+    row's scanner never covered, and no caller authored it. Dropping it would
+    let the row present continuous coverage over an interval nothing read.
     """
     stamped = dict(monitoring_config or {})
     stamped["tracking_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
-    return stamped
+    return preserve_scan_plane_facts(stamped, existing_config)
 
 
 def _monitored_contract_payload(c: MonitoredContract) -> dict[str, Any]:
@@ -159,6 +173,11 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
             # below which the scanner records events as pre-watch history
             # without notifying (consistent with the auto-enrollment inserts).
             head_block = _current_head_block(request.chain)
+            if head_block is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Chain head not determined; cannot seed a scan cursor or enrollment floor. Retry.",
+                )
             existing = MonitoredContract(
                 address=request.address,
                 chain=request.chain,
@@ -178,7 +197,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
             existing.protocol_id = protocol_id
             existing.contract_id = contract.id if contract else existing.contract_id
             existing.contract_type = request.contract_type
-            existing.monitoring_config = _stamp_caller_supplied(request.monitoring_config)
+            existing.monitoring_config = _stamp_caller_supplied(request.monitoring_config, existing.monitoring_config)
             existing.needs_polling = request.needs_polling
             existing.is_active = request.is_active
             existing.enrollment_source = existing.enrollment_source or "surface_alert"
@@ -198,7 +217,7 @@ def update_monitored_contract(contract_id: str, request: UpdateMonitoredContract
             raise HTTPException(status_code=404, detail="MonitoredContract not found")
 
         if request.monitoring_config is not None:
-            mc.monitoring_config = _stamp_caller_supplied(request.monitoring_config)
+            mc.monitoring_config = _stamp_caller_supplied(request.monitoring_config, mc.monitoring_config)
         if request.is_active is not None:
             mc.is_active = request.is_active
         if request.needs_polling is not None:

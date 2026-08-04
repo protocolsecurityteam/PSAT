@@ -42,6 +42,7 @@ from db.queue import (
 )
 from services.monitoring.notifier import _send_discord
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
+from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,11 @@ DEFAULT_SCAN_LAG_ALERT = 50_000
 # collides with the scanner "dead" (stale) alert — they are independent alarms.
 _BEHIND_SUFFIX = ":behind"
 
+# Third alarm family: monitored contracts watching without a current tracking
+# plan (dated, or none at all). Not a daemon — the processes are all fresh; the
+# thing that has degraded is what they are watching FOR.
+_COVERAGE_KEY = "tracking_plan_coverage"
+
 
 def _interval_s() -> int:
     return int(os.getenv("PSAT_OPS_ALERT_INTERVAL_S", str(DEFAULT_INTERVAL_S)))
@@ -65,6 +71,21 @@ def _cooldown_s() -> int:
 
 def _scan_lag_alert() -> int:
     return int(os.getenv("PSAT_SCAN_LAG_ALERT", str(DEFAULT_SCAN_LAG_ALERT)))
+
+
+def _coverage_alert_threshold() -> int:
+    """How many contracts may watch without a current plan before it pages.
+
+    Default 0 = **no threshold asserted**, so the alarm is silent until an
+    operator sets one. What counts as an acceptable coverage shortfall is a
+    policy nobody has decided yet, and a built-in default would be this module
+    inventing one. The census itself is published unconditionally (``/api/fleet``
+    and :func:`collect_plan_coverage`) — visibility is not gated on the alarm.
+    """
+    try:
+        return max(0, int(os.getenv("PSAT_PLAN_COVERAGE_ALERT", "0")))
+    except ValueError:
+        return 0
 
 
 def _webhook_url() -> str | None:
@@ -198,12 +219,28 @@ def collect_chain_health(session: Session, *, now: datetime | None = None) -> li
     return sorted(out, key=lambda d: (d["chain_id"] is None, d["chain_id"] or 0, d["name"]))
 
 
-def _current_problems(beats: dict[str, dict[str, Any]], now: datetime) -> dict[str, dict[str, Any]]:
+def collect_plan_coverage(session: Session) -> dict[str, Any]:
+    """Tracking-plan census for the monitored fleet.
+
+    Thin pass-through to :func:`plan_coverage_counts` so the watchdog and the
+    fleet view read one implementation — "quiet because nothing happened" and
+    "quiet because nothing is being watched" must not be a per-surface judgment.
+    """
+    return plan_coverage_counts(session)
+
+
+def _current_problems(
+    beats: dict[str, dict[str, Any]],
+    now: datetime,
+    coverage: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Map dedupe-key → problem info for every process currently in trouble.
 
-    Two independent alarm families, each its own key:
-      * ``<process>``            — a daemon gone stale/error ("dead").
-      * ``<scanner>:behind``     — the scanner's head-lag over threshold.
+    Three independent alarm families, each its own key:
+      * ``<process>``               — a daemon gone stale/error ("dead").
+      * ``<scanner>:behind``        — the scanner's head-lag over threshold.
+      * ``tracking_plan_coverage``  — contracts watching without a current plan,
+        over an operator-set threshold (off by default).
     The alerter never pages on its own silence (it is the thing running).
     """
     problems: dict[str, dict[str, Any]] = {}
@@ -231,6 +268,26 @@ def _current_problems(beats: dict[str, dict[str, Any]], now: datetime) -> dict[s
             "status": "behind",
             "max_lag_blocks": int(lag),
         }
+
+    threshold = _coverage_alert_threshold()
+    if threshold and coverage:
+        # Dated plans and no plan at all are both "not watching what the
+        # analysis says to watch"; they are counted together for the alarm and
+        # stay separate in the payload. A caller-authored config is excluded: an
+        # operator chose it, so paging on it would page them for their own
+        # decision (the bucket stays in the payload either way).
+        not_determined = coverage.get("not_determined") or {}
+        uncovered = int(coverage.get("ready_stale", 0)) + sum(
+            int(n) for token, n in not_determined.items() if token != CONFIG_SUPPLIED_BY_CALLER
+        )
+        if uncovered > threshold:
+            problems[_COVERAGE_KEY] = {
+                "kind": "coverage",
+                "daemon": _COVERAGE_KEY,
+                "status": "degraded",
+                "uncovered": uncovered,
+                "contracts": int(coverage.get("contracts", 0)),
+            }
     return problems
 
 
@@ -253,7 +310,23 @@ def _post_discord(webhook_url: str, embed: dict[str, Any]) -> None:
 def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
     """One ERROR log (always) + one Discord post (if a webhook is configured)."""
     daemon = problem["daemon"]
-    if problem["kind"] == "behind":
+    if problem["kind"] == "coverage":
+        logger.error(
+            "ops: %d monitored contract(s) are watching without a current tracking plan",
+            problem["uncovered"],
+            extra={
+                "daemon": daemon,
+                "status": problem["status"],
+                "uncovered": problem["uncovered"],
+                "contracts": problem["contracts"],
+            },
+        )
+        fields = [
+            {"name": "Without a current plan", "value": str(problem["uncovered"]), "inline": True},
+            {"name": "Monitored contracts", "value": str(problem["contracts"]), "inline": True},
+        ]
+        title = "Monitoring coverage degraded"
+    elif problem["kind"] == "behind":
         logger.error(
             "ops: scanner %s is behind head",
             daemon,
@@ -284,7 +357,10 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
 
 def _emit_recovery(key: str, prior: dict[str, Any], *, webhook_url: str | None) -> None:
     daemon = prior.get("daemon", key)
-    logger.info("ops: daemon %s recovered", daemon, extra={"daemon": daemon})
+    # The coverage alarm is not a daemon, so it recovers as a subject, not a
+    # process — same machinery, honest wording.
+    subject = "coverage" if prior.get("kind") == "coverage" else "daemon"
+    logger.info("ops: %s %s recovered", subject, daemon, extra={"daemon": daemon})
     if webhook_url:
         _post_discord(
             webhook_url,
@@ -351,7 +427,8 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
             {"p": HEARTBEAT_OPS_ALERTER},
         ).scalar()
 
-    problems = _current_problems(beats, now)
+    coverage = collect_plan_coverage(session) if _coverage_alert_threshold() else None
+    problems = _current_problems(beats, now, coverage)
     cooldown = _cooldown_s()
 
     new_alerts: dict[str, Any] = {}
