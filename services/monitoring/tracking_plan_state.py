@@ -56,8 +56,8 @@ POLLING_PLAN_KEY = "polling_plan"
 #: as of some instant at or before this one.
 TRACKED_TOPICS_STALE_SINCE_KEY = "tracked_topics_stale_since"
 POLLING_PLAN_STALE_SINCE_KEY = "polling_plan_stale_since"
-#: Block intervals this row's scanner never covered (written by
-#: ``scripts/clamp_monitoring_cursors.py``). A scan-plane fact about what was
+#: Block intervals this row's scanner never covered (written by the
+#: operator cursor-clamp tooling). A scan-plane fact about what was
 #: observed, not a plan-plane statement — see :func:`preserve_scan_plane_facts`.
 SCAN_GAPS_KEY = "scan_gaps"
 

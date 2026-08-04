@@ -1062,8 +1062,8 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     # of the fleet sits at head. It is served last and capped at
     # ``runaway_windows`` windows per pass — still advancing (behind ≠ skipped),
     # never monopolising — and counted onto the heartbeat so the condition is
-    # visible rather than merely slow. The operator repair is
-    # ``scripts/clamp_monitoring_cursors.py``; the scanner's own "behind" alarm
+    # visible rather than merely slow. The repair is the operator-run
+    # cursor-clamp tooling; the scanner's own "behind" alarm
     # (ops_alerts) already fires on the lag.
     runaway_windows = max(1, _scan_int_env("PSAT_SCAN_RUNAWAY_WINDOWS_PER_PASS", DEFAULT_RUNAWAY_WINDOWS_PER_PASS))
 

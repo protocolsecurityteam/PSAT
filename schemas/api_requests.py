@@ -109,7 +109,7 @@ _ANALYZER_OWNED_CONFIG_KEYS = {
 
 #: Keys the SCANNER owns: records of what monitoring did or did not observe.
 #: ``scan_gaps`` names block intervals a row's scanner never covered — written
-#: only by ``scripts/clamp_monitoring_cursors.py`` and carried across every
+#: only by the operator-run cursor-clamp tooling and carried across every
 #: config rebuild by ``tracking_plan_state.preserve_scan_plane_facts``. That
 #: durability is exactly why it cannot be caller-settable: a fabricated entry
 #: would be indistinguishable from a clamp-authored one and would outlive every
