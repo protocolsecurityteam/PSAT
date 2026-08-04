@@ -831,6 +831,69 @@ def _state_writers_from_effects(
     return by_var
 
 
+# ``StateWriteFact.hygiene_class`` for a variable a modifier sets before the
+# placeholder and restores after it — the Solmate/OZ reentrancy latch. Every
+# ``nonReentrant`` function writes it, so donating the whole writer set to it
+# enrolls every event on the contract under a slot whose value is identical
+# before and after each transaction (P1a: 2 of the 446 audited publications, and
+# unbounded on a busy contract).
+_TRANSIENT_HYGIENE_CLASS = "reentrancy_guard"
+
+
+def _write_facts_by_signature(effects: Mapping[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    """``function signature → its ``state_writes`` facts``, for the functions
+    that carry them.
+
+    A signature ABSENT from the result is the not-determined case — an effects
+    artifact built before the facts existed, or a function whose writes the
+    projection could not enrich. Callers keep such a writer rather than
+    filtering it out, so a missing fact never silently narrows what is watched.
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    if not isinstance(effects, dict):
+        return out
+    for fn_sig, info in (effects.get("functions") or {}).items():
+        if not isinstance(fn_sig, str) or not isinstance(info, dict):
+            continue
+        facts = info.get("state_writes")
+        if isinstance(facts, list):
+            out[fn_sig] = [fact for fact in facts if isinstance(fact, dict)]
+    return out
+
+
+def _writer_survives_hygiene(
+    facts: list[dict[str, Any]] | None,
+    var: str,
+    member_path: tuple[str, ...] | None,
+) -> bool:
+    """Does this function write *var* (at *member_path*, when one is given) in a
+    way worth watching?
+
+    Two exclusions, both requiring the fact to be PROVEN before it subtracts:
+
+      * every recorded write of *var* here is the transient-latch class — the
+        function sets and restores it within one call, so the value it leaves
+        behind is the value it found;
+      * a member-scoped controller whose writes here are all proven to land on
+        OTHER members. A ``var``-granularity write says which variable but not
+        which member, so it is kept: not knowing which member moved is not
+        knowing that this one did not.
+
+    ``facts is None`` (nothing recorded) keeps the writer for the same reason.
+    """
+    if facts is None:
+        return True
+    for_var = [fact for fact in facts if fact.get("var") == var]
+    if not for_var:
+        return True
+    if all(fact.get("hygiene_class") == _TRANSIENT_HYGIENE_CLASS for fact in for_var):
+        return False
+    if member_path:
+        wanted = list(member_path)
+        return any(not fact.get("member_path") or fact.get("member_path") == wanted for fact in for_var)
+    return True
+
+
 def _writer_records_from_effects(
     contract,
     project_dir: Path,
@@ -838,21 +901,28 @@ def _writer_records_from_effects(
     event_lookup: dict[str, list],
     effects: Mapping[str, Any] | None,
     qualification: "_EventQualification | None" = None,
+    member_path: tuple[str, ...] | None = None,
 ) -> tuple[list[ControllerWriterFunction], list[AssociatedEvent]]:
     """Build ``ControllerWriterFunction`` records for the given state-variable
     targets, using ``effects`` as the writer-discovery source.
 
     *qualification* stamps F3's member-witness / writer-openness facts onto the
     aggregated events when it is supplied; without it the events carry neither,
-    which the monitoring plane reads as the not-determined third state."""
+    which the monitoring plane reads as the not-determined third state.
+
+    *member_path* narrows a member-scoped controller to the writers that can
+    reach that member (:func:`_writer_survives_hygiene`)."""
     target_set = {var for var in target_state_vars if var}
     if not target_set:
         return [], []
     writers_by_var = _state_writers_from_effects(effects)
+    facts_by_signature = _write_facts_by_signature(effects)
     # Invert: function-signature → set of vars it writes that we care about.
     writes_by_signature: dict[str, set[str]] = {}
     for var in target_set:
         for signature in writers_by_var.get(var, set()):
+            if not _writer_survives_hygiene(facts_by_signature.get(signature), var, member_path):
+                continue
             writes_by_signature.setdefault(signature, set()).add(var)
 
     functions_by_signature = _functions_by_signature(contract)
@@ -1450,6 +1520,7 @@ def build_controller_tracking(
             event_lookup,
             effects,
             qualification,
+            member_path,
         )
         tracking_mode = "event_plus_state" if associated_events else "state_only"
         notes = [
