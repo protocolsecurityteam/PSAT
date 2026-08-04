@@ -21,6 +21,12 @@ from services.monitoring.event_topics import (
     WITNESS_TIER_HINT,
     value_changed_event_type,
 )
+from services.monitoring.salience import (
+    SALIENCE_ALERT,
+    SALIENCE_NOT_DETERMINED,
+    SALIENCE_NOTABLE,
+    SALIENCE_ROUTINE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +472,44 @@ def _may_notify(event: MonitoredEvent) -> bool:
     return data.get("witness_tier") not in _NON_NOTIFYING_TIERS
 
 
+# Mirror of ``services.monitoring.salience.SALIENCE_ORDER``. ``not_determined``
+# sorts WITH ``notable`` so an unclassified event is never filtered out by a
+# threshold the classifier never rated it against.
+_SALIENCE_ORDER = {
+    SALIENCE_ROUTINE: 0,
+    SALIENCE_NOT_DETERMINED: 1,
+    SALIENCE_NOTABLE: 1,
+    SALIENCE_ALERT: 2,
+}
+
+
+def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) -> bool:
+    """Does *subscription*'s ``min_salience`` admit *event*?
+
+    **Opt-in, and only opt-in** (invariant 7). A subscription without
+    ``min_salience`` receives exactly what it receives today — this is the same
+    no-default-change contract ``_expand_allowed_event_types`` keeps for saved
+    event-type filters, and it is why the threshold rides inside the existing
+    ``event_filter`` JSONB rather than in a new column.
+
+    An unrecognized threshold admits everything: a filter value nothing in the
+    vocabulary matches is a filter we cannot honour, and declining to deliver
+    on that basis would mute a subscriber over our own misreading.
+    """
+    event_filter = subscription.event_filter if isinstance(subscription.event_filter, dict) else {}
+    minimum = event_filter.get("min_salience")
+    if not isinstance(minimum, str) or minimum not in _SALIENCE_ORDER:
+        return True
+    data = event.data if isinstance(event.data, dict) else {}
+    level = data.get("salience")
+    if level not in _SALIENCE_ORDER:
+        # A row minted before salience landed, or one no rule rated. Unrated is
+        # not routine (invariant 5), so it is measured at the not_determined
+        # rank rather than dropped.
+        level = SALIENCE_NOT_DETERMINED
+    return _SALIENCE_ORDER[level] >= _SALIENCE_ORDER[minimum]
+
+
 def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> None:
     """Send Discord notifications for detected governance/monitoring events.
 
@@ -526,6 +570,11 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                 if sub.event_filter and isinstance(sub.event_filter, dict):
                     if not _filter_allows(sub.event_filter.get("event_types"), event.event_type):
                         continue
+                # Composes with the type filter: both must pass. Absent
+                # ``min_salience`` is a no-op, so no existing subscription
+                # changes behaviour.
+                if not _salience_allows(sub, event):
+                    continue
 
                 try:
                     _send_discord(sub.discord_webhook_url, embed)  # type: ignore[arg-type]

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
-from typing import Callable
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from sqlalchemy import func, select, text, update
@@ -46,6 +46,7 @@ from services.monitoring import (
     emit_monitor_cycle,
 )
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.enrichment import enrich_events
 from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
@@ -63,6 +64,7 @@ from services.monitoring.event_topics import (
 )
 from services.monitoring.polling_plan import decode_poll_outcome, project_entry_return
 from services.monitoring.reanalysis import maybe_queue_reanalysis
+from services.monitoring.salience import assign_salience, stamp_signal_class
 from services.monitoring.tracking_plan_state import TRACKED_TOPICS_STALE_SINCE_KEY
 from services.monitoring.verify_status import (
     VERIFY_ERROR,
@@ -669,6 +671,14 @@ def _process_window(
             event_data = dict(event_data)
             event_data["historical"] = True
 
+        # Mint site 1 of 3. Assigned BEFORE the insert so the level is durable
+        # in the same write as the row rather than in a follow-up UPDATE that a
+        # crash could lose. For enrichable types (the Safe executions) this is
+        # provisional: enrich_events re-rates them below, before the commit.
+        salience, salience_basis = assign_salience(session, event_type, event_data, mc)
+        event_data["salience"] = salience
+        event_data["salience_basis"] = salience_basis
+
         event_id = uuid.uuid4()
         insert_stmt = (
             pg_insert(MonitoredEvent)
@@ -964,6 +974,15 @@ def _resolve_verification_reads(
                     "read_entry_source": member.entry.get("source"),
                     "hint_block_number": member.block_number,
                 }
+                # Mint site 2 of 3. The plan entry that answered is in scope
+                # here and nowhere downstream, so its signal_class rides onto
+                # the row — which is also where the salience census reads the
+                # basis from. An entry with no class stamps nothing and the
+                # rule falls through to not_determined (visible).
+                stamp_signal_class(event_data, member.entry)
+                salience, salience_basis = assign_salience(session, event_type, event_data, mc)
+                event_data["salience"] = salience
+                event_data["salience_basis"] = salience_basis
                 event = MonitoredEvent(
                     id=uuid.uuid4(),
                     monitored_contract_id=mc.id,
@@ -1238,6 +1257,16 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 break
 
             window_events = _process_window(session, cohort, fetched_logs, window_start, window_end, dirty_controllers)
+
+            # Enrich after the ON-CONFLICT insert has decided which rows are
+            # real (no spend on rows a concurrent scanner won), inside the same
+            # transaction that commits the window, and BEFORE the commit that
+            # precedes _notify_committed_events — so the Discord embed and the
+            # salience gate both see the post-enrichment row. Reanalysis
+            # dispatch deliberately stays inside _process_window and does NOT
+            # depend on enrichment: side effects follow claim strength, not
+            # richness.
+            enrich_events(session, window_events, rpc_by_chain)
 
             # Advance cursors monotonically in the SAME transaction that
             # persists this window's events. GREATEST means a stale or zombie
@@ -2151,17 +2180,26 @@ def _apply_poll_result(
             )
             return True
 
+    # Mint site 3 of 3. Same construction as the verification read: the plan
+    # entry is in scope only here, so its signal_class is stamped onto the row
+    # and the salience rule reads it back off ``data``.
+    event_data: dict[str, Any] = {
+        "field": field_name,
+        "old_value": str(old_value),
+        "new_value": str(new_value),
+    }
+    stamp_signal_class(event_data, entry)
+    salience, salience_basis = assign_salience(session, "state_changed_poll", event_data, mc)
+    event_data["salience"] = salience
+    event_data["salience_basis"] = salience_basis
+
     event = MonitoredEvent(
         id=uuid.uuid4(),
         monitored_contract_id=mc.id,
         event_type="state_changed_poll",
         block_number=0,
         tx_hash="",
-        data={
-            "field": field_name,
-            "old_value": str(old_value),
-            "new_value": str(new_value),
-        },
+        data=event_data,
     )
     session.add(event)
     new_events.append(event)
