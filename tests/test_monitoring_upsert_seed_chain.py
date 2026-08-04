@@ -59,10 +59,17 @@ def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url):
         assert captured_url["url"] == deps.DEFAULT_RPC_URL
 
 
-def test_head_block_failure_falls_back_to_zero(monkeypatch):
-    # An RPC failure degrades to 0 (unchanged behavior) rather than raising.
+def test_head_block_failure_is_not_determined_not_zero(monkeypatch):
+    """An RPC failure reads as not-determined, never as block 0.
+
+    Block 0 is a claim — "watching this contract since genesis" — that seeds a
+    cursor 25M blocks behind head and a floor that lets every historical event
+    publish as a live change. The route refuses the enrollment on ``None``
+    rather than persist that (``test_upsert_refuses_to_seed_a_floor_zero_row``
+    in tests/test_cursor_hygiene.py)."""
+
     def _boom(*_a, **_kw):
         raise RuntimeError("upstream down")
 
     monkeypatch.setattr(monitored, "rpc_request", _boom)
-    assert monitored._current_head_block("base") == 0
+    assert monitored._current_head_block("base") is None

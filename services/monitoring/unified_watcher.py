@@ -84,6 +84,12 @@ DEFAULT_CONFIRMATION_DEPTH = 12
 # range/response-cap rejection actually bisects instead of failing the cohort.
 FETCHER_MIN_BISECT_SPAN = 125
 
+# Runaway-cursor backstop (see ``scan_for_events``). ~1M mainnet blocks is about
+# four months — no outage-driven backfill reaches it, so a cohort past this lag
+# is carrying a broken cursor rather than doing real work.
+DEFAULT_RUNAWAY_LAG_BLOCKS = 1_000_000
+DEFAULT_RUNAWAY_WINDOWS_PER_PASS = 1
+
 # Reason stamped on the enrollment-queue row when the watcher's relational sync
 # observes an on-chain controller rotation (owner/admin/authority/implementation).
 # Closes the gap where a rotation installs a new governance Safe that would
@@ -258,6 +264,12 @@ class _Cohort:
     cursor: int
     done: bool = False
     failed: bool = False
+    #: Windows this cohort has been served in the current pass. Only the
+    #: runaway backstop reads it (see ``scan_for_events``).
+    windows_this_pass: int = 0
+    #: Set each time the cohort is considered: its lag exceeds
+    #: ``PSAT_SCAN_RUNAWAY_LAG_BLOCKS``.
+    runaway: bool = False
 
 
 class ScanResult(list):
@@ -278,6 +290,7 @@ class ScanResult(list):
         cohorts: int = 0,
         max_lag_blocks: int = 0,
         degraded: bool = False,
+        runaway_cohorts: int = 0,
     ) -> None:
         super().__init__(events)
         self.budget_exhausted = budget_exhausted
@@ -285,6 +298,7 @@ class ScanResult(list):
         self.cohorts = cohorts
         self.max_lag_blocks = max_lag_blocks
         self.degraded = degraded
+        self.runaway_cohorts = runaway_cohorts
 
 
 def _scan_topics_union(session: Session) -> list[str]:
@@ -542,6 +556,17 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     address_batch = max(1, _scan_int_env("PSAT_SCAN_ADDRESS_BATCH", 200))
     max_windows_cohort = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", 25))
     max_windows_pass = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_PASS", 50))
+    # Runaway backstop: a cohort this far behind confirmed head is not
+    # backfilling, it is broken (a floor-0 legacy row, a cursor restored from an
+    # old snapshot). Most-behind-first would hand it every window of every pass
+    # while the rest of the fleet sits at head. It is served last and capped at
+    # ``runaway_windows`` windows per pass — still advancing (behind ≠ skipped),
+    # never monopolising — and counted onto the heartbeat so the condition is
+    # visible rather than merely slow. The operator repair is
+    # ``scripts/clamp_monitoring_cursors.py``; the scanner's own "behind" alarm
+    # (ops_alerts) already fires on the lag. 0 disables the backstop.
+    runaway_lag = max(0, _scan_int_env("PSAT_SCAN_RUNAWAY_LAG_BLOCKS", DEFAULT_RUNAWAY_LAG_BLOCKS))
+    runaway_windows = max(1, _scan_int_env("PSAT_SCAN_RUNAWAY_WINDOWS_PER_PASS", DEFAULT_RUNAWAY_WINDOWS_PER_PASS))
 
     index_rows = session.execute(
         select(
@@ -652,16 +677,24 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             if cohort.cursor >= confirmed_head:
                 cohort.done = True
                 continue
+            cohort.runaway = runaway_lag > 0 and (confirmed_head - cohort.cursor) > runaway_lag
+            if cohort.runaway and cohort.windows_this_pass >= runaway_windows:
+                continue  # already served its capped slice this pass
             eligible.append((cohort, confirmed_head))
         if not eligible:
             break
 
-        # Most-behind cohort first (largest confirmed_head − cursor).
-        eligible.sort(key=lambda item: item[1] - item[0].cursor, reverse=True)
+        # Healthy cohorts first, most-behind-first within each group; a runaway
+        # cohort is only reached once nothing else is waiting.
+        eligible.sort(key=lambda item: (item[0].runaway, -(item[1] - item[0].cursor)))
         cohort, confirmed_head = eligible[0]
 
+        turn_cap = max_windows_cohort
+        if cohort.runaway:
+            turn_cap = min(turn_cap, runaway_windows - cohort.windows_this_pass)
+
         turn_windows = 0
-        while turn_windows < max_windows_cohort and windows_scanned < max_windows_pass:
+        while turn_windows < turn_cap and windows_scanned < max_windows_pass:
             window_start = cohort.cursor + 1
             if window_start > confirmed_head:
                 cohort.done = True
@@ -717,6 +750,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             blocks_scanned += window_end - window_start + 1
             windows_scanned += 1
             turn_windows += 1
+            cohort.windows_this_pass += 1
 
             # Renew now that this window is durably committed. renew_daemon_lease
             # commits even when it LOSES, so a lost renew aborts the pass AFTER
@@ -740,6 +774,20 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         max_lag = max(max_lag, _head_for(cohort.chain) - cohort.cursor)
     max_lag = max(0, max_lag)
 
+    runaway_cohorts = sum(1 for c in cohorts if c.runaway and not c.done and not c.failed)
+    if runaway_cohorts:
+        logger.warning(
+            "scan: %d cohort(s) past the runaway lag threshold — capped at %d window(s) this pass",
+            runaway_cohorts,
+            runaway_windows,
+            extra={
+                "runaway_cohorts": runaway_cohorts,
+                "runaway_lag_blocks": runaway_lag,
+                "max_lag_blocks": max_lag,
+                "reason": "cursor_runaway",
+            },
+        )
+
     emit_monitor_cycle(
         HEARTBEAT_PROTOCOL_SCANNER,
         started=started,
@@ -753,6 +801,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             "windows_scanned": windows_scanned,
             "cohorts": len(cohorts),
             "budget_exhausted": budget_exhausted,
+            "runaway_cohorts": runaway_cohorts,
         },
     )
     return ScanResult(
@@ -762,6 +811,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         cohorts=len(cohorts),
         max_lag_blocks=max_lag,
         degraded=degraded,
+        runaway_cohorts=runaway_cohorts,
     )
 
 
