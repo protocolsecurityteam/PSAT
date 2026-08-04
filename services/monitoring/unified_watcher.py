@@ -771,10 +771,22 @@ class _VerificationOutcome:
     caller folds it into the pass's ``degraded`` flag, matching the poller's
     ``chunks_failed > 0 ⇒ partial=True``: a pass that lost work must not report
     clean.
+
+    ``reads_failed`` / ``reads_over_budget`` are this pass's own bookkeeping,
+    emitted on the heartbeat. The DB markers (verify_status.py) answer "what is
+    marked right now", and the poller erases them on its next answered pass, so
+    on a healthy deployment they are usually gone before anyone looks. These
+    count the outcomes the pass actually observed, whatever later happens to the
+    markers — including the outcomes that could not be marked at all (no field
+    name to key on) and those whose marker rolled back with a deadlocked unit.
+    ``None`` is the third state: the pass did not get far enough to observe,
+    which is not a zero.
     """
 
     events: list[MonitoredEvent]
     units_failed: int = 0
+    reads_failed: int | None = 0
+    reads_over_budget: int | None = 0
 
 
 def _resolve_verification_reads(
@@ -857,6 +869,11 @@ def _resolve_verification_reads(
     # --- write phase: per chain, committed as its own unit ----------------
     new_events: list[MonitoredEvent] = []
     units_failed = 0
+    reads_failed = 0
+    # A scheduling fact of this pass, counted before any write: these controllers
+    # were dirty and the pass declined to read them. True whether or not each
+    # marker lands.
+    reads_over_budget = len(over)
     now = time.monotonic()
 
     if over:
@@ -884,6 +901,7 @@ def _resolve_verification_reads(
                 _LAST_VERIFIED_AT[(member.monitored_contract_id, member.controller_id)] = now
                 if status != "ok":
                     marker = VERIFY_ERROR if status == "error" else VERIFY_UNANSWERED
+                    reads_failed += 1
                     if record_verify_status(mc, field, marker):
                         flag_modified(mc, "last_poll_status")
                     continue
@@ -898,8 +916,10 @@ def _resolve_verification_reads(
                     # keeps out of last_known_state; matching it keeps the two
                     # readers of the same slot from disagreeing about what is
                     # stored.
-                    if not parsed_ok and record_verify_status(mc, field, VERIFY_NO_VALUE):
-                        flag_modified(mc, "last_poll_status")
+                    if not parsed_ok:
+                        reads_failed += 1
+                        if record_verify_status(mc, field, VERIFY_NO_VALUE):
+                            flag_modified(mc, "last_poll_status")
                     continue
                 if not isinstance(field, str) or not field:
                     continue
@@ -994,7 +1014,12 @@ def _resolve_verification_reads(
         new_events.extend(unit_events)
 
     _prune_verification_cursors()
-    return _VerificationOutcome(new_events, units_failed=units_failed)
+    return _VerificationOutcome(
+        new_events,
+        units_failed=units_failed,
+        reads_failed=reads_failed,
+        reads_over_budget=reads_over_budget,
+    )
 
 
 def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
@@ -1256,7 +1281,9 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         # roll them back or abort the pass summary.
         session.rollback()
         degraded = True
-        verification = _VerificationOutcome([])
+        # Zero would read as "no read failed this pass"; what happened is that
+        # the pass stopped before its outcomes were countable.
+        verification = _VerificationOutcome([], reads_failed=None, reads_over_budget=None)
     if verification.units_failed:
         # A deadlocked unit rolled back its events AND its not-determined
         # markers, so this is the one failure in the pass that leaves no
@@ -1310,6 +1337,14 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             "budget_exhausted": budget_exhausted,
             "runaway_cohorts": runaway_cohorts,
             "verification_units_failed": verification.units_failed,
+            # Pass-scoped complement to the not-determined markers those reads
+            # leave on the contracts: the markers are erased by the poller's next
+            # answered pass, so on a healthy fleet the fleet census
+            # (``watchers.verification_gaps``) is usually blind to an
+            # intermittent failure that this per-pass number recorded. ``None``
+            # means the verification pass itself did not complete — not zero.
+            "verification_reads_failed": verification.reads_failed,
+            "verification_reads_over_budget": verification.reads_over_budget,
         },
     )
     return ScanResult(
