@@ -148,7 +148,7 @@ def test_the_kill_switch_cannot_promote(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fact(var="s", member=None, hygiene="normal", origin="body"):
+def _fact(var="s", member=None, hygiene="normal", origin: str | None = "body"):
     return {
         "var": var,
         "member_path": list(member) if member else [],
