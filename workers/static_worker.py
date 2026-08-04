@@ -1084,6 +1084,10 @@ class StaticWorker(BaseWorker):
             if secondary_analysis is not None:
                 self._resolve_secondary_impls(session, job, address, secondary_analysis)
 
+            # Both paths above leave the same three artifacts behind (the cache
+            # path copies them), so supply is published from one call site.
+            self._publish_materialization(session, job, address, contract_name)
+
             self.update_detail(session, job, "Static analysis complete")
             logger.info("Static analysis complete for job %s (%s)", job_id_str, contract_name)
 
@@ -2054,6 +2058,106 @@ class StaticWorker(BaseWorker):
             )
 
         session.commit()
+
+    def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
+        """Record this job's analysis bundle in ``contract_materializations`` (F4a).
+
+        Until now the versioned store had exactly one writer: the authority
+        recursion, which materializes whichever dependencies it happens to
+        visit. Monitoring enrolls from that store, so whether a contract was
+        watched on its real tracking plan or on the baseline registry alone was
+        decided by an accident of graph traversal (136 of 183 monitored
+        contracts read ``no_current_materialization`` while their own jobs held
+        a substantive plan). Publishing here makes coverage follow from analysis
+        having run — invariant 8.
+
+        Reads back the three artifacts this stage just stored rather than taking
+        them as arguments: the artifacts are what the job actually left behind,
+        they are identical on the fresh and the static-cache paths, and a bundle
+        that failed to store is one this row must not claim to hold.
+
+        Best-effort in every arm. Supply is not the analysis: a bucket outage, a
+        keccak we cannot read, or a row another writer holds must never fail a
+        job whose analysis succeeded. Each refusal is logged with its reason.
+        """
+        from db.contract_materializations import (
+            PRODUCED_BY_PIPELINE,
+            PUBLISH_WRITTEN,
+            build_provenance,
+            is_enabled,
+            publish_materialization,
+        )
+
+        if not is_enabled():
+            return
+        try:
+            analysis = get_artifact(session, job.id, "contract_analysis")
+            tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+        except Exception as exc:
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish skipped for %s — artifacts unreadable: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+        if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+            # The plan phase records its own failure; a row without both halves
+            # would read downstream as a contract with no analysis and no plan.
+            logger.info(
+                "Static stage: no materialization published for %s — analysis or tracking plan absent",
+                address,
+            )
+            return
+
+        chain = _parent_chain_name(job)
+        try:
+            from utils.rpc import get_code_with_keccak
+
+            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
+        except Exception as exc:
+            # The row is keyed on bytecode. Without the keccak there is no key,
+            # and inventing one would key the bundle to code nobody read.
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish skipped for %s — bytecode keccak not determined: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+
+        try:
+            outcome = publish_materialization(
+                chain=chain,
+                address=address,
+                bytecode_keccak=keccak,
+                contract_name=contract_name,
+                analysis=analysis,
+                tracking_plan=tracking_plan,
+                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                source_content_hash=job.source_content_hash,
+                provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
+            )
+        except Exception as exc:
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish failed for %s: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+        log = logger.info if outcome == PUBLISH_WRITTEN else logger.warning
+        log(
+            "Static stage: materialization %s for %s (%s)",
+            outcome,
+            address,
+            chain,
+            extra={"address": address, "chain": chain, "outcome": outcome},
+        )
 
     def _run_tracking_plan_phase(
         self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str
