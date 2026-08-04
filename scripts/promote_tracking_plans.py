@@ -29,7 +29,9 @@ coverage:
     hydrates to None — read downstream as *this contract has no analysis*, which
     a missing artifact never said.
 ``job_schema_version_not_current``
-    The job carries no ``analysis_schema_version``, or an older one. A v5 row
+    The era the artifacts were produced under is older than the current one, or
+    could not be established at all (``proven_analysis_schema_version`` follows
+    a static-cache job's chain to the donor that was actually stamped). A v5 row
     holding a pre-v5 plan is a version claim nothing witnessed.
 ``bytecode_keccak_not_cached``
     The row is keyed on bytecode. This sweep does no RPC — an address with no
@@ -87,7 +89,7 @@ from db.models import (
     MonitoredContract,
     SessionLocal,
 )
-from db.queue import _job_chain_name, get_artifact
+from db.queue import _job_chain_name, get_artifact, proven_analysis_schema_version
 from services.monitoring.enrollment import mark_enrollment_dirty
 from services.monitoring.event_topics import (
     WITNESS_TIER_SELF_DESCRIBING,
@@ -112,6 +114,11 @@ PLAN_UNREADABLE = "plan_unreadable"
 
 #: The row would be written.
 PROMOTABLE = "promotable"
+
+#: An ``--apply`` item that raised. Recorded per promotion so a partial sweep
+#: reports which contracts it did not supply, rather than reporting a total that
+#: silently excludes them.
+APPLY_FAILED = "apply_failed"
 
 #: Where the specs in the "after" column come from. A contract that already has
 #: a current row is not promoted, but its plan is what re-enrollment will read,
@@ -362,10 +369,13 @@ def plan_promotions(
             continue
         promotion.source_job_id = str(job.id)
         promotion.contract_name = job.name
-        if job.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:
-            # None (a static-cache job that never reached the stamp) and an older
-            # number are the same refusal for different reasons: neither proves
-            # the artifacts were produced by the current analyzer.
+        if proven_analysis_schema_version(session, job) != ANALYSIS_SCHEMA_VERSION:
+            # An older number and an era that cannot be established are the same
+            # refusal for different reasons: neither proves the artifacts were
+            # produced by the current analyzer. A static-cache job's own column
+            # is NULL, so the era is looked for where it was actually witnessed —
+            # the donor whose artifacts were copied — and the same resolver gates
+            # the pipeline's own write.
             promotion.outcome = JOB_SCHEMA_VERSION_NOT_CURRENT
             continue
         if not _has_artifact(session, job.id, "contract_analysis"):
@@ -418,7 +428,15 @@ def apply_promotions(session: Session, promotions: list[Promotion]) -> dict[str,
     Re-enrollment is *marked*, not performed: ``mark_enrollment_dirty`` hands the
     protocol to the monitor's own enrollment pass, which is the single code path
     that knows how to merge a config (F5) — reimplementing that here would be a
-    second, divergent writer of ``monitoring_config``.
+    second, divergent writer of ``monitoring_config``. That function does not
+    commit (its caller does, so a mark never references rolled-back work), and
+    ``publish_materialization`` commits its OWN session — so without the commit
+    below the rows land and every mark is discarded at session close, leaving
+    plans in the store that nothing re-enrolls to read.
+
+    One promotion's failure does not abandon the rest: the sweep runs over a
+    whole fleet, and an unreadable blob on contract 40 must not cost contracts
+    41-107 their supply.
     """
     counts: dict[str, int] = {}
     protocols: set[int] = set()
@@ -426,21 +444,28 @@ def apply_promotions(session: Session, promotions: list[Promotion]) -> dict[str,
         if not promotion.promotable:
             continue
         job_id = promotion.source_job_id
-        analysis = get_artifact(session, job_id, "contract_analysis")
-        plan = get_artifact(session, job_id, "control_tracking_plan")
-        trees = get_artifact(session, job_id, "predicate_trees")
-        job = session.get(Job, job_id)
-        outcome = publish_materialization(
-            chain=promotion.chain,
-            address=promotion.address,
-            bytecode_keccak=promotion.bytecode_keccak or "",
-            contract_name=promotion.contract_name,
-            analysis=analysis if isinstance(analysis, dict) else None,
-            tracking_plan=plan if isinstance(plan, dict) else None,
-            predicate_trees=trees if isinstance(trees, dict) else None,
-            source_content_hash=job.source_content_hash if job is not None else None,
-            provenance=build_provenance(PRODUCED_BY_PROMOTION_SWEEP, source_job_id=job_id),
-        )
+        try:
+            analysis = get_artifact(session, job_id, "contract_analysis")
+            plan = get_artifact(session, job_id, "control_tracking_plan")
+            trees = get_artifact(session, job_id, "predicate_trees")
+            job = session.get(Job, job_id)
+            outcome = publish_materialization(
+                chain=promotion.chain,
+                address=promotion.address,
+                bytecode_keccak=promotion.bytecode_keccak or "",
+                contract_name=promotion.contract_name,
+                analysis=analysis if isinstance(analysis, dict) else None,
+                tracking_plan=plan if isinstance(plan, dict) else None,
+                predicate_trees=trees if isinstance(trees, dict) else None,
+                source_content_hash=job.source_content_hash if job is not None else None,
+                provenance=build_provenance(PRODUCED_BY_PROMOTION_SWEEP, source_job_id=job_id),
+            )
+        except Exception as exc:
+            logger.warning("promotion failed for %s (%s): %s", promotion.address, promotion.chain, exc, exc_info=True)
+            promotion.applied = APPLY_FAILED
+            counts[APPLY_FAILED] = counts.get(APPLY_FAILED, 0) + 1
+            session.rollback()
+            continue
         promotion.applied = outcome
         counts[outcome] = counts.get(outcome, 0) + 1
         if outcome == PUBLISH_WRITTEN and promotion.protocol_id:
@@ -448,6 +473,9 @@ def apply_promotions(session: Session, promotions: list[Promotion]) -> dict[str,
 
     for protocol_id in sorted(protocols):
         mark_enrollment_dirty(session, protocol_id, "tracking_plan_promoted")
+    # The marks are this session's only uncommitted work; the rows committed
+    # themselves inside the writer.
+    session.commit()
     counts["protocols_marked_for_re_enrollment"] = len(protocols)
     return counts
 

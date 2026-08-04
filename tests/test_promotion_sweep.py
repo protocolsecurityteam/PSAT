@@ -14,6 +14,7 @@ every watch gaining notify rights names the arm that earns it.
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,7 @@ import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+import db.contract_materializations as publish_module
 from db.contract_materializations import (
     ANALYSIS_SCHEMA_VERSION,
     PRODUCED_BY_PROMOTION_SWEEP,
@@ -41,6 +43,7 @@ from db.models import (
 )
 from db.queue import store_artifact
 from scripts.promote_tracking_plans import (
+    APPLY_FAILED,
     BYTECODE_KECCAK_NOT_CACHED,
     JOB_ANALYSIS_ARTIFACT_ABSENT,
     JOB_PLAN_ARTIFACT_ABSENT,
@@ -385,6 +388,60 @@ def test_apply_writes_the_row_with_its_source_job_and_queues_re_enrollment(apply
     assert [q.reason for q in queued] == ["tracking_plan_promoted"]
     # The row it just wrote is what enrollment now reads.
     assert find_by_address(apply_db, chain="ethereum", address=_addr(20)) is not None
+
+
+@requires_postgres
+def test_the_enrollment_marks_survive_the_session(apply_db):
+    """``mark_enrollment_dirty`` does not commit and ``publish_materialization``
+    commits its own session — so without an explicit commit the rows land and
+    every mark is discarded at close, leaving promoted plans that nothing
+    re-enrolls to read. Read back through a SECOND session, because an assertion
+    inside the writing session cannot tell committed from merely pending."""
+    mc = _monitored(apply_db, 30)
+    protocol = Protocol(name=f"P-{uuid.uuid4().hex[:8]}")
+    apply_db.add(protocol)
+    apply_db.commit()
+    mc.protocol_id = protocol.id
+    apply_db.commit()
+    _job(apply_db, 30)
+    _cache_keccak(apply_db, 30)
+
+    apply_promotions(apply_db, plan_promotions(apply_db, address=_addr(30)))
+
+    engine = create_engine(os.environ["TEST_DATABASE_URL"])
+    with Session(engine) as fresh:
+        marked = (
+            fresh.execute(select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == protocol.id))
+            .scalars()
+            .all()
+        )
+        assert [q.reason for q in marked] == ["tracking_plan_promoted"]
+    engine.dispose()
+
+
+@requires_postgres
+def test_one_failed_promotion_does_not_abandon_the_rest(apply_db, monkeypatch):
+    """The sweep runs over a whole fleet; an unreadable blob on one contract must
+    not cost the others their supply."""
+    for n in (31, 32):
+        _monitored(apply_db, n)
+        _job(apply_db, n)
+        _cache_keccak(apply_db, n)
+
+    real = publish_module.publish_materialization
+    calls = {"n": 0}
+
+    def _fail_first(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("bucket down")
+        return real(**kwargs)
+
+    monkeypatch.setattr("scripts.promote_tracking_plans.publish_materialization", _fail_first)
+    counts = apply_promotions(apply_db, plan_promotions(apply_db))
+    assert counts[APPLY_FAILED] == 1
+    assert counts[PUBLISH_WRITTEN] == 1
+    assert len(apply_db.execute(select(ContractMaterialization)).scalars().all()) == 1
 
 
 @requires_postgres
