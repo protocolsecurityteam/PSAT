@@ -20,6 +20,7 @@ from services.monitoring.event_topics import (  # noqa: E402
     MAX_EVENT_TYPE_LENGTH,
     WITNESS_TIER_ACTIVITY,
     WITNESS_TIER_HINT,
+    WITNESS_TIER_SELF_DESCRIBING,
     extract_governance_topics,
     is_member_changed_event_type,
     member_witness_mapping_var,
@@ -381,6 +382,28 @@ def test_one_topic0_on_two_controllers_resolves_by_evidence():
 # ---------------------------------------------------------------------------
 # The slot-shaped consumers skip the member vocabulary
 # ---------------------------------------------------------------------------
+
+
+def test_a_legacy_witness_under_a_slot_type_does_not_promote():
+    """``_resolve_spec_tier`` re-classifies a spec persisted before the taxonomy.
+    A record honoured there regardless of the published type would promote a row
+    that publishes as ``state_changed:`` — and every slot-shaped consumer keys
+    off the type, so the entry key would land in ``last_known_state`` and in a
+    ``ControllerValue`` row as the slot's value."""
+    from services.monitoring.unified_watcher import _resolve_spec_tier
+
+    mc = SimpleNamespace(monitoring_config={"polling_plan": []})
+    witness = {"mapping_name": "m", "key_position": 0, "direction": "add"}
+    slot_typed = {
+        "event_type": "state_changed:state_variable:m",
+        "controller_id": "state_variable:m",
+        "member_witness": witness,
+        "writer_openness": "restricted",
+    }
+    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # type: ignore[arg-type]
+
+    member_typed = dict(slot_typed, event_type="member_changed:m")
+    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # type: ignore[arg-type]
 
 
 def test_member_change_never_reflects_into_last_known_state():

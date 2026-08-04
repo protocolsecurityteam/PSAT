@@ -476,12 +476,19 @@ def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
     tier = spec.get("witness_tier")
     if tier in WITNESS_TIERS:
         return tier
+    event_type = spec.get("event_type")
     return classify_witness_tier(
-        event_type=spec.get("event_type"),
+        event_type=event_type,
         controller_id=spec.get("controller_id"),
         inputs=spec.get("inputs"),
         effect_tags=spec.get("effect_tags"),
-        member_witness=spec.get("member_witness"),
+        # The member witness promotes only a spec that publishes under the
+        # member vocabulary. Enrollment refuses to mint that type when the
+        # qualification cannot be published (no mapping named, a type that would
+        # overflow the column, a key outside the event's args) — honouring the
+        # record here regardless would promote a row that publishes under the
+        # slot stem, and every slot-shaped consumer downstream keys off the type.
+        member_witness=spec.get("member_witness") if is_member_changed_event_type(event_type) else None,
         writer_openness=spec.get("writer_openness"),
         poll_decodable=_poll_entry_for_controller(mc, spec.get("controller_id")) is not None,
     )
