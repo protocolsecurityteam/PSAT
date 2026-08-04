@@ -526,7 +526,7 @@ describe("ProtocolSurface — function lane categorization (via buildMachines)",
 });
 
 // Sanity: the rich fixture used here is the same one consumers will use
-// to test buildMachines / guardSummary / collectPrincipals once those are
+// to test buildMachines / guardSummary / collectDirectCallers once those are
 // extracted as standalone helpers — pinning the fixture here means the
 // extraction and the fixture stay in lockstep.
 describe("rich fixture", () => {
@@ -1708,8 +1708,8 @@ describe("ProtocolSurface — reached-from route on the entity card", () => {
     ]);
     // The witnessed role rides through from the payload; the unwitnessed hop
     // shows its flow type alone.
-    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("principal · role_principal roles 77");
-    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controller");
+    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("can call · role holder roles 77");
+    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controls");
     expectNoCrash();
   });
 

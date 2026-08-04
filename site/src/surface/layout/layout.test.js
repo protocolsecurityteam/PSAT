@@ -10,7 +10,11 @@ import {
   RICH_ADDRESSES,
 } from "../../test/fixtures.js";
 import { buildMachines } from "./buildMachines.js";
-import { collectPrincipals } from "./controlGraph.js";
+import {
+  buildIndirectCallerContext,
+  collectDirectCallers,
+  collectIndirectCallers,
+} from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 import { buildSearchResults } from "./search.js";
 import { aggregateEdges, assignGroups, buildGraphLayout, groupHeaderHeight, layoutGroupInterior } from "./elkLayout.js";
@@ -46,17 +50,17 @@ describe("buildMachines", () => {
   });
 });
 
-describe("collectPrincipals", () => {
+describe("collectDirectCallers", () => {
   it("returns a direct caller for a guarded fixture function", () => {
     const fn = ETHERFI_COMPANY_RICH.contracts[0].functions.find((f) => f.function === "pause");
-    const { direct } = collectPrincipals(fn, ETHERFI_COMPANY_RICH);
+    const direct = collectDirectCallers(fn);
     expect(direct).toHaveLength(1);
     expect(direct[0].resolvedType).toBe("safe");
   });
 
   it("returns no direct caller for a public-authority function", () => {
     const fn = ETHERFI_COMPANY_RICH.contracts[0].functions.find((f) => f.function === "deposit");
-    const { direct } = collectPrincipals(fn, ETHERFI_COMPANY_RICH);
+    const direct = collectDirectCallers(fn);
     expect(direct).toHaveLength(0);
   });
 });
@@ -503,48 +507,104 @@ describe("buildGroupControllers — controls_detail chain keying", () => {
   });
 });
 
-describe("buildControlGraphIndex — callee edges are not control", () => {
-  it("does not walk external_call_target into the indirect governance path", () => {
-    const TARGET = "0x1111111111111111111111111111111111111111";
-    const CALLEE = "0x2222222222222222222222222222222222222222";
-    const CALLEE_OWNER = "0x3333333333333333333333333333333333333333";
-    const GATE = "0x4444444444444444444444444444444444444444";
-    const GATE_OWNER = "0x5555555555555555555555555555555555555555";
+// Indirect callers derive from the SAME agency-gated reach walk as the canvas
+// overlay (fund_flows adjacency + controls_detail agency index) — not from the
+// per-contract control_graph blobs, whose relations (external_call_target &
+// co.) once leaked callee owners into the governance path. A principal only
+// publishes as indirect when its walk was LICENSED to stand on a direct
+// caller: reaching one through a non-agency power (pause-only) is where the
+// claim ends, not a route to the function.
+describe("collectIndirectCallers — witnessed-agency walk", () => {
+  const CALLER = "0x1111111111111111111111111111111111111111";
+  const MID = "0x2222222222222222222222222222222222222222";
+  const OWNER_SAFE = "0x3333333333333333333333333333333333333333";
+  const PAUSER_SAFE = "0x4444444444444444444444444444444444444444";
 
-    const companyData = {
-      contracts: [
+  // fn is gated by CALLER (a contract); OWNER_SAFE owns MID which controls
+  // CALLER; PAUSER_SAFE can only pause CALLER.
+  const fn = {
+    controllers: [
+      { label: "authority", principals: [{ address: CALLER, resolved_type: "contract" }] },
+    ],
+  };
+
+  function companyWith(principals, extraFlows = []) {
+    return {
+      contracts: [{ address: CALLER, control_graph: { nodes: [], edges: [] } }],
+      principals,
+      fund_flows: extraFlows,
+    };
+  }
+
+  it("publishes a principal whose agency route stands on the direct caller, with the route as path", () => {
+    const companyData = companyWith(
+      [
         {
-          address: TARGET,
-          control_graph: {
-            nodes: [
-              { address: TARGET, type: "contract", label: "Target" },
-              { address: CALLEE, type: "contract", label: "Token" },
-              { address: CALLEE_OWNER, type: "safe", label: "Token owner Safe", details: {} },
-              { address: GATE, type: "contract", label: "RoleRegistry" },
-              { address: GATE_OWNER, type: "safe", label: "Registry owner Safe", details: {} },
-            ],
-            edges: [
-              { from: TARGET, to: GATE, relation: "controller_value" },
-              { from: GATE, to: GATE_OWNER, relation: "controller_value" },
-              { from: TARGET, to: CALLEE, relation: "external_call_target" },
-              { from: CALLEE, to: CALLEE_OWNER, relation: "controller_value" },
-            ],
-          },
+          address: OWNER_SAFE,
+          type: "safe",
+          label: "Owner Safe",
+          details: { threshold: 2 },
+          controls: [MID],
+          controls_detail: [{ address: MID, capabilities: ["ownership"] }],
         },
       ],
-    };
-
-    const fn = {
-      controllers: [
-        { label: "roleRegistry", principals: [{ address: TARGET, resolved_type: "contract" }] },
+      [
+        { from: OWNER_SAFE, to: MID, type: "principal", relation: "controller_value" },
+        // MID is a plain contract standpoint (no controls_detail) — the walk
+        // stays blind through it, matching the backend closure.
+        { from: MID, to: CALLER, type: "controller", relation: "controller_value" },
       ],
-    };
-    const { indirect } = collectPrincipals(fn, companyData);
-    const reached = indirect.map((p) => p.address);
-    // POSITIVE: the gate's owner Safe is genuine governance context.
-    expect(reached).toContain(GATE_OWNER);
-    // NEGATIVE: the callee's owner Safe cannot reach this function at all.
-    expect(reached).not.toContain(CALLEE_OWNER);
+    );
+    const ctx = buildIndirectCallerContext(companyData, null);
+    const indirect = collectIndirectCallers(collectDirectCallers(fn), ctx);
+    expect(indirect.map((p) => p.address)).toEqual([OWNER_SAFE]);
+    expect(indirect[0].resolvedType).toBe("safe");
+    // Trail renders caller-upward: [direct caller, ...route..., principal].
+    expect(indirect[0].path.map((p) => p.address)).toEqual([CALLER, MID, OWNER_SAFE]);
+    expect(indirect[0].path[0].relation).toBe("direct");
+    expect(indirect[0].path[1].relation).toBe("controller_value");
+  });
+
+  it("does not publish a principal whose only witnessed power over the caller is non-agency", () => {
+    const companyData = companyWith(
+      [
+        {
+          address: PAUSER_SAFE,
+          type: "safe",
+          label: "Pauser",
+          details: {},
+          controls: [CALLER],
+          controls_detail: [{ address: CALLER, capabilities: ["pause"] }],
+        },
+      ],
+      [{ from: PAUSER_SAFE, to: CALLER, type: "principal", relation: "controller_value" }],
+    );
+    const ctx = buildIndirectCallerContext(companyData, null);
+    const indirect = collectIndirectCallers(collectDirectCallers(fn), ctx);
+    // PAUSER_SAFE reaches CALLER but was never licensed to stand on it — a
+    // pause power confers no route to the functions CALLER can call.
+    expect(indirect).toEqual([]);
+  });
+
+  it("ignores principals with no agency route to a direct caller", () => {
+    const companyData = companyWith(
+      [
+        {
+          address: OWNER_SAFE,
+          type: "safe",
+          label: "Unrelated Safe",
+          details: {},
+          controls: [MID],
+          controls_detail: [{ address: MID, capabilities: ["ownership"] }],
+        },
+      ],
+      // OWNER_SAFE owns MID, but no edge carries MID → CALLER: the graph
+      // holds no route to the direct caller, so nothing may be published.
+      [{ from: OWNER_SAFE, to: MID, type: "principal" }],
+    );
+    const ctx = buildIndirectCallerContext(companyData, null);
+    const indirect = collectIndirectCallers(collectDirectCallers(fn), ctx);
+    expect(indirect).toEqual([]);
   });
 });
 

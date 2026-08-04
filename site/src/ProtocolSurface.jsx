@@ -23,7 +23,7 @@ import {
 } from "./surface/layout/governancePath.js";
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
-import { coalesceChain, entityKey } from "./surface/entityKey.js";
+import { coalesceChain, entityKey, principalOnChain } from "./surface/entityKey.js";
 import { chainColor, chainLabel } from "./surface/chainMeta.js";
 import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "./surface/chainScope.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
@@ -57,16 +57,9 @@ export function auditHighlightSet(coverage, activeAuditId, activeChain) {
   return out.size ? out : null;
 }
 
-// Whether a principal governs on ``activeChain``. Principals carry a ``chains``
-// list (the chains they were observed governing on); a same-address entity seen
-// only on another chain is excluded so it never attaches to this chain's twin
-// (inv. 13). A principal with no ``chains`` (legacy payload) is always kept.
-export function principalOnChain(principal, activeChain) {
-  if (!activeChain) return true;
-  const chains = principal?.chains;
-  if (!Array.isArray(chains) || chains.length === 0) return true;
-  return chains.some((c) => coalesceChain(c) === activeChain);
-}
+// Chain-scope predicate for principals lives in entityKey.js (shared with the
+// indirect-caller derivation); re-exported here for existing importers.
+export { principalOnChain };
 
 function ProtocolSurface({
   companyName,
@@ -343,8 +336,8 @@ function ProtocolSurface({
   }, [companyData, isMultichain, activeChain]);
 
   const allMachines = useMemo(
-    () => (scopedCompanyData ? buildMachines(scopedCompanyData, functionData, { functionsLoading }) : []),
-    [scopedCompanyData, functionData, functionsLoading]
+    () => (scopedCompanyData ? buildMachines(scopedCompanyData, functionData, { functionsLoading, activeChain }) : []),
+    [scopedCompanyData, functionData, functionsLoading, activeChain]
   );
 
 

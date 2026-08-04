@@ -1,4 +1,4 @@
-import { shortAddr } from "../format.js";
+import { flowTypeWord, relationWord, shortAddr } from "../format.js";
 
 // "Reached from {host} via:" — the route a score-page click-through took to this
 // contract.
@@ -12,9 +12,10 @@ import { shortAddr } from "../format.js";
 // Every hop is read off the payload's own control edges (the same ones the
 // canvas reach chips walk), and each names itself with what was witnessed: the flow
 // type always, plus the control-graph relation and role label where a row
-// witnessed them. An edge with no witnessed relation shows its type alone —
-// never an invented name. A route this graph does not carry is its own state
-// and says so.
+// witnessed them — both projected through the reader-facing word map in
+// format.js (the payload keeps its witness-plane vocabulary). An edge with no
+// witnessed relation shows its type alone — never an invented name. A route
+// this graph does not carry is its own state and says so.
 export function ReachPath({ reachPath }) {
   if (!reachPath) return null;
   const { hostName, hostNames, hops } = reachPath;
@@ -51,11 +52,11 @@ export function ReachPath({ reachPath }) {
                 </span>
               </span>
               <span className="ps-reach-kind">
-                {hop.type}
+                {flowTypeWord(hop.type)}
                 {hop.claims.map((claim) => (
                   <span key={`${claim.relation}:${claim.label || ""}`} className="ps-reach-claim">
                     {" · "}
-                    {claim.relation}
+                    {relationWord(claim.relation)}
                     {claim.label ? <b> {claim.label}</b> : null}
                   </span>
                 ))}

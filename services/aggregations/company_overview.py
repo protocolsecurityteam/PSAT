@@ -56,6 +56,7 @@ from db.models import (
 )
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
+from services.scoring.planes import CONTROL_RELATIONS as SCORER_REACH_RELATIONS
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE, token_balances_may_be_truncated
 
@@ -1619,6 +1620,8 @@ def build_governance_view(
             del owner_groups[owner_addr]
 
     hierarchy = _build_ownership_hierarchy(contracts, owner_groups)
+    protocol_ids = {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None}
+    reach_edges = _protocol_reach_edges(session, protocol_ids)
     fund_flows, principals = _build_flows_and_principals(
         contracts,
         contracts_by_job_id,
@@ -1629,6 +1632,7 @@ def build_governance_view(
         fp_in_contract_by_cid,
         fp_all_addrs_by_cid,
         principal_lookup,
+        reach_edges,
     )
 
     # Reshape FP-by-contract-id into FP-by-contract-address so each principal
@@ -1909,10 +1913,61 @@ def _build_ownership_hierarchy(
     return hierarchy
 
 
+_ZERO_ADDR = "0x0000000000000000000000000000000000000000"
+
+
+def _protocol_reach_edges(
+    session: Session, protocol_ids: set[int]
+) -> list[tuple[str, str, str, str | None, str | None]]:
+    """The control edges the scorer's closure walks, protocol-wide.
+
+    Mirrors ``services.scoring.planes.load_control_closure`` exactly: every
+    ``ControlGraphEdge`` row of the protocol whose relation is in
+    ``SCORER_REACH_RELATIONS`` (reversed to authority direction), plus the
+    ``Contract.admin`` column pairs. Deliberately NOT restricted to the
+    contracts that make this payload's list — the scorer isn't either, so a
+    score-document reach can route through an implementation or an orphaned
+    contract row this page never renders, and the surface graph must carry
+    those hops to route the path. Rows are ``(chain_tok, holder, subject,
+    relation, label)``; admin pairs carry ``relation=None`` (the column is the
+    witness — inventing a relation name for it would overclaim).
+
+    ``safe_owner`` and ``capability_principal`` witnesses never appear here:
+    the scorer excludes both from reach, and admitting them would draw routes
+    the score document does not vouch for. Zero-address ends are skipped —
+    a renounced owner holds nothing, and no host-seeded path routes through
+    the zero address.
+    """
+    rows: list[tuple[str, str, str, str | None, str | None]] = []
+    if not protocol_ids:
+        return rows
+    id_list = sorted(protocol_ids)
+    edge_rows = (
+        session.query(ControlGraphEdge, Contract.chain)
+        .join(Contract, Contract.id == ControlGraphEdge.contract_id)
+        .filter(Contract.protocol_id.in_(id_list), ControlGraphEdge.relation.in_(SCORER_REACH_RELATIONS))
+        .order_by(ControlGraphEdge.id)
+        .all()
+    )
+    for edge, chain in edge_rows:
+        subject = (edge.from_node_id or "").replace("address:", "").lower()
+        holder = (edge.to_node_id or "").replace("address:", "").lower()
+        if not subject or not holder or subject == holder or _ZERO_ADDR in (subject, holder):
+            continue
+        rows.append((_coalesce_chain(chain), holder, subject, edge.relation, edge.label or None))
+    for contract in session.query(Contract).filter(Contract.protocol_id.in_(id_list)).order_by(Contract.id).all():
+        address = (contract.address or "").lower()
+        admin = (contract.admin or "").lower()
+        if address and admin and admin != address and _ZERO_ADDR not in (address, admin):
+            rows.append((_coalesce_chain(contract.chain), admin, address, None, None))
+    return rows
+
+
 def _control_edge_witness(
     contracts: list[dict[str, Any]],
     lookup_contract_by_entity: dict[str, Contract | None],
     cge_by_cid: dict[int, list[ControlGraphEdge]],
+    reach_edges: Iterable[tuple[str, str, str, str | None, str | None]] = (),
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
     """``(chain, flow_from, flow_to)`` → the witnessed claims on that control edge.
 
@@ -1923,6 +1978,10 @@ def _control_edge_witness(
     fund-flow control edge runs the other way — authority holder → contract —
     so rows are indexed reversed. Only those relations are indexed: reversing
     an ``external_call_target`` would assert an authority nobody proved.
+
+    ``reach_edges`` (from :func:`_protocol_reach_edges`) contributes the same
+    claims for pairs whose carrying row lives on a contract outside this
+    payload — an edge admitted from that plane must be nameable too.
 
     One pair can carry several distinct claims at once (a Teller both holds
     ``roles 2,3`` on a vault and is its ``hook`` controller-value). Collapsing
@@ -1947,6 +2006,9 @@ def _control_edge_witness(
             if not subject or not holder or subject == holder:
                 continue
             claims.setdefault((chain_tok, holder, subject), set()).add((edge.relation, edge.label or None))
+    for chain_tok, holder, subject, relation, label in reach_edges:
+        if relation is not None:
+            claims.setdefault((chain_tok, holder, subject), set()).add((relation, label))
 
     witness: dict[tuple[str, str, str], dict[str, Any]] = {}
     for key, pairs in claims.items():
@@ -1971,6 +2033,7 @@ def _build_flows_and_principals(
     fp_in_contract_by_cid: dict[int, set[str]],
     fp_all_addrs_by_cid: dict[int, set[str]],
     principal_lookup: dict[str, dict[str, Any]],
+    reach_edges: list[tuple[str, str, str, str | None, str | None]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
     # Control relations are intra-chain, so every flow carries a single chain
@@ -2028,7 +2091,7 @@ def _build_flows_and_principals(
         if entry.get("address"):
             lookup_contract_by_entity[_entity_key(entry.get("chain"), entry["address"])] = _lookup_contract_for(entry)
 
-    edge_witness.update(_control_edge_witness(contracts, lookup_contract_by_entity, cge_by_cid))
+    edge_witness.update(_control_edge_witness(contracts, lookup_contract_by_entity, cge_by_cid, reach_edges))
 
     for c in contracts:
         if not c["address"]:
@@ -2228,6 +2291,25 @@ def _build_flows_and_principals(
                 principal_map[pa]["controls"].append(target)
             principal_map[pa]["chains"].add(_coalesce_chain(chain))
             add_flow(pa, target, "principal", chain)
+
+    # The authority edges the scorer's control closure walks (see
+    # _protocol_reach_edges), carried verbatim: the score document publishes
+    # reach over exactly these pairs, and one this graph drops is a route the
+    # frontend can only report as "not carried". No holder gate — the closure
+    # routes through whatever the witnessed rows name, including a
+    # RolesAuthority that gates functions without ever being a
+    # FunctionPrincipal, an implementation row the page does not render, and
+    # contracts never enrolled in the inventory at all. The relations admitted
+    # here all carry established authority provenance (an unattributed value
+    # lands on controller_value_unattributed, which neither the scorer nor
+    # this pass walks), so a beneficiary state-var cannot ride in — and the
+    # FP-gated passes stay authoritative for which addresses become principal
+    # CARDS; this pass emits edges only. It runs LAST so add_flow's
+    # first-writer-wins dedup lets every pass above keep its richer type
+    # (``principal``, gate-derived ``controller``) — reach edges only fill
+    # pairs no other witness emitted.
+    for chain_tok, holder, subject, _relation, _label in reach_edges:
+        add_flow(holder, subject, "controller", chain_tok)
 
     # ``chains`` accumulates as a set during collection (a principal may govern
     # on several chains); the payload carries a sorted list. It stays additive —

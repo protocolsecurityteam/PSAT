@@ -9,7 +9,7 @@ import {
 } from "@xyflow/react";
 
 import { entityKey } from "../entityKey.js";
-import { principalBadge } from "../format.js";
+import { flowTypeWord, principalBadge } from "../format.js";
 import { elkLayout } from "../layout/elkLayout.js";
 import { ChanneledStepEdge } from "./ChanneledStepEdge.jsx";
 import { ContractNode } from "./ContractNode.jsx";
@@ -241,7 +241,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
               flowType: fallbackFlowType,
             }];
         for (const { from, to, caps, flowType } of items) {
-          const capsText = (caps || []).join(", ") || flowType || "";
+          // Cap-less edges name themselves by flow type; project the payload
+          // token through the reader-facing word map (format.js) so a chip
+          // says "can call", never the internal `principal`.
+          const capsText = (caps || []).join(", ") || flowTypeWord(flowType) || "";
           if (from === sel) {
             connectedNodes.add(to);
             addChip(to, capsText, "out");

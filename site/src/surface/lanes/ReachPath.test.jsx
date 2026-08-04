@@ -64,11 +64,11 @@ describe("ReachPath", () => {
   it("names each hop with its flow type and every witnessed role label", () => {
     const { container } = render(<ReachPath reachPath={PATH} />);
     const kinds = [...container.querySelectorAll(".ps-reach-kind")].map((k) => k.textContent);
-    expect(kinds[0]).toBe("principal · role_principal roles 77");
-    expect(kinds[1]).toBe("principal · role_principal roles 12");
+    expect(kinds[0]).toBe("can call · role holder roles 77");
+    expect(kinds[1]).toBe("can call · role holder roles 12");
     // Both claims on the pair, neither dropped for the other.
-    expect(kinds[2]).toContain(" · controller_value hook");
-    expect(kinds[2]).toContain(" · role_principal roles 2,3");
+    expect(kinds[2]).toContain(" · control slot hook");
+    expect(kinds[2]).toContain(" · role holder roles 2,3");
   });
 
   it("shows an unwitnessed hop as its flow type alone", () => {
@@ -77,7 +77,7 @@ describe("ReachPath", () => {
       hops: [{ ...PATH.hops[0], claims: [] }],
     };
     const { container } = render(<ReachPath reachPath={bare} />);
-    expect(container.querySelector(".ps-reach-kind").textContent).toBe("principal");
+    expect(container.querySelector(".ps-reach-kind").textContent).toBe("can call");
     expect(container.querySelector(".ps-reach-claim")).toBeNull();
   });
 

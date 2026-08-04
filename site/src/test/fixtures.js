@@ -86,8 +86,8 @@ export const ADDRESS_LABELS = { labels: {} };
 
 // Rich ProtocolSurface fixture — contracts with functions that exercise
 // every lane (control / ops / inflow / outflow), guard kind (safe / timelock
-// / eoa / unknown / open), and the cross-contract principal walk that drives
-// `collectPrincipals` + `guardSummary` + lane categorization. Used by the
+// / eoa / unknown / open), and the cross-contract caller walk that drives
+// `collectDirectCallers` + `guardSummary` + lane categorization. Used by the
 // state-variant tests in src/ProtocolSurface.test.jsx.
 const SAFE_ADDR = "0xaaaa000000000000000000000000000000000aaa";
 const TIMELOCK_ADDR = "0xbbbb000000000000000000000000000000000bbb";

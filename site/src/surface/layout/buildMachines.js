@@ -10,13 +10,19 @@ import {
   lanePriority,
   toneForFunction,
 } from "../lane.js";
-import { buildControlGraphIndex, collectPrincipals } from "./controlGraph.js";
+import {
+  buildControlNodeIndex,
+  buildIndirectCallerContext,
+  collectDirectCallers,
+  collectIndirectCallers,
+} from "./controlGraph.js";
 import { guardSummary } from "./guardSummary.js";
 
-export function buildMachines(companyData, functionData, { functionsLoading = false } = {}) {
+export function buildMachines(companyData, functionData, { functionsLoading = false, activeChain = null } = {}) {
   // Node-type index over every contract's control_graph; used to flag
   // passthrough timelock contracts (their own node is typed "timelock").
-  const { nodeInfo } = buildControlGraphIndex(companyData);
+  const nodeInfo = buildControlNodeIndex(companyData);
+  const indirectCtx = buildIndirectCallerContext(companyData, activeChain);
   return companyData.contracts
     .map((contract) => {
       const rawFunctions = (functionData[entityKey(contract.chain, contract.address)] || [])
@@ -25,7 +31,8 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
 
       for (const fn of rawFunctions) {
         const lane = laneForFunction(fn);
-        const { direct, indirect } = collectPrincipals(fn, companyData);
+        const direct = collectDirectCallers(fn);
+        const indirect = collectIndirectCallers(direct, indirectCtx);
         lanes[lane].push({
           key: `${contract.address}:${fn.selector || fn.function}`,
           contractName: contract.name,
@@ -39,9 +46,10 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
           claims: fn.claims || [],
           guard: guardSummary(fn, companyData),
           // `principals` is the direct-callers list — exactly who can fire
-          // msg.sender on this function right now. `indirectPrincipals` is the
-          // governance path above any contract principals, shown as secondary
-          // context in the inspector (never used to claim call rights).
+          // msg.sender on this function right now. `indirectPrincipals` are
+          // the principals whose witnessed-agency reach can stand on a
+          // contract-typed direct caller — secondary context in the inspector
+          // (never used to claim call rights).
           principals: direct,
           indirectPrincipals: indirect,
           authorityPublic: Boolean(fn.authority_public),

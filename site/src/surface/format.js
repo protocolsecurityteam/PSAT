@@ -75,6 +75,36 @@ export function isRoleIdAddress(address) {
   return leadingZeros >= 24;
 }
 
+// Reader-facing words for the payload's edge vocabulary. The DATA keeps its
+// witness-plane names — flow type `principal` means a FunctionPrincipal row
+// proved the from-address can call the target's gated functions; `controller`
+// means a control-plane edge (slot value, role grant) the scorer's reach
+// closure walks — and those names are shared with the backend and scorer, so
+// only the display layer translates. A token outside the map renders
+// verbatim: showing the raw witness name beats inventing a friendlier one for
+// vocabulary this map has never seen.
+const FLOW_TYPE_WORDS = {
+  principal: "can call",
+  controller: "controls",
+  controls: "controls",
+  controls_value: "controls value of",
+};
+
+const RELATION_WORDS = {
+  controller_value: "control slot",
+  role_principal: "role holder",
+  mapping_member: "mapping member",
+  safe_owner: "safe owner",
+};
+
+export function flowTypeWord(type) {
+  return FLOW_TYPE_WORDS[type] || type || "";
+}
+
+export function relationWord(relation) {
+  return RELATION_WORDS[relation] || relation || "";
+}
+
 export function isHexAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
 }
