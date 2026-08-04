@@ -1084,6 +1084,10 @@ class StaticWorker(BaseWorker):
             if secondary_analysis is not None:
                 self._resolve_secondary_impls(session, job, address, secondary_analysis)
 
+            # Both paths above leave the same three artifacts behind (the cache
+            # path copies them), so supply is published from one call site.
+            self._publish_materialization(session, job, address, contract_name)
+
             self.update_detail(session, job, "Static analysis complete")
             logger.info("Static analysis complete for job %s (%s)", job_id_str, contract_name)
 
@@ -2054,6 +2058,153 @@ class StaticWorker(BaseWorker):
             )
 
         session.commit()
+
+    def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
+        """Record this job's analysis bundle in ``contract_materializations`` (F4a).
+
+        Until now the versioned store had exactly one writer: the authority
+        recursion, which materializes whichever dependencies it happens to
+        visit. Monitoring enrolls from that store, so whether a contract was
+        watched on its real tracking plan or on the baseline registry alone was
+        decided by an accident of graph traversal (136 of 183 monitored
+        contracts read ``no_current_materialization`` while their own jobs held
+        a substantive plan). Publishing here makes coverage follow from analysis
+        having run — invariant 8.
+
+        Reads back the three artifacts this stage just stored rather than taking
+        them as arguments: the artifacts are what the job actually left behind,
+        they are identical on the fresh and the static-cache paths, and a bundle
+        that failed to store is one this row must not claim to hold.
+
+        A row is stamped ``ANALYSIS_SCHEMA_VERSION``, so it may only be written
+        for a bundle PROVEN to be of that era. The stamp lives on the job, but
+        only the fetch path writes it — a same-address cache hit copies the
+        donor's artifacts and returns before it, leaving NULL. NULL is not
+        "current", so ``proven_analysis_schema_version`` follows the cache chain
+        to the era that was actually witnessed, and a job whose era stays
+        undetermined publishes nothing. Same rule the promotion sweep applies to
+        the same fact.
+
+        Best-effort in every arm. Supply is not the analysis: a bucket outage, a
+        keccak we cannot read, or a row another writer holds must never fail a
+        job whose analysis succeeded. Each refusal is logged with its reason.
+        """
+        from db.contract_materializations import (
+            ANALYSIS_SCHEMA_VERSION,
+            PRODUCED_BY_PIPELINE,
+            PUBLISH_ALREADY_CURRENT,
+            PUBLISH_REFRESHED,
+            PUBLISH_WRITTEN,
+            build_provenance,
+            is_enabled,
+            publish_materialization,
+        )
+        from db.queue import proven_analysis_schema_version
+
+        if not is_enabled():
+            return
+
+        era = proven_analysis_schema_version(session, job)
+        if era != ANALYSIS_SCHEMA_VERSION:
+            record_degraded(
+                phase="materialization_publish",
+                exc=RuntimeError(f"analyzer era not proven current (job era={era})"),
+                context={"address": address, "job_era": era},
+            )
+            logger.warning(
+                "Static stage: no materialization published for %s — analyzer era not proven current (job era=%s)",
+                address,
+                era,
+                extra={"address": address, "job_era": era, "outcome": "schema_version_not_proven"},
+            )
+            return
+
+        try:
+            analysis = get_artifact(session, job.id, "contract_analysis")
+            tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
+            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+        except Exception as exc:
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish skipped for %s — artifacts unreadable: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+        if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+            # The plan phase records its own failure; a row without both halves
+            # would read downstream as a contract with no analysis and no plan.
+            logger.info(
+                "Static stage: no materialization published for %s — analysis or tracking plan absent",
+                address,
+            )
+            return
+
+        chain = _parent_chain_name(job)
+        request = job.request if isinstance(job.request, dict) else {}
+        # Did THIS job's analysis produce these artifacts, or did it copy an
+        # ancestor's? The era gate above proves they are of the current era; it
+        # says nothing about which of two same-era bundles is the later record.
+        produced_here = not request.get("static_cached")
+        try:
+            from utils.rpc import get_code_with_keccak
+
+            _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
+        except Exception as exc:
+            # The row is keyed on bytecode. Without the keccak there is no key,
+            # and inventing one would key the bundle to code nobody read.
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish skipped for %s — bytecode keccak not determined: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+
+        try:
+            outcome = publish_materialization(
+                chain=chain,
+                address=address,
+                bytecode_keccak=keccak,
+                contract_name=contract_name,
+                analysis=analysis,
+                tracking_plan=tracking_plan,
+                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                source_content_hash=job.source_content_hash,
+                provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
+                # Only a bundle THIS job produced may overwrite a current row.
+                # On the static-cache path these artifacts are an ancestor's,
+                # copied — same era (the gate above proves that), but not the
+                # newer record: a fresh analysis and a later cache hit reproducing
+                # its ancestor would then take turns overwriting each other, and
+                # each flip moves where monitoring watches.
+                refresh_on_differ=produced_here,
+            )
+        except Exception as exc:
+            record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
+            logger.warning(
+                "Static stage: materialization publish failed for %s: %s",
+                address,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            return
+        if outcome in (PUBLISH_WRITTEN, PUBLISH_REFRESHED):
+            log = logger.info
+        elif outcome == PUBLISH_ALREADY_CURRENT:
+            # The steady state on every re-run of an unchanged contract.
+            log = logger.debug
+        else:
+            log = logger.warning
+        log(
+            "Static stage: materialization %s for %s (%s)",
+            outcome,
+            address,
+            chain,
+            extra={"address": address, "chain": chain, "outcome": outcome},
+        )
 
     def _run_tracking_plan_phase(
         self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str

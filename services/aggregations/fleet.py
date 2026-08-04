@@ -44,6 +44,7 @@ from db.queue import (
     HEARTBEAT_EVENT_INDEXER,
     HEARTBEAT_PROTOCOL_SCANNER,
 )
+from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
 from services.monitoring.tracking_plan_state import plan_coverage_counts
 from services.monitoring.verify_status import count_verification_read_gaps
@@ -419,6 +420,12 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         # marker surviving ride the scanner's own heartbeat, published above as
         # ``daemons[protocol_scanner].detail.verification_reads_*``.
         "verification_gaps": count_verification_read_gaps(session),
+        # And the supply side of the same question: ``plan_coverage`` counts
+        # contracts watching without a current plan, this counts the rebuild
+        # work that would fix them and how much of it the budget allows today.
+        # A schema bump moves the whole fleet into here at once, which is the
+        # moment this needs to be visible rather than inferred.
+        "materialization_backlog": materialization_backlog(session, now=now),
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}

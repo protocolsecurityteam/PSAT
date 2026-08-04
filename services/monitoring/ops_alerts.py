@@ -40,6 +40,7 @@ from db.queue import (
     HEARTBEAT_OPS_ALERTER,
     HEARTBEAT_PROTOCOL_SCANNER,
 )
+from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.notifier import _send_discord
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
 from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
@@ -63,6 +64,9 @@ _COVERAGE_KEY = "tracking_plan_coverage"
 
 # Log-only, never an alert dedupe key — see :func:`collect_verification_gaps`.
 _VERIFICATION_GAP_KEY = "verification_read_gaps"
+
+# Log-only for the same reason — see :func:`collect_materialization_backlog`.
+_MATERIALIZATION_BACKLOG_KEY = "materialization_backlog"
 
 
 def _interval_s() -> int:
@@ -246,6 +250,32 @@ def collect_verification_gaps(session: Session) -> dict[str, Any]:
     the condition has a timestamped record even after the markers are erased.
     """
     return count_verification_read_gaps(session)
+
+
+def collect_materialization_backlog(session: Session) -> dict[str, Any]:
+    """Materialization-supply backlog for the monitored fleet (F9c).
+
+    The same pass-through role :func:`collect_plan_coverage` plays, and the same
+    deliberate non-alarm: the existing coverage alarm already fires on contracts
+    watching without a current plan, and this counts the rebuild work behind
+    that number. A second threshold over the same condition would double-alert
+    on one fact, so the counts are published unconditionally instead — here, on
+    ``/api/fleet``, and in the tick log while the backlog is non-empty.
+    """
+    return materialization_backlog(session)
+
+
+def _log_materialization_backlog(backlog: dict[str, Any]) -> None:
+    """One INFO per tick while any monitored contract lacks a current row."""
+    contracts = backlog.get("contracts")
+    if not isinstance(contracts, int) or contracts <= 0:
+        return
+    logger.info(
+        "ops: %d monitored contract(s) without a current materialization (%d queueable today)",
+        contracts,
+        backlog.get("queueable_now", 0),
+        extra={"daemon": _MATERIALIZATION_BACKLOG_KEY, **backlog},
+    )
 
 
 def _log_verification_gaps(gaps: dict[str, Any]) -> None:
@@ -464,6 +494,7 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
 
     coverage = collect_plan_coverage(session) if _coverage_alert_threshold() else None
     _log_verification_gaps(collect_verification_gaps(session))
+    _log_materialization_backlog(collect_materialization_backlog(session))
     problems = _current_problems(beats, now, coverage)
     cooldown = _cooldown_s()
 
