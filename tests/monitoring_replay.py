@@ -1,6 +1,6 @@
 """Replay harness for the recorded 2026-08-01 monitoring scan window.
 
-The fixture (``tests/fixtures/monitoring/replay_scan_window.json``) is a
+The fixture (``tests/fixtures/monitoring/replay_scan_window.json.gz``) is a
 read-only snapshot of the audited dev-DB state: the enrolled configs of the
 three contracts that emitted, every log the scanner's ``topics_union`` +
 address filter would have fetched in the window, and the identity of all 446
@@ -13,6 +13,7 @@ against a hand-written expectation.
 
 from __future__ import annotations
 
+import gzip
 import json
 import uuid
 from pathlib import Path
@@ -25,11 +26,14 @@ from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from services.monitoring.unified_watcher import _Cohort, _process_window
 from services.resolution.repos.event_logs_rpc import _decode_log
 
-FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "monitoring" / "replay_scan_window.json"
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "monitoring" / "replay_scan_window.json.gz"
 
 
 def load_replay_fixture() -> dict[str, Any]:
-    with FIXTURE_PATH.open() as fh:
+    # Gzipped: the recording is a complete audited window (446 raw logs) that
+    # only ever changes by wholesale regeneration, so line-diffability buys
+    # nothing and the hex-heavy JSON compresses ~6x.
+    with gzip.open(FIXTURE_PATH, "rt") as fh:
         return json.load(fh)
 
 
