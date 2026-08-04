@@ -158,6 +158,7 @@ PRODUCED_BY_PROMOTION_SWEEP = "promotion_sweep"
 
 # What :func:`publish_materialization` did, as a token the caller reports.
 PUBLISH_WRITTEN = "written"
+PUBLISH_REFRESHED = "refreshed"
 PUBLISH_ALREADY_CURRENT = "already_current"
 PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS = "keccak_bound_to_other_address"
 PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK = "address_bound_to_other_keccak"
@@ -900,6 +901,7 @@ def publish_materialization(
     predicate_trees: dict | None = None,
     source_content_hash: str | None = None,
     provenance: dict[str, Any],
+    refresh_on_differ: bool = False,
 ) -> str:
     """Write a ready row for an ALREADY-BUILT bundle. Returns an outcome token.
 
@@ -910,13 +912,29 @@ def publish_materialization(
     store (F4b). Coverage then follows from analysis having run, instead of from
     which dependencies the authority recursion happened to visit.
 
-    **Fill-or-refresh, never a downgrade.** A ready row at the current schema
-    version is left exactly as it is (``already_current``): same ``(chain,
-    bytecode_keccak)`` means byte-identical code, so its bundle is equivalent to
-    ours and rewriting multi-MB blobs buys nothing — while flipping its
-    ``address`` to ours would silently move the row out from under the address
-    that already resolves to it. Rows that are absent, ``failed``, ``pending``,
-    still ``building``, or stamped at a superseded version are written.
+    **Fill-or-refresh, never a downgrade.** Rows that are absent, ``failed``,
+    ``pending``, stamped at a superseded version, or claimed by a builder that
+    has gone stale are written outright.
+
+    A ready row at the current schema version is compared, not assumed:
+
+    * ``refresh_on_differ=True`` (the pipeline path) — the caller's bundle came
+      out of the current analyzer, run against this exact contract, so where it
+      DIFFERS from the stored bundle it is the better record and the row is
+      refreshed (``refreshed``). Identical bytecode does not imply an identical
+      bundle: the analyzer improves without every improvement earning an
+      ``ANALYSIS_SCHEMA_VERSION`` bump (a bump invalidates the whole fleet at
+      once and bills a re-analysis of it), so without this a ready row is frozen
+      forever and later analyzer work never reaches the store it was written to.
+    * ``refresh_on_differ=False`` (the promotion sweep) — the caller's bundle is
+      an OLDER job's artifact. Overwriting a current row with it would be a
+      downgrade, so the row stands.
+
+    Either way an identical bundle returns ``already_current`` and touches
+    nothing — including the blobs, which is why the comparison happens under the
+    lock, before any upload. And a ready row's ``address`` is never flipped to
+    ours: that would move the row out from under the address already resolving
+    to it.
 
     Refusals, each a fact the caller reports rather than a silent no-op:
 
@@ -939,8 +957,17 @@ def publish_materialization(
         return PUBLISH_INCOMPLETE_BUNDLE
 
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
+    written = PUBLISH_WRITTEN
 
+    # One lock spans decide → upload → write. Holding it across the upload is
+    # what makes ``already_current`` mean what it says: deciding first and
+    # uploading second is the only order in which a row we decline to touch also
+    # keeps the payload it had. Unlike ``materialize_or_wait``, no builder runs
+    # inside this lock — the payload is already in memory and the uploads are a
+    # few PUTs, not the multi-minute forge+Slither pass the lock-release dance in
+    # that function exists to keep a connection out of.
     with SessionLocal() as session:
+        _advisory_lock(session, chain_norm, keccak_norm)
         existing = session.execute(
             select(ContractMaterialization).where(
                 ContractMaterialization.chain == chain_norm,
@@ -948,8 +975,18 @@ def publish_materialization(
             )
         ).scalar_one_or_none()
         outcome = _publish_precheck(existing, addr_norm)
-        if outcome is not None:
+        if outcome == PUBLISH_ALREADY_CURRENT:
+            if not refresh_on_differ or not _bundle_differs(existing, analysis, tracking_plan, predicate_trees):
+                session.commit()
+                return PUBLISH_ALREADY_CURRENT
+            written = PUBLISH_REFRESHED
+        elif outcome is not None:
+            session.commit()
             return outcome
+
+        # Re-checked here rather than only before the lock: the row that owns
+        # ``(chain, address)`` can appear between the two, and the unique index
+        # would then fail the insert instead of reporting the collision.
         conflict = session.execute(
             select(ContractMaterialization.bytecode_keccak).where(
                 ContractMaterialization.chain == chain_norm,
@@ -965,33 +1002,17 @@ def publish_materialization(
                 conflict,
                 keccak_norm,
             )
+            session.commit()
             return PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK
 
-    # Uploads happen with no lock held and no connection idling behind them,
-    # exactly as in phase 2 of ``materialize_or_wait``.
-    (
-        analysis_inline,
-        plan_inline,
-        trees_inline,
-        analysis_key,
-        plan_key,
-        trees_key,
-    ) = _publish_blobs(chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees)
-
-    with SessionLocal() as session:
-        _advisory_lock(session, chain_norm, keccak_norm)
-        # Re-read under the lock: a builder may have finished between the
-        # pre-check and here, and its row wins.
-        existing = session.execute(
-            select(ContractMaterialization).where(
-                ContractMaterialization.chain == chain_norm,
-                ContractMaterialization.bytecode_keccak == keccak_norm,
-            )
-        ).scalar_one_or_none()
-        outcome = _publish_precheck(existing, addr_norm)
-        if outcome is not None:
-            session.commit()
-            return outcome
+        (
+            analysis_inline,
+            plan_inline,
+            trees_inline,
+            analysis_key,
+            plan_key,
+            trees_key,
+        ) = _publish_blobs(chain_norm, keccak_norm, analysis, tracking_plan, predicate_trees)
 
         stmt = pg_insert(ContractMaterialization).values(
             chain=chain_norm,
@@ -1034,14 +1055,69 @@ def publish_materialization(
         )
         session.execute(stmt)
         session.commit()
-    return PUBLISH_WRITTEN
+    return written
+
+
+def _bundle_differs(
+    existing: ContractMaterialization | None,
+    analysis: dict,
+    tracking_plan: dict,
+    predicate_trees: dict | None,
+) -> bool:
+    """Does the stored bundle say something other than the caller's?
+
+    Compared on the serialized payloads, which is what a consumer reads. An
+    unreadable stored payload counts as DIFFERING: "the same" is a positive
+    claim, and a bucket that cannot answer has not made it. Refreshing on that
+    answer is safe — the caller's bundle is complete by the time we are here.
+    """
+    if existing is None:
+        return True
+    try:
+        stored = (
+            hydrate_analysis(existing),
+            hydrate_tracking_plan(existing),
+            hydrate_predicate_trees(existing),
+        )
+    except Exception as exc:
+        logger.info(
+            "contract_materializations: %s/%s stored bundle unreadable (%s); treating as differing",
+            getattr(existing, "chain", "?"),
+            getattr(existing, "address", "?"),
+            exc,
+        )
+        return True
+    return [_canonical(p) for p in stored] != [_canonical(p) for p in (analysis, tracking_plan, predicate_trees)]
+
+
+def _canonical(payload: dict | None) -> str | None:
+    if payload is None:
+        return None
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def builder_claim_is_stale(status: str | None, builder_started_at: datetime | None) -> bool:
+    """Is a ``building`` claim old enough that no builder is presumed behind it?
+
+    Same rule ``materialize_or_wait`` phase 1 takes over on
+    (:func:`_builder_staleness_s`), exported so the reconciler's census counts a
+    crashed worker's leftover claim as a row to rebuild rather than reporting
+    "a builder is running" about a process that died.
+    """
+    if status != "building":
+        return False
+    if builder_started_at is None:
+        return True
+    started = builder_started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds() >= _builder_staleness_s()
 
 
 def _publish_precheck(existing: ContractMaterialization | None, addr_norm: str) -> str | None:
     """The outcome when *existing* forbids a write, else None.
 
-    One implementation for the unlocked pre-check and the locked re-read so the
-    two cannot drift on what "already current" means.
+    One implementation for every read of "already current" so they cannot drift.
     """
     if existing is None:
         return None
