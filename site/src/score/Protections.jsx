@@ -1,3 +1,4 @@
+import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton, { entityProps } from "./EntityButton.jsx";
 import { shortAddress, usdCompact } from "./format.js";
 
@@ -165,7 +166,10 @@ export default function Protections({ doc, view, note, onSelect }) {
           <div className="sc-prot-head">
             <ProtectionChip row={row} onSelect={onSelect} />
             {row.who && <span className="sc-prot-who">{row.who}</span>}
-            <span className="sc-prot-what">{row.what}</span>
+            <span className="sc-prot-what">
+              <CapabilityTag capability={row.capability} />
+              {row.valueText ? ` on ${row.valueText}` : ""}
+            </span>
             <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
           </div>
           <div className="sc-pbar" style={{ width: `${row.widthPct}%` }}>

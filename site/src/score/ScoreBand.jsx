@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import ConfidenceStrip from "./ConfidenceStrip.jsx";
 import Deductions from "./Deductions.jsx";
@@ -7,9 +7,9 @@ import Protections from "./Protections.jsx";
 import { projectScore } from "./derive.js";
 import { usdCompact } from "./format.js";
 
-function Shell({ children }) {
+function Shell({ children, bandRef = null }) {
   return (
-    <section className="score-band">
+    <section className="score-band" ref={bandRef}>
       <div className="sc-band-inner">{children}</div>
     </section>
   );
@@ -78,6 +78,7 @@ function WithheldBanner({ doc }) {
 
 export default function ScoreBand({ companyName, contracts, score, error, onSelectEntity }) {
   const [open, setOpen] = useState(false);
+  const bandRef = useRef(null);
   // Branch on grade_state before any grade field is read: in the withheld state
   // grade_lambda / grade_exposure / confidence_pct are null and the findings do
   // not carry net_points_lambda at all.
@@ -86,6 +87,38 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
     () => (score && score.findings ? projectScore(score, contracts) : null),
     [score, contracts],
   );
+
+  // A `#score` hash is a request to land ON the breakdown, open — the surface
+  // sidebar's "Full score breakdown →" sets it, whether that click navigated
+  // here or happened further down this very page. Consumed (and cleared) only
+  // once a breakdown can actually open, so a click that raced the score fetch
+  // still opens when the document arrives — and an error/absent band leaves
+  // the hash alone rather than eating the request while showing nothing. The
+  // pushState-based router never fires `hashchange` on its own, so the manual
+  // PopStateEvent the link dispatches is the signal; hashchange covers direct
+  // hash edits.
+  const ready = (state === "computed" || state === "not_determined") && Boolean(view);
+  useEffect(() => {
+    function maybeOpen() {
+      if (window.location.hash !== "#score" || !ready) return;
+      setOpen(true);
+      requestAnimationFrame(() => {
+        bandRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      });
+      window.history.replaceState(
+        window.history.state,
+        "",
+        window.location.pathname + window.location.search,
+      );
+    }
+    maybeOpen();
+    window.addEventListener("popstate", maybeOpen);
+    window.addEventListener("hashchange", maybeOpen);
+    return () => {
+      window.removeEventListener("popstate", maybeOpen);
+      window.removeEventListener("hashchange", maybeOpen);
+    };
+  }, [ready]);
 
   if (state === "loading") {
     return <Notice title="Loading the protocol score…" />;
@@ -105,7 +138,7 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
 
   return (
     <>
-      <Shell>
+      <Shell bandRef={bandRef}>
         {withheld ? (
           <>
             <WithheldBanner doc={score} />

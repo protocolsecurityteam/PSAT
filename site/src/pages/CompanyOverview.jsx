@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 
 import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
+import { chainLabel } from "../surface/chainMeta.js";
 import { entityKey } from "../surface/entityKey.js";
 import { bytecodeVerifiedAudits } from "../auditCoverage.js";
 import LoadingFallback from "../LoadingFallback.jsx";
@@ -14,18 +15,16 @@ const AuditsAdminModal = lazy(() => import("../AuditsAdminModal.jsx"));
 
 const SELECT_NOTICE_MS = 4000;
 
-// The surface's refusal, put into words. "Absent from this graph", "present but
-// on another chain" and "that name is on several contracts" are three separate
-// facts; collapsing them into one message would tell the user something the
-// surface never said.
+// The surface's refusal, put into words. "Absent from this graph" and "that
+// name is on several contracts" are separate facts; collapsing them into one
+// message would tell the user something the surface never said. (An entity on
+// another chain is no longer a refusal — the surface switches its scope.)
 function selectMissNotice(result, label) {
   switch (result?.kind) {
     case "ambiguous-function":
       return result.hosts > 1
         ? `${label} is on ${result.hosts} contracts here — select a contract first, then the function.`
         : `${label} has ${result.count} overloads on its contract — open the contract and pick one.`;
-    case "chain-mismatch":
-      return `${label} is on another chain; the control surface shows one chain at a time.`;
     default:
       return `${label} is not on the control surface.`;
   }
@@ -95,11 +94,13 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     // read as a broken highlight rather than a refused one.
     const hintedFn = target?.highlight?.functionSignature;
     showNotice(
-      result.kind === "contract" && result.functionMissing
-        ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
-        : result.highlight?.function === "unpaired" && hintedFn
-          ? `${hintedFn} on this contract is gated by a different controller than the deduction names — this contract is reached through the control graph; nothing on its card is the deduced action.`
-          : null,
+      result.kind === "chain-switch"
+        ? `Switched the control surface to ${chainLabel(result.chain)} — ${label} is on that chain.`
+        : result.kind === "contract" && result.functionMissing
+          ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
+          : result.highlight?.function === "unpaired" && hintedFn
+            ? `${hintedFn} on this contract is gated by a different controller than the deduction names — this contract is reached through the control graph; nothing on its card is the deduced action.`
+            : null,
     );
     surfaceBandRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [showNotice]);

@@ -14,7 +14,7 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App.jsx";
 import { setFetchHandler } from "./test/fetchMock.js";
@@ -134,7 +134,16 @@ describe("App router smoke tests", () => {
     setFetchHandler((url) => url.pathname === "/api/company/multichain/audit_coverage", () => ({ coverage: [] }));
     navigateTo("/company/multichain/surface?chain=base");
     render(<App />);
-    // The switcher renders (2 chains) and the deep-linked Base pill is active.
+    // The filter panel starts collapsed; the pill itself wears the deep-linked
+    // chain so the scope is visible without opening anything.
+    const chain = await waitFor(() => {
+      const el = document.querySelector(".ps-filter-chain");
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(chain.textContent).toMatch(/Base/);
+    // Expanding shows the switcher with the Base pill active.
+    fireEvent.click(document.querySelector('.ps-filter-pill[aria-expanded="false"]'));
     const active = await waitFor(() => {
       const el = document.querySelector(".ps-chain-bar .ps-chain-chip-on");
       expect(el).toBeTruthy();

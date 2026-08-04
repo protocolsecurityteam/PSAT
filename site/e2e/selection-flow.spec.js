@@ -127,8 +127,12 @@ async function goToSurface(page, { admin = false } = {}) {
   await page.waitForSelector(".react-flow__node", { timeout: 15000 });
 }
 
-/** Pick a search mode pill in the top-left modes bar. */
+/** Pick a search mode pill in the top-left modes bar. The filter panel starts
+    collapsed; the pill toggles it in both states, so expand only while it
+    reports collapsed. */
 async function pickMode(page, label) {
+  const collapsed = page.locator('.ps-filter-pill[aria-expanded="false"]');
+  if (await collapsed.count()) await collapsed.click();
   const bar = page.locator(".ps-search-modes");
   await bar.getByRole("button", { name: new RegExp(label, "i") }).click();
 }

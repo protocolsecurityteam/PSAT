@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 
+import CapabilityTag from "./CapabilityTag.jsx";
 import EntityButton from "./EntityButton.jsx";
 
 const VISIBLE_ROWS = 8;
@@ -169,7 +170,7 @@ function DeductionRow({ row, onSelect }) {
       <div>
         <div className="sc-who">
           <span className={`sc-kchip sc-kchip-${chip.kind}`}>{chip.label}</span>
-          <span className="sc-cap">{row.capability}</span>
+          <CapabilityTag capability={row.capability} />
           <span className="sc-addr">
             {detail.map((node, i) => (
               <Fragment key={i}>
@@ -218,7 +219,9 @@ function FixFirst({ fix, onSelect }) {
             {fix.subsumed.map((capability, i) => (
               <span key={capability}>
                 {i > 0 && (i === fix.subsumed.length - 1 ? " and " : ", ")}
-                <b>{capability}</b>
+                <b>
+                  <CapabilityTag capability={capability} />
+                </b>
               </span>
             ))}
             {fix.exampleFunction ? (

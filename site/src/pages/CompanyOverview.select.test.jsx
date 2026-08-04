@@ -227,8 +227,8 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     );
   });
 
-  it("tells another chain's entity apart from an absent one", async () => {
-    selectExample.mockReturnValue({ ok: false, kind: "chain-mismatch" });
+  it("announces a chain switch when the surface re-scoped to reach the entity", async () => {
+    selectExample.mockReturnValue({ ok: true, kind: "chain-switch", chain: "base" });
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
@@ -236,7 +236,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     await user.click(within(targets).getByRole("button", { name: /BoringVault/ }));
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent(
-      "BoringVault is on another chain; the control surface shows one chain at a time.",
+      "Switched the control surface to Base — BoringVault is on that chain.",
     );
     expect(status.textContent).not.toContain("not on the control surface");
   });

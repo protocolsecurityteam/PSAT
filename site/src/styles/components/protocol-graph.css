@@ -50,15 +50,6 @@
   padding: 18px 16px;
 }
 
-.ps-detail-empty-hdr {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--ink);
-  letter-spacing: 0.02em;
-  text-align: center;
-  margin-bottom: 4px;
-}
-
 .ps-detail-empty-hint {
   margin-top: 12px;
   font-size: 11px;
@@ -66,4 +57,136 @@
   text-align: center;
   font-style: italic;
 }
+
+/* Protocol-at-a-glance layout of the same empty state: stat cards stretch
+   full-width instead of centring like the bare prompt. */
+.ps-glance {
+  align-items: stretch;
+  gap: 12px;
+  padding: 14px 14px 18px;
+}
+
+.ps-glance-hdr { display: flex; align-items: baseline; gap: 8px; }
+.ps-glance-name { font-size: 15px; font-weight: 700; letter-spacing: 0.02em; }
+.ps-glance-meta { font-size: 10.5px; color: var(--muted); }
+
+.ps-glance-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 12px;
+  /* Opaque: the sidebar sits over the canvas and a translucent card lets
+     bright group fills bleed through, reading as a phantom hover state. */
+  background: var(--panel);
+}
+
+.ps-glance-title {
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 9px;
+}
+
+.ps-glance-dim { font-size: 11.5px; color: var(--muted); }
+
+.ps-glance-grade-row { display: flex; gap: 12px; align-items: center; }
+.ps-glance-letter {
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1;
+}
+.ps-glance-lambda { font-size: 13px; font-weight: 600; }
+.ps-glance-sub { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+
+.ps-glance-ledger {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 10px 0 6px;
+  gap: 2px;
+}
+.ps-glance-seg { height: 100%; }
+.ps-glance-seg-kept { background: var(--teal); opacity: 0.75; }
+.ps-glance-seg-ded { background: var(--status-warn); opacity: 0.55; }
+.ps-glance-ledger-key {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.ps-glance-fix {
+  font-size: 11.5px;
+  line-height: 1.45;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+.ps-glance-fix b { color: var(--ink); font-weight: 600; }
+.ps-glance-gain { color: var(--teal); font-weight: 600; }
+
+.ps-glance-link {
+  display: inline-block;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--teal);
+  text-decoration: none;
+}
+.ps-glance-link:hover { text-decoration: underline; }
+
+.ps-glance-tiles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.ps-glance-tile {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 6px;
+  text-align: center;
+}
+.ps-glance-tile-n { font-size: 17px; font-weight: 700; }
+.ps-glance-tile-k { font-size: 9.5px; color: var(--muted); letter-spacing: 0.06em; margin-top: 2px; }
+
+.ps-glance-rows { display: flex; flex-direction: column; }
+.ps-glance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+}
+.ps-glance-row:first-child { border-top: 0; padding-top: 0; }
+.ps-glance-row-l { color: var(--muted); }
+.ps-glance-row-r { text-align: right; }
+.ps-glance-row-dim { color: var(--muted); font-size: 10.5px; margin-left: 5px; }
+
+.ps-glance-vhead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.ps-glance-tvl { font-size: 16px; font-weight: 700; }
+.ps-glance-vsrc { font-size: 10px; color: var(--muted); }
+.ps-glance-vsub {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 8px 0 3px;
+}
+.ps-glance-vrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: calc(100% + 16px);
+  padding: 6px 8px;
+  margin: 0 -8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.ps-glance-vrow:hover { background: var(--teal-soft); }
+.ps-glance-vrow-name { font-weight: 600; }
+.ps-glance-vrow-usd { color: var(--muted); font-variant-numeric: tabular-nums; }
 

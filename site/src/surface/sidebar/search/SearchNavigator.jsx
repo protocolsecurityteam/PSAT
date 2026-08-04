@@ -41,7 +41,6 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
           `children` between here and the preview; both live in one panel now. */}
       <div className="ps-search-controls">
         <div className="ps-search-field">
-          <span className="ps-search-field-ic" aria-hidden="true">🔍</span>
           <input
             type="text"
             value={query}

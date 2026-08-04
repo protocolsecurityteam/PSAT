@@ -531,9 +531,10 @@ describe("ScoreBand — entities select on the surface", () => {
     await openBreakdown();
     const row = container.querySelector(".sc-frow");
     expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0x2322…2bd1");
-    // Only the target expander is a button; nothing that cannot act is one.
+    // Only controls that can act are buttons: the capability's glossary "?"
+    // and the target expander. Entity references degrade to plain spans.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
-    expect(buttons).toEqual(["+5 more"]);
+    expect(buttons).toEqual(["?", "+5 more"]);
   });
 
   it("keeps the wired row's text identical to the unwired one", async () => {
@@ -544,5 +545,73 @@ describe("ScoreBand — entities select on the surface", () => {
     const wired = renderBand({ score: ETHERFI, onSelectEntity: vi.fn() });
     await openBreakdown();
     expect(wired.container.querySelector(".sc-frow").textContent).toBe(before);
+  });
+});
+
+describe("ScoreBand — #score hash deep link", () => {
+  it("opens the breakdown, scrolls the band into view, and consumes the hash", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    renderBand({ score: ETHERFI });
+    // The breakdown is open without anyone clicking the toggle…
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    // …the band scrolled itself into view…
+    await vi.waitFor(() => expect(scrolled).toHaveBeenCalled());
+    // …and the hash is consumed so a later popstate cannot re-trigger it.
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("a click's popstate signal opens an already-mounted band (same-page case)", async () => {
+    window.history.replaceState({}, "", "/company/etherfi");
+    renderBand({ score: ETHERFI });
+    expect(screen.queryByText("Deductions")).not.toBeInTheDocument();
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("a hash arriving while the score is still loading opens once it lands", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const view = renderBand(); // loading — no score yet
+    expect(window.location.hash).toBe("#score"); // not consumed early
+    view.rerender(
+      <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={ETHERFI} error={null} />,
+    );
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
+  });
+});
+
+describe("ScoreBand — protections carry the capability glossary", () => {
+  it("wraps the protection row's capability in the ? tag, value suffix intact", async () => {
+    const { container } = renderBand({ score: ETHERFI });
+    await openBreakdown();
+    const what = container.querySelector(".sc-prot-what");
+    expect(what).toBeTruthy();
+    // Same reading as before, plus the glossary affordance.
+    expect(what.textContent).toMatch(/^\S+\.\S+\? on /);
+    const q = what.querySelector(".sc-cap-q");
+    await userEvent.setup().click(q);
+    expect(screen.getByRole("note")).toBeInTheDocument();
+  });
+});
+
+describe("ScoreBand — #score hash on an unopenable band", () => {
+  it("leaves the hash alone in the error state, then opens when the score lands", async () => {
+    window.history.replaceState({}, "", "/company/etherfi#score");
+    const view = renderBand({ error: { status: 503, message: "boom" } });
+    // Nothing to open — the request must not be eaten.
+    expect(window.location.hash).toBe("#score");
+    view.rerender(
+      <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={ETHERFI} error={null} />,
+    );
+    expect(await screen.findByText("Deductions")).toBeInTheDocument();
+    expect(window.location.hash).toBe("");
+    window.history.replaceState({}, "", "/");
   });
 });

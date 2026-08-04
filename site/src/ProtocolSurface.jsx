@@ -9,14 +9,14 @@ import { getCoverage } from "./api/audits.js";
 import { AgentPanel } from "./surface/inspector/AgentPanel.jsx";
 import { isRoleIdAddress, principalLabel, shortAddr } from "./surface/format.js";
 import { findCaller, findFunctionMatches, findFunctionView } from "./surface/lane.js";
-import { ROLE_META } from "./surface/meta.js";
 import { buildMachines } from "./surface/layout/buildMachines.js";
 import { buildGovernsIndex } from "./surface/layout/governsIndex.js";
 import {
+  buildAgencyIndex,
   buildControlAdjacency,
   buildControlEdgeIndex,
+  controlClosure,
   controlPathEdges,
-  controlReach,
   edgeClaims,
   flowOnChain,
   shortestControlPath,
@@ -24,6 +24,7 @@ import {
 import { buildEntityIndex } from "./surface/layout/entities.js";
 import { useSurfaceSelection } from "./surface/useSurfaceSelection.js";
 import { coalesceChain, entityKey } from "./surface/entityKey.js";
+import { chainColor, chainLabel } from "./surface/chainMeta.js";
 import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "./surface/chainScope.js";
 import { SurfaceCanvas } from "./surface/canvas/SurfaceCanvas.jsx";
 import { ChainSwitcher } from "./surface/sidebar/ChainSwitcher.jsx";
@@ -32,7 +33,6 @@ import { AuditsListPanel } from "./surface/sidebar/AuditsListPanel.jsx";
 import { DetailEmptyState } from "./surface/sidebar/DetailEmptyState.jsx";
 import { DraggableSidebar } from "./surface/sidebar/DraggableSidebar.jsx";
 import { InspectorCard } from "./surface/sidebar/InspectorCard.jsx";
-import { RoleFilterBar } from "./surface/sidebar/RoleFilterBar.jsx";
 import { SidebarTabs } from "./surface/sidebar/SidebarTabs.jsx";
 import { ActivityPanel } from "./surface/sidebar/activity/ActivityPanel.jsx";
 import { SearchModesBar } from "./surface/sidebar/search/SearchModesBar.jsx";
@@ -250,13 +250,11 @@ function ProtocolSurface({
   }, [activeAuditId, coverageData, sidebarMode, activeChain]);
 
   const setHighlightedAddresses = setAgentHighlights;
-  const [enabledRoles, setEnabledRoles] = useState(() => {
-    const initial = new Set();
-    for (const [role, meta] of Object.entries(ROLE_META)) {
-      if (meta.defaultOn) initial.add(role);
-    }
-    return initial;
-  });
+
+  // The filter panel starts collapsed — it is large, and at first glance the
+  // canvas matters more. Nothing in it hides nodes (the Type modes only scope
+  // the search), so collapsing it conceals no active state.
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   useEffect(() => {
     if (!companyName) return undefined;
@@ -349,10 +347,6 @@ function ProtocolSurface({
     [scopedCompanyData, functionData, functionsLoading]
   );
 
-  const machines = useMemo(
-    () => allMachines.filter((m) => enabledRoles.has(m.role || "utility")),
-    [allMachines, enabledRoles]
-  );
 
   // Authority-OUT index for the contract card's Governs tab: authority address
   // → the contracts + functions it can call. Built once over ALL machines /
@@ -368,6 +362,14 @@ function ProtocolSurface({
   // no principal.controls to read). Built once, never per-render inside the card.
   const controlAdjacency = useMemo(
     () => buildControlAdjacency(companyData?.fund_flows || [], activeChain),
+    [companyData, activeChain]
+  );
+
+  // Per-(controller, contract) agency witnesses — what licenses the reach walk
+  // to continue THROUGH a node rather than stop at it. Built once beside the
+  // adjacency it gates.
+  const agencyIndex = useMemo(
+    () => buildAgencyIndex(companyData?.principals || [], activeChain),
     [companyData, activeChain]
   );
 
@@ -427,7 +429,7 @@ function ProtocolSurface({
     guard,
     radar,
     focusPreview,
-  } = useSurfaceSelection({ entityIndex, machines, companyName, chain: activeChain });
+  } = useSurfaceSelection({ entityIndex, machines: allMachines, companyName, chain: activeChain });
 
   // Restore a persisted selection from the URL on initial data load. Reads
   // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
@@ -440,7 +442,7 @@ function ProtocolSurface({
   // first.
   const restoredSelection = useRef(false);
   useEffect(() => {
-    if (embedded || restoredSelection.current || !machines.length) return;
+    if (embedded || restoredSelection.current || !allMachines.length) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get("score")) return;
     const addr = params.get("sel") || params.get("focus");
@@ -454,7 +456,7 @@ function ProtocolSurface({
       // synthesized junk selection card.
       focusPreview(addr);
     }
-  }, [embedded, machines, entityIndex, activeChain, select, focusPreview, syncUrl]);
+  }, [embedded, allMachines, entityIndex, activeChain, select, focusPreview, syncUrl]);
 
   // Switching chains rescopes the entire page: clear the selection (the same
   // address can be a different contract — or absent — on the new chain), drop
@@ -475,15 +477,6 @@ function ProtocolSurface({
     url.searchParams.delete("fn");
     window.history.replaceState({}, "", url.toString());
   }, [embedded, defaultChain, select]);
-
-  const handleToggleRole = useCallback((role) => {
-    setEnabledRoles((prev) => {
-      const next = new Set(prev);
-      if (next.has(role)) next.delete(role);
-      else next.add(role);
-      return next;
-    });
-  }, []);
 
   const handleSelectMachine = useCallback((machine) => {
     // Any committed selection transition drops the overlay highlights — the
@@ -541,13 +534,6 @@ function ProtocolSurface({
 
   const selectMachineExample = useCallback((machine, fnView, callerAddress = null, reachedFrom = null) => {
     setSidebarMode("detail");
-    setEnabledRoles((prev) => {
-      const role = machine.role || "utility";
-      if (prev.has(role)) return prev;
-      const next = new Set(prev);
-      next.add(role);
-      return next;
-    });
     setAgentHighlights(null);
     setActiveAuditId(null);
     radar(machine.address, fnView?.key || null, callerAddress, reachedFrom);
@@ -565,6 +551,11 @@ function ProtocolSurface({
   // and a caller that collapses them tells the user something untrue. A request
   // that names a function but no contract is resolved against the whole graph,
   // and only a unique match selects — see findFunctionMatches.
+  // A cross-chain request parks here while handleSelectChain re-scopes the
+  // graph; the effect below selectExample re-runs it once the active chain
+  // matches, on the freshly scoped entity index.
+  const pendingCrossChain = useRef(null);
+
   const selectExample = useCallback((example) => {
     const address = String(example?.contractAddress || "").toLowerCase();
     const named = Boolean(example?.functionSignature || example?.selector);
@@ -592,9 +583,38 @@ function ProtocolSurface({
         : {};
     if (!address && !named) return { ok: false, kind: "empty" };
     // Identity is (chain, address) (inv. 13) and the surface renders one chain
-    // at a time: another chain's entity is off this graph, not a miss.
-    if (coalesceChain(example?.chain || activeChain) !== activeChain) {
-      return { ok: false, kind: "chain-mismatch" };
+    // at a time. Another chain's entity is not a miss when the payload
+    // witnesses it there: switch the page's scope to that chain and park the
+    // request — the effect below re-runs it once the graph has re-scoped, so
+    // there is never a second copy of the selection logic. A chain the payload
+    // does NOT witness the entity on refuses as not-found: "it is on that
+    // chain" is exactly the claim this graph cannot make.
+    const requestedChain = coalesceChain(example?.chain || activeChain);
+    if (requestedChain !== activeChain) {
+      // The page can only scope to a chain it has contracts on — outside that,
+      // handleSelectChain would silently degrade to the default and the
+      // "switched" outcome would be a lie.
+      const scopable = availableChains.some((c) => c.name === requestedChain);
+      // The witness must be explicit: a contract row on that chain, or a
+      // principal whose OWN chains list names it. principalOnChain's
+      // legacy-payload default (no list → every chain) is exactly the
+      // default-as-witness shape this check exists to refuse.
+      const witnessedThere =
+        scopable &&
+        Boolean(address) &&
+        ((companyData?.contracts || []).some(
+          (c) => coalesceChain(c.chain) === requestedChain && (c.address || "").toLowerCase() === address,
+        ) ||
+          (companyData?.principals || []).some(
+            (p) =>
+              (p.address || "").toLowerCase() === address &&
+              Array.isArray(p.chains) &&
+              p.chains.some((c) => coalesceChain(c) === requestedChain),
+          ));
+      if (!witnessedThere) return { ok: false, kind: "not-found" };
+      pendingCrossChain.current = example;
+      handleSelectChain(requestedChain);
+      return { ok: true, kind: "chain-switch", chain: requestedChain };
     }
     if (!address) {
       const matches = findFunctionMatches(allMachines, example);
@@ -653,7 +673,15 @@ function ProtocolSurface({
     // a row inside it.
     if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
     return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
-  }, [activeChain, allMachines, entityIndex, handleSelectPrincipal, selectMachineExample]);
+  }, [activeChain, allMachines, availableChains, companyData, entityIndex, handleSelectChain, handleSelectPrincipal, selectMachineExample]);
+
+  useEffect(() => {
+    const pending = pendingCrossChain.current;
+    if (!pending) return;
+    if (coalesceChain(pending.chain || activeChain) !== activeChain) return;
+    pendingCrossChain.current = null;
+    selectExample(pending);
+  }, [activeChain, selectExample]);
 
   useImperativeHandle(ref, () => ({ selectExample }), [selectExample]);
 
@@ -682,7 +710,7 @@ function ProtocolSurface({
   }, [allMachines, companyName, embedded, functionsLoading, selectExample]);
 
   const visiblePrincipals = useMemo(() => {
-    const visibleAddrs = new Set(machines.map((m) => m.address?.toLowerCase()));
+    const visibleAddrs = new Set(allMachines.map((m) => m.address?.toLowerCase()));
     // Chain-scope first: a principal observed only on another chain must not
     // ride in on a same-address twin among the (chain-scoped) visible machines
     // (inv. 13). Legacy principals without ``chains`` behave as before.
@@ -691,7 +719,7 @@ function ProtocolSurface({
       principalOnChain(p, activeChain) &&
       (p.controls || []).some((a) => visibleAddrs.has(a.toLowerCase()))
     );
-  }, [machines, companyData, activeChain]);
+  }, [allMachines, companyData, activeChain]);
 
   // Highlighted addresses on the canvas: union of agent highlights (Agent tab)
   // and the audit-coverage set (Audits tab). Either source drives the green
@@ -709,24 +737,28 @@ function ProtocolSurface({
     return merged.size ? merged : null;
   }, [auditHighlights, agentHighlights]);
 
-  // Reach overlay: every contract the SELECTED entity reaches transitively over
-  // the control graph, keyed to the hop distance on the shortest route. The
-  // canvas chips those nodes with the hop count. Memoized per selection: one BFS
-  // over a few hundred edges, never a walk per render.
-  const reachDistances = useMemo(() => {
+  // Reach overlay: every contract the SELECTED entity reaches over the control
+  // graph, keyed to the hop distance on the shortest route. Transitivity is
+  // licensed per hop by the agency index: where the payload witnesses what the
+  // standpoint can do to a target, only an agency-conferring capability lets
+  // the walk continue through it — a pause-only principal reaches what it
+  // pauses and nothing beyond. Memoized per selection: one BFS over a few
+  // hundred edges, never a walk per render.
+  const reachClosure = useMemo(() => {
     if (!selection?.address) return null;
-    const reach = controlReach(selection.address, controlAdjacency);
-    return reach.size ? reach : null;
-  }, [selection, controlAdjacency]);
+    const closure = controlClosure(selection.address, controlAdjacency, agencyIndex);
+    return closure.distances.size ? closure : null;
+  }, [selection, controlAdjacency, agencyIndex]);
+  const reachDistances = reachClosure ? reachClosure.distances : null;
 
-  // The routes behind those hop counts: the BFS-tree edges of the same closure.
+  // The routes behind those hop counts: the walk-tree edges of the same closure.
   // The canvas lights the drawn edges matching these pairs, so a "reach · 3 hops"
   // chip has a visible line back to the selection rather than asking the reader
   // to take the number on faith. Synthesizes nothing — a pair with no drawn edge
   // (an intra-group hop inside a collapsed box) simply lights nothing.
   const reachPathEdges = useMemo(
-    () => (reachDistances ? controlPathEdges(selection?.address, controlAdjacency, reachDistances) : null),
-    [selection, controlAdjacency, reachDistances],
+    () => (reachClosure ? controlPathEdges(selection?.address, controlAdjacency, reachClosure) : null),
+    [selection, controlAdjacency, reachClosure],
   );
 
   // Human name for an address on this graph: the contract's, else the
@@ -769,28 +801,6 @@ function ProtocolSurface({
     };
   }, [reachHosts, selection, controlEdgeIndex, nameForAddress]);
 
-  // Role-toggle reconciliation. Toggling a role off removes its contracts (and
-  // any principal whose whole touch set was those contracts) from the visible
-  // set — but the selection still points at the now-hidden address, stranding a
-  // sidebar card for a node that no longer exists. Reconcile ONLY on a roles
-  // change (not on any visibility change) so a deliberate navigate to a
-  // role-filtered-off contract still selects it. Keyed on enabledRoles; machines
-  // /visiblePrincipals are already the post-toggle sets when this runs.
-  const prevRolesRef = useRef(enabledRoles);
-  useEffect(() => {
-    if (prevRolesRef.current === enabledRoles) return;
-    prevRolesRef.current = enabledRoles;
-    const addr = selection?.address;
-    if (!addr) return;
-    const stillVisible =
-      machines.some((m) => m.address?.toLowerCase() === addr) ||
-      visiblePrincipals.some((p) => p.address?.toLowerCase() === addr);
-    if (!stillVisible) {
-      select(null);
-      syncUrl({});
-    }
-  }, [enabledRoles, machines, visiblePrincipals, selection, select, syncUrl]);
-
   // Search browse preview. Null (result set changed / emptied) clears the
   // focus address so a stale gold ring can't outlive the browsing session —
   // the committed selection is untouched either way. Stable identity:
@@ -832,11 +842,37 @@ function ProtocolSurface({
     <div className="ps-surface ps-surface-fullscreen">
       {/* Unified filter panel — top-left. Search + sort + browse nav, then the
           Type filter and Role visibility rows (injected as children), then the
-          browse preview. Replaces the old bottom-left role bar + top-left
-          search-modes + search overlays. */}
-      <div className="ps-filter-overlay">
+          browse preview. Collapsed to a pill by default — the full panel is
+          large and competes with the selection legend on narrow embeds. The
+          pill IS the toggle and sits in the same top-left spot in both states;
+          collapsed, it wears the active chain (multichain pages — chain scope
+          must not be silently hidden behind an unopened panel). */}
+      <div className={`ps-filter-overlay${filtersOpen ? "" : " ps-filter-overlay--collapsed"}`}>
+        <button
+          type="button"
+          className="ps-filter-pill"
+          onClick={() => {
+            if (filtersOpen) {
+              // Unmounting the navigator skips its preview cleanup — drop any
+              // lingering browse marker along with the panel.
+              handleSearchPreview(null);
+            }
+            setFiltersOpen((was) => !was);
+          }}
+          aria-expanded={filtersOpen}
+          aria-label={filtersOpen ? "Collapse filters" : "Open search and filters"}
+        >
+          Filters <span className="ps-filter-chev" aria-hidden="true">{filtersOpen ? "▴" : "▾"}</span>
+          {!filtersOpen && isMultichain && (
+            <span className="ps-filter-chain">
+              <span className="ps-chain-dot" style={{ "--chain-color": chainColor(activeChain) }} />
+              {chainLabel(activeChain)}
+            </span>
+          )}
+        </button>
+        {filtersOpen && (
         <SearchNavigator
-          machines={machines}
+          machines={allMachines}
           principals={visiblePrincipals}
           mode={searchMode}
           onPreview={handleSearchPreview}
@@ -855,17 +891,14 @@ function ProtocolSurface({
             <span className="ps-filter-gutter">Type</span>
             <SearchModesBar mode={searchMode} setMode={setSearchMode} />
           </div>
-          <div className="ps-filter-row">
-            <span className="ps-filter-gutter">Roles</span>
-            <RoleFilterBar machines={allMachines} enabledRoles={enabledRoles} onToggle={handleToggleRole} />
-          </div>
         </SearchNavigator>
+        )}
       </div>
 
       <div className="ps-layout">
         <ReactFlowProvider>
           <SurfaceCanvas
-            machines={machines}
+            machines={allMachines}
             fundFlows={scopedFundFlows}
             principals={visiblePrincipals}
             chain={activeChain}
@@ -904,7 +937,7 @@ function ProtocolSurface({
               onPickAudit={setActiveAuditId}
               loading={coverageLoading}
               error={coverageError}
-              machines={machines}
+              machines={allMachines}
               selectedMachine={selectedMachine}
               selectedPrincipal={selectedPrincipal}
               onClearSelection={() => handleSelectMachine(null)}
@@ -932,7 +965,13 @@ function ProtocolSurface({
               the empty state. A score-page arrival lands here too — same card,
               with the highlight props set. */}
           {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
-            <DetailEmptyState companyName={companyName} companyData={scopedCompanyData} />
+            <DetailEmptyState
+              companyName={companyName}
+              companyData={scopedCompanyData}
+              machines={allMachines}
+              principals={visiblePrincipals}
+              onSelectAddress={select}
+            />
           )}
           {sidebarMode === "detail" && (selectedMachine || selectedPrincipal) && (
             <EntityCard
@@ -950,8 +989,9 @@ function ProtocolSurface({
               highlightedCaller={radarCallerAddress}
               governsIndex={governsIndex}
               controlAdjacency={controlAdjacency}
+              agencyIndex={agencyIndex}
               reachPath={reachPath}
-              machines={machines}
+              machines={allMachines}
               chain={activeChain}
               showChain={isMultichain}
             />
@@ -970,7 +1010,7 @@ function ProtocolSurface({
                 // click uses so we get the connected-edges-stay-bright
                 // dim behavior for free.
                 const lc = addr.toLowerCase();
-                const machine = machines.find(
+                const machine = allMachines.find(
                   (m) => (m.address || "").toLowerCase() === lc,
                 );
                 if (machine) {

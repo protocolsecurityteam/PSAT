@@ -6,7 +6,7 @@
 
 import React from "react";
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import ProtocolSurface, { auditHighlightSet, principalOnChain } from "./ProtocolSurface.jsx";
@@ -67,13 +67,22 @@ const CONTROLLED_NAMES = SAFE_PRINCIPAL.controls
   )
   .filter(Boolean);
 
+// The filter panel starts collapsed; the pill is the toggle in BOTH states, so
+// expanding means clicking it only while it reports collapsed.
+function expandFiltersIfCollapsed() {
+  const pill = document.querySelector('.ps-filter-pill[aria-expanded="false"]');
+  if (pill) fireEvent.click(pill);
+}
+
 function searchInput() {
+  expandFiltersIfCollapsed();
   const el = document.querySelector(".ps-search-input");
   expect(el).toBeTruthy();
   return el;
 }
 
 async function selectSearchMode(user, label) {
+  expandFiltersIfCollapsed();
   // Scope to the top-left search-modes bar so a same-named button elsewhere
   // in the surface can never satisfy the query.
   const bar = await waitFor(() => {
@@ -259,12 +268,12 @@ function renderMultichain() {
 }
 
 function scopedMachineCount() {
-  // Sum of the RoleFilterBar per-role counts = number of machines on the active
-  // chain (each machine counts once). A non-canvas signal of chain scoping.
-  return [...document.querySelectorAll(".ps-role-count")].reduce(
-    (n, el) => n + (parseInt(el.textContent, 10) || 0),
-    0,
-  );
+  // The contracts-mode search counter reads "1 / N" — N machines on the active
+  // chain. A non-canvas signal of chain scoping (the panel must be expanded).
+  expandFiltersIfCollapsed();
+  const counter = document.querySelector(".ps-search-counter");
+  const m = /\/\s*(\d+)/.exec(counter?.textContent || "");
+  return m ? Number(m[1]) : 0;
 }
 
 describe("ProtocolSurface — multichain chain switcher", () => {
@@ -281,6 +290,13 @@ describe("ProtocolSurface — multichain chain switcher", () => {
 
   it("renders Ethereum + Base pills and scopes the page to the active chain", async () => {
     renderMultichain();
+    // Collapsed, the filter pill itself wears the active chain — the scope is
+    // never silently hidden behind an unopened panel.
+    await waitFor(() => expect(document.querySelector(".ps-filter-chain")).toBeTruthy());
+    expect(document.querySelector(".ps-filter-chain").textContent).toContain("Ethereum");
+
+    // The chain bar (and the search counter) live inside the expanded panel.
+    expandFiltersIfCollapsed();
     const bar = await waitFor(() => {
       const el = document.querySelector(".ps-chain-bar");
       expect(el).toBeTruthy();
@@ -295,6 +311,75 @@ describe("ProtocolSurface — multichain chain switcher", () => {
     const user = userEvent.setup();
     await user.click(within(bar).getByText("Base").closest("button"));
     await waitFor(() => expect(scopedMachineCount()).toBe(1));
+    expectNoCrash();
+  });
+
+  // The score page's deduction rows click through with a (chain, address)
+  // pair. A base entity clicked while the page shows ethereum must switch the
+  // page's chain scope and land the selection — and the collapsed filter pill
+  // must wear the new chain so the switch is visible without opening anything.
+  it("a cross-chain selectExample switches the chain scope and lands the selection", async () => {
+    const ref = React.createRef();
+    render(<ProtocolSurface ref={ref} companyName="multi" initialData={MULTICHAIN_COMPANY} embedded />);
+    await waitFor(() => expect(ref.current).toBeTruthy());
+
+    let result;
+    await act(async () => {
+      result = ref.current.selectExample({
+        contractAddress: "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+        chain: "base",
+      });
+    });
+    expect(result).toEqual({ ok: true, kind: "chain-switch", chain: "base" });
+
+    // The parked request re-ran after the re-scope: the base contract's card
+    // is up, and the pill wears Base.
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("BaseToken");
+      expect(document.querySelector(".ps-machine")).toBeTruthy();
+    });
+    expect(document.querySelector(".ps-filter-chain").textContent).toContain("Base");
+    expectNoCrash();
+  });
+
+  // The switch outcome is a claim ("it is on that chain") and must be earned:
+  // a chain the page cannot scope to, or a principal whose chains list does
+  // not name the chain, refuses rather than announcing a switch that the
+  // scoping would silently degrade.
+  it("refuses a cross-chain request the payload does not witness", async () => {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="multi"
+        initialData={{
+          ...MULTICHAIN_COMPANY,
+          // A legacy principal (no chains list) at a known address: its
+          // absent list must NOT witness it onto arbitrum.
+          principals: [{ address: "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4", type: "safe", controls: [] }],
+        }}
+        embedded
+      />,
+    );
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let offProtocolChain;
+    let legacyPrincipal;
+    await act(async () => {
+      // arbitrum: no contracts there at all — not scopable.
+      offProtocolChain = ref.current.selectExample({
+        contractAddress: "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+        chain: "arbitrum",
+      });
+      // base is scopable, but the principal's own chains list doesn't name it.
+      legacyPrincipal = ref.current.selectExample({
+        contractAddress: "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+        chain: "base",
+      });
+    });
+    expect(offProtocolChain).toEqual({ ok: false, kind: "not-found" });
+    expect(legacyPrincipal).toEqual({ ok: false, kind: "not-found" });
+    // Nothing switched: the pill still wears the default chain.
+    expect(document.querySelector(".ps-filter-chain").textContent).toContain("Ethereum");
     expectNoCrash();
   });
 });
@@ -350,6 +435,9 @@ describe("ProtocolSurface — per-chain function verdicts (functions chain axis)
       <ProtocolSurface companyName="twin" initialData={DATA} initialFunctions={FUNCTIONS} embedded />,
     );
     const user = userEvent.setup();
+    // The chain bar lives inside the (collapsed-by-default) filter panel.
+    await waitFor(() => expect(document.querySelector(".ps-filter-pill")).toBeTruthy());
+    expandFiltersIfCollapsed();
     const bar = await waitFor(() => {
       const el = document.querySelector(".ps-chain-bar");
       expect(el).toBeTruthy();
@@ -893,66 +981,13 @@ describe("ProtocolSurface — M2 per-tab awareness + URL", () => {
   });
 });
 
-// M3 (stage 4) polish: role-toggle reconciliation + label cosmetics. The
-// node-less touch-set highlight derivation is unit-tested at the helper level
+// M3 (stage 4) polish: label cosmetics. The node-less touch-set highlight
+// derivation is unit-tested at the helper level
 // (surface/layout/entities.test.js) since its only observable effect is the
 // canvas dim overlay, which ELK doesn't lay out in jsdom.
 describe("ProtocolSurface — M3 polish", () => {
   beforeEach(() => {
     installApiMocks();
-  });
-
-  // Role-toggle reconciliation: hiding the selected contract's role must clear
-  // the selection so no sidebar card is stranded for a node that's gone. The
-  // fixture's contracts fall in the "utility" role bucket, toggled via the
-  // Utilities chip.
-  it("clears the selection when a role toggle hides the selected contract", async () => {
-    renderSurface(); // non-admin → Detail
-    const user = userEvent.setup();
-
-    // Commit the Vault contract → its contract card mounts.
-    await user.type(searchInput(), "Vault");
-    await commitViaEnter(user);
-    await waitFor(() => {
-      expect(document.querySelector(".ps-machine")).toBeTruthy();
-    });
-
-    // Toggle the role that contains Vault off — it leaves the visible set.
-    const roleBar = document.querySelector(".ps-role-bar");
-    const utilities = await within(roleBar).findByRole("button", { name: /Utilities/i });
-    await user.click(utilities);
-
-    // The stranded card is reconciled away; Detail returns to its empty state.
-    await waitFor(() => {
-      expect(document.querySelector(".ps-machine")).toBeNull();
-    });
-    expectNoCrash();
-  });
-
-  // Reconciliation must fire ONLY when the SELECTED entity is hidden — toggling
-  // an unrelated role leaves the selection alone (it doesn't blindly clear on
-  // every roles change).
-  it("keeps the selection when an unrelated role is toggled", async () => {
-    renderSurface();
-    const user = userEvent.setup();
-
-    // Commit Vault (a "utility"-bucket contract).
-    await user.type(searchInput(), "Vault");
-    await commitViaEnter(user);
-    await waitFor(() => {
-      expect(document.querySelector(".ps-machine")).toBeTruthy();
-    });
-
-    // Toggle a role Vault is NOT in — its card must survive.
-    const roleBar = document.querySelector(".ps-role-bar");
-    const governance = await within(roleBar).findByRole("button", { name: /Governance/i });
-    await user.click(governance);
-
-    // Give the reconciliation effect a chance to (wrongly) fire, then assert
-    // the card is still there.
-    await new Promise((r) => setTimeout(r, 50));
-    expect(document.querySelector(".ps-machine")).toBeTruthy();
-    expectNoCrash();
   });
 
   // Label cosmetics: a principal whose label is the bare type token ("safe")
@@ -1197,7 +1232,7 @@ describe("ProtocolSurface — external selection handle", () => {
     expectNoCrash();
   });
 
-  it("refuses an address the graph does not carry, and another chain's twin — as two different facts", async () => {
+  it("refuses an address the graph does not carry, and a chain the payload never witnessed it on", async () => {
     const ref = renderWithHandle();
     await waitFor(() => expect(ref.current).toBeTruthy());
     let offGraph;
@@ -1206,13 +1241,15 @@ describe("ProtocolSurface — external selection handle", () => {
       offGraph = ref.current.selectExample({
         contractAddress: "0xdead00000000000000000000000000000000dead",
       });
+      // This protocol has no base deployment: "it is on base" is a claim the
+      // payload never witnessed, so the request refuses rather than switching.
       offChain = ref.current.selectExample({
         contractAddress: ETHERFI_COMPANY_RICH.contracts[0].address,
         chain: "base",
       });
     });
     expect(offGraph).toEqual({ ok: false, kind: "not-found" });
-    expect(offChain).toEqual({ ok: false, kind: "chain-mismatch" });
+    expect(offChain).toEqual({ ok: false, kind: "not-found" });
     expect(document.querySelector(".ps-machine-name")).toBeNull();
     expectNoCrash();
   });
@@ -1705,6 +1742,36 @@ describe("ProtocolSurface — reached-from route on the entity card", () => {
       expect(document.querySelector(".ps-machine-name")).toHaveTextContent("Vault");
     });
     expect(document.querySelector(".ps-reach")).toBeNull();
+    expectNoCrash();
+  });
+});
+
+describe("ProtocolSurface — collapsed filter panel", () => {
+  it("starts collapsed; the SAME pill toggles it open and closed", async () => {
+    renderSurface();
+    const user = userEvent.setup();
+    await waitFor(() => expect(document.querySelector(".ps-filter-pill")).toBeTruthy());
+    const pill = document.querySelector(".ps-filter-pill");
+    expect(pill.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector(".ps-search-input")).toBeNull();
+
+    await user.click(pill);
+    expect(document.querySelector(".ps-search-input")).toBeTruthy();
+    expect(document.querySelector(".ps-filter-pill").getAttribute("aria-expanded")).toBe("true");
+
+    await user.click(document.querySelector(".ps-filter-pill"));
+    expect(document.querySelector(".ps-search-input")).toBeNull();
+    expect(document.querySelector(".ps-filter-pill").getAttribute("aria-expanded")).toBe("false");
+    expectNoCrash();
+  });
+
+  it("carries no emoji anywhere in the panel", async () => {
+    renderSurface();
+    const user = userEvent.setup();
+    await waitFor(() => expect(document.querySelector(".ps-filter-pill")).toBeTruthy());
+    await user.click(document.querySelector(".ps-filter-pill"));
+    const text = document.querySelector(".ps-filter-overlay").textContent;
+    expect(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(text)).toBe(false);
     expectNoCrash();
   });
 });
