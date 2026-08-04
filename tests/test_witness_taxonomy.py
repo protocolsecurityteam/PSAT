@@ -231,16 +231,16 @@ def test_extract_stamps_the_tier_and_the_three_state_openness():
 
 
 def test_extract_reads_the_g3_qualification_fields():
-    spec = extract_governance_topics(
-        _plan_with(
-            None,
-            member_witness={"key_position": 0, "direction": "add"},
-            writer_openness="restricted",
-        )
-    )[0]
+    """The record has to be PUBLISHABLE to promote: it names the mapping whose
+    entry moved, and its key position is inside the event's own argument list.
+    A record missing either is covered in ``test_witness_qualification_units``,
+    where the tier stays ``activity``."""
+    witness = {"mapping_name": "rate", "key_position": 0, "direction": "add"}
+    spec = extract_governance_topics(_plan_with(None, member_witness=witness, writer_openness="restricted"))[0]
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
     assert spec["writer_openness"] == "restricted"
-    assert spec["member_witness"] == {"key_position": 0, "direction": "add"}
+    assert spec["member_witness"] == witness
+    assert spec["event_type"] == "member_changed:rate"
 
 
 def test_qualification_fields_round_trip_through_the_plan_assembler():
@@ -264,7 +264,11 @@ def test_qualification_fields_round_trip_through_the_plan_assembler():
                         "topic0": _topic0("DenyFrom(address)"),
                         "inputs": [{"name": "user", "type": "address", "indexed": True}],
                         "effect_tags": {"writes": ["fromDenyList"]},
-                        "member_witness": {"key_position": 0, "direction": "add"},
+                        "member_witness": {
+                            "mapping_name": "fromDenyList",
+                            "key_position": 0,
+                            "direction": "add",
+                        },
                         "writer_openness": "restricted",
                     }
                 ],
@@ -274,7 +278,11 @@ def test_qualification_fields_round_trip_through_the_plan_assembler():
     }
     plan = dict(build_control_tracking_plan(analysis))  # type: ignore[arg-type]
     event = dict(plan["tracked_controllers"][0]["event_watch"]["events"][0])  # type: ignore[index,typeddict-item]
-    assert event["member_witness"] == {"key_position": 0, "direction": "add"}
+    assert event["member_witness"] == {
+        "mapping_name": "fromDenyList",
+        "key_position": 0,
+        "direction": "add",
+    }
     assert event["writer_openness"] == "restricted"
     assert extract_governance_topics(plan)[0]["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
 
