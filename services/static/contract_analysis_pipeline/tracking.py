@@ -27,11 +27,19 @@ from schemas.contract_analysis import (
     SemanticControlAnalysis,
 )
 
+from .mapping_events import member_witness_records
 from .shared import (
     _contract_functions,
     _declaring_contract_name,
+    _entry_points,
     _source_evidence,
     external_bool_leaf_is_gate_shape,
+)
+from .writer_openness import (
+    WRITER_OPENNESS_NOT_DETERMINED,
+    WRITER_OPENNESS_RESTRICTED,
+    openness_of_emitters,
+    restricted_function_signatures,
 )
 
 
@@ -286,6 +294,111 @@ def _collect_events(
                 continue
             events.extend(_collect_events(callee, project_dir, event_index, seen))
     return events
+
+
+def _emitted_signatures(unit, event_index: dict[str, list], seen: set[str]) -> set[str]:
+    """Event signatures *unit* can emit, following internal calls.
+
+    The evidence-free twin of :func:`_collect_events`: it answers "which
+    externally-callable paths reach this emit" without reading source lines for
+    every function on the contract, which is the only reason it exists
+    separately.
+    """
+    key = _unit_key(unit)
+    if key in seen:
+        return set()
+    seen.add(key)
+    signatures: set[str] = set()
+    for node in getattr(unit, "nodes", []):
+        for ir in getattr(node, "irs", []) or []:
+            ir_kind = type(ir).__name__
+            if ir_kind == "EventCall":
+                # Slither types ``EventCall.name`` as ``str | Constant``; coerce
+                # for the same reason ``mapping_events`` does.
+                event_name = getattr(ir, "name", None)
+                event_name = event_name if isinstance(event_name, str) else (str(event_name) if event_name else "")
+                if event_name:
+                    signatures.update(
+                        ref["signature"]
+                        for ref in _resolve_event_refs(
+                            event_name, list(getattr(ir, "arguments", []) or []), event_index
+                        )
+                    )
+            elif ir_kind == "InternalCall":
+                callee = getattr(ir, "function", None)
+                if callee is not None:
+                    signatures |= _emitted_signatures(callee, event_index, seen)
+    return signatures
+
+
+def _entry_point_emitters(contract, event_index: dict[str, list]) -> dict[str, set[str]]:
+    """Event signature → the ``full_name`` of every entry point that can emit it.
+
+    Entry points, not all functions: an internal helper is only reachable
+    through one, so the caller restriction that governs an emit is the one on
+    the externally-callable path that leads there.
+    """
+    out: dict[str, set[str]] = {}
+    for function in _entry_points(contract):
+        if getattr(function, "is_constructor", False):
+            continue
+        name = getattr(function, "full_name", getattr(function, "name", ""))
+        if not name:
+            continue
+        for signature in _emitted_signatures(function, event_index, set()):
+            out.setdefault(signature, set()).add(name)
+    return out
+
+
+class _EventQualification:
+    """F3's two facts, precomputed once per contract.
+
+    An event qualifies to publish a mapping/struct member change directly when
+    BOTH hold: its args carry the written entry's key (emit-write
+    correspondence, from ``mapping_events``), and every externally-callable
+    path that can emit it both writes the tracked variable and is proven to
+    restrict its caller. Either fact missing leaves the event unqualified, and
+    the monitoring plane then treats an occurrence as a hint or as bare
+    activity — never as a change claim.
+    """
+
+    def __init__(
+        self,
+        contract,
+        event_index: dict[str, list],
+        predicate_trees: Mapping[str, Any] | None,
+    ) -> None:
+        self._witness_by_pair = member_witness_records(contract)
+        self._emitters = _entry_point_emitters(contract, event_index) if self._witness_by_pair else {}
+        self._restricted = restricted_function_signatures(predicate_trees) if self._witness_by_pair else frozenset()
+
+    def for_event(
+        self,
+        signature: str,
+        target_vars: set[str],
+        writers_by_signature: Mapping[str, set[str]],
+    ) -> tuple[dict[str, Any] | None, str]:
+        """``(member_witness, writer_openness)`` for one associated event.
+
+        *writers_by_signature* maps a function's ``full_name`` to the tracked
+        variables it writes; an emitter missing from it emits this event
+        WITHOUT writing the variable, so on that path the event is not evidence
+        of a write at all and the openness is demoted rather than proven.
+        """
+        witnesses = [
+            record
+            for var in sorted(target_vars)
+            if (record := self._witness_by_pair.get((var, signature))) is not None
+        ]
+        if len(witnesses) != 1:
+            # Zero: no correspondence was proven. More than one: the same event
+            # is the witness for two different mappings, so an occurrence does
+            # not say which entry moved.
+            return None, WRITER_OPENNESS_NOT_DETERMINED
+        emitters = self._emitters.get(signature) or set()
+        if not emitters or any(not (writers_by_signature.get(fn) or set()) & target_vars for fn in emitters):
+            return witnesses[0], WRITER_OPENNESS_NOT_DETERMINED
+        return witnesses[0], openness_of_emitters(emitters, self._restricted)
 
 
 def _dedupe_event_refs(events: list[tuple[AssociatedEvent, Evidence]]) -> list[AssociatedEvent]:
@@ -724,9 +837,14 @@ def _writer_records_from_effects(
     target_state_vars: Iterable[str],
     event_lookup: dict[str, list],
     effects: Mapping[str, Any] | None,
+    qualification: "_EventQualification | None" = None,
 ) -> tuple[list[ControllerWriterFunction], list[AssociatedEvent]]:
     """Build ``ControllerWriterFunction`` records for the given state-variable
-    targets, using ``effects`` as the writer-discovery source."""
+    targets, using ``effects`` as the writer-discovery source.
+
+    *qualification* stamps F3's member-witness / writer-openness facts onto the
+    aggregated events when it is supplied; without it the events carry neither,
+    which the monitoring plane reads as the not-determined third state."""
     target_set = {var for var in target_state_vars if var}
     if not target_set:
         return [], []
@@ -803,6 +921,18 @@ def _writer_records_from_effects(
             for ev in wf["associated_events"]:
                 if ev["signature"] == sig and "effect_tags" not in ev:
                     ev["effect_tags"] = tags
+
+    if qualification is not None:
+        for sig, event_ref in aggregated_events.items():
+            member_witness, openness = qualification.for_event(sig, target_set, writes_by_signature)
+            if member_witness is not None:
+                event_ref["member_witness"] = member_witness
+            # Only the proven value is written. Absent is the third state, the
+            # same convention ``authority_provenance`` follows one level up, and
+            # the monitoring plane normalizes it back to an explicit
+            # ``not_determined`` on the spec the watcher reads.
+            if openness == WRITER_OPENNESS_RESTRICTED:
+                event_ref["writer_openness"] = openness
 
     associated_events = sorted(aggregated_events.values(), key=lambda item: item["signature"])
     return writer_functions, associated_events
@@ -925,6 +1055,7 @@ def _emit_oz_v5_owner_target(
     project_dir: Path,
     event_lookup: dict[str, list],
     effects: Mapping[str, Any] | None,
+    qualification: "_EventQualification | None" = None,
 ) -> None:
     """Append a canonical OZ-v5 ownership controller (read through ``owner()``)
     once, deduplicated by ``controller_id``.
@@ -954,6 +1085,7 @@ def _emit_oz_v5_owner_target(
         [slot_constant],
         event_lookup,
         effects,
+        qualification,
     )
     writer_functions = [
         wf
@@ -1023,6 +1155,7 @@ def build_controller_tracking(
     the writer side.
     """
     event_lookup = _event_index(contract)
+    qualification = _EventQualification(contract, event_lookup, predicate_trees)
     state_vars_by_name = {sv.name: sv for sv in getattr(contract, "state_variables_ordered", [])}
     getter_by_var = _build_getter_index(contract)
 
@@ -1144,6 +1277,7 @@ def build_controller_tracking(
                     project_dir,
                     event_lookup,
                     effects,
+                    qualification,
                 )
             continue
         controller_id = f"role_identifier:{role_name}"
@@ -1254,6 +1388,7 @@ def build_controller_tracking(
             [name],
             event_lookup,
             effects,
+            qualification,
         )
         if associated_events:
             tracking_mode: str = "event_plus_state"
@@ -1314,6 +1449,7 @@ def build_controller_tracking(
             [name],
             event_lookup,
             effects,
+            qualification,
         )
         tracking_mode = "event_plus_state" if associated_events else "state_only"
         notes = [

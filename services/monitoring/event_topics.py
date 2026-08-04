@@ -808,6 +808,31 @@ def member_changed_event_type(mapping_var: str | None) -> str:
     return f"{_MEMBER_CHANGED_STEM}:{var}" if var else _MEMBER_CHANGED_STEM
 
 
+def is_member_changed_event_type(event_type: object) -> bool:
+    """True for the qualified-member-change vocabulary.
+
+    Such an event proves that ONE ENTRY of a mapping/struct moved. It carries
+    no statement about the variable's value as a whole — a mapping has no
+    single value — so the slot-shaped consumers (``last_known_state``
+    reflection, ``ControllerValue`` rows) must not read an entry's key or value
+    as the slot's.
+    """
+    return isinstance(event_type, str) and event_type.startswith(f"{_MEMBER_CHANGED_STEM}:")
+
+
+def member_witness_mapping_var(raw: object) -> str:
+    """The mapping/struct variable a correspondence record testifies about, or
+    ``""`` when the record names none.
+
+    A record without a variable cannot mint ``member_changed:<mapping_var>`` —
+    a bare ``member_changed`` would say an entry moved somewhere.
+    """
+    if not is_member_witness(raw):
+        return ""
+    name = raw.get("mapping_name") if isinstance(raw, dict) else None
+    return name.strip() if isinstance(name, str) else ""
+
+
 def normalized_writer_openness(raw: object) -> str:
     """Map a spec's ``writer_openness`` onto the three-state vocabulary.
 
@@ -997,6 +1022,22 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             )
             member_witness = ev.get("member_witness")
             writer_openness = normalized_writer_openness(ev.get("writer_openness"))
+            # A qualified member change publishes under the variable whose entry
+            # moved, not under the tracked-slot stem: the stem claims "this slot
+            # was written", while the correspondence proves the stronger and
+            # more specific fact that THIS entry of THIS mapping changed, and
+            # the key/value/direction ride in ``data`` (never in the type, which
+            # would give every entry its own event type and defeat the identity
+            # index). A canonical family already carries a semantic claim of its
+            # own and keeps it.
+            mapping_var = member_witness_mapping_var(member_witness)
+            if (
+                mapping_var
+                and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED
+                and not _is_canonical_family(event_type)
+                and len(member_changed_event_type(mapping_var)) <= MAX_EVENT_TYPE_LENGTH
+            ):
+                event_type = member_changed_event_type(mapping_var)
             spec: dict = {
                 "topic0": topic0,
                 "signature": ev.get("signature"),
@@ -1050,8 +1091,12 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     topics = log.get("topics") or []
     data = log.get("data") or "0x"
 
-    indexed_inputs = [i for i in inputs if i.get("indexed")]
-    non_indexed_inputs = [i for i in inputs if not i.get("indexed")]
+    # Declaration index kept alongside each input: the topic/data split
+    # reorders args, while a member witness's ``key_position`` /
+    # ``value_position`` are positions in the DECLARED arg list. Reading them
+    # off the reordered list would publish the wrong argument as the key.
+    indexed_inputs = [(idx, i) for idx, i in enumerate(inputs) if i.get("indexed")]
+    non_indexed_inputs = [(idx, i) for idx, i in enumerate(inputs) if not i.get("indexed")]
 
     # topics[0] is the event sig; indexed args live in topics[1:].
     if len(topics) < 1 + len(indexed_inputs):
@@ -1082,7 +1127,8 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
 
     # Decode indexed args from topics.
     args_in_order: list[object] = []
-    for i, spec_in in enumerate(indexed_inputs):
+    by_declaration: dict[int, object] = {}
+    for i, (decl_index, spec_in) in enumerate(indexed_inputs):
         topic = topics[1 + i]
         sol_type = (spec_in.get("type") or "").strip()
         decoded: object
@@ -1100,16 +1146,17 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
         name = spec_in.get("name") or f"arg{i}"
         event[name] = decoded
         args_in_order.append(decoded)
+        by_declaration[decl_index] = decoded
 
     # Decode non-indexed args from data.
     if non_indexed_inputs:
         try:
             raw = bytes.fromhex((data or "0x").removeprefix("0x"))
-            sol_types = [str(i.get("type") or "") for i in non_indexed_inputs]
+            sol_types = [str(i.get("type") or "") for _idx, i in non_indexed_inputs]
             decoded_tuple = eth_abi_decode(sol_types, raw)
         except Exception:
             return None
-        for i, spec_in in enumerate(non_indexed_inputs):
+        for i, (decl_index, spec_in) in enumerate(non_indexed_inputs):
             val = decoded_tuple[i]
             # Normalize bytes → 0x-hex so JSONB-serializability is preserved.
             if isinstance(val, (bytes, bytearray)):
@@ -1117,6 +1164,7 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
             name = spec_in.get("name") or f"arg{len(indexed_inputs) + i}"
             event[name] = val
             args_in_order.append(val)
+            by_declaration[decl_index] = val
 
     # Semantic-key aliases (``old_owner`` / ``new_owner``, etc.) keyed
     # off event_type. Name-aware fill so single-arg events
@@ -1125,5 +1173,36 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     # non-standard ABI names (Solmate's ``user`` / ``newOwner``) all
     # surface the canonical sync keys.
     _assign_semantic_keys(event, event["event_type"], inputs, args_in_order)
+    _assign_member_witness_keys(event, spec, by_declaration)
 
     return event
+
+
+def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[int, object]) -> None:
+    """Fill ``key`` / ``value`` / ``direction`` on a qualified member change.
+
+    Gated on the event_type stem, not on the presence of a witness record: only
+    a spec that mints ``member_changed:<mapping_var>`` has fixed the meaning of
+    these three keys, so a spec carrying a record under some other type keeps
+    its ABI names untouched. Written last for the same reason — on a
+    ``member_changed`` row ``data.key`` means the WITNESSED key, and an ABI
+    parameter that happens to share the name does not get to define it.
+
+    Each of the three is published only when the record proves it: an
+    ``add``/``remove`` event states no value, so none is invented for it.
+    """
+    event_type = event.get("event_type")
+    if not isinstance(event_type, str) or not event_type.startswith(f"{_MEMBER_CHANGED_STEM}:"):
+        return
+    witness = spec.get("member_witness")
+    if not is_member_witness(witness):
+        return
+    key_position = witness.get("key_position")
+    if isinstance(key_position, int) and key_position in by_declaration:
+        event["key"] = by_declaration[key_position]
+    value_position = witness.get("value_position")
+    if isinstance(value_position, int) and value_position in by_declaration:
+        event["value"] = by_declaration[value_position]
+    direction = witness.get("direction")
+    if isinstance(direction, str) and direction:
+        event["direction"] = direction

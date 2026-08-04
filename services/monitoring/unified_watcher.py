@@ -55,6 +55,7 @@ from services.monitoring.event_topics import (
     WITNESS_TIER_SELF_DESCRIBING,
     WITNESS_TIERS,
     classify_witness_tier,
+    is_member_changed_event_type,
     parse_any_log,
     parse_tracked_log,
     value_changed_event_type,
@@ -1607,9 +1608,15 @@ def _update_state_from_event(mc: MonitoredContract, parsed: dict) -> None:
     via ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — covers monitoring_config
     rows persisted before tag synthesis landed.
     """
-    state = dict(mc.last_known_state or {})
     event_type = parsed["event_type"]
+    # A qualified member change proves one ENTRY moved. The reflection below
+    # resolves a single "new value" per write target and would store this
+    # entry's key or value as the whole mapping's — a value the mapping does
+    # not have and nothing observed.
+    if is_member_changed_event_type(event_type):
+        return
 
+    state = dict(mc.last_known_state or {})
     tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
     writes = tags.get("writes") or []
 
@@ -1675,6 +1682,12 @@ def _sync_relational_tables(
         return
 
     event_type = parsed["event_type"]
+    # Same reason as in ``_update_state_from_event``: a ``ControllerValue`` row
+    # is the slot's current value, and one entry of a mapping is not that. The
+    # entry change is published as its own event and stops there.
+    if is_member_changed_event_type(event_type):
+        return
+
     tags = parsed.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type) or {}
     writes = tags.get("writes") or []
     delegates = bool(tags.get("delegates"))
