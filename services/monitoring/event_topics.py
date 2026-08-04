@@ -749,22 +749,207 @@ def _resolve_event_type(
     return f"{stem}:{cid}"
 
 
+# ---------------------------------------------------------------------------
+# Three-tier witness taxonomy
+# ---------------------------------------------------------------------------
+
+# What a runtime occurrence of an enrolled event is ALLOWED to claim.
+#
+#   self_describing — the event's own decoded args state the change, and that
+#                     statement is qualified (canonical family corroborated by
+#                     signature, an old/new pair attributable to the tracked
+#                     slot, or a proven emit-write correspondence from a
+#                     proven-restricted writer). Publishes directly.
+#   hint            — the spec exists only because the emitter's write set was
+#                     donated to it. An occurrence proves a writer ran, not
+#                     that the value moved, so it publishes nothing on its own;
+#                     it marks the controller for a verification read whose
+#                     diff is the witness.
+#   activity        — no read is possible and no qualification holds. Nothing
+#                     is published and nothing is notified: there is no fact
+#                     here beyond "some function of this contract ran".
+WITNESS_TIER_SELF_DESCRIBING = "self_describing"
+WITNESS_TIER_HINT = "hint"
+WITNESS_TIER_ACTIVITY = "activity"
+WITNESS_TIERS = frozenset({WITNESS_TIER_SELF_DESCRIBING, WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
+
+# Openness of the functions that emit the event, as the analyzer proved it.
+# Absent is NOT ``open`` and NOT ``restricted`` — it is the third state, and it
+# only ever demotes a tier (invariant 4).
+WRITER_OPENNESS_RESTRICTED = "restricted"
+WRITER_OPENNESS_OPEN = "open"
+WRITER_OPENNESS_NOT_DETERMINED = "not_determined"
+WRITER_OPENNESS_VALUES = frozenset({WRITER_OPENNESS_RESTRICTED, WRITER_OPENNESS_OPEN, WRITER_OPENNESS_NOT_DETERMINED})
+
+# ``monitored_events.event_type`` is varchar(100). A claim that cannot be
+# stored under its own identity is not a claim we can publish, so a spec whose
+# minted type would overflow is demoted rather than truncated — a truncated
+# controller id names a different slot.
+MAX_EVENT_TYPE_LENGTH = 100
+
+_VALUE_CHANGED_STEM = "value_changed"
+_MEMBER_CHANGED_STEM = "member_changed"
+
+
+def value_changed_event_type(controller_id: str | None) -> str:
+    """Event type for a read-verified old→new diff on *controller_id*."""
+    cid = (controller_id or "").strip()
+    return f"{_VALUE_CHANGED_STEM}:{cid}" if cid else _VALUE_CHANGED_STEM
+
+
+def member_changed_event_type(mapping_var: str | None) -> str:
+    """Event type for a qualified member change on *mapping_var*.
+
+    The key / value / direction ride in ``data`` — never in the type string,
+    which would make every entry its own event type and defeat the identity
+    index.
+    """
+    var = (mapping_var or "").strip()
+    return f"{_MEMBER_CHANGED_STEM}:{var}" if var else _MEMBER_CHANGED_STEM
+
+
+def normalized_writer_openness(raw: object) -> str:
+    """Map a spec's ``writer_openness`` onto the three-state vocabulary.
+
+    Anything absent, misspelled or non-string is ``not_determined``: the
+    absence of a proof is not the proof of an absence.
+    """
+    if isinstance(raw, str) and raw.strip().lower() in WRITER_OPENNESS_VALUES:
+        return raw.strip().lower()
+    return WRITER_OPENNESS_NOT_DETERMINED
+
+
+def _is_canonical_family(event_type: str | None) -> bool:
+    """True when *event_type* is a canonical family name rather than one of
+    the terminal ``<stem>:<controller_id>`` / bare-stem forms.
+
+    A canonical family was only minted when the event's own signature
+    corroborated it (:func:`_event_corroborates`), so the family name itself
+    is the qualification.
+    """
+    if not isinstance(event_type, str) or not event_type:
+        return False
+    if ":" in event_type:
+        return False
+    return event_type not in ("state_changed", "controller_changed")
+
+
+def _controller_state_var(controller_id: str | None) -> str:
+    cid = (controller_id or "").strip()
+    if not cid:
+        return ""
+    return cid.split(":", 1)[1] if ":" in cid else cid
+
+
+def _event_states_the_change(
+    inputs: list[dict] | None,
+    effect_tags: dict | None,
+    controller_id: str | None,
+) -> bool:
+    """True when the event's own ABI carries an old/new pair that is
+    ATTRIBUTABLE to the tracked controller.
+
+    Two facts, both required:
+
+      * the parameter list names both a ``new*`` and an ``old*``/``previous*``
+        argument — the event states a transition, not just a value; and
+      * the emitter writes exactly one slot and that slot is this controller —
+        so the pair can only be about this controller.
+
+    The second half is what keeps this from being the write-set donation
+    problem in a new costume: a multi-write emitter donates its whole slot set
+    to every event it emits, so an old/new pair on such an event says nothing
+    about which of those slots moved.
+    """
+    if not isinstance(inputs, list) or len(inputs) < 2:
+        return False
+    if not isinstance(effect_tags, dict):
+        return False
+    writes = effect_tags.get("writes")
+    if not isinstance(writes, list) or len(writes) != 1:
+        return False
+    state_var = _controller_state_var(controller_id)
+    if not state_var or writes[0] != state_var:
+        return False
+    has_new = False
+    has_old = False
+    for inp in inputs:
+        if not isinstance(inp, dict):
+            continue
+        name = (inp.get("name") or "").strip().lower()
+        if not name:
+            continue
+        if name.startswith("new"):
+            has_new = True
+        elif name.startswith(("old", "previous")):
+            has_old = True
+    return has_new and has_old
+
+
+def classify_witness_tier(
+    *,
+    event_type: str | None,
+    controller_id: str | None,
+    inputs: list[dict] | None = None,
+    effect_tags: dict | None = None,
+    member_witness: object = None,
+    writer_openness: object = None,
+    poll_decodable: bool = False,
+) -> str:
+    """Assign the witness tier for one enrolled event spec.
+
+    Every input is a proof or it is nothing: an absent member witness, an
+    unproven writer openness, an unreadable controller each demote. No input
+    can promote (invariant 4), so the worst-informed spec lands on
+    ``activity``, which publishes nothing at all.
+
+    *poll_decodable* is the caller's proof that the controller can be read
+    back — ``polling_plan._is_poll_decodable`` at enrollment, the presence of a
+    projected polling entry at runtime. When F8 teaches that predicate to
+    project struct members, member-path controllers become ``hint`` here with
+    no change to this function.
+    """
+    if member_witness and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED:
+        if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
+            return WITNESS_TIER_SELF_DESCRIBING
+
+    if _is_canonical_family(event_type):
+        return WITNESS_TIER_SELF_DESCRIBING
+
+    if _event_states_the_change(inputs, effect_tags, controller_id):
+        if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
+            return WITNESS_TIER_SELF_DESCRIBING
+
+    if poll_decodable and len(value_changed_event_type(controller_id)) <= MAX_EVENT_TYPE_LENGTH:
+        return WITNESS_TIER_HINT
+
+    return WITNESS_TIER_ACTIVITY
+
+
 def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
     """Walk a ``ControlTrackingPlan`` and return per-contract topic specs.
 
     Each entry has shape ``{topic0, signature, event_type, controller_id,
-    inputs, effect_tags}``. Topic0s already in ``ALL_EVENT_TOPICS`` are
-    skipped so the hand-rolled decoders keep ownership of OZ / Safe /
-    Timelock / proxy events. Returns ``[]`` when *tracking_plan* is None
-    or has no events.
+    inputs, effect_tags, witness_tier, writer_openness}`` (plus
+    ``member_witness`` when the plan carries one). Topic0s already in
+    ``ALL_EVENT_TOPICS`` are skipped so the hand-rolled decoders keep
+    ownership of OZ / Safe / Timelock / proxy events. Returns ``[]`` when
+    *tracking_plan* is None or has no events.
 
     ``effect_tags`` flows through from the static analysis pipeline
     (``services/static/contract_analysis_pipeline/tracking.py``). The
     watcher reads them to classify and route events without falling
     back on a hand-curated event-name list.
+
+    ``witness_tier`` is what decides at runtime whether an occurrence may
+    publish a change claim at all — see :func:`classify_witness_tier`.
     """
     if not tracking_plan:
         return []
+    # Local import: polling_plan defers its own event_topics import to call
+    # time to keep the two modules acyclic; keep the favour symmetrical.
+    from services.monitoring.polling_plan import _is_poll_decodable
+
     seen: set[str] = set()
     out: list[dict] = []
     for tc in tracking_plan.get("tracked_controllers") or []:
@@ -772,6 +957,8 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
         if not ew:
             continue
         controller_id = tc.get("controller_id")
+        read_spec = tc.get("read_spec")
+        poll_decodable = _is_poll_decodable(read_spec) if isinstance(read_spec, dict) else False
         for ev in ew.get("events") or []:
             topic0 = (ev.get("topic0") or "").lower()
             if not topic0 or not topic0.startswith("0x"):
@@ -785,23 +972,41 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
                 continue
             seen.add(topic0)
             effect_tags = ev.get("effect_tags") if isinstance(ev.get("effect_tags"), dict) else None
-            spec: dict = {
-                "topic0": topic0,
-                "signature": ev.get("signature"),
+            inputs = list(ev.get("inputs") or [])
+            event_type = _resolve_event_type(
+                controller_id,
+                effect_tags,
                 # ``authority_provenance`` is absent on a plan whose target
                 # never earned the gate proof — pass it through as-is so the
                 # resolver sees the same three states the plan carries.
-                "event_type": _resolve_event_type(
-                    controller_id,
-                    effect_tags,
-                    authority_provenance=tc.get("authority_provenance"),
-                    signature=ev.get("signature"),
-                ),
+                authority_provenance=tc.get("authority_provenance"),
+                signature=ev.get("signature"),
+            )
+            member_witness = ev.get("member_witness")
+            writer_openness = normalized_writer_openness(ev.get("writer_openness"))
+            spec: dict = {
+                "topic0": topic0,
+                "signature": ev.get("signature"),
+                "event_type": event_type,
                 "controller_id": controller_id,
-                "inputs": list(ev.get("inputs") or []),
+                "inputs": inputs,
+                "witness_tier": classify_witness_tier(
+                    event_type=event_type,
+                    controller_id=controller_id,
+                    inputs=inputs,
+                    effect_tags=effect_tags,
+                    member_witness=member_witness,
+                    writer_openness=writer_openness,
+                    poll_decodable=poll_decodable,
+                ),
+                # Published even when not determined: the third state has to
+                # be visible to a consumer, not inferred from a missing key.
+                "writer_openness": writer_openness,
             }
             if effect_tags:
                 spec["effect_tags"] = effect_tags
+            if member_witness:
+                spec["member_witness"] = member_witness
             out.append(spec)
     return out
 

@@ -434,6 +434,10 @@ def build_polling_plan(
     analyzer's ``implementation()`` getter discovery and the standard
     Safe/Timelock ABIs beat any local re-discovery.
     """
+    # Local import for the same acyclicity reason as
+    # ``_handrolled_events_for_write_target``.
+    from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
+
     by_field: dict[str, dict[str, Any]] = {}
 
     # Vendored proxy storage-slot or getter entry, keyed on proxy_type.
@@ -470,6 +474,13 @@ def build_polling_plan(
             type_kind = (read_spec.get("type_kind") or "").lower()
             type_str = read_spec.get("type") or ""
             suppress = _derive_suppress_event_types(field, tracked_topics)
+            # A hint occurrence on this controller resolves through a
+            # verification read against this very entry, so the witnessed
+            # ``value_changed`` it mints and this entry's own poll report the
+            # same mutation from the same read. Suppress the duplicate.
+            verified_type = value_changed_event_type(tc.get("controller_id"))
+            if len(verified_type) <= MAX_EVENT_TYPE_LENGTH and verified_type not in suppress:
+                suppress.append(verified_type)
             entry = {
                 "field": field,
                 "kind": "getter_call",

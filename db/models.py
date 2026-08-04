@@ -1474,7 +1474,12 @@ class MonitoredEvent(Base):
     monitored_contract_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("monitored_contracts.id", ondelete="CASCADE"), nullable=False
     )
-    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 100, not 50: the witness taxonomy mints ``value_changed:<controller_id>``
+    # / ``member_changed:<mapping_var>`` and a real controller id overflows 50.
+    # ``event_topics.MAX_EVENT_TYPE_LENGTH`` mirrors this width and demotes any
+    # spec whose type would not fit — a truncated controller id names a
+    # different slot, so overflow is a demotion, never a trim.
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     block_number: Mapped[int] = mapped_column(Integer, nullable=False)
     tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
     # On-chain log index — the scan path populates it so identity is

@@ -51,11 +51,23 @@ from services.monitoring.event_topics import (
     _HANDROLLED_EVENT_TYPE_TO_TAGS,
     ALL_EVENT_TOPICS,
     PROXY_EVENT_TOPICS,
+    WITNESS_TIER_HINT,
+    WITNESS_TIER_SELF_DESCRIBING,
+    WITNESS_TIERS,
+    classify_witness_tier,
     parse_any_log,
     parse_tracked_log,
+    value_changed_event_type,
 )
 from services.monitoring.polling_plan import decode_poll_outcome
 from services.monitoring.reanalysis import maybe_queue_reanalysis
+from services.monitoring.verify_status import (
+    VERIFY_ERROR,
+    VERIFY_NO_VALUE,
+    VERIFY_OVER_BUDGET,
+    VERIFY_UNANSWERED,
+    record_verify_status,
+)
 from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 from utils.chains import UnknownChainError, chain_by_name
 from utils.rpc import (
@@ -83,6 +95,11 @@ DEFAULT_CONFIRMATION_DEPTH = 12
 # before re-raising. It must sit well below MAX_BLOCK_RANGE so a provider
 # range/response-cap rejection actually bisects instead of failing the cohort.
 FETCHER_MIN_BISECT_SPAN = 125
+
+# One read per dirty controller per scan pass. Reads beyond this are RECORDED
+# as skipped (services/monitoring/verify_status.py), never silently dropped —
+# a skipped read is a not-determined interval, not an earned negative.
+DEFAULT_MAX_VERIFY_READS_PER_PASS = 25
 
 # Reason stamped on the enrollment-queue row when the watcher's relational sync
 # observes an on-chain controller rotation (owner/admin/authority/implementation).
@@ -335,12 +352,81 @@ def _notify_committed_events(session: Session, events: list[MonitoredEvent]) -> 
         session.rollback()
 
 
+def _poll_entry_for_controller(mc: MonitoredContract, controller_id: str | None) -> dict | None:
+    """The persisted polling-plan entry that reads *controller_id*, or None.
+
+    Matched on the entry's ``source`` first — ``build_polling_plan`` stamps
+    ``analyzer:<controller_id>`` there, so that is an exact identity — then on
+    the entry's ``field`` against the controller's state-variable name, which
+    covers vendored entries and plans persisted before the source stamp.
+    """
+    plan = (mc.monitoring_config or {}).get("polling_plan")
+    if not isinstance(plan, list) or not controller_id:
+        return None
+    wanted_source = f"analyzer:{controller_id}"
+    state_var = controller_id.split(":", 1)[1] if ":" in controller_id else controller_id
+    by_field: dict | None = None
+    for entry in plan:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("source") == wanted_source:
+            return entry
+        if by_field is None and state_var and entry.get("field") == state_var:
+            by_field = entry
+    return by_field
+
+
+@dataclass
+class _DirtyController:
+    """One controller a hint occurrence marked for verification this pass.
+
+    Repeat occurrences within the pass coalesce onto the same key, so the read
+    count is bounded by distinct controllers rather than by traffic. The
+    marking is in-memory only: a crash before the read loses the hint, the next
+    occurrence re-marks, and the regular poller remains the backstop.
+    """
+
+    monitored_contract_id: uuid.UUID
+    controller_id: str
+    chain: str
+    address: str
+    entry: dict
+    block_number: int
+
+
+def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
+    """The witness tier of one enrolled tracked-topic *spec*.
+
+    Enrollment stamps ``witness_tier``; that value wins. A spec persisted
+    before the taxonomy landed carries none, so it is re-classified here from
+    what the row does carry — with the controller's readability taken from the
+    persisted polling plan, which is the same projection
+    ``_is_poll_decodable`` produced at enrollment. Re-classifying rather than
+    grandfathering is the demotion-only rule applied to legacy rows: an
+    unclassified spec has no proof, and a bare occurrence must not publish a
+    change claim just because nobody has re-enrolled the contract yet.
+    """
+    tier = spec.get("witness_tier")
+    if tier in WITNESS_TIERS:
+        return tier
+    return classify_witness_tier(
+        event_type=spec.get("event_type"),
+        controller_id=spec.get("controller_id"),
+        inputs=spec.get("inputs"),
+        effect_tags=spec.get("effect_tags"),
+        member_witness=spec.get("member_witness"),
+        writer_openness=spec.get("writer_openness"),
+        poll_decodable=_poll_entry_for_controller(mc, spec.get("controller_id")) is not None,
+    )
+
+
 def _process_window(
     session: Session,
     cohort: _Cohort,
     fetched_logs: list,
     window_start: int,
     window_end: int,
+    dirty: dict[tuple[uuid.UUID, str], _DirtyController] | None = None,
 ) -> list[MonitoredEvent]:
     """Decode a window's logs and run the full side-effect pipeline.
 
@@ -348,6 +434,13 @@ def _process_window(
     the existing decode / watch-gate / state-update / relational-sync /
     reanalysis pipeline. Events are added to ``session`` but not committed —
     the caller advances the cursor and commits in one transaction.
+
+    Per-contract events are gated on their spec's witness tier: only
+    ``self_describing`` occurrences reach the insert. A ``hint`` occurrence
+    marks its controller in *dirty* for the pass's verification read and
+    publishes nothing here; an ``activity`` occurrence publishes nothing at
+    all. Hand-rolled OZ / Safe / Timelock / proxy events decode through
+    ``parse_any_log``, carry no spec, and are unchanged.
     """
     if not fetched_logs:
         return []
@@ -376,10 +469,10 @@ def _process_window(
     for addr, mc in mc_by_addr.items():
         topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
         spec_map: dict[str, dict] = {}
-        for spec in topics_list:
-            t0 = (spec.get("topic0") or "").lower()
+        for topic_spec in topics_list:
+            t0 = (topic_spec.get("topic0") or "").lower()
             if t0:
-                spec_map[t0] = spec
+                spec_map[t0] = topic_spec
         if spec_map:
             tracked_specs_by_emitter[addr] = spec_map
 
@@ -398,6 +491,7 @@ def _process_window(
         if raw is None:
             continue
         emitter = fl.address
+        spec: dict | None = None
         parsed = parse_any_log(raw)
         if not parsed:
             emitter_specs = tracked_specs_by_emitter.get(emitter)
@@ -421,11 +515,41 @@ def _process_window(
         if mc.monitoring_config and not _should_watch(mc, parsed):
             continue
 
+        witness_tier: str | None = None
+        if spec is not None:
+            witness_tier = _resolve_spec_tier(spec, mc)
+            if witness_tier != WITNESS_TIER_SELF_DESCRIBING:
+                # An occurrence is not a change. A hint controller earns one
+                # coalesced verification read this pass whose diff — or
+                # earned negative — is the witness; an activity occurrence has
+                # no readable witness at all. Neither publishes a row here.
+                if witness_tier == WITNESS_TIER_HINT and dirty is not None:
+                    controller_id = spec.get("controller_id")
+                    entry = _poll_entry_for_controller(mc, controller_id)
+                    if entry is not None and isinstance(controller_id, str):
+                        dirty.setdefault(
+                            (mc.id, controller_id),
+                            _DirtyController(
+                                monitored_contract_id=mc.id,
+                                controller_id=controller_id,
+                                chain=mc.chain,
+                                address=mc.address,
+                                entry=entry,
+                                block_number=parsed["block_number"],
+                            ),
+                        )
+                continue
+
         event_data = {
             k: v
             for k, v in parsed.items()
             if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
         }
+        if witness_tier is not None:
+            # Rides on the row so a consumer reads the claim's strength off
+            # the event rather than re-deriving it from a config that may
+            # since have been re-enrolled.
+            event_data["witness_tier"] = witness_tier
 
         # Pre-enrollment floor: an event below the contract's enrollment_block
         # predates monitoring (a cohort scans from its MIN member cursor, so a
@@ -522,6 +646,169 @@ def _process_window(
                 extra={"exc_type": type(exc).__name__},
             )
 
+    return new_events
+
+
+def _resolve_verification_reads(
+    session: Session,
+    dirty: dict[tuple[uuid.UUID, str], _DirtyController],
+    rpc_by_chain: dict[str, str],
+) -> list[MonitoredEvent]:
+    """Read back every controller a hint occurrence marked this pass and
+    publish only what the read proves.
+
+    One read per dirty controller — occurrences coalesced onto the same key
+    upstream, so traffic volume does not multiply reads. Outcomes:
+
+      * the value moved      → a witnessed ``value_changed:<controller_id>``
+        event carrying ``old``/``new``, plus the same relational sync and
+        reanalysis dispatch a poll-detected change drives;
+      * the value held       → an earned negative. Nothing is published: the
+        absence of a row IS the statement that nothing changed;
+      * first observation    → the baseline is seeded and nothing is
+        published. There is no old value to have moved from;
+      * no observation       → a not-determined marker on the contract's
+        poll-status map (verify_status.py). Never a change claim, never a
+        silent drop.
+
+    Events are committed here, then returned for the caller to notify.
+    """
+    if not dirty:
+        return []
+
+    budget = max(0, _scan_int_env("PSAT_SCAN_MAX_VERIFY_READS_PER_PASS", DEFAULT_MAX_VERIFY_READS_PER_PASS))
+    # Deterministic order so which controllers fall outside the budget is a
+    # property of the pass, not of dict insertion luck.
+    ordered = sorted(dirty.values(), key=lambda d: (d.address.lower(), d.controller_id))
+    within, over = ordered[:budget], ordered[budget:]
+
+    mcs = {
+        mc.id: mc
+        for mc in session.execute(
+            select(MonitoredContract).where(MonitoredContract.id.in_([d.monitored_contract_id for d in ordered]))
+        )
+        .scalars()
+        .all()
+    }
+
+    for skipped in over:
+        mc = mcs.get(skipped.monitored_contract_id)
+        if mc is not None and record_verify_status(mc, skipped.entry.get("field"), VERIFY_OVER_BUDGET):
+            flag_modified(mc, "last_poll_status")
+    if over:
+        logger.warning(
+            "Verification-read budget exhausted; %d controller(s) recorded as not determined",
+            len(over),
+            extra={"budget": budget, "dirty": len(ordered)},
+        )
+
+    by_chain: dict[str, list[_DirtyController]] = defaultdict(list)
+    for entry in within:
+        by_chain[entry.chain].append(entry)
+
+    new_events: list[MonitoredEvent] = []
+    for chain, members in by_chain.items():
+        calls: list[tuple[str, list]] = []
+        dispatch: list[_DirtyController] = []
+        for member in members:
+            call = _rpc_call_for_entry(member.address, member.entry)
+            if call is None:
+                continue
+            dispatch.append(member)
+            calls.append(call)
+        if not calls:
+            continue
+        chain_rpc_url = rpc_by_chain.get(chain) or rpc_for_chain(chain, "")
+        try:
+            results = rpc_batch_request_classified(chain_rpc_url, calls)
+        except Exception as exc:
+            logger.warning(
+                "Verification-read batch failed for %s: %s",
+                chain,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            results = [(None, "transport")] * len(calls)
+
+        for member, (raw, status) in zip(dispatch, results):
+            mc = mcs.get(member.monitored_contract_id)
+            if mc is None:
+                continue
+            field = member.entry.get("field")
+            if status != "ok":
+                marker = VERIFY_ERROR if status == "error" else VERIFY_UNANSWERED
+                if record_verify_status(mc, field, marker):
+                    flag_modified(mc, "last_poll_status")
+                continue
+            new_value, parsed_ok = decode_poll_outcome(raw, member.entry.get("type_kind"), member.entry.get("type"))
+            if new_value is None:
+                # ``parsed_ok`` True is the type's conventional empty (a zero
+                # address), which the poller's own storage convention keeps out
+                # of last_known_state; matching it keeps the two readers of the
+                # same slot from disagreeing about what is stored.
+                if not parsed_ok and record_verify_status(mc, field, VERIFY_NO_VALUE):
+                    flag_modified(mc, "last_poll_status")
+                continue
+            if not isinstance(field, str) or not field:
+                continue
+
+            state = dict(mc.last_known_state or {})
+            old_value = state.get(field)
+            if new_value == old_value:
+                continue  # earned negative — the hint did not correspond to a change
+            state[field] = new_value
+            mc.last_known_state = state
+            flag_modified(mc, "last_known_state")
+            if old_value is None:
+                continue  # first observation is a baseline, not a transition
+
+            event_type = value_changed_event_type(member.controller_id)
+            event_data = {
+                "field": field,
+                "controller_id": member.controller_id,
+                "old": str(old_value),
+                "new": str(new_value),
+                # The witness is the read, not the log that triggered it.
+                "witness": "read_verified",
+                "hint_block_number": member.block_number,
+            }
+            event = MonitoredEvent(
+                id=uuid.uuid4(),
+                monitored_contract_id=mc.id,
+                event_type=event_type,
+                # A read observes a slot, not a log: no block and no tx are
+                # knowable. ``log_index`` stays NULL, which keeps these rows
+                # outside the partial identity index exactly like the poll
+                # path's rows (invariant 12 is preserved, not extended).
+                block_number=0,
+                tx_hash="",
+                data=event_data,
+            )
+            session.add(event)
+            new_events.append(event)
+            logger.info(
+                "Verification read detected %s change on %s: %s -> %s",
+                field,
+                mc.address,
+                old_value,
+                new_value,
+            )
+            _sync_relational_from_poll(session, mc, field, new_value, old_value)
+            try:
+                reanalysis_job = maybe_queue_reanalysis(session, mc, event_type, event_data)
+                if reanalysis_job:
+                    updated = dict(event.data or {})
+                    updated["reanalysis_job_id"] = str(reanalysis_job.id)
+                    event.data = updated
+            except Exception as exc:
+                logger.warning(
+                    "Failed to queue re-analysis for %s: %s",
+                    mc.address,
+                    exc,
+                    extra={"exc_type": type(exc).__name__},
+                )
+
+    session.commit()
     return new_events
 
 
@@ -640,6 +927,10 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     blocks_scanned = 0
     degraded = False
     budget_exhausted = False
+    # Hint occurrences accumulate across the whole pass so repeats on the same
+    # controller — the exact shape of the crowd-traffic problem — collapse to
+    # one read. In-memory only, by design: no persistence, no migration.
+    dirty_controllers: dict[tuple[uuid.UUID, str], _DirtyController] = {}
 
     while windows_scanned < max_windows_pass:
         eligible: list[tuple[_Cohort, int]] = []
@@ -695,7 +986,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 cohort.failed = True
                 break
 
-            window_events = _process_window(session, cohort, fetched_logs, window_start, window_end)
+            window_events = _process_window(session, cohort, fetched_logs, window_start, window_end, dirty_controllers)
 
             # Advance cursors monotonically in the SAME transaction that
             # persists this window's events. GREATEST means a stale or zombie
@@ -725,6 +1016,25 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             if not renew_daemon_lease(session, _scanner_lease_name(cohort.chain), lease_holder, lease_ttl):
                 held_chains.discard(cohort.chain)
                 break
+
+    # Hint resolution runs once, after the window loop, so a controller hit in
+    # several windows is read once for the whole pass.
+    try:
+        verified_events = _resolve_verification_reads(session, dirty_controllers, rpc_by_chain)
+    except Exception as exc:
+        logger.warning(
+            "Verification-read pass failed: %s",
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        # The windows above are already committed; a failure here must not
+        # roll them back or abort the pass summary.
+        session.rollback()
+        degraded = True
+        verified_events = []
+    if verified_events:
+        _notify_committed_events(session, verified_events)
+        total_new_events.extend(verified_events)
 
     # Budget-exhausted only if we stopped at the hard pass cap with work left.
     if windows_scanned >= max_windows_pass:

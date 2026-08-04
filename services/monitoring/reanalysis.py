@@ -74,7 +74,11 @@ def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool
     storage-slot poll entry, which is keyed by ``proxy_type`` rather
     than by the analyzer's write targets.
     """
-    if event_type == "state_changed_poll" and data:
+    if (event_type == "state_changed_poll" or event_type.startswith("value_changed")) and data:
+        # Both are read-observed changes: the changed FIELD is the witnessed
+        # fact, so the trigger keys off it rather than off the emitter's
+        # donated write set. Same target vocabulary either way — the
+        # read-verified vocabulary is recognized here, not widened.
         field = data.get("field")
         if field in REANALYSIS_POLL_FIELDS_VENDORED:
             return True
@@ -164,6 +168,8 @@ def maybe_queue_reanalysis(
     # Determine a human-readable trigger label
     if event_type == "state_changed_poll":
         trigger = f"poll:{(data or {}).get('field', 'unknown')}"
+    elif event_type.startswith("value_changed"):
+        trigger = f"verified_read:{(data or {}).get('field', 'unknown')}"
     else:
         trigger = event_type
 
