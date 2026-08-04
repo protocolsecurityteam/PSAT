@@ -67,7 +67,13 @@ def _monitored(session, address: str, *, chain: str = "ethereum") -> MonitoredCo
     return mc
 
 
-def _queue_rebuild_jobs(session, addresses: list[str], *, created_at: datetime | None = None) -> None:
+def _queue_rebuild_jobs(
+    session,
+    addresses: list[str],
+    *,
+    created_at: datetime | None = None,
+    chain_id: int = 1,
+) -> None:
     for address in addresses:
         session.add(
             Job(
@@ -75,6 +81,7 @@ def _queue_rebuild_jobs(session, addresses: list[str], *, created_at: datetime |
                 address=address,
                 status=JobStatus.queued,
                 stage=JobStage.discovery,
+                chain_id=chain_id,
                 request={"address": address, "force": True, REBUILD_REQUEST_KEY: True},
                 created_at=created_at or datetime.now(timezone.utc),
             )
@@ -231,6 +238,38 @@ def test_an_in_flight_rebuild_is_not_re_queued_even_when_it_is_old(cm_db, monkey
     # Outside the 24h window, so it is not budget already spent — but it is
     # still an attempt outstanding, and those are different facts.
     assert backlog["queued_last_24h"] == 0
+    assert backlog["attempted_not_yet_resolved"] == 1
+
+
+@requires_postgres
+def test_a_rebuild_on_one_chain_does_not_suppress_the_same_address_on_another(cm_db, monkeypatch):
+    """The same address on two chains is two deployments with two
+    materializations; keying the exclusion on the address alone would leave the
+    twin permanently unattempted."""
+    addr = "0x" + "80" * 20
+    _monitored(cm_db, addr, chain="ethereum")
+    _monitored(cm_db, addr, chain="base")
+    _queue_rebuild_jobs(cm_db, [addr], chain_id=1)
+
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
+    candidates, backlog = plan_rebuilds(cm_db)
+    assert [(c.chain, c.address) for c in candidates] == [("base", addr)]
+    assert backlog["attempted_not_yet_resolved"] == 1
+
+
+@requires_postgres
+def test_a_resolved_attempt_is_not_outstanding_work(cm_db, monkeypatch):
+    """The count answers "how much issued work has not landed yet"; an attempt
+    whose contract now has its row has landed."""
+    resolved, outstanding = "0x" + "90" * 20, "0x" + "91" * 20
+    _monitored(cm_db, resolved)
+    _monitored(cm_db, outstanding)
+    _materialization(cm_db, resolved, "0x" + "90" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION)
+    _queue_rebuild_jobs(cm_db, [resolved, outstanding])
+
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
+    backlog = materialization_backlog(cm_db)
+    assert backlog["queued_last_24h"] == 2
     assert backlog["attempted_not_yet_resolved"] == 1
 
 

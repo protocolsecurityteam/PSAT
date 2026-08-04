@@ -165,12 +165,24 @@ def backlog_candidates(session: Session) -> list[RebuildCandidate]:
     return out
 
 
+def _job_key(job: Job) -> tuple[str, str]:
+    """``(chain_token, address)`` for a rebuild job.
+
+    Chain-qualified because the same address on two chains is two deployments
+    with two materializations: keying on the address alone would let a rebuild
+    in flight for the mainnet contract suppress its Base twin indefinitely.
+    """
+    request = job.request if isinstance(job.request, dict) else {}
+    chain = job.chain_id if isinstance(getattr(job, "chain_id", None), int) else request.get("chain")
+    return (chain_cache_token(chain), (job.address or "").lower())
+
+
 def _rebuild_jobs_since(session: Session, since: datetime) -> list[Job]:
     """Reconciler-issued jobs created since *since*, plus any still in flight.
 
     Both halves matter: the recent ones are the budget already spent, and their
-    addresses are the ones a second pass must not re-queue. An older job that is
-    still queued or processing is in flight regardless of age.
+    deployments are the ones a second pass must not re-queue. An older job that
+    is still queued or processing is in flight regardless of age.
     """
     return list(
         session.execute(
@@ -209,9 +221,12 @@ def materialization_backlog(
     being done about it: a large backlog under a spent budget and the same
     backlog under an untouched one are different operational facts.
 
-    ``attempted_not_yet_resolved`` counts distinct addresses this reconciler has
-    a job out for and which are still in the backlog — work issued that has not
-    yet produced a row, which is a different fact from work not yet issued.
+    ``attempted_not_yet_resolved`` counts the deployments this reconciler has a
+    job out for that are STILL IN THE BACKLOG — work issued that has not yet
+    produced a row, which is a different fact from work not yet issued. An
+    attempt whose contract now has its row is resolved and is not counted; the
+    number is meant to answer "how much outstanding work is there", and counting
+    successes in it would answer nothing.
 
     No alert threshold is invented here — the counts ride the same
     publish-unconditionally rule as ``plan_coverage`` and ``verification_gaps``.
@@ -228,13 +243,16 @@ def materialization_backlog(
     window_start = now - timedelta(days=1)
     recent = _rebuild_jobs_since(session, window_start)
     queued = sum(1 for job in recent if job.created_at is not None and _aware(job.created_at) >= window_start)
+    unresolved = {_job_key(job) for job in recent} & {
+        (chain_cache_token(c.chain), (c.address or "").lower()) for c in candidates
+    }
     return {
         "contracts": len(candidates),
         "by_reason": by_reason,
         "budget_per_day": budget,
         "queued_last_24h": queued,
         "queueable_now": max(0, budget - queued),
-        "attempted_not_yet_resolved": len({(job.address or "").lower() for job in recent}),
+        "attempted_not_yet_resolved": len(unresolved),
         "basis": BACKLOG_BASIS,
     }
 
@@ -256,11 +274,12 @@ def plan_rebuilds(
 
     * ``in_progress`` — a builder is already running, so a job would pay for the
       same bundle twice.
-    * anything this reconciler already has a job out for (in flight, or issued
-      within the budget window). The 24 h counter bounds how MANY jobs are
-      issued, not WHICH — without this, every pass re-proposes the head of the
-      list, and a contract that keeps failing to rebuild starves the tail
-      forever.
+    * any deployment this reconciler already has a job out for (in flight, or
+      issued within the budget window). The 24 h counter bounds how MANY jobs
+      are issued, not WHICH — without this, every pass re-proposes the head of
+      the list, and a contract that keeps failing to rebuild starves the tail
+      forever. Chain-qualified, so a mainnet rebuild does not suppress its Base
+      twin.
 
     The remaining order is stable (chain, address), so a dry run and the
     ``--apply`` that follows it propose the same work.
@@ -269,6 +288,10 @@ def plan_rebuilds(
     candidates = backlog_candidates(session)
     backlog = materialization_backlog(session, now=now, _candidates=candidates)
     allowed = backlog["queueable_now"] if budget is None else max(0, budget - backlog["queued_last_24h"])
-    attempted = {(job.address or "").lower() for job in _rebuild_jobs_since(session, now - timedelta(days=1))}
-    workable = [c for c in candidates if c.reason != REASON_IN_PROGRESS and (c.address or "").lower() not in attempted]
+    attempted = {_job_key(job) for job in _rebuild_jobs_since(session, now - timedelta(days=1))}
+    workable = [
+        c
+        for c in candidates
+        if c.reason != REASON_IN_PROGRESS and (chain_cache_token(c.chain), (c.address or "").lower()) not in attempted
+    ]
     return workable[:allowed], backlog
