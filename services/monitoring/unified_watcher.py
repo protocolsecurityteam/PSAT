@@ -84,10 +84,14 @@ DEFAULT_CONFIRMATION_DEPTH = 12
 # range/response-cap rejection actually bisects instead of failing the cohort.
 FETCHER_MIN_BISECT_SPAN = 125
 
-# Runaway-cursor backstop (see ``scan_for_events``). ~1M mainnet blocks is about
-# four months — no outage-driven backfill reaches it, so a cohort past this lag
-# is carrying a broken cursor rather than doing real work.
-DEFAULT_RUNAWAY_LAG_BLOCKS = 1_000_000
+# Runaway-cursor backstop (see ``scan_for_events``). The budget is WALL CLOCK,
+# not blocks: ~139 days of the cohort's own chain. No outage-driven backfill
+# reaches that, so a cohort past it is carrying a broken cursor rather than
+# doing real work. Expressing it in blocks would make the threshold mean
+# different things per chain — 1M blocks is ~139 days of mainnet but ~23 days of
+# Base, so a uniform block count would demote every Base cohort after a
+# three-week outage, exactly when catch-up matters most.
+DEFAULT_RUNAWAY_LAG_SECONDS = 12_000_000
 DEFAULT_RUNAWAY_WINDOWS_PER_PASS = 1
 
 # Reason stamped on the enrollment-queue row when the watcher's relational sync
@@ -142,6 +146,27 @@ def _max_getlogs_range_for(chain: str) -> int:
         return chain_by_name(chain).max_getlogs_range
     except UnknownChainError:
         return MAX_BLOCK_RANGE
+
+
+def _runaway_lag_blocks_for(chain: str) -> int:
+    """The runaway threshold in blocks for *chain*, from the wall-clock budget.
+
+    0 disables the backstop — either because the operator set the budget to 0,
+    or because the chain's block time is not in the registry. An unresolvable
+    chain gives no honest way to convert seconds to blocks, and a borrowed
+    conversion would demote a cohort on a guess; not-determined means the
+    backstop does not fire (demotion needs a witness).
+    """
+    budget_s = max(0, _scan_int_env("PSAT_SCAN_RUNAWAY_LAG_SECONDS", DEFAULT_RUNAWAY_LAG_SECONDS))
+    if not budget_s:
+        return 0
+    try:
+        block_time = chain_by_name(chain).block_time_s
+    except UnknownChainError:
+        return 0
+    if block_time <= 0:
+        return 0
+    return int(budget_s / block_time)
 
 
 def _confirmation_depth_for(chain: str) -> int:
@@ -556,16 +581,16 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     address_batch = max(1, _scan_int_env("PSAT_SCAN_ADDRESS_BATCH", 200))
     max_windows_cohort = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", 25))
     max_windows_pass = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_PASS", 50))
-    # Runaway backstop: a cohort this far behind confirmed head is not
-    # backfilling, it is broken (a floor-0 legacy row, a cursor restored from an
-    # old snapshot). Most-behind-first would hand it every window of every pass
-    # while the rest of the fleet sits at head. It is served last and capped at
+    # Runaway backstop: a cohort further behind confirmed head than the
+    # wall-clock budget of its OWN chain is not backfilling, it is broken (a
+    # floor-0 legacy row, a cursor restored from an old snapshot).
+    # Most-behind-first would hand it every window of every pass while the rest
+    # of the fleet sits at head. It is served last and capped at
     # ``runaway_windows`` windows per pass — still advancing (behind ≠ skipped),
     # never monopolising — and counted onto the heartbeat so the condition is
     # visible rather than merely slow. The operator repair is
     # ``scripts/clamp_monitoring_cursors.py``; the scanner's own "behind" alarm
-    # (ops_alerts) already fires on the lag. 0 disables the backstop.
-    runaway_lag = max(0, _scan_int_env("PSAT_SCAN_RUNAWAY_LAG_BLOCKS", DEFAULT_RUNAWAY_LAG_BLOCKS))
+    # (ops_alerts) already fires on the lag.
     runaway_windows = max(1, _scan_int_env("PSAT_SCAN_RUNAWAY_WINDOWS_PER_PASS", DEFAULT_RUNAWAY_WINDOWS_PER_PASS))
 
     index_rows = session.execute(
@@ -636,6 +661,11 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         return ScanResult([])
     cohorts = [c for c in cohorts if c.chain in held_chains]
 
+    # Per-chain runaway threshold, resolved once per pass (see the module
+    # constants): the same block count is months on one chain and weeks on
+    # another, so the budget converts through each chain's own block time.
+    runaway_lag_by_chain = {chain: _runaway_lag_blocks_for(chain) for chain in {c.chain for c in cohorts}}
+
     # Each cohort's chain resolves its OWN eRPC route from the registry
     # (``rpc_url`` is the mainnet seed / local-fork override). Mainnet keeps the
     # incoming URL verbatim, so its head reads and getLogs are unchanged.
@@ -677,6 +707,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             if cohort.cursor >= confirmed_head:
                 cohort.done = True
                 continue
+            runaway_lag = runaway_lag_by_chain.get(cohort.chain, 0)
             cohort.runaway = runaway_lag > 0 and (confirmed_head - cohort.cursor) > runaway_lag
             if cohort.runaway and cohort.windows_this_pass >= runaway_windows:
                 continue  # already served its capped slice this pass
@@ -782,7 +813,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             runaway_windows,
             extra={
                 "runaway_cohorts": runaway_cohorts,
-                "runaway_lag_blocks": runaway_lag,
+                "runaway_lag_blocks_by_chain": runaway_lag_by_chain,
                 "max_lag_blocks": max_lag,
                 "reason": "cursor_runaway",
             },

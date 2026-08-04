@@ -42,7 +42,7 @@ from db.queue import (
 )
 from services.monitoring.notifier import _send_discord
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
-from services.monitoring.tracking_plan_state import plan_coverage_counts
+from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -273,8 +273,13 @@ def _current_problems(
     if threshold and coverage:
         # Dated plans and no plan at all are both "not watching what the
         # analysis says to watch"; they are counted together for the alarm and
-        # stay separate in the payload.
-        uncovered = int(coverage.get("ready_stale", 0)) + int(coverage.get("not_determined_total", 0))
+        # stay separate in the payload. A caller-authored config is excluded: an
+        # operator chose it, so paging on it would page them for their own
+        # decision (the bucket stays in the payload either way).
+        not_determined = coverage.get("not_determined") or {}
+        uncovered = int(coverage.get("ready_stale", 0)) + sum(
+            int(n) for token, n in not_determined.items() if token != CONFIG_SUPPLIED_BY_CALLER
+        )
         if uncovered > threshold:
             problems[_COVERAGE_KEY] = {
                 "kind": "coverage",

@@ -168,6 +168,21 @@ def test_polling_plan_carries_analyzer_slots_and_yields_to_fresh_entries():
     assert merged["polling_plan_stale_since"] == _NOW.isoformat()
 
 
+def test_carried_polling_entries_are_always_stamped():
+    """Review finding 7: the stamp used to be gated on the merged plan being
+    LONGER than the raw new plan. A new plan holding a malformed entry (dropped
+    by the merge) plus one carried entry gives equal lengths — stale entries
+    would then ride with no staleness mark at all."""
+    new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}, "not-a-dict"]})
+    existing = {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: [{"field": "feeRecipient"}]}
+
+    merged = merge_stale_tracking_plan(new, existing, now=_NOW)
+
+    assert len(merged[POLLING_PLAN_KEY]) == len(new[POLLING_PLAN_KEY])  # the shape that used to slip through
+    assert {e["field"] for e in merged[POLLING_PLAN_KEY]} == {"implementation", "feeRecipient"}
+    assert merged["polling_plan_stale_since"] == _NOW.isoformat()
+
+
 def test_polling_plan_untouched_when_nothing_to_carry():
     new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}]})
     merged = merge_stale_tracking_plan(new, {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: []}, now=_NOW)
@@ -192,12 +207,60 @@ def test_classify_keeps_the_four_states_distinct():
     assert classify_plan_state({TRACKED_TOPICS_KEY: _TOPICS}) == READY_FRESH_WITH_TOPICS
     assert classify_plan_state({TRACKED_TOPICS_KEY: []}) == READY_FRESH_PROVEN_EMPTY
     assert (
-        classify_plan_state({TRACKED_TOPICS_KEY: _TOPICS, NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION})
+        classify_plan_state(
+            {
+                TRACKED_TOPICS_KEY: _TOPICS,
+                NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION,
+                TRACKED_TOPICS_STALE_SINCE_KEY: _NOW.isoformat(),
+            }
+        )
         == READY_STALE
     )
     assert classify_plan_state({NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION}) == NO_CURRENT_MATERIALIZATION
     assert classify_plan_state({"watch_ownership": True}) == UNCLASSIFIED
     assert classify_plan_state(None) == UNCLASSIFIED
+
+
+def test_ready_stale_needs_its_own_witness_not_a_coincidence_of_keys():
+    """Review finding 5: two keys coexisting is not evidence of staleness. The
+    state requires the stamp the merge writes, under a token the merge may act
+    on — otherwise it reads as the token it carries.
+
+    Neither shape below is producible by this module (the merge always stamps,
+    and the schema rejects caller-supplied topics); classifying them as
+    ``ready_stale`` anyway would publish "watching on a dated analyzer plan"
+    about a config no analyzer touched.
+    """
+    no_stamp = {TRACKED_TOPICS_KEY: _TOPICS, NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION}
+    assert classify_plan_state(no_stamp) == NO_CURRENT_MATERIALIZATION
+
+    caller_with_topics = {
+        TRACKED_TOPICS_KEY: _TOPICS,
+        NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER,
+        TRACKED_TOPICS_STALE_SINCE_KEY: _NOW.isoformat(),
+    }
+    assert classify_plan_state(caller_with_topics) == CONFIG_SUPPLIED_BY_CALLER
+
+
+def test_scan_plane_facts_survive_every_config_rebuild():
+    """Review finding 2: ``scan_gaps`` records intervals this row's scanner
+    never covered. Every writer replaces the whole config, so the carry is
+    unconditional — including when the plan WAS read (no staleness merge runs)
+    and when a caller authored the new config."""
+    from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY, preserve_scan_plane_facts
+
+    gaps = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
+    existing = {TRACKED_TOPICS_KEY: _TOPICS, SCAN_GAPS_KEY: gaps}
+
+    fresh_read = preserve_scan_plane_facts({"watch_ownership": True, TRACKED_TOPICS_KEY: []}, existing)
+    assert fresh_read[SCAN_GAPS_KEY] == gaps
+    assert fresh_read[TRACKED_TOPICS_KEY] == []  # unrelated keys untouched
+
+    caller = preserve_scan_plane_facts({NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER}, existing)
+    assert caller[SCAN_GAPS_KEY] == gaps
+
+    assert preserve_scan_plane_facts({"a": 1}, {}) == {"a": 1}
+    assert preserve_scan_plane_facts({"a": 1}, None) == {"a": 1}
 
 
 def test_classify_reports_an_unknown_token_as_itself():

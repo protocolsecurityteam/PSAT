@@ -43,7 +43,7 @@ from sqlalchemy import cast, func, literal, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from db.models import ContractMaterialization, MonitoredContract
+from db.models import ContractMaterialization, MonitoredContract, MonitoringEnrollmentQueue
 from utils.chains import chain_cache_token
 
 # --- config keys -----------------------------------------------------------
@@ -56,6 +56,10 @@ POLLING_PLAN_KEY = "polling_plan"
 #: as of some instant at or before this one.
 TRACKED_TOPICS_STALE_SINCE_KEY = "tracked_topics_stale_since"
 POLLING_PLAN_STALE_SINCE_KEY = "polling_plan_stale_since"
+#: Block intervals this row's scanner never covered (written by
+#: ``scripts/clamp_monitoring_cursors.py``). A scan-plane fact about what was
+#: observed, not a plan-plane statement — see :func:`preserve_scan_plane_facts`.
+SCAN_GAPS_KEY = "scan_gaps"
 
 # --- not-determined tokens -------------------------------------------------
 
@@ -74,6 +78,12 @@ PLAN_LOAD_ERROR = "plan_load_error"
 CONTRACT_NOT_ANALYZED = "contract_not_analyzed"
 #: Authored by an API caller; no analyzer provenance at all.
 CONFIG_SUPPLIED_BY_CALLER = "config_supplied_by_caller"
+
+#: ``mark_enrollment_dirty`` reason for a pass that could not create one or more
+#: monitored rows because the chain head was not determined. The queue row is
+#: how the deferral survives the pass (the reconciler re-drains it) and how the
+#: census counts it — a deferred contract has no row to be counted as.
+HEAD_NOT_DETERMINED_REASON = "head_not_determined"
 
 PLAN_NOT_DETERMINED_TOKENS = frozenset(
     {
@@ -163,11 +173,36 @@ def merge_stale_tracking_plan(
 
     merged_plan = _merge_polling_plan(new_config.get(POLLING_PLAN_KEY), existing_config.get(POLLING_PLAN_KEY))
     if merged_plan is not None:
+        # Non-None means entries WERE carried (``_merge_polling_plan`` returns
+        # None otherwise), so the stamp is unconditional here — comparing
+        # lengths against the raw new plan would miss a carry whenever that plan
+        # held a malformed entry the merge dropped.
         merged[POLLING_PLAN_KEY] = merged_plan
-        if len(merged_plan) > len(new_config.get(POLLING_PLAN_KEY) or []):
-            merged[POLLING_PLAN_STALE_SINCE_KEY] = existing_config.get(POLLING_PLAN_STALE_SINCE_KEY) or stale_since
+        merged[POLLING_PLAN_STALE_SINCE_KEY] = existing_config.get(POLLING_PLAN_STALE_SINCE_KEY) or stale_since
 
     return merged
+
+
+def preserve_scan_plane_facts(
+    new_config: dict[str, Any],
+    existing_config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Carry the row's scan-plane record onto a rebuilt config, always.
+
+    Every writer of ``monitoring_config`` — enrollment and the caller-facing
+    routes alike — replaces the whole object. ``scan_gaps`` is not part of what
+    any of them computes: it records block intervals this row's scanner never
+    covered, and dropping it would let the row present continuous coverage over
+    an interval nothing ever read. Unconditional, and independent of the
+    staleness merge: the gaps are true whether or not the plan could be read,
+    and true whether the new config came from the analyzer or from a caller.
+    """
+    gaps = (existing_config or {}).get(SCAN_GAPS_KEY)
+    if not isinstance(gaps, list) or not gaps:
+        return new_config
+    if new_config.get(SCAN_GAPS_KEY) == gaps:
+        return new_config
+    return {**new_config, SCAN_GAPS_KEY: gaps}
 
 
 def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
@@ -190,11 +225,20 @@ def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
     return fresh + carried
 
 
-def _state_from_parts(token: Any, has_topics_key: bool, topics_present: bool) -> str:
+def _state_from_parts(token: Any, has_topics_key: bool, topics_present: bool, has_stale_since: bool) -> str:
     """The state table at the top of this module, as code. One implementation
-    so the row-wise classifier and the SQL census cannot drift."""
+    so the row-wise classifier and the SQL census cannot drift.
+
+    ``ready_stale`` requires its own witness — the staleness stamp the merge
+    writes, under a token the merge is allowed to act on. Two keys happening to
+    coexist is a coincidence, not evidence: a caller-authored config carrying
+    topics would otherwise be reported as "watching on a dated analyzer plan",
+    which nothing established.
+    """
     if isinstance(token, str) and token:
-        return READY_STALE if (has_topics_key and topics_present) else token
+        if has_topics_key and topics_present and has_stale_since and token in STALENESS_MERGE_TOKENS:
+            return READY_STALE
+        return token
     if not has_topics_key:
         return UNCLASSIFIED
     return READY_FRESH_WITH_TOPICS if topics_present else READY_FRESH_PROVEN_EMPTY
@@ -210,7 +254,12 @@ def classify_plan_state(config: Mapping[str, Any] | None) -> str:
     cfg = config if isinstance(config, Mapping) else {}
     topics = cfg.get(TRACKED_TOPICS_KEY)
     has_topics_key = isinstance(topics, list)
-    return _state_from_parts(cfg.get(NOT_DETERMINED_KEY), has_topics_key, bool(has_topics_key and topics))
+    return _state_from_parts(
+        cfg.get(NOT_DETERMINED_KEY),
+        has_topics_key,
+        bool(has_topics_key and topics),
+        bool(cfg.get(TRACKED_TOPICS_STALE_SINCE_KEY)),
+    )
 
 
 def plan_coverage_counts(session: Session) -> dict[str, Any]:
@@ -225,13 +274,19 @@ def plan_coverage_counts(session: Session) -> dict[str, Any]:
         ready_fresh_with_topics + ready_fresh_proven_empty
           + ready_stale + sum(not_determined.values()) + unclassified
 
-    ``analysis_failed`` is an **overlay, not a partition member**: it counts the
-    subset of rows whose address has a ``status='failed'`` materialization —
-    the reason behind some of the ``no_current_materialization`` count (a failed
-    row reads as a miss). It is reported separately because "no analysis was
-    ever established" and "the analysis was attempted and failed" are different
-    facts with different remedies, and the second is only visible from the
-    materialization table.
+    Two **overlays, not partition members**, ride alongside:
+
+    * ``analysis_failed`` — rows whose address has a ``status='failed'``
+      materialization, i.e. the reason behind some of the
+      ``no_current_materialization`` count (a failed row reads as a miss).
+      Reported separately because "no analysis was ever established" and "the
+      analysis was attempted and failed" are different facts with different
+      remedies, and the second is only visible from the materialization table.
+    * ``enrollment_deferred_protocols`` — protocols whose last enrollment could
+      not create at least one row because the chain head was not determined.
+      It is PROTOCOL-scoped, not contract-scoped, and counts things that have no
+      ``monitored_contracts`` row at all: without it a deferral is invisible on
+      a surface that can only count rows that exist.
     """
     # The column is declared ``JSON().with_variant(JSONB(), "postgresql")``, so
     # the generic type is what builds expressions — cast to reach the JSONB
@@ -245,16 +300,17 @@ def plan_coverage_counts(session: Session) -> dict[str, Any]:
     topics_type = func.coalesce(func.jsonb_typeof(topics), literal("missing"))
     topics_empty = topics == cast(literal("[]"), JSONB)
     token_col = config[NOT_DETERMINED_KEY].astext
+    has_stale_since = config[TRACKED_TOPICS_STALE_SINCE_KEY].astext.isnot(None)
 
     counts: dict[str, int] = {}
     total = 0
-    for token, tt, is_empty, count in session.execute(
-        select(token_col, topics_type, topics_empty, func.count())
+    for token, tt, is_empty, stale_since, count in session.execute(
+        select(token_col, topics_type, topics_empty, has_stale_since, func.count())
         .where(MonitoredContract.is_active.is_(True))
-        .group_by(token_col, topics_type, topics_empty)
+        .group_by(token_col, topics_type, topics_empty, has_stale_since)
     ).all():
         has_topics_key = tt == "array"
-        state = _state_from_parts(token, has_topics_key, has_topics_key and not is_empty)
+        state = _state_from_parts(token, has_topics_key, has_topics_key and not is_empty, bool(stale_since))
         counts[state] = counts.get(state, 0) + count
         total += count
 
@@ -268,7 +324,20 @@ def plan_coverage_counts(session: Session) -> dict[str, Any]:
         "not_determined_total": sum(not_determined.values()),
         UNCLASSIFIED: counts.get(UNCLASSIFIED, 0),
         "analysis_failed": _failed_analysis_count(session),
+        "enrollment_deferred_protocols": _deferred_enrollment_count(session),
     }
+
+
+def _deferred_enrollment_count(session: Session) -> int:
+    """Protocols queued because a chain head was not determined mid-enrollment."""
+    return (
+        session.execute(
+            select(func.count())
+            .select_from(MonitoringEnrollmentQueue)
+            .where(MonitoringEnrollmentQueue.reason == HEAD_NOT_DETERMINED_REASON)
+        ).scalar()
+        or 0
+    )
 
 
 _PARTITION_NON_TOKEN_STATES = frozenset({READY_FRESH_WITH_TOPICS, READY_FRESH_PROVEN_EMPTY, READY_STALE, UNCLASSIFIED})

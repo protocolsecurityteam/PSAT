@@ -29,6 +29,7 @@ from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
 from services.monitoring.tracking_plan_state import (
     CONTRACT_NOT_ANALYZED,
+    HEAD_NOT_DETERMINED_REASON,
     MATERIALIZATION_LOOKUP_FAILED,
     NO_CURRENT_MATERIALIZATION,
     PLAN_LOAD_ERROR,
@@ -36,6 +37,7 @@ from services.monitoring.tracking_plan_state import (
     PLAN_OBJECT_ABSENT,
     POLLING_PLAN_KEY,
     merge_stale_tracking_plan,
+    preserve_scan_plane_facts,
 )
 from utils.chains import chain_enabled
 from utils.rpc import rpc_request
@@ -46,7 +48,15 @@ logger = logging.getLogger(__name__)
 # Reason vocabulary for ``mark_enrollment_dirty`` — the write site that
 # enqueued the protocol. Kept as documentation; not enforced.
 ENROLLMENT_DIRTY_REASONS = frozenset(
-    {"policy_complete", "discovery_adoption", "audit_added", "manual", "sweep", "governance_rotation"}
+    {
+        "policy_complete",
+        "discovery_adoption",
+        "audit_added",
+        "manual",
+        "sweep",
+        "governance_rotation",
+        HEAD_NOT_DETERMINED_REASON,
+    }
 )
 
 
@@ -270,6 +280,8 @@ def enroll_protocol_contracts(
         return block_by_chain[contract_chain]
 
     enrolled: list[MonitoredContract] = []
+    # Rows this pass could not create because a chain head was not determined.
+    deferred = 0
 
     for contract in contracts:
         contract_chain = contract.chain or chain
@@ -341,6 +353,9 @@ def enroll_protocol_contracts(
             # from the config, so the merged plan is what seeds the state and
             # decides whether this row still polls.
             monitoring_config = merge_stale_tracking_plan(monitoring_config, existing.monitoring_config)
+            # Independent of the plan state: what this row's scanner never
+            # covered stays recorded across every rebuild of the config.
+            monitoring_config = preserve_scan_plane_facts(monitoring_config, existing.monitoring_config)
             carried_plan = monitoring_config.get(POLLING_PLAN_KEY)
             if isinstance(carried_plan, list):
                 polling_plan = carried_plan
@@ -394,6 +409,7 @@ def enroll_protocol_contracts(
                         "site": "enrollment",
                     },
                 )
+                deferred += 1
                 continue
             # Concurrent policy workers enrolling the same protocol can insert
             # this (address, chain) between the SELECT above and here. ON
@@ -433,7 +449,8 @@ def enroll_protocol_contracts(
         # Create WatchedProxy only for actual proxy shells (is_proxy / proxy_type),
         # not UUPS implementations that are merely "upgradeable" per summary.
         if contract_type == "proxy" and (contract.is_proxy or contract.proxy_type):
-            _bridge_to_watched_proxy(session, mc, contract, current_block, contract_chain)
+            if _bridge_to_watched_proxy(session, mc, contract, current_block, contract_chain):
+                deferred += 1
 
         enrolled.append(mc)
 
@@ -459,7 +476,7 @@ def enroll_protocol_contracts(
         # chain against the allowlist so a disabled chain's controllers get no
         # monitoring state either.
         if chain_enabled(controller_chain):
-            _enroll_controller_addresses(
+            deferred += _enroll_controller_addresses(
                 session, contracts, protocol_id, controller_chain, _block_for(controller_chain)
             )
             # Flush so controller rows are visible to the stale-detection query below.
@@ -525,6 +542,29 @@ def enroll_protocol_contracts(
 
     if stale:
         logger.info("Deactivated %d stale monitored contracts for protocol %s", len(stale), protocol_id)
+
+    if deferred:
+        # A pass that could not create every row it should have is NOT a
+        # completed reconcile, and returning normally would let the drain delete
+        # the queue row and stamp last_enrollment_reconcile_at — sending the
+        # protocol to the back of the sweep queue with the deferral surviving
+        # only as a log line. Re-marking dirty in this same transaction advances
+        # ``dirty_at``, which makes the drain's dirty_at-guarded delete a no-op:
+        # the row keeps its place and the next tick re-runs the build. It is
+        # also what the coverage census counts — a deferred contract has no row
+        # to be counted as.
+        mark_enrollment_dirty(session, protocol_id, HEAD_NOT_DETERMINED_REASON)
+        logger.warning(
+            "Enrollment incomplete: %d row(s) deferred for protocol %s; re-queued",
+            deferred,
+            protocol_id,
+            extra={
+                "protocol_id": protocol_id,
+                "deferred_rows": deferred,
+                "reason": HEAD_NOT_DETERMINED_REASON,
+                "site": "enrollment",
+            },
+        )
 
     session.commit()
     logger.info(
@@ -854,8 +894,10 @@ def _bridge_to_watched_proxy(
     contract: Contract,
     current_block: int | None,
     chain: str,
-) -> None:
+) -> bool:
     """Create or link a WatchedProxy row for backward compatibility.
+
+    Returns True when the link had to be deferred (see *current_block*).
 
     *chain* is the MonitoredContract's resolved chain (``contract.chain`` or the
     caller's fallback), so the WatchedProxy is keyed on the same ``(address,
@@ -865,6 +907,7 @@ def _bridge_to_watched_proxy(
     create branch needs it (same floor-0 cursor hazard as the MonitoredContract
     insert), so the link is deferred to the next pass rather than seeded at 0.
     """
+
     existing_wp = session.execute(
         select(WatchedProxy).where(
             WatchedProxy.proxy_address == contract.address.lower(),
@@ -892,7 +935,7 @@ def _bridge_to_watched_proxy(
                     "site": "enrollment_watched_proxy",
                 },
             )
-            return
+            return True
         # Race-safe on uq_watched_proxy_address_chain — same rationale as the
         # MonitoredContract insert: a concurrent enroller for the same proxy
         # shell must become a no-op rather than poison the session.
@@ -917,6 +960,7 @@ def _bridge_to_watched_proxy(
             )
         ).scalar_one()
         mc.watched_proxy_id = wp.id
+    return False
 
 
 # MonitoredContract.contract_type values this module materializes for
@@ -932,7 +976,7 @@ def _enroll_controller_addresses(
     protocol_id: int,
     chain: str,
     current_block: int | None,
-) -> None:
+) -> int:
     """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
     MonitoredContract rows, and demote any that are no longer controllers.
 
@@ -966,12 +1010,14 @@ def _enroll_controller_addresses(
 
     A ``None`` *current_block* (head read not determined) suppresses only the
     creation of new rows — re-promotion and demotion of rows that already exist
-    need no cursor and still converge.
+    need no cursor and still converge. Returns the number of controller rows
+    whose creation was deferred that way.
     """
     from services.aggregations.company_overview import controllers_for_protocol
 
     enrolled_contract_addrs = {c.address.lower() for c in contracts}
     controllers = controllers_for_protocol(session, protocol_id)
+    deferred = 0
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).
     # Sorted by lowercased address: this loop takes progressive row locks via
@@ -1003,6 +1049,7 @@ def _enroll_controller_addresses(
                         "site": "enrollment_controllers",
                     },
                 )
+                deferred += 1
                 continue
             # Primary controllers are principals on *other* contracts, not
             # analyzed themselves, so the polling plan resolves to vendored
@@ -1069,3 +1116,5 @@ def _enroll_controller_addresses(
             continue
         mc.is_active = False
         mc.enrollment_source = "auto_deprimary"
+
+    return deferred

@@ -220,21 +220,33 @@ def main(argv: list[str] | None = None) -> int:
         "--target-block",
         type=int,
         default=None,
-        help="Clamp target for the runaway class instead of reading heads over RPC.",
+        help="Clamp target for the runaway class instead of reading heads over RPC. "
+        "Requires --chain or --address: a block number belongs to exactly one chain.",
     )
     ap.add_argument("--rpc-url", default=None, help="Mainnet RPC seed; other chains resolve their own route.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    if args.target_block is not None and not (args.chain or args.address):
+        # A block number is a fact about ONE chain. Applied fleet-wide it would
+        # write a mainnet head as a Base row's cursor AND its enrollment floor —
+        # a floor nothing witnessed, on a chain that never reached that height.
+        ap.error("--target-block requires --chain or --address (a block number belongs to one chain)")
+
     with SessionLocal() as session:
-        chains = {
-            c
-            for (c,) in session.execute(
-                select(MonitoredContract.chain).where(MonitoredContract.is_active.is_(True)).distinct()
-            ).all()
-            if c and (args.chain is None or c == args.chain)
-        }
+        stmt = select(MonitoredContract.chain).where(MonitoredContract.is_active.is_(True)).distinct()
+        if args.chain:
+            stmt = stmt.where(MonitoredContract.chain == args.chain)
+        if args.address:
+            stmt = stmt.where(MonitoredContract.address == args.address.lower())
+        chains = {c for (c,) in session.execute(stmt).all() if c}
+
+        if args.target_block is not None and len(chains) > 1:
+            # The same address is a distinct deployment per chain; one block
+            # number cannot be the head of two of them.
+            ap.error(f"--target-block selects rows on {len(chains)} chains ({sorted(chains)}); narrow with --chain")
+
         heads: dict[str, int | None] = {}
         for chain in sorted(chains):
             heads[chain] = args.target_block if args.target_block is not None else _head_for(chain, args.rpc_url)

@@ -102,6 +102,22 @@ def test_census_partitions_the_active_fleet(fleet):
     assert partition == counts["contracts"]
 
 
+def test_ready_stale_row_needs_its_staleness_stamp(fleet, db_session):
+    """Review finding 5: the census reads the same witness the classifier does.
+    Strip the stamp and the row falls back to its token — it is no longer
+    reported as watching on a dated plan."""
+    row = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == _addr(3))).scalar_one()
+    config = dict(row.monitoring_config or {})
+    del config[TRACKED_TOPICS_STALE_SINCE_KEY]
+    row.monitoring_config = config
+    db_session.commit()
+
+    counts = plan_coverage_counts(db_session)
+    assert counts[READY_STALE] == 0
+    assert counts["not_determined"][NO_CURRENT_MATERIALIZATION] == 2
+    assert counts["contracts"] == 8  # still a partition
+
+
 def test_stale_is_neither_fresh_nor_ignorance(fleet):
     """The state F5 mints has to survive to the consumer as its own number:
     folding it into ready collapses "we cannot re-read this" and folding it into
@@ -177,14 +193,17 @@ def test_coverage_alarm_is_silent_until_a_threshold_is_set(fleet, monkeypatch):
 def test_coverage_alarm_fires_over_the_threshold(fleet, monkeypatch):
     from services.monitoring import ops_alerts
 
-    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "3")
+    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "2")
     coverage = ops_alerts.collect_plan_coverage(fleet)
-    # 3 not-determined + 1 stale = 4 contracts watching without a current plan.
+    # Review finding 6: 2 not-determined (no_current_materialization,
+    # contract_not_analyzed) + 1 stale. The caller-supplied row is an operator's
+    # own choice and is NOT paged on, though it stays in the payload.
     problems = ops_alerts._current_problems({}, _now(), coverage)
-    assert problems["tracking_plan_coverage"]["uncovered"] == 4
+    assert coverage["not_determined"][CONFIG_SUPPLIED_BY_CALLER] == 1
+    assert problems["tracking_plan_coverage"]["uncovered"] == 3
     assert problems["tracking_plan_coverage"]["kind"] == "coverage"
 
-    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "4")
+    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "3")
     assert "tracking_plan_coverage" not in ops_alerts._current_problems({}, _now(), coverage)
 
 
@@ -209,10 +228,13 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
     on the transition and once on recovery."""
     from services.monitoring import ops_alerts
 
-    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "3")
+    # 3 pageable uncovered rows (the caller-supplied one is excluded), so a
+    # threshold of 2 is crossed.
+    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "2")
     monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
     first = ops_alerts.run_ops_alert_tick(fleet)
     assert first["posted_down"] >= 1
+    assert any(k == "tracking_plan_coverage" for k in _alert_keys(fleet))
 
     second = ops_alerts.run_ops_alert_tick(fleet)
     assert second["posted_down"] == 0  # deduped inside the cooldown
@@ -229,3 +251,13 @@ def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+def _alert_keys(session) -> list[str]:
+    """Dedupe keys the alerter currently holds in its own heartbeat detail."""
+    from db.models import WorkerHeartbeat
+    from db.queue import HEARTBEAT_OPS_ALERTER
+
+    session.expire_all()
+    hb = session.execute(select(WorkerHeartbeat).where(WorkerHeartbeat.process == HEARTBEAT_OPS_ALERTER)).scalar_one()
+    return list((hb.detail or {}).get("alerts", {}))

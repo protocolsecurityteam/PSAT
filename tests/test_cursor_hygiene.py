@@ -16,6 +16,7 @@ Two halves:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -100,6 +101,61 @@ def test_new_row_is_deferred_when_the_chain_head_is_not_determined(db_session, a
     row = _row(db_session, ADDRESS)
     assert row.last_scanned_block == HEAD
     assert row.enrollment_block == HEAD
+
+
+def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, analyzed_protocol):
+    """Review finding 1: a pass that could not create every row it should have
+    is not a completed reconcile.
+
+    Without the re-mark, ``enroll_protocol_contracts`` returns normally, the
+    drain deletes the queue row and stamps ``last_enrollment_reconcile_at`` —
+    the deferral survives only as a log line and the protocol goes to the BACK
+    of the sweep queue. The re-mark advances ``dirty_at``, which is exactly the
+    condition ``_finish_success``'s guarded delete treats as "re-dirtied during
+    the build": the row stays queued and the next tick re-runs the build.
+    """
+    from db.models import MonitoringEnrollmentQueue
+    from services.monitoring.reconciler import EnrollmentClaim, _finish_success
+    from services.monitoring.tracking_plan_state import HEAD_NOT_DETERMINED_REASON
+
+    claimed_at = datetime(2026, 8, 4, 1, 0, tzinfo=timezone.utc)
+    lease_id = uuid.uuid4()
+    db_session.add(
+        MonitoringEnrollmentQueue(
+            protocol_id=analyzed_protocol.id,
+            reason="policy_complete",
+            dirty_at=claimed_at,
+            lease_id=lease_id,
+        )
+    )
+    db_session.commit()
+    claim = EnrollmentClaim(analyzed_protocol.id, claimed_at, 0, lease_id)
+
+    _enroll(db_session, analyzed_protocol.id, RuntimeError("upstream down"))
+
+    row = db_session.execute(
+        select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == analyzed_protocol.id)
+    ).scalar_one()
+    assert row.reason == HEAD_NOT_DETERMINED_REASON
+    assert row.dirty_at > claimed_at
+
+    # The drain now runs its success bookkeeping: the delete must no-op.
+    _finish_success(db_session, claim)
+    db_session.expire_all()
+    survivor = db_session.execute(
+        select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == analyzed_protocol.id)
+    ).scalar_one()
+    assert survivor.lease_id is None  # lease released, row retained for the next tick
+
+
+def test_deferred_enrollment_is_visible_in_the_coverage_census(db_session, analyzed_protocol):
+    """A deferred contract has no ``monitored_contracts`` row, so a surface that
+    counts rows can only see it through the queue."""
+    from services.monitoring.tracking_plan_state import plan_coverage_counts
+
+    assert plan_coverage_counts(db_session)["enrollment_deferred_protocols"] == 0
+    _enroll(db_session, analyzed_protocol.id, RuntimeError("upstream down"))
+    assert plan_coverage_counts(db_session)["enrollment_deferred_protocols"] == 1
 
 
 def test_existing_row_still_reconciles_when_the_head_is_not_determined(db_session, analyzed_protocol):
@@ -213,6 +269,75 @@ def test_apply_never_rewinds_a_cursor_that_advanced_since_planning(db_session):
 
     assert apply_clamps(db_session, clamps) == 0
     assert _row(db_session, ADDRESS).last_scanned_block == 9000
+
+
+def test_clamp_record_survives_re_enrollment(db_session, analyzed_protocol):
+    """Review finding 2: enrollment rebuilds ``monitoring_config`` wholesale, so
+    without an explicit carry the clamp's own record of what was never scanned
+    is erased on the next pass — and the row goes back to presenting continuous
+    coverage over the interval, which is what the clamp exists to deny."""
+    from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY
+
+    _mk(db_session, ADDRESS, cursor=9_400_000, floor=0)
+    apply_clamps(db_session, plan_clamps(db_session, heads={"ethereum": HEAD}))
+    gaps = (_row(db_session, ADDRESS).monitoring_config or {})[SCAN_GAPS_KEY]
+
+    _enroll(db_session, analyzed_protocol.id, hex(HEAD))
+
+    config = _row(db_session, ADDRESS).monitoring_config or {}
+    assert config[SCAN_GAPS_KEY] == gaps
+    # The plan-plane rebuild still happened (this is not a config that was left alone).
+    assert "watch_ownership" in config
+
+
+def test_clamp_record_survives_a_caller_supplied_overwrite(api_client, db_session, monkeypatch):
+    """The route replaces the config wholesale too, and no caller authored the
+    scan-plane record."""
+    from routers import monitored
+    from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY
+
+    proto = Protocol(name=PROTO_NAME)
+    db_session.add(proto)
+    db_session.commit()
+    gaps = [{"from_block": 1, "to_block": 2, "reason": UNFLOORED_RUNAWAY}]
+    mc = _mk(db_session, ADDRESS, cursor=HEAD, floor=HEAD, config={SCAN_GAPS_KEY: gaps})
+
+    monkeypatch.setattr(monitored, "rpc_request", lambda *_a, **_kw: hex(HEAD))
+    resp = api_client.patch(
+        f"/api/monitored-contracts/{mc.id}",
+        json={"monitoring_config": {"watch_ownership": True}},
+        headers={"X-PSAT-Admin-Key": "test-admin-key"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["monitoring_config"][SCAN_GAPS_KEY] == gaps
+    assert resp.json()["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
+
+
+def test_target_block_refuses_to_span_chains(db_session, monkeypatch):
+    """Review finding 4: a block number is a fact about one chain. Fleet-wide it
+    would write a mainnet head as a Base row's cursor AND its enrollment floor —
+    a floor nothing witnessed."""
+    import scripts.clamp_monitoring_cursors as clamp
+
+    _mk(db_session, ADDRESS, cursor=9_400_000, floor=0)
+    _mk(db_session, ADDRESS, cursor=9_400_000, floor=0, chain="base")
+    monkeypatch.setattr(clamp, "SessionLocal", SessionFactory(db_session))
+
+    with pytest.raises(SystemExit):
+        clamp.main(["--target-block", str(HEAD)])  # no scope at all
+    with pytest.raises(SystemExit):
+        clamp.main(["--target-block", str(HEAD), "--address", ADDRESS])  # twin on two chains
+
+    assert _row_on(db_session, ADDRESS, "base").last_scanned_block == 9_400_000
+    assert clamp.main(["--target-block", str(HEAD), "--chain", "ethereum"]) == 0
+
+
+def _row_on(session, address: str, chain: str) -> MonitoredContract:
+    session.expire_all()
+    return session.execute(
+        select(MonitoredContract).where(MonitoredContract.address == address.lower(), MonitoredContract.chain == chain)
+    ).scalar_one()
 
 
 def test_main_dry_run_is_the_default_and_writes_nothing(db_session, monkeypatch, capsys):
