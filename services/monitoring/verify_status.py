@@ -78,11 +78,23 @@ def record_unresolvable_read(mc: MonitoredContract, controller_id: str | None) -
     Keyed on the controller rather than a polling field, because the absence of
     a bound entry is exactly why there is no field name to key on. One key per
     controller, so repeat occurrences do not grow the map.
+
+    Returns False — writing nothing — when the marker is already recorded. This
+    is called once per unbound hint OCCURRENCE, and an unbound controller is
+    usually one whose events are frequent (that is why it was hinted at all),
+    so re-stamping an identical value would emit a ``monitored_contracts``
+    UPDATE on every window forever, inside the same transaction that carries
+    the scanner's cursor UPDATE — the documented deadlock counterpart to the
+    poller. The state is idempotent, so the second write says nothing the first
+    did not.
     """
     if not isinstance(controller_id, str) or not controller_id:
         return False
+    key = f"{CONTROLLER_STATUS_PREFIX}{controller_id}"
     current = dict(mc.last_poll_status or {})
-    current[f"{CONTROLLER_STATUS_PREFIX}{controller_id}"] = VERIFY_NO_READ_BINDING
+    if current.get(key) == VERIFY_NO_READ_BINDING:
+        return False
+    current[key] = VERIFY_NO_READ_BINDING
     mc.last_poll_status = current
     return True
 

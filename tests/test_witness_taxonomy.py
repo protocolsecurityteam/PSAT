@@ -42,6 +42,7 @@ from services.monitoring.verify_status import (
     VERIFY_OVER_BUDGET,
     VERIFY_UNANSWERED,
     count_verification_read_gaps,
+    record_unresolvable_read,
 )
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from services.resolution.tracking_plan import build_control_tracking_plan
@@ -911,6 +912,11 @@ def test_deadlocked_verification_unit_rolls_back_without_killing_the_pass(db_ses
     assert db_session.query(MonitoredEvent).count() == 0
     db_session.refresh(mc)
     assert mc.last_known_state == {"rate": 7}
+    # ...but it does NOT report clean. A deadlocked unit takes its events AND
+    # its not-determined markers back with it, so this is the one failure in
+    # the pass that leaves no surviving signal of itself; a healthy-looking
+    # cycle would publish "nothing to see" for an interval nobody verified.
+    assert result.degraded is True
 
 
 def test_non_deadlock_db_error_is_not_swallowed_per_unit(db_session, seeded):
@@ -955,3 +961,29 @@ def test_reads_are_issued_before_any_write_is_staged(db_session, seeded):
         scan_for_events(db_session, "http://rpc.invalid")
 
     assert dirty_at_read_time == [False]
+
+
+def test_unbindable_hint_marker_converges(db_session, seeded):
+    """The marker is stamped once, not once per occurrence.
+
+    An unbound controller is usually one whose events are frequent — that is
+    why it was hinted at all — so re-stamping an identical value would emit a
+    monitored_contracts UPDATE on every window forever, inside the same
+    transaction that carries the scanner's cursor UPDATE. That is the
+    documented deadlock counterpart to the poller.
+    """
+    mc = seeded(WITNESS_TIER_HINT, with_plan=False)
+    key = "controller:state_variable:rate"
+
+    _process_window(db_session, _cohort(mc), _logs(2), 200, 210, {})
+    db_session.commit()
+    assert (mc.last_poll_status or {})[key] == VERIFY_NO_READ_BINDING
+
+    # Second pass over the same controller writes nothing new.
+    assert record_unresolvable_read(mc, "state_variable:rate") is False
+    _process_window(db_session, _cohort(mc), _logs(2), 220, 230, {})
+    assert mc not in db_session.dirty
+
+    # A different unbound controller still records its own key.
+    assert record_unresolvable_read(mc, "state_variable:other") is True
+    assert set(mc.last_poll_status or {}) == {key, "controller:state_variable:other"}

@@ -720,11 +720,28 @@ def _verification_read_order(dirty: dict[tuple[uuid.UUID, str], _DirtyController
     )
 
 
+@dataclass
+class _VerificationOutcome:
+    """One verification pass: the events to notify, and whether any unit's work
+    was lost.
+
+    ``units_failed`` exists because a deadlocked unit is recovered silently —
+    its rows AND its not-determined markers roll back together, so unlike every
+    other failure in this module it ends with no surviving signal at all. The
+    caller folds it into the pass's ``degraded`` flag, matching the poller's
+    ``chunks_failed > 0 ⇒ partial=True``: a pass that lost work must not report
+    clean.
+    """
+
+    events: list[MonitoredEvent]
+    units_failed: int = 0
+
+
 def _resolve_verification_reads(
     session: Session,
     dirty: dict[tuple[uuid.UUID, str], _DirtyController],
     rpc_by_chain: dict[str, str],
-) -> list[MonitoredEvent]:
+) -> _VerificationOutcome:
     """Read back every controller a hint occurrence marked this pass and
     publish only what the read proves.
 
@@ -752,7 +769,7 @@ def _resolve_verification_reads(
     Events are committed here, then returned for the caller to notify.
     """
     if not dirty:
-        return []
+        return _VerificationOutcome([])
 
     budget = max(0, _scan_int_env("PSAT_SCAN_MAX_VERIFY_READS_PER_PASS", DEFAULT_MAX_VERIFY_READS_PER_PASS))
     ordered = _verification_read_order(dirty)
@@ -799,6 +816,7 @@ def _resolve_verification_reads(
 
     # --- write phase: per chain, committed as its own unit ----------------
     new_events: list[MonitoredEvent] = []
+    units_failed = 0
     now = time.monotonic()
 
     if over:
@@ -929,13 +947,14 @@ def _resolve_verification_reads(
                 extra={"exc_type": type(getattr(exc, "orig", None) or exc).__name__},
             )
             # The unit's rows went back with it, so none of them are notified.
+            units_failed += 1
             for member, _answer in members:
                 _LAST_VERIFIED_AT.pop((member.monitored_contract_id, member.controller_id), None)
             continue
         new_events.extend(unit_events)
 
     _prune_verification_cursors()
-    return new_events
+    return _VerificationOutcome(new_events, units_failed=units_failed)
 
 
 def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
@@ -1160,7 +1179,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             len(dirty_controllers) - len(held_dirty),
         )
     try:
-        verified_events = _resolve_verification_reads(session, held_dirty, rpc_by_chain)
+        verification = _resolve_verification_reads(session, held_dirty, rpc_by_chain)
     except Exception as exc:
         logger.warning(
             "Verification-read pass failed: %s",
@@ -1171,10 +1190,16 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         # roll them back or abort the pass summary.
         session.rollback()
         degraded = True
-        verified_events = []
-    if verified_events:
-        _notify_committed_events(session, verified_events)
-        total_new_events.extend(verified_events)
+        verification = _VerificationOutcome([])
+    if verification.units_failed:
+        # A deadlocked unit rolled back its events AND its not-determined
+        # markers, so this is the one failure in the pass that leaves no
+        # surviving signal of itself. Reporting the cycle clean would publish
+        # "nothing to see" for an interval nobody verified.
+        degraded = True
+    if verification.events:
+        _notify_committed_events(session, verification.events)
+        total_new_events.extend(verification.events)
 
     # Budget-exhausted only if we stopped at the hard pass cap with work left.
     if windows_scanned >= max_windows_pass:
@@ -1203,6 +1228,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             "windows_scanned": windows_scanned,
             "cohorts": len(cohorts),
             "budget_exhausted": budget_exhausted,
+            "verification_units_failed": verification.units_failed,
         },
     )
     return ScanResult(
