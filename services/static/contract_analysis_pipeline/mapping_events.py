@@ -361,6 +361,93 @@ def discover_mapping_writer_events(contract: Any) -> list[WriterEventSpec]:
     return specs
 
 
+def member_witness_record(spec: WriterEventSpec) -> dict[str, Any]:
+    """JSON-clean correspondence record for the monitoring plane's F3
+    qualification — the proof that an occurrence of this event names the entry
+    that was written.
+
+    Sibling of ``predicate_artifacts._value_writer_spec`` rather than a reuse of
+    it: that one hard-codes ``direction: "set"`` and requires a non-null
+    ``value_position``, which drops exactly the ``add``/``remove`` specs
+    (``DenyFrom(address)``) whose whole payload is the key. Here the real
+    direction rides and ``value_position`` may be ``None`` — an event that
+    states no value states none, and the consumer publishes a key and a
+    direction without inventing a value.
+
+    ``key_positions_by_index`` is dropped for the same reason it is dropped
+    there: its ``int`` keys do not survive a JSONB round-trip.
+    """
+    value_position = spec.get("value_position")
+    return {
+        "mapping_name": spec["mapping_name"],
+        "event_signature": spec["event_signature"],
+        "event_name": spec["event_name"],
+        "key_position": int(spec["key_position"]),
+        "indexed_positions": [int(pos) for pos in spec.get("indexed_positions") or []],
+        "direction": spec["direction"],
+        "writer_function": spec.get("writer_function") or "",
+        "value_position": int(value_position) if value_position is not None else None,
+    }
+
+
+def multi_entry_writers(contract: Any) -> set[tuple[str, str]]:
+    """``(mapping_name, writer_function)`` pairs where ONE call writes more than
+    one entry of the mapping.
+
+    ``discover_mapping_writer_events`` deduplicates on
+    ``(mapping, event_signature, direction)``, so an ERC-20 ``transfer`` —
+    ``balances[from]`` and ``balances[to]`` under a single ``Transfer`` — keeps
+    only the first of the two writes and yields a record that names one entry.
+    A consumer publishing that record's key would name the sender and say
+    nothing about the recipient, while claiming to describe the event.
+    """
+    out: set[tuple[str, str]] = set()
+    for function in _contract_functions(contract):
+        if getattr(function, "is_constructor", False):
+            continue
+        keys_by_mapping: dict[str, set[str]] = {}
+        for mapping_name, key_vars, _value in _extract_index_writes(function):
+            if not mapping_name or not key_vars:
+                continue
+            keys_by_mapping.setdefault(mapping_name, set()).add(_var_name(key_vars[-1]))
+        name = getattr(function, "full_name", getattr(function, "name", ""))
+        for mapping_name, keys in keys_by_mapping.items():
+            if len(keys) > 1:
+                out.add((mapping_name, name))
+    return out
+
+
+def member_witness_records(contract: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    """``(mapping_name, event_signature)`` → the one correspondence record that
+    pair proves.
+
+    Two omissions, each because the event does not state a single entry change:
+
+      * a pair matched by several specs that disagree on key/value position or
+        direction — the event says an entry moved without saying which way; and
+      * a pair whose writer changes SEVERAL entries of the mapping in one call
+        (:func:`multi_entry_writers`) — the record names one of them, and a
+        one-entry claim over a two-entry write is a false description of the
+        event, not a partial one.
+    """
+    multi_entry = multi_entry_writers(contract)
+    by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for spec in discover_mapping_writer_events(contract):
+        mapping_name = spec.get("mapping_name")
+        signature = spec.get("event_signature")
+        if not mapping_name or not signature:
+            continue
+        if (mapping_name, spec.get("writer_function") or "") in multi_entry:
+            continue
+        by_pair.setdefault((mapping_name, signature), []).append(member_witness_record(spec))
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for pair, records in by_pair.items():
+        distinct = {(r["key_position"], r["value_position"], r["direction"]) for r in records}
+        if len(distinct) == 1:
+            out[pair] = records[0]
+    return out
+
+
 def _match_event_value_position(
     emissions: list[tuple[str, list[Any], list[int]]],
     value_var: Any,

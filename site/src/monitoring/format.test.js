@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "./format.js";
+import { shortenAddress } from "../graph.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";
 const ADDR_B = "0x2222222222222222222222222222222222222222";
@@ -313,6 +314,58 @@ describe("decodeEvent — state poll", () => {
     expect(result.title).toBe("owner changed (polled)");
     expect(result.sub).toContain("→");
   });
+
+  it("compacts wei-scale integers and appends the relative delta", () => {
+    // The poller's real shape: old_value/new_value, unbounded uint256 strings.
+    // No decimals are known, so no unit is assumed — scientific notation plus
+    // a delta derivable from the pair alone.
+    const result = decodeEvent(
+      evt("state_changed_poll", {
+        field: "_totalSupply",
+        old_value: "91887099948048325164605122",
+        new_value: "91953892477145219780348471",
+      }),
+    );
+    expect(result.sub).toBe("9.1887e25 → 9.1953e25 (+0.072%)");
+  });
+
+  it("leaves small numeric values verbatim with no delta", () => {
+    const result = decodeEvent(
+      evt("state_changed_poll", { field: "threshold", old_value: "2", new_value: "3" }),
+    );
+    expect(result.sub).toBe("2 → 3");
+  });
+
+  it("marks a change too small for three decimals as sub-threshold, not zero", () => {
+    const result = decodeEvent(
+      evt("state_changed_poll", {
+        field: "_totalSupply",
+        old_value: "1000000000000000000000000000",
+        new_value: "1000000000000000000000000001",
+      }),
+    );
+    expect(result.sub).toContain("(+<0.001%)");
+  });
+
+  it("shortens polled address values like the verified renderer does", () => {
+    const result = decodeEvent(
+      evt("state_changed_poll", { field: "owner", old: ADDR_A, new: ADDR_B }),
+    );
+    expect(result.sub.length).toBeLessThan(ADDR_A.length + ADDR_B.length);
+  });
+});
+
+describe("decodeEvent — value_changed numeric compaction", () => {
+  it("compacts a verified wei-scale diff the same way", () => {
+    const result = decodeEvent(
+      evt("value_changed:state_variable:cap", {
+        old: "5000000000000000000000000",
+        new: "6000000000000000000000000",
+      }),
+    );
+    expect(result.title).toBe("cap changed (verified)");
+    expect(result.sub).toBe("5.0000e24 → 6.0000e24 (+20.000%)");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -498,5 +551,72 @@ describe("state_changed:<controller_id>", () => {
       data: { old_owner: ADDR_A, new_owner: ADDR_B, effect_tags: { writes: ["owner"] } },
     });
     expect(result.title).toBe("Ownership transferred");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Witnessed vocabulary — the types the taxonomy mints once a change is proven
+// ---------------------------------------------------------------------------
+
+describe("value_changed:<controller_id>", () => {
+  const ownerRow = {
+    event_type: "value_changed:state_variable:owner",
+    data: { field: "owner", controller_id: "state_variable:owner", old: ADDR_A, new: ADDR_B, witness: "read_verified" },
+  };
+
+  it("renders the read-verified diff, not the emitter's write set", () => {
+    const result = decodeEvent(ownerRow);
+    expect(result.title).toBe("owner changed (verified)");
+    expect(result.sub).toBe("0x1111...1111 → 0x2222...2222");
+  });
+
+  it("takes its kind from the slot the read proved moved", () => {
+    expect(eventKind(ownerRow)).toBe("owner");
+    expect(eventKindLabel(ownerRow)).toBe("Ownership");
+    expect(eventSeverity(ownerRow)).toBe("critical");
+  });
+
+  it("falls back to the state kind for a slot with no mapping", () => {
+    const row = { event_type: "value_changed:state_variable:feeBps", data: { old: 30, new: 50 } };
+    expect(eventKind(row)).toBe("state");
+    expect(decodeEvent(row).sub).toBe("30 → 50");
+  });
+
+  it("is not re-titled by a donated write set", () => {
+    // The emitter that hinted at this read wrote several slots; only the
+    // read's own field is the claim.
+    const row = {
+      event_type: "value_changed:state_variable:feeBps",
+      data: { field: "feeBps", old: 30, new: 50, effect_tags: { writes: ["owner", "feeBps"] } },
+    };
+    expect(decodeEvent(row).title).toBe("feeBps changed (verified)");
+  });
+});
+
+describe("member_changed:<mapping_var>", () => {
+  it("renders the key/value/direction from data, never from the type", () => {
+    const row = {
+      event_type: "member_changed:fromDenyList",
+      data: { key: ADDR_A, value: true, direction: "add" },
+    };
+    const result = decodeEvent(row);
+    expect(result.title).toBe("fromDenyList entry added");
+    expect(result.sub).toBe("0x1111...1111 = true");
+    expect(row.event_type).not.toContain(ADDR_A);
+  });
+
+  it("names no verb when the event stated no direction", () => {
+    const result = decodeEvent({ event_type: "member_changed:peers", data: { key: "42" } });
+    expect(result.title).toBe("peers entry changed");
+  });
+});
+
+describe("state_changed_poll old/new key aliases", () => {
+  it("renders the poller's own old_value/new_value shape", () => {
+    const result = decodeEvent(
+      evt("state_changed_poll", { field: "owner", old_value: ADDR_A, new_value: ADDR_B }),
+    );
+    // addresses shorten like every other renderer; the aliases are what this pins
+    expect(result.sub).toBe(`${shortenAddress(ADDR_A)} → ${shortenAddress(ADDR_B)}`);
   });
 });

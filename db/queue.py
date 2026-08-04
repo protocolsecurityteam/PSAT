@@ -1636,6 +1636,52 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
     return new_row
 
 
+def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
+    """The analyzer era *job*'s static artifacts were produced under, or None.
+
+    ``jobs.analysis_schema_version`` is stamped only on the fetch path
+    (``workers/discovery``): a same-address cache hit copies the donor's
+    artifacts and returns before the stamp, so the column reads NULL on 32 of
+    the working DB's 86 completed cache-hit jobs. NULL is not "current" — it is
+    the absence of the fact — and a consumer that treats it as current stamps an
+    era nothing witnessed onto the bundle.
+
+    The fact is still recoverable: ``copy_static_cache`` copies the donor's
+    artifacts verbatim, so the donor's era IS this job's artifacts' era. The
+    chain is followed until a stamped job is found.
+
+    **Walked to termination, not to a hop budget.** Every cache-hit re-run of an
+    address appends one hop, so the chain grows without bound on exactly the
+    addresses that get re-analyzed most; measured on the working DB, all 32
+    unstamped jobs terminate at a stamped v5 donor between 1 and 14 hops away —
+    a fixed budget silently converts the far end of that distribution into
+    "no witnessed era" and refuses supply for the busiest contracts. Termination
+    rests on the visited set instead: each hop moves to a distinct job id, so a
+    finite table is exhausted in finite steps whatever the links look like.
+    """
+    version = getattr(job, "analysis_schema_version", None)
+    if isinstance(version, int):
+        return version
+
+    seen: set[str] = {str(getattr(job, "id", ""))}
+    current: Job | None = job
+    while True:
+        request = current.request if current is not None and isinstance(current.request, dict) else {}
+        donor_id = request.get("cache_source_job_id")
+        if not donor_id or str(donor_id) in seen:
+            return None
+        seen.add(str(donor_id))
+        try:
+            current = session.get(Job, donor_id)
+        except Exception:
+            return None
+        if current is None:
+            return None
+        version = getattr(current, "analysis_schema_version", None)
+        if isinstance(version, int):
+            return version
+
+
 def find_completed_static_cache(
     session: Session,
     address: str,

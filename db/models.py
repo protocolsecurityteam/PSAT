@@ -1474,7 +1474,12 @@ class MonitoredEvent(Base):
     monitored_contract_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("monitored_contracts.id", ondelete="CASCADE"), nullable=False
     )
-    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 100, not 50: the witness taxonomy mints ``value_changed:<controller_id>``
+    # / ``member_changed:<mapping_var>`` and a real controller id overflows 50.
+    # ``event_topics.MAX_EVENT_TYPE_LENGTH`` mirrors this width and demotes any
+    # spec whose type would not fit — a truncated controller id names a
+    # different slot, so overflow is a demotion, never a trim.
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     block_number: Mapped[int] = mapped_column(Integer, nullable=False)
     tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
     # On-chain log index — the scan path populates it so identity is
@@ -2491,6 +2496,11 @@ class ContractMaterialization(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     builder_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Who established this row and from what: ``{produced_by, source_job_id,
+    # materialized_at}`` (see ``db.contract_materializations.build_provenance``).
+    # NULL is a row written before the column existed — no provenance was
+    # recorded, which is not the same as a producer we happen to assume.
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     materialized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()"), nullable=False
     )

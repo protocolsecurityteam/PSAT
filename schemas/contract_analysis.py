@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from typing_extensions import NotRequired
 
@@ -236,6 +236,24 @@ class AssociatedEventRequired(TypedDict):
 
 class AssociatedEvent(AssociatedEventRequired, total=False):
     effect_tags: EffectTags
+    # F3 qualification, both absent unless PROVEN
+    # (services/static/contract_analysis_pipeline/writer_openness.py):
+    #
+    #   member_witness   — the emit-write correspondence record proving this
+    #                      event's args carry the written entry's key (and,
+    #                      when the event states one, its value + direction).
+    #   writer_openness  — ``"restricted"`` when every externally-callable path
+    #                      that can emit this event is proven to restrict its
+    #                      caller. Never ``"open"``: proving that needs the
+    #                      resolution plane's earned-public projection, and the
+    #                      monitoring plane reads an absent key as the
+    #                      not-determined third state either way.
+    #
+    # Together they are what lets the watcher publish a mapping/struct member
+    # change directly (``member_changed:<mapping_var>``) instead of treating an
+    # occurrence as bare activity.
+    member_witness: dict[str, Any]
+    writer_openness: str
 
 
 class ControllerTypeComponent(TypedDict):

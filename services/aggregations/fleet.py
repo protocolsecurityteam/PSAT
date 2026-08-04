@@ -44,7 +44,10 @@ from db.queue import (
     HEARTBEAT_EVENT_INDEXER,
     HEARTBEAT_PROTOCOL_SCANNER,
 )
+from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
+from services.monitoring.tracking_plan_state import plan_coverage_counts
+from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 from .audits_pipeline import build_audits_pipeline
@@ -405,6 +408,24 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
         "by_chain": mon_by_chain,
+        # Liveness says the scanner is running; this says what it is running
+        # WITH. A contract watching on the baseline registry alone is quiet for
+        # the same reason a healthy one is, and without this census the two are
+        # indistinguishable on the page.
+        "plan_coverage": plan_coverage_counts(session),
+        # The other half of "what is it running with": a plan can be current and
+        # its hint controllers still unverified, because the read failed, was
+        # skipped over budget, or is bound to nothing. Point-in-time by
+        # construction (``basis``) — the per-pass counts that do not depend on a
+        # marker surviving ride the scanner's own heartbeat, published above as
+        # ``daemons[protocol_scanner].detail.verification_reads_*``.
+        "verification_gaps": count_verification_read_gaps(session),
+        # And the supply side of the same question: ``plan_coverage`` counts
+        # contracts watching without a current plan, this counts the rebuild
+        # work that would fix them and how much of it the budget allows today.
+        # A schema bump moves the whole fleet into here at once, which is the
+        # moment this needs to be visible rather than inferred.
+        "materialization_backlog": materialization_backlog(session, now=now),
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}

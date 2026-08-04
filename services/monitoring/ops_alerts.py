@@ -40,8 +40,11 @@ from db.queue import (
     HEARTBEAT_OPS_ALERTER,
     HEARTBEAT_PROTOCOL_SCANNER,
 )
+from services.monitoring.materialization_reconciler import materialization_backlog
 from services.monitoring.notifier import _send_discord
 from services.monitoring.process_meta import ERROR, PROCESS_META, STALE, classify, stale_after_seconds
+from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER, plan_coverage_counts
+from services.monitoring.verify_status import count_verification_read_gaps
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,17 @@ DEFAULT_SCAN_LAG_ALERT = 50_000
 # collides with the scanner "dead" (stale) alert — they are independent alarms.
 _BEHIND_SUFFIX = ":behind"
 
+# Third alarm family: monitored contracts watching without a current tracking
+# plan (dated, or none at all). Not a daemon — the processes are all fresh; the
+# thing that has degraded is what they are watching FOR.
+_COVERAGE_KEY = "tracking_plan_coverage"
+
+# Log-only, never an alert dedupe key — see :func:`collect_verification_gaps`.
+_VERIFICATION_GAP_KEY = "verification_read_gaps"
+
+# Log-only for the same reason — see :func:`collect_materialization_backlog`.
+_MATERIALIZATION_BACKLOG_KEY = "materialization_backlog"
+
 
 def _interval_s() -> int:
     return int(os.getenv("PSAT_OPS_ALERT_INTERVAL_S", str(DEFAULT_INTERVAL_S)))
@@ -65,6 +79,21 @@ def _cooldown_s() -> int:
 
 def _scan_lag_alert() -> int:
     return int(os.getenv("PSAT_SCAN_LAG_ALERT", str(DEFAULT_SCAN_LAG_ALERT)))
+
+
+def _coverage_alert_threshold() -> int:
+    """How many contracts may watch without a current plan before it pages.
+
+    Default 0 = **no threshold asserted**, so the alarm is silent until an
+    operator sets one. What counts as an acceptable coverage shortfall is a
+    policy nobody has decided yet, and a built-in default would be this module
+    inventing one. The census itself is published unconditionally (``/api/fleet``
+    and :func:`collect_plan_coverage`) — visibility is not gated on the alarm.
+    """
+    try:
+        return max(0, int(os.getenv("PSAT_PLAN_COVERAGE_ALERT", "0")))
+    except ValueError:
+        return 0
 
 
 def _webhook_url() -> str | None:
@@ -198,12 +227,85 @@ def collect_chain_health(session: Session, *, now: datetime | None = None) -> li
     return sorted(out, key=lambda d: (d["chain_id"] is None, d["chain_id"] or 0, d["name"]))
 
 
-def _current_problems(beats: dict[str, dict[str, Any]], now: datetime) -> dict[str, dict[str, Any]]:
+def collect_plan_coverage(session: Session) -> dict[str, Any]:
+    """Tracking-plan census for the monitored fleet.
+
+    Thin pass-through to :func:`plan_coverage_counts` so the watchdog and the
+    fleet view read one implementation — "quiet because nothing happened" and
+    "quiet because nothing is being watched" must not be a per-surface judgment.
+    """
+    return plan_coverage_counts(session)
+
+
+def collect_verification_gaps(session: Session) -> dict[str, Any]:
+    """Verification-read gap census for the monitored fleet (F9b on the F9a
+    surface).
+
+    Same pass-through role :func:`collect_plan_coverage` plays, and deliberately
+    **not** a fourth alarm family: the census counts markers present at read
+    time, not gaps that occurred, so a threshold over it would fire on when the
+    poller last rewrote a status map as much as on anything about the reads. The
+    counts are published unconditionally instead — here, on ``/api/fleet``, and
+    per-pass on the scanner heartbeat — and the tick logs them when non-zero so
+    the condition has a timestamped record even after the markers are erased.
+    """
+    return count_verification_read_gaps(session)
+
+
+def collect_materialization_backlog(session: Session) -> dict[str, Any]:
+    """Materialization-supply backlog for the monitored fleet (F9c).
+
+    The same pass-through role :func:`collect_plan_coverage` plays, and the same
+    deliberate non-alarm: the existing coverage alarm already fires on contracts
+    watching without a current plan, and this counts the rebuild work behind
+    that number. A second threshold over the same condition would double-alert
+    on one fact, so the counts are published unconditionally instead — here, on
+    ``/api/fleet``, and in the tick log while the backlog is non-empty.
+    """
+    return materialization_backlog(session)
+
+
+def _log_materialization_backlog(backlog: dict[str, Any]) -> None:
+    """One INFO per tick while any monitored contract lacks a current row."""
+    contracts = backlog.get("contracts")
+    if not isinstance(contracts, int) or contracts <= 0:
+        return
+    logger.info(
+        "ops: %d monitored contract(s) without a current materialization (%d queueable today)",
+        contracts,
+        backlog.get("queueable_now", 0),
+        extra={"daemon": _MATERIALIZATION_BACKLOG_KEY, **backlog},
+    )
+
+
+def _log_verification_gaps(gaps: dict[str, Any]) -> None:
+    """One INFO per tick carrying the census, only when something is marked.
+
+    Sums every marker bucket — ``contracts_affected`` is excluded because it
+    counts contracts, not markers.
+    """
+    marked = sum(v for key, v in gaps.items() if isinstance(v, int) and key != "contracts_affected")
+    if not marked:
+        return
+    logger.info(
+        "ops: %d verification read(s) currently marked not determined",
+        marked,
+        extra={"daemon": _VERIFICATION_GAP_KEY, **gaps},
+    )
+
+
+def _current_problems(
+    beats: dict[str, dict[str, Any]],
+    now: datetime,
+    coverage: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Map dedupe-key → problem info for every process currently in trouble.
 
-    Two independent alarm families, each its own key:
-      * ``<process>``            — a daemon gone stale/error ("dead").
-      * ``<scanner>:behind``     — the scanner's head-lag over threshold.
+    Three independent alarm families, each its own key:
+      * ``<process>``               — a daemon gone stale/error ("dead").
+      * ``<scanner>:behind``        — the scanner's head-lag over threshold.
+      * ``tracking_plan_coverage``  — contracts watching without a current plan,
+        over an operator-set threshold (off by default).
     The alerter never pages on its own silence (it is the thing running).
     """
     problems: dict[str, dict[str, Any]] = {}
@@ -231,6 +333,26 @@ def _current_problems(beats: dict[str, dict[str, Any]], now: datetime) -> dict[s
             "status": "behind",
             "max_lag_blocks": int(lag),
         }
+
+    threshold = _coverage_alert_threshold()
+    if threshold and coverage:
+        # Dated plans and no plan at all are both "not watching what the
+        # analysis says to watch"; they are counted together for the alarm and
+        # stay separate in the payload. A caller-authored config is excluded: an
+        # operator chose it, so paging on it would page them for their own
+        # decision (the bucket stays in the payload either way).
+        not_determined = coverage.get("not_determined") or {}
+        uncovered = int(coverage.get("ready_stale", 0)) + sum(
+            int(n) for token, n in not_determined.items() if token != CONFIG_SUPPLIED_BY_CALLER
+        )
+        if uncovered > threshold:
+            problems[_COVERAGE_KEY] = {
+                "kind": "coverage",
+                "daemon": _COVERAGE_KEY,
+                "status": "degraded",
+                "uncovered": uncovered,
+                "contracts": int(coverage.get("contracts", 0)),
+            }
     return problems
 
 
@@ -253,7 +375,23 @@ def _post_discord(webhook_url: str, embed: dict[str, Any]) -> None:
 def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
     """One ERROR log (always) + one Discord post (if a webhook is configured)."""
     daemon = problem["daemon"]
-    if problem["kind"] == "behind":
+    if problem["kind"] == "coverage":
+        logger.error(
+            "ops: %d monitored contract(s) are watching without a current tracking plan",
+            problem["uncovered"],
+            extra={
+                "daemon": daemon,
+                "status": problem["status"],
+                "uncovered": problem["uncovered"],
+                "contracts": problem["contracts"],
+            },
+        )
+        fields = [
+            {"name": "Without a current plan", "value": str(problem["uncovered"]), "inline": True},
+            {"name": "Monitored contracts", "value": str(problem["contracts"]), "inline": True},
+        ]
+        title = "Monitoring coverage degraded"
+    elif problem["kind"] == "behind":
         logger.error(
             "ops: scanner %s is behind head",
             daemon,
@@ -284,7 +422,10 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
 
 def _emit_recovery(key: str, prior: dict[str, Any], *, webhook_url: str | None) -> None:
     daemon = prior.get("daemon", key)
-    logger.info("ops: daemon %s recovered", daemon, extra={"daemon": daemon})
+    # The coverage alarm is not a daemon, so it recovers as a subject, not a
+    # process — same machinery, honest wording.
+    subject = "coverage" if prior.get("kind") == "coverage" else "daemon"
+    logger.info("ops: %s %s recovered", subject, daemon, extra={"daemon": daemon})
     if webhook_url:
         _post_discord(
             webhook_url,
@@ -351,7 +492,10 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
             {"p": HEARTBEAT_OPS_ALERTER},
         ).scalar()
 
-    problems = _current_problems(beats, now)
+    coverage = collect_plan_coverage(session) if _coverage_alert_threshold() else None
+    _log_verification_gaps(collect_verification_gaps(session))
+    _log_materialization_backlog(collect_materialization_backlog(session))
+    problems = _current_problems(beats, now, coverage)
     cooldown = _cooldown_s()
 
     new_alerts: dict[str, Any] = {}
