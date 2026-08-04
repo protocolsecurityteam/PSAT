@@ -169,3 +169,58 @@ describe("buildTimeline — an unknown era boundary is not a boundary value", ()
     expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBe(shortenAddress(CUR));
   });
 });
+
+describe("buildTimeline — read-witnessed rows carry no block claim", () => {
+  // The poll and verification-read paths write block_number 0 + tx_hash ''
+  // as a placeholder (there is no on-chain log). Block 0 read literally falls
+  // under any enrollment boundary and the row would be dropped as
+  // pre-enrollment history.
+  function pollEv(id, type, data, at) {
+    return {
+      id,
+      event_type: type,
+      block_number: 0,
+      tx_hash: "",
+      data,
+      detected_at: at,
+    };
+  }
+
+  it("renders a state_changed_poll row above the boundary, not as history", () => {
+    const out = buildTimeline({
+      events: [
+        pollEv("e-poll", "state_changed_poll", { field: "_totalSupply", old_value: "1", new_value: "2" }, "2026-08-04T20:15:00Z"),
+        ev("e-role", "role_granted", 260, {}),
+      ],
+      proxy: null,
+      enrollmentBlock: 250,
+      isProxy: false,
+    });
+    const row = out.above.find((r) => r.key === "ev:e-poll");
+    expect(row).toBeTruthy();
+    expect(row.block).toBeNull(); // no block claim, floats by timestamp
+    expect(out.above[0].key).toBe("ev:e-poll"); // null block sorts to the top
+    expect(out.below).toHaveLength(0);
+  });
+
+  it("treats value_changed rows the same way", () => {
+    const out = buildTimeline({
+      events: [pollEv("e-vc", "value_changed:state_variable:feeRecipient", { old: "0x1", new: "0x2" }, "2026-08-04T20:15:00Z")],
+      proxy: null,
+      enrollmentBlock: 250,
+      isProxy: false,
+    });
+    expect(out.above.map((r) => r.key)).toContain("ev:e-vc");
+  });
+
+  it("still reads a REAL block 0 with a tx_hash as a block claim", () => {
+    const out = buildTimeline({
+      events: [ev("e-genesis", "role_granted", 0, {})],
+      proxy: null,
+      enrollmentBlock: 250,
+      isProxy: false,
+    });
+    // a genuine on-chain block-0 log (tx_hash present) stays sub-boundary
+    expect(out.above.find((r) => r.key === "ev:e-genesis")).toBeUndefined();
+  });
+});

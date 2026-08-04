@@ -86,7 +86,13 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
   for (const ev of events) {
     const kind = eventKind(ev);
     const decoded = decodeEvent(ev);
-    const block = typeof ev.block_number === "number" ? ev.block_number : null;
+    const rawBlock = typeof ev.block_number === "number" ? ev.block_number : null;
+    // Read-witnessed rows (state_changed_poll, value_changed:*) carry
+    // block_number 0 + no tx_hash as a placeholder — there is no on-chain log
+    // to point at. Rendered as a real block 0 they'd fall under the enrollment
+    // boundary and be dropped as pre-enrollment history; blockless rows float
+    // to the top by timestamp instead.
+    const block = rawBlock === 0 && !ev.tx_hash ? null : rawBlock;
     const isUpgrade = kind === "upgrade";
     const implAddr = isUpgrade ? ev.data?.implementation : null;
     if (isUpgrade && block != null) seenUpgrades.add(upgradeKey(block, implAddr));
