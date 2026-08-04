@@ -76,12 +76,20 @@ def salience_rank(level: str | None) -> int:
     return SALIENCE_ORDER.get(level or "", SALIENCE_ORDER[SALIENCE_NOT_DETERMINED])
 
 
-def max_salience(*levels: str | None) -> str:
-    """The strongest of *levels*. ``not_determined`` and ``notable`` share a
-    rank, so ties resolve to ``notable`` — the level that states a finding —
-    only when a ``notable`` is actually among the inputs."""
+def max_salience(first: str | None, *rest: str | None) -> str:
+    """The strongest of the given levels. ``not_determined`` and ``notable``
+    share a rank, so ties resolve to ``notable`` — the level that states a
+    finding — only when a ``notable`` is actually among the inputs.
+
+    At least one level is REQUIRED. The seed of a max fold over an empty
+    sequence would have to be ``routine``, and a ``routine`` returned because
+    there was nothing to compare is exactly the minted-from-absence level the
+    mechanical gate forbids. A caller with a possibly-empty sequence must
+    supply its own floor as *first* (``max_salience(SALIENCE_NOTABLE, *xs)``),
+    which states what an empty sequence means rather than defaulting it.
+    """
     best = SALIENCE_ROUTINE
-    for level in levels:
+    for level in (first, *rest):
         candidate = level if level in SALIENCE_VALUES else SALIENCE_NOT_DETERMINED
         if salience_rank(candidate) > salience_rank(best):
             best = candidate

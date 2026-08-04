@@ -194,12 +194,21 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
 // and how many were withheld. The count is not optional bookkeeping: a view
 // that hides rows without saying how many is the suppression this axis exists
 // to prevent (invariant 4), so every caller renders it.
+// The per-section counts are not bookkeeping either: the Timeline's empty
+// states are claims about what EXISTS (an earned negative, a hedge, or an
+// answer), and a section the filter emptied has not earned any of them. It
+// needs to know which of its empty sections are empty because nothing is there
+// and which are empty because it was told not to draw them.
 export function filterTimelineBySalience({ above = [], below = [] }, minSalience) {
   const keptAbove = above.filter((row) => salienceAllows(row.salience, minSalience));
   const keptBelow = below.filter((row) => salienceAllows(row.salience, minSalience));
+  const hiddenAbove = above.length - keptAbove.length;
+  const hiddenBelow = below.length - keptBelow.length;
   return {
     above: keptAbove,
     below: keptBelow,
-    hidden: above.length - keptAbove.length + (below.length - keptBelow.length),
+    hiddenAbove,
+    hiddenBelow,
+    hidden: hiddenAbove + hiddenBelow,
   };
 }

@@ -89,6 +89,25 @@ ENRICHERS: dict[str, Enricher] = {}
 # at all.
 NEEDS_TX: frozenset[str] = frozenset()
 
+# Invariant 8, enforced rather than documented: enrichment is ADDITIVE. These
+# are the only ``data`` keys an enricher may write. The list is closed on
+# purpose — ``witness_tier`` is read by ``notifier._may_notify`` and
+# ``historical`` by the scanner's notify gate, so an enricher that returned
+# either would move a side-effect decision from the taxonomy to a decoder. The
+# driver is the natural chokepoint: every enricher's output passes through it,
+# and a rejected key is logged rather than dropped in silence.
+ENRICHABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "safe_exec",
+        "correlated_events",
+        "correlated_scope",
+        "caused_by",
+        "heuristics",
+        "salience",
+        "salience_basis",
+    }
+)
+
 
 def _fetch_txs(
     rpc_url: str | None,
@@ -112,6 +131,30 @@ def _fetch_txs(
         chain_id,
     )
     return {}, frozenset()
+
+
+def _admit_keys(
+    produced: Mapping[str, Any],
+    event: MonitoredEvent,
+    mc: MonitoredContract,
+) -> dict[str, Any]:
+    """The subset of *produced* an enricher is allowed to write (invariant 8).
+
+    A rejected key is logged, never dropped in silence: an enricher trying to
+    write ``witness_tier`` or ``event_type`` is a bug about who decides what a
+    row claims, and it must be visible as one rather than mysteriously
+    ineffective.
+    """
+    admitted = {key: value for key, value in produced.items() if key in ENRICHABLE_KEYS}
+    rejected = sorted(set(produced) - ENRICHABLE_KEYS)
+    if rejected:
+        logger.warning(
+            "Enricher for %s on %s returned non-additive key(s) %s; refused",
+            event.event_type,
+            mc.address,
+            ", ".join(rejected),
+        )
+    return admitted
 
 
 def _contracts_for(session: Session, events: list[MonitoredEvent]) -> dict[Any, MonitoredContract]:
@@ -163,7 +206,16 @@ def enrich_events(
         mc = mc_by_id.get(event.monitored_contract_id)
         if mc is None:
             continue
-        by_chain.setdefault(mc.chain or "ethereum", []).append((event, mc))
+        if not mc.chain:
+            # No chain means no endpoint and no chain_id for the URL↔chain
+            # guard. Defaulting one here would enrich a row against whatever
+            # ethereum answered and publish it as this contract's decode.
+            logger.warning(
+                "Enrichment skipped for %s: the monitored contract names no chain",
+                mc.address,
+            )
+            continue
+        by_chain.setdefault(mc.chain, []).append((event, mc))
 
     changed: list[tuple[MonitoredEvent, MonitoredContract]] = []
 
@@ -177,19 +229,24 @@ def enrich_events(
             }
         )
         try:
-            txs, over_budget = _fetch_txs(rpc_by_chain.get(chain), chain_id_for(chain), hashes)
+            # chain_id_for is inside the guard with the fetch it feeds: this
+            # function's contract is that it never raises, and chain_rpc is
+            # free to become fail-loud on an unknown chain. An unresolvable
+            # chain must cost that chain its enrichment, never the window.
+            chain_id = chain_id_for(chain)
+            txs, over_budget = _fetch_txs(rpc_by_chain.get(chain), chain_id, hashes)
         except Exception as exc:
             logger.warning(
-                "Enrichment transaction fetch failed for %s: %s",
+                "Enrichment setup failed for %s; that chain is not enriched this pass: %s",
                 chain,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
-            txs, over_budget = {}, frozenset()
+            continue
 
         ctx = EnrichmentContext(
             chain=chain,
-            chain_id=chain_id_for(chain),
+            chain_id=chain_id,
             session=session,
             txs=txs,
             over_budget=over_budget,
@@ -212,8 +269,11 @@ def enrich_events(
                 continue
             if not produced:
                 continue
+            additive = _admit_keys(produced, event, mc)
+            if not additive:
+                continue
             merged = dict(event.data or {})
-            merged.update(produced)
+            merged.update(additive)
             event.data = merged
             flag_modified(event, "data")
             changed.append((event, mc))

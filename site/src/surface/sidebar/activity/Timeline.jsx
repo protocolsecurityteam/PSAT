@@ -164,13 +164,45 @@ function TimelineRows({ rows, chain, now }) {
 //
 // It changes nothing drawn from rows we have; it governs only the empty states.
 // The default is "pending" so that a caller who forgets the prop claims nothing.
-export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, chain, now, historyState = "pending" }) {
+//
+// `hiddenAbove` / `hiddenBelow` are the rows the caller's salience threshold
+// removed from each section. They exist because EVERY empty state below is a
+// claim about what exists — an earned negative, a hedge, or an answer — and a
+// section the filter emptied has earned none of them. A filter-emptied list
+// rendered as "no activity" is the same unwitnessed absence claim the
+// monitoring plane was overhauled to stop making, one layer up. Both default
+// to 0 so a caller that does not filter behaves exactly as before.
+export function Timeline({
+  above,
+  below,
+  boundaryBlock,
+  boundaryDate,
+  isProxy,
+  chain,
+  now,
+  historyState = "pending",
+  hiddenAbove = 0,
+  hiddenBelow = 0,
+}) {
   const dateLabel = boundaryDate
     ? new Date(boundaryDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
     : null;
   const hasBoundary = boundaryBlock != null;
 
   if (!above.length && !below.length && !hasBoundary) {
+    const hidden = hiddenAbove + hiddenBelow;
+    if (hidden > 0) {
+      // Rows exist and were withheld. Saying "no activity recorded yet" here
+      // would be a statement about the contract; this is a statement about the
+      // filter, which is the only thing that happened.
+      return (
+        <div className="ps-activity-empty">
+          {hidden === 1
+            ? "1 event is hidden by the current filter."
+            : `${hidden} events are hidden by the current filter.`}
+        </div>
+      );
+    }
     return (
       <div className="ps-activity-empty">
         {historyState === "pending"
@@ -199,6 +231,16 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
 
       {hasBoundary && below.length ? (
         <TimelineRows rows={below} chain={chain} now={now} />
+      ) : hasBoundary && hiddenBelow > 0 ? (
+        // Back-filled rows exist below the line and the filter withheld them.
+        // Checked BEFORE the historyState chain: the history read answered
+        // (that is where these rows came from), so neither the hedge nor the
+        // absence prose applies — only the filter does.
+        <div className="ps-activity-empty">
+          {hiddenBelow === 1
+            ? "1 back-filled upgrade is hidden by the current filter."
+            : `${hiddenBelow} back-filled upgrades are hidden by the current filter.`}
+        </div>
       ) : hasBoundary && historyState === "pending" ? (
         <div className="ps-activity-empty">Checking for earlier activity…</div>
       ) : hasBoundary && historyState === "not_determined" ? (

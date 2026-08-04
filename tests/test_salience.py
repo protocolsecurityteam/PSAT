@@ -1010,3 +1010,161 @@ def test_min_salience_never_overrides_the_tier_gate(db_session, notify_env):
     with patch("services.monitoring.notifier._send_discord") as send:
         notify_protocol_events(db_session, [event])
     assert send.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# §5b — the API boundary
+# ---------------------------------------------------------------------------
+
+
+def test_the_api_passes_salience_through_verbatim(db_session, api_client, make_mc):
+    """``list_monitored_events`` serializes ``data`` whole — no key whitelist,
+    no projection — so the level and its basis reach the frontend for free.
+    Pinned because the frontend's ``eventSalience`` reads exactly this, and a
+    field silently dropped at the boundary would render as ``not_determined``
+    on every row while the DB held the real answer."""
+    mc = make_mc()
+    _seed_event(
+        db_session,
+        mc,
+        "ownership_transferred",
+        {
+            "new_owner": ADDR(9),
+            "salience": sal.SALIENCE_ALERT,
+            "salience_basis": [sal.BASIS_CANONICAL_CONFIG_FAMILY],
+        },
+    )
+
+    body = api_client.get(f"/api/monitored-events?address={mc.address}&chain=ethereum").json()
+    assert len(body) == 1
+    assert body[0]["data"]["salience"] == sal.SALIENCE_ALERT
+    assert body[0]["data"]["salience_basis"] == [sal.BASIS_CANONICAL_CONFIG_FAMILY]
+    # The rest of the payload is untouched by the added keys.
+    assert body[0]["data"]["new_owner"] == ADDR(9)
+
+
+def test_a_poll_row_carries_its_signal_class_through_the_api(db_session, api_client, make_mc):
+    """The census's basis lives on the row, so it has to survive the boundary
+    too — that is where an auditor reads it."""
+    mc = make_mc(last_known_state={"rate": 7})
+    _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE), 9)
+
+    body = api_client.get(f"/api/monitored-events?address={mc.address}&chain=ethereum").json()
+    assert len(body) == 1
+    assert body[0]["data"]["signal_class"] == SIGNAL_CLASS_METRIC
+    assert body[0]["data"]["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
+    assert body[0]["data"]["salience"] == sal.SALIENCE_ROUTINE
+
+
+# ---------------------------------------------------------------------------
+# Invariant 8, enforced at the driver
+# ---------------------------------------------------------------------------
+
+
+def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
+    """An enricher may not move a side-effect decision from the taxonomy to a
+    decoder: ``witness_tier`` is what ``notifier._may_notify`` reads, and
+    ``event_type`` is the claim itself."""
+    mc = make_mc(contract_type="safe")
+    event = _seed_event(
+        db_session,
+        mc,
+        "safe_tx_executed",
+        {
+            "witness_tier": "hint",
+            "historical": True,
+            "salience": sal.SALIENCE_NOT_DETERMINED,
+            "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
+        },
+    )
+
+    def overreaching(_event, _mc, _ctx):
+        return {
+            "safe_exec": {"status": "not_top_level_call"},
+            "witness_tier": "self_describing",
+            "historical": False,
+            "event_type": "ownership_transferred",
+            "reanalysis_job_id": "nope",
+        }
+
+    with patch.dict(ENRICHERS, {"safe_tx_executed": overreaching}, clear=False):
+        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
+    db_session.commit()
+    db_session.expire_all()
+
+    row = db_session.get(MonitoredEvent, event.id)
+    # The additive key landed and drove the recompute...
+    assert row.data["safe_exec"] == {"status": "not_top_level_call"}
+    assert row.data["salience"] == sal.SALIENCE_ROUTINE
+    # ...and every key the taxonomy owns is exactly as it was.
+    assert row.data["witness_tier"] == "hint"
+    assert row.data["historical"] is True
+    assert "reanalysis_job_id" not in row.data
+    assert row.event_type == "safe_tx_executed"
+
+
+def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
+    mc = make_mc(contract_type="safe")
+    before = {"witness_tier": "hint", "salience": sal.SALIENCE_NOT_DETERMINED, "salience_basis": ["x"]}
+    event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
+
+    with patch.dict(ENRICHERS, {"safe_tx_executed": lambda *_a: {"witness_tier": "self_describing"}}, clear=False):
+        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
+    db_session.commit()
+    db_session.expire_all()
+
+    assert db_session.get(MonitoredEvent, event.id).data == before
+
+
+def test_a_chainless_contract_is_skipped_rather_than_defaulted(db_session, make_mc, caplog):
+    """No chain means no endpoint and no chain_id guard. Enriching it against
+    whatever ethereum answered would publish another chain's transaction as
+    this contract's decode."""
+    mc = make_mc(contract_type="safe")
+    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
+    mc.chain = ""
+    db_session.commit()
+
+    calls: list[str] = []
+
+    def fake(_event, _mc, _ctx):
+        calls.append("ran")
+        return {"safe_exec": {"status": "decoded", "operation": 0}}
+
+    with patch.dict(ENRICHERS, {"safe_tx_executed": fake}, clear=False):
+        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
+
+    assert calls == []
+    db_session.expire_all()
+    assert "safe_exec" not in (db_session.get(MonitoredEvent, event.id).data or {})
+
+
+def test_an_unresolvable_chain_costs_that_chain_not_the_window(db_session, make_mc):
+    """``enrich_events`` never raises: the window's rows are already correct
+    and a chain-resolution failure must not roll them back."""
+    mc = make_mc(contract_type="safe")
+    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
+
+    def boom(_chain, **_kw):
+        raise RuntimeError("unknown chain")
+
+    with (
+        patch("services.monitoring.enrichment.chain_id_for", side_effect=boom),
+        patch.dict(ENRICHERS, {"safe_tx_executed": lambda *_a: {"safe_exec": {"status": "decoded"}}}, clear=False),
+    ):
+        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
+
+    db_session.commit()
+    db_session.expire_all()
+    assert "safe_exec" not in (db_session.get(MonitoredEvent, event.id).data or {})
+
+
+def test_max_salience_requires_a_stated_floor():
+    """A max fold over an empty sequence would have to seed at ``routine`` —
+    the one level the mechanical gate forbids from an absent input. Callers
+    state their own floor instead."""
+    with pytest.raises(TypeError):
+        sal.max_salience()  # type: ignore[call-arg]
+    assert sal.max_salience(sal.SALIENCE_NOTABLE) == sal.SALIENCE_NOTABLE
+    assert sal.max_salience(sal.SALIENCE_NOTABLE, *[]) == sal.SALIENCE_NOTABLE
+    assert sal.max_salience(sal.SALIENCE_ROUTINE) == sal.SALIENCE_ROUTINE

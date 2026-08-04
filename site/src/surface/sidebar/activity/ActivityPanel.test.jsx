@@ -761,3 +761,54 @@ describe("ActivityPanel — salience filter", () => {
     await waitFor(() => expect(screen.getByText("3 hidden")).toBeTruthy());
   });
 });
+
+// A section the filter emptied has NOT earned an absence claim. Both empty
+// states below were reproduced rendering the absence prose over rows that
+// exist; these pin the two branches.
+describe("ActivityPanel — a filter-emptied timeline claims no absence", () => {
+  it("does not call the withheld back-filled upgrades 'no activity before the line'", async () => {
+    mockActivity({
+      contracts: [PROXY_CONTRACT],
+      monitoredEvents: [evRow("a1", "ownership_transferred", 401, { salience: "alert" })],
+      history: HISTORY,
+    });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    await screen.findByText("Ownership transferred");
+    // Default Notable+ still draws them: backfill rows are not_determined.
+    expect(await screen.findByText("First deployment")).toBeTruthy();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Alerts only" }).click();
+    });
+
+    expect(screen.queryByText("First deployment")).toBeNull();
+    expect(screen.queryByText(/No activity before the line/)).toBeNull();
+    expect(screen.queryByText(/isn't back-filled/)).toBeNull();
+    // I1 (block 100) and I2 (200) fall below the enrollment boundary at 250;
+    // CUR (300) is above it. All three are not_determined and all three are
+    // withheld — the two below the line are the ones this branch renders.
+    expect(screen.getByText("2 back-filled upgrades are hidden by the current filter.")).toBeTruthy();
+  });
+
+  it("does not call two withheld routine events 'no activity recorded yet'", async () => {
+    // enrollment_block null → no boundary → the early-return empty state.
+    mockActivity({
+      contracts: [{ ...SAFE_CONTRACT, enrollment_block: null }],
+      monitoredEvents: [
+        evRow("r1", "state_changed_poll", 401, { salience: "routine", field: "a" }),
+        evRow("r2", "state_changed_poll", 402, { salience: "routine", field: "b" }),
+      ],
+    });
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+
+    await waitFor(() => expect(screen.getByText("2 hidden")).toBeTruthy());
+    expect(screen.queryByText("No activity recorded yet.")).toBeNull();
+    expect(screen.getByText("2 events are hidden by the current filter.")).toBeTruthy();
+
+    // And the rows are reachable — routine hides, it never deletes.
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+    expect(screen.getByRole("button", { name: "2 routine events — show" })).toBeTruthy();
+  });
+});

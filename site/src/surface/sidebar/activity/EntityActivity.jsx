@@ -264,6 +264,11 @@ export function EntityActivity({
         // period, so they have to be driven by the same fact — otherwise the
         // panel hedges in one line and asserts absence in the next.
         historyState={historyState}
+        // What the threshold removed, per section. Without these the Timeline
+        // cannot tell a section that is empty from a section it was told not
+        // to draw, and renders the second as the first.
+        hiddenAbove={visible.hiddenAbove}
+        hiddenBelow={visible.hiddenBelow}
       />
     </section>
   );
