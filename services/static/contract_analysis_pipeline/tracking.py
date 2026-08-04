@@ -8,6 +8,7 @@ writers from ``effects.functions`` state_write sinks.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable, cast
@@ -389,7 +390,11 @@ class _EventQualification:
         # entry points, which ARE restricted, so nothing survives the
         # subtraction and the qualification stands.
         opaque = (
-            (_unattributable_write_functions(effects) | _library_storage_write_functions(contract))
+            (
+                _unattributable_write_functions(effects)
+                | _library_storage_write_functions(contract)
+                | _assembly_log_functions(contract)
+            )
             if active
             else frozenset()
         )
@@ -902,6 +907,68 @@ def _library_storage_write_functions(contract) -> frozenset[str]:
     return frozenset(out)
 
 
+# An inline-assembly LOG opcode. A function reaching one can emit any topic0 it
+# likes, including the topic0 of an event some other function's write earned a
+# correspondence for — and it does so through a node carrying no ``EventCall``
+# IR and, when it writes nothing, no state-write sink either. Such a function is
+# invisible to BOTH openness quantifiers, so it is admitted to the opaque set on
+# its own.
+_ASSEMBLY_LOG_OPCODE = re.compile(r"\blog[0-4]\b")
+
+
+def _assembly_reaches_log(unit, seen: set[str]) -> bool:
+    """Can *unit* (or anything it calls internally) emit a log from assembly?
+
+    Reads each assembly block's own source. Assembly whose source cannot be read
+    counts as reaching a log: what the block does was not determined, and an
+    undetermined block is not proof that it emits nothing.
+
+    Detection is per-opcode rather than ``contains_assembly`` on purpose. Modern
+    contracts use assembly constantly — ERC-7201 storage getters, Solady's
+    slot arithmetic, custom-error reverts — and admitting every one of them
+    would refuse qualification on nearly every real contract. Only the opcode
+    that can forge an event is the threat.
+    """
+    # Imported lazily for the same reason the type handling above is: this
+    # module stays importable without Slither side effects.
+    from slither.core.cfg.node import NodeType
+
+    key = _unit_key(unit)
+    if key in seen:
+        return False
+    seen.add(key)
+    for node in getattr(unit, "nodes", []) or []:
+        if getattr(node, "type", None) == NodeType.ASSEMBLY or getattr(node, "inline_asm", None) is not None:
+            source_mapping = getattr(node, "source_mapping", None)
+            content = getattr(source_mapping, "content", None)
+            if not isinstance(content, str) or not content:
+                return True
+            if _ASSEMBLY_LOG_OPCODE.search(content):
+                return True
+        for ir in getattr(node, "irs", []) or []:
+            if type(ir).__name__ != "InternalCall":
+                continue
+            callee = getattr(ir, "function", None)
+            if callee is not None and _assembly_reaches_log(callee, seen):
+                return True
+    return False
+
+
+def _assembly_log_functions(contract) -> frozenset[str]:
+    """Entry points that can emit a log from inline assembly."""
+    out: set[str] = set()
+    for function in _entry_points(contract):
+        name = getattr(function, "full_name", getattr(function, "name", ""))
+        if not name:
+            continue
+        try:
+            if _assembly_reaches_log(function, set()):
+                out.add(name)
+        except Exception:
+            out.add(name)
+    return frozenset(out)
+
+
 def _state_writers_from_effects(
     effects: Mapping[str, Any] | None,
 ) -> dict[str, set[str]]:
@@ -934,6 +1001,11 @@ def _state_writers_from_effects(
 # before and after each transaction (P1a: 2 of the 446 audited publications, and
 # unbounded on a busy contract).
 _TRANSIENT_HYGIENE_CLASS = "reentrancy_guard"
+
+# ``StateWriteFact.origin`` for a write performed by a MODIFIER rather than by
+# the function body. The write-and-restore proof is about the modifier, so this
+# is the only origin the transient exclusion may subtract.
+_GUARD_WRITE_ORIGIN = "guard"
 
 
 def _write_facts_by_signature(effects: Mapping[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
@@ -968,14 +1040,21 @@ def _writer_survives_hygiene(
 
     Two exclusions, both requiring the fact to be PROVEN before it subtracts:
 
-      * every recorded write of *var* here is the transient-latch class AND
-        *var* is in *transient_vars* — the IR-proven guard set (written on both
-        sides of a modifier's ``_;``). The membership test is not redundant:
-        ``hygiene_class`` also carries a NAME fallback (``locked``, ``_status``,
-        anything containing "reentran"), which is sound only as a suppressor of
-        facts nobody admits. Dropping a controller on it would make a name the
-        witness, and ``bool public locked`` is a perfectly ordinary owner-gated
-        withdrawal pause;
+      * every recorded write of *var* here is the transient-latch class, *var*
+        is in *transient_vars* (the IR-proven guard set — written on both sides
+        of a modifier's ``_;``), AND the write is carried by the modifier that
+        holds that proof (``origin == "guard"``).
+
+        All three are needed and each rules out a different way of deleting a
+        real controller. ``hygiene_class`` carries a NAME fallback (``locked``,
+        ``_status``, anything containing "reentran"), sound only as a suppressor
+        of facts nobody admits — dropping a controller on it would make the name
+        the witness. And the class is VARIABLE-granular, so once a var is a
+        proven latch every write of it is stamped, including an ``onlyOwner
+        setStatus`` in a function BODY: that write is a real, owner-controlled
+        mutation and dropping it took the controller out of the plan entirely,
+        with no watch and no poll. Only the modifier's own set-and-restore is
+        the write the proof is about;
       * a member-scoped controller whose writes here are all proven to land on
         OTHER members. A ``var``-granularity write says which variable but not
         which member, so it is kept: not knowing which member moved is not
@@ -988,7 +1067,10 @@ def _writer_survives_hygiene(
     for_var = [fact for fact in facts if fact.get("var") == var]
     if not for_var:
         return True
-    if var in transient_vars and all(fact.get("hygiene_class") == _TRANSIENT_HYGIENE_CLASS for fact in for_var):
+    if var in transient_vars and all(
+        fact.get("hygiene_class") == _TRANSIENT_HYGIENE_CLASS and fact.get("origin") == _GUARD_WRITE_ORIGIN
+        for fact in for_var
+    ):
         return False
     if member_path:
         wanted = list(member_path)

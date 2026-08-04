@@ -55,6 +55,7 @@ from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
 from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
+    _assembly_log_functions,
     _state_writers_from_effects,
     build_controller_tracking,
 )
@@ -76,7 +77,6 @@ contract WitnessCorpus {
     mapping(address => bool) public registered;
     mapping(address => bool) public claimed;
     mapping(address => bool) public wards;
-    mapping(address => bool) public marks;
     mapping(address => uint256) public balances;
     mapping(uint256 => uint128) public gasLimits;
     mapping(address => uint64) internal _tokenInfos;
@@ -90,7 +90,6 @@ contract WitnessCorpus {
     event Registered(address indexed user);
     event Claimed(address indexed user);
     event WardAdded(address indexed usr, uint256 value);
-    event MarkSet(address indexed user);
     event Transfer(address indexed from, address indexed to, uint256 amount);
     event ExchangeRateUpdated(uint96 oldRate, uint96 newRate);
     event PayoutAddressUpdated(address oldPayout, address newPayout);
@@ -159,26 +158,6 @@ contract WitnessCorpus {
 
     function sweep() external view {
         require(wards[msg.sender], "not ward");
-    }
-
-    function useMark() external view {
-        require(marks[msg.sender], "unmarked");
-    }
-
-    function adminMark(address user) external onlyOwner {
-        marks[user] = true;
-        emit MarkSet(user);
-    }
-
-    // The same topic0 as adminMark's, emitted from inline assembly where no
-    // EventCall IR node exists to see it — and open to anyone.
-    function anyoneMark() external {
-        marks[msg.sender] = true;
-        bytes32 topic = keccak256("MarkSet(address)");
-        bytes32 key = bytes32(uint256(uint160(msg.sender)));
-        assembly {
-            log2(0, 0, topic, key)
-        }
     }
 
     // One event, TWO entries written. A record can name only one of them.
@@ -329,8 +308,6 @@ def test_corpus_covers_all_five_degenerate_shapes(corpus):
     # 2b. the same open-writer shape gated by a cofinite DENYLIST rather than a
     #     business condition — the arm that keeps ERC-20 Transfers out.
     assert "state_changed:state_variable:claimed" in tiers[WITNESS_TIER_ACTIVITY]
-    # 2c. a gated EventCall emitter and an open assembly emitter of one topic0.
-    assert "state_changed:state_variable:marks" in tiers[WITNESS_TIER_ACTIVITY]
 
 
 # ---------------------------------------------------------------------------
@@ -407,27 +384,6 @@ def test_a_denylist_gated_writer_is_not_a_restricted_one(corpus):
     claimed_event = next(e for e in events if e["signature"] == "Claimed(address)")
     assert claimed_event["member_witness"]["mapping_name"] == "claimed"
     assert "writer_openness" not in claimed_event
-
-
-def test_an_open_writer_demotes_even_when_its_emit_is_invisible(corpus):
-    """``adminMark`` emits ``MarkSet`` through an ``EventCall`` node and is
-    owner-gated; ``anyoneMark`` writes the same mapping and emits the same
-    topic0 from inline assembly, where no ``EventCall`` node exists. Quantifying
-    over EMITTERS alone would see only the gated one and publish every
-    ``MarkSet`` as a witnessed member change with an attacker-chosen key.
-
-    The writers-side quantifier is what closes it: an open path that changes the
-    mapping has to WRITE it, and the effects artifact attributes that write
-    whether or not the emit was visible.
-    """
-    # Non-vacuity: the invisible emitter really is invisible to the emitter walk.
-    assert "anyoneMark()" in _state_writers_from_effects(corpus["effects"]).get("marks", set())
-    assert corpus["effects"]["functions"]["anyoneMark()"]["assembly_state_access"] is False
-
-    spec = _spec(corpus, "MarkSet(address)")
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-    assert spec["event_type"] == "state_changed:state_variable:marks"
 
 
 def test_a_two_entry_write_names_no_single_entry(corpus):
@@ -653,6 +609,61 @@ contract OpaqueLibrary {
     # The guard's NEGATIVE SPACE (the Solady shape): the assembly writer is an
     # internal helper reached only from a gated entry point, so nothing survives
     # subtracting the restricted functions and the clean pair still qualifies.
+    # An ungated function that emits the qualified topic0 from an assembly LOG
+    # and writes NOTHING. Invisible to both openness quantifiers on its own: no
+    # EventCall node puts it in the emitter set, and touching no storage keeps it
+    # out of every writer set and out of the assembly-STORAGE set.
+    "OpaqueLogOnly": """
+pragma solidity ^0.8.19;
+contract OpaqueLogOnly {
+"""
+    + _CLEAN_PAIR
+    + """
+    function anyoneLog(address user) external {
+        bytes32 topic = keccak256("Allowed(address)");
+        bytes32 key = bytes32(uint256(uint160(user)));
+        assembly { log2(0, 0, topic, key) }
+    }
+}
+""",
+    # The round-2 mixed-style shape: a gated EventCall emitter and an open
+    # assembly emitter of the same topic0, where the open one also WRITES.
+    "OpaqueMixedEmitter": """
+pragma solidity ^0.8.19;
+contract OpaqueMixedEmitter {
+"""
+    + _CLEAN_PAIR
+    + """
+    function anyoneAlso(address user) external {
+        gated[user] = true;
+        bytes32 topic = keccak256("Allowed(address)");
+        bytes32 key = bytes32(uint256(uint160(user)));
+        assembly { log2(0, 0, topic, key) }
+    }
+}
+""",
+    # A latch var with an owner-controlled setter of the SAME variable. The
+    # modifier's set-and-restore is the transient write; the setter's is a real
+    # mutation and the controller must stay in the plan.
+    "LatchWithAdminSetter": """
+pragma solidity ^0.8.19;
+contract LatchWithAdminSetter {
+"""
+    + _CLEAN_PAIR
+    + """
+    uint256 private _status = 1;
+    event StatusSet(uint256 value);
+
+    modifier nonReentrant() { require(_status == 1, "r"); _status = 2; _; _status = 1; }
+
+    function deposit() external nonReentrant {}
+
+    function setStatus(uint256 value) external onlyOwner {
+        _status = value;
+        emit StatusSet(value);
+    }
+}
+""",
     # Ordinary library use: no storage pointer, so the library cannot write the
     # caller's state and the qualification must be untouched.
     "PlainLibrary": """
@@ -708,6 +719,8 @@ def opaque(tmp_path_factory):
         out[name] = {
             "contract": contract,
             "effects": effects,
+            "targets": {target["controller_id"]: target for target in targets},
+            "planned": {tc["controller_id"] for tc in plan["tracked_controllers"]},
             "specs": {spec["topic0"]: spec for spec in extract_governance_topics(dict(plan))},
         }
     return out
@@ -781,6 +794,72 @@ def test_a_library_storage_write_demotes_the_qualification(opaque):
     spec = _allowed(derived)
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
     assert spec["writer_openness"] == "not_determined"
+
+
+def test_an_assembly_log_only_emitter_demotes_the_qualification(opaque):
+    """The forging shape. ``anyoneLog`` emits the qualified topic0 from an
+    assembly LOG and writes nothing, so it is in neither quantifier's domain:
+    no ``EventCall`` node puts it in the emitter set, and touching no storage
+    keeps it out of every writer set and out of the assembly-STORAGE set.
+    Without the log-opcode arm, any address could mint a notified
+    ``member_changed`` claim naming an entry of its choosing."""
+    derived = opaque["OpaqueLogOnly"]
+    effects = derived["effects"]
+    # Non-vacuity: invisible to every other signal the qualification reads.
+    assert effects["functions"]["anyoneLog(address)"]["assembly_state_access"] is False
+    assert effects["functions"]["anyoneLog(address)"]["state_writes"] == []
+    assert all("anyoneLog(address)" not in fns for fns in _state_writers_from_effects(effects).values())
+    assert "anyoneLog(address)" in _assembly_log_functions(derived["contract"])
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+
+def test_a_mixed_style_emitter_demotes_the_qualification(opaque):
+    """A gated ``EventCall`` emitter beside an open assembly emitter of the same
+    topic0, where the open one also writes. Two independent arms now refuse it —
+    the writers-side quantifier (tested on its own by the denylist-gated writer
+    above) and the log-opcode arm."""
+    derived = opaque["OpaqueMixedEmitter"]
+    effects = derived["effects"]
+    assert "anyoneAlso(address)" in _state_writers_from_effects(effects).get("gated", set())
+    assert "anyoneAlso(address)" in _assembly_log_functions(derived["contract"])
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+
+def test_a_latch_var_keeps_its_admin_setter(opaque):
+    """``hygiene_class`` is VARIABLE-granular: once ``_status`` is a proven latch,
+    every write of it is stamped, including an ``onlyOwner setStatus`` in a
+    function body. Subtracting on the class alone deleted a real owner-controlled
+    writer and took the controller out of the plan entirely — no watch, no poll,
+    silently. Only the modifier's own set-and-restore (``origin == "guard"``) is
+    the write the proof is about."""
+    derived = opaque["LatchWithAdminSetter"]
+    facts = derived["effects"]["functions"]
+    # Non-vacuity: BOTH writes carry the latch class, and only their origin
+    # tells them apart.
+    guard_write = facts["deposit()"]["state_writes"][0]
+    body_write = next(w for w in facts["setStatus(uint256)"]["state_writes"] if w["var"] == "_status")
+    assert guard_write == {
+        "var": "_status",
+        "declared_type": "uint256",
+        "member_path": [],
+        "granularity": "var",
+        "hygiene_class": "reentrancy_guard",
+        "origin": "guard",
+    }
+    assert body_write["hygiene_class"] == "reentrancy_guard"
+    assert body_write["origin"] == "body"
+
+    latch = derived["targets"]["state_variable:_status"]
+    assert [w["function"] for w in latch["writer_functions"]] == ["setStatus(uint256)"]
+    assert [e["signature"] for e in latch["associated_events"]] == ["StatusSet(uint256)"]
+    assert "state_variable:_status" in derived["planned"]
+    assert _topic0("StatusSet(uint256)") in derived["specs"]
 
 
 def test_ordinary_library_use_is_not_opaque(opaque):

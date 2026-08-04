@@ -148,13 +148,19 @@ def test_the_kill_switch_cannot_promote(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fact(var="s", member=None, hygiene="normal"):
+def _fact(var="s", member=None, hygiene="normal", origin="body"):
     return {
         "var": var,
         "member_path": list(member) if member else [],
         "granularity": "member" if member else "var",
         "hygiene_class": hygiene,
+        "origin": origin,
     }
+
+
+def _guard_write(var="s"):
+    """The modifier's own set-and-restore — the write the latch proof is about."""
+    return _fact(var=var, hygiene="reentrancy_guard", origin="guard")
 
 
 _IR_PROVEN = frozenset({"s"})
@@ -168,10 +174,15 @@ _IR_PROVEN = frozenset({"s"})
         ([], None, True),
         # Recorded, but about a different variable — this one is unconstrained.
         ([_fact(var="other")], None, True),
-        # Every write here is the transient latch.
-        ([_fact(hygiene="reentrancy_guard")], None, False),
-        # One real write beside the latch keeps the writer.
-        ([_fact(hygiene="reentrancy_guard"), _fact()], None, True),
+        # Every write here is the modifier's own set-and-restore.
+        ([_guard_write()], None, False),
+        # One real write beside it keeps the writer.
+        ([_guard_write(), _fact()], None, True),
+        # The latch CLASS on a body write is an owner-controlled mutation of the
+        # same variable: the class is variable-granular, the origin is not.
+        ([_fact(hygiene="reentrancy_guard", origin="body")], None, True),
+        # An origin that was never recorded is not the guard origin.
+        ([_fact(hygiene="reentrancy_guard", origin=None)], None, True),
         # Member-scoped: proven to write a sibling member only.
         ([_fact(member=["b"])], ("a",), False),
         ([_fact(member=["a"])], ("a",), True),
@@ -185,11 +196,16 @@ def test_writer_hygiene_subtracts_only_what_is_proven(facts, member_path, surviv
 
 def test_the_latch_class_alone_subtracts_nothing():
     """``hygiene_class`` carries a name fallback ({locked, _status, *reentran*})
-    with no IR behind it. It may suppress a fact nobody admits; it may not
-    delete a controller, so the drop needs the var in the IR-proven set."""
-    facts = [_fact(hygiene="reentrancy_guard")]
-    assert _writer_survives_hygiene(facts, "s", None, frozenset()) is True
-    assert _writer_survives_hygiene(facts, "s", None, _IR_PROVEN) is False
+    with no IR behind it, and it is VARIABLE-granular — once a var is a proven
+    latch every write of it is stamped, including an admin setter's. Neither may
+    delete a controller on its own: the drop needs the var in the IR-proven set
+    AND the write to be the modifier's own."""
+    guard = [_guard_write()]
+    assert _writer_survives_hygiene(guard, "s", None, frozenset()) is True
+    assert _writer_survives_hygiene(guard, "s", None, _IR_PROVEN) is False
+
+    admin_setter = [_fact(hygiene="reentrancy_guard", origin="body")]
+    assert _writer_survives_hygiene(admin_setter, "s", None, _IR_PROVEN) is True
 
 
 def test_the_opaque_set_reads_both_shapes_the_artifact_records():
