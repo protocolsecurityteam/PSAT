@@ -375,10 +375,25 @@ class _EventQualification:
         self._emitters = _entry_point_emitters(contract, event_index) if active else {}
         self._restricted = restricted_function_signatures(predicate_trees) if active else frozenset()
         self._writers_by_var = _state_writers_from_effects(effects) if active else {}
-        # A function reaching storage through inline assembly writes slots this
-        # analysis cannot attribute to a variable, so it may be a writer of the
-        # witnessed mapping without appearing in ``_writers_by_var`` at all.
-        self._opaque_writers = _assembly_state_access_functions(effects) if active else frozenset()
+        # Functions that can write storage this analysis cannot attribute to a
+        # variable — inline assembly, delegatecall, a library call through a
+        # storage pointer. Each is MISSING from the mapping's writer set, so the
+        # quantifier over that set says nothing about them. What is left after
+        # subtracting the proven-restricted functions is the open surface: if it
+        # is non-empty, "every writer is restricted" was quantified over a
+        # domain we know to be incomplete, and the qualification is refused.
+        #
+        # Subtracting ``_restricted`` rather than intersecting the writer set is
+        # also what keeps the Solady shape working: there the assembly writer is
+        # an internal helper reached only from ``onlyOwner`` / ``onlyRoles``
+        # entry points, which ARE restricted, so nothing survives the
+        # subtraction and the qualification stands.
+        opaque = (
+            (_unattributable_write_functions(effects) | _library_storage_write_functions(contract))
+            if active
+            else frozenset()
+        )
+        self._opaque_unrestricted = opaque - self._restricted
 
     def for_event(
         self,
@@ -405,13 +420,12 @@ class _EventQualification:
         emitters = self._emitters.get(signature) or set()
         if not emitters or any(not (writers_by_signature.get(fn) or set()) & target_vars for fn in emitters):
             return witness, WRITER_OPENNESS_NOT_DETERMINED
+        if self._opaque_unrestricted:
+            # An open path can write storage nothing attributed to a variable,
+            # so no writer set on this contract is known to be complete.
+            return witness, WRITER_OPENNESS_NOT_DETERMINED
         mapping_var = witness["mapping_name"]
         writers = set(self._writers_by_var.get(mapping_var) or set())
-        if writers & self._opaque_writers:
-            # One of the writers reaches storage through assembly: the write set
-            # attributed to this mapping is not the whole write set, so "every
-            # writer is restricted" would quantify over an incomplete domain.
-            return witness, WRITER_OPENNESS_NOT_DETERMINED
         return witness, openness_of_write_paths(emitters, writers, self._restricted)
 
 
@@ -820,22 +834,70 @@ def _function_is_initializer(function: Any) -> bool:
     return False
 
 
-def _assembly_state_access_functions(effects: Mapping[str, Any] | None) -> frozenset[str]:
-    """Functions the effects artifact recorded reaching storage (or a
-    delegate target) through inline assembly.
+def _unattributable_write_functions(effects: Mapping[str, Any] | None) -> frozenset[str]:
+    """Functions whose storage effect the write-attribution cannot see.
 
-    Their writes land on a raw slot, so they are attributed to
-    ``assembly_storage:<slot>`` rather than to a variable name: such a function
-    can be a writer of a tracked mapping without appearing in that mapping's
-    writer set at all.
+    Two shapes, both demonstrated on compiled Solidity:
+
+      * inline assembly reaching storage — the write is recorded against
+        ``assembly_storage:<slot>``, never against a variable name, so such a
+        function writes a tracked mapping WITHOUT appearing in that mapping's
+        writer set; and
+      * a ``delegatecall`` — the callee's writes land in this contract's
+        storage and are not in this compilation unit at all.
+
+    Note what this set is NOT for: intersecting it with a mapping's attributed
+    writers. The whole point is that these functions are MISSING from that
+    set, so an intersection is empty exactly when the shape is present.
     """
     if not isinstance(effects, dict):
         return frozenset()
-    return frozenset(
-        fn_sig
-        for fn_sig, info in (effects.get("functions") or {}).items()
-        if isinstance(fn_sig, str) and isinstance(info, dict) and info.get("assembly_state_access")
-    )
+    out: set[str] = set()
+    for fn_sig, info in (effects.get("functions") or {}).items():
+        if not isinstance(fn_sig, str) or not isinstance(info, dict):
+            continue
+        if info.get("assembly_state_access"):
+            out.add(fn_sig)
+            continue
+        if any(isinstance(sink, dict) and sink.get("kind") == "delegatecall" for sink in info.get("sinks") or []):
+            out.add(fn_sig)
+    return frozenset(out)
+
+
+def _library_storage_write_functions(contract) -> frozenset[str]:
+    """Entry points reaching a library function that takes a STORAGE pointer.
+
+    ``MarkLib.put(libMap, user)`` writes the caller's mapping through the
+    pointer; Slither attributes the write to neither function, and
+    ``all_state_variables_written()`` on the caller returns nothing for it — so
+    such a caller is a writer of a tracked mapping that no writer set contains.
+
+    The storage-parameter test is what keeps this from swallowing ordinary
+    library use: ``SafeERC20.safeTransfer(token, to, amount)`` and
+    ``Math.max(a, b)`` take no storage pointer and cannot write the caller's
+    state, so a contract using them is untouched.
+    """
+    out: set[str] = set()
+    for function in _entry_points(contract):
+        name = getattr(function, "full_name", getattr(function, "name", ""))
+        if not name:
+            continue
+        accessor = getattr(function, "all_library_calls", None)
+        if not callable(accessor):
+            continue
+        try:
+            calls = accessor() or []
+        except Exception:
+            # The question was not answered for this function; an unanswered
+            # question is not proof that it writes nothing.
+            out.add(name)
+            continue
+        for call in calls:
+            callee = getattr(call, "function", None)
+            if any(getattr(p, "location", None) == "storage" for p in getattr(callee, "parameters", None) or []):
+                out.add(name)
+                break
+    return frozenset(out)
 
 
 def _state_writers_from_effects(

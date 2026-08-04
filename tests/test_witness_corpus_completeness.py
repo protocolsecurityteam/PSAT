@@ -551,6 +551,222 @@ def test_add_remove_events_publish_no_value(corpus):
 
 
 # ---------------------------------------------------------------------------
+# Shape 6 — write paths no attribution can see
+#
+# Each of these contracts carries the SAME clean pair: an owner-gated
+# ``allow(user)`` writing ``gated[user]`` and emitting ``Allowed(user)``, which
+# qualifies on its own. What varies is one open path that can write storage the
+# attribution never records — so the differential is the guard and nothing else.
+# ---------------------------------------------------------------------------
+
+_CLEAN_PAIR = """
+    address public owner;
+    mapping(address => bool) public gated;
+    event Allowed(address indexed user);
+
+    modifier onlyOwner() { require(msg.sender == owner, "no"); _; }
+
+    function useGated() external view { require(gated[msg.sender], "x"); }
+
+    function allow(address user) external onlyOwner {
+        gated[user] = true;
+        emit Allowed(user);
+    }
+"""
+
+_OPAQUE_SOURCES = {
+    # (a) An assembly-only writer. Its write is recorded against
+    #     ``assembly_storage:<slot>``, so it appears in NO mapping's writer set —
+    #     which is why intersecting the opaque set with an attributed writer set
+    #     can never catch it.
+    "OpaqueAssembly": """
+pragma solidity ^0.8.19;
+contract OpaqueAssembly {
+"""
+    + _CLEAN_PAIR
+    + """
+    function anyoneAsm(address user) external {
+        bytes32 slot = keccak256(abi.encode(user, uint256(1)));
+        assembly { sstore(slot, 1) }
+    }
+}
+""",
+    # (b) An open arbitrary delegatecall: the callee's writes land in THIS
+    #     contract's storage and are not in this compilation unit at all.
+    "OpaqueDelegatecall": """
+pragma solidity ^0.8.19;
+contract OpaqueDelegatecall {
+"""
+    + _CLEAN_PAIR
+    + """
+    function anyoneDc(address impl, bytes calldata data) external {
+        (bool ok, ) = impl.delegatecall(data);
+        require(ok, "dc");
+    }
+}
+""",
+    # (c) A library call through a STORAGE pointer. Slither attributes the write
+    #     to neither function and ``all_state_variables_written()`` on the caller
+    #     is empty for it.
+    "OpaqueLibrary": """
+pragma solidity ^0.8.19;
+library MarkLib {
+    function put(mapping(address => bool) storage m, address u) internal { m[u] = true; }
+}
+contract OpaqueLibrary {
+"""
+    + _CLEAN_PAIR
+    + """
+    mapping(address => bool) public sideMap;
+
+    function anyoneLib(address user) external { MarkLib.put(sideMap, user); }
+}
+""",
+    # The guard's NEGATIVE SPACE (the Solady shape): the assembly writer is an
+    # internal helper reached only from a gated entry point, so nothing survives
+    # subtracting the restricted functions and the clean pair still qualifies.
+    # Ordinary library use: no storage pointer, so the library cannot write the
+    # caller's state and the qualification must be untouched.
+    "PlainLibrary": """
+pragma solidity ^0.8.19;
+library MathLib {
+    function max(uint256 a, uint256 b) internal pure returns (uint256) { return a > b ? a : b; }
+}
+contract PlainLibrary {
+"""
+    + _CLEAN_PAIR
+    + """
+    uint256 public floor;
+
+    function anyoneMax(uint256 a) external { floor = MathLib.max(a, floor); }
+}
+""",
+    "SoladyShaped": """
+pragma solidity ^0.8.19;
+contract SoladyShaped {
+"""
+    + _CLEAN_PAIR
+    + """
+    function _touch(address user) internal { assembly { sstore(user, 1) } }
+
+    function adminTouch(address user) external onlyOwner { _touch(user); }
+}
+""",
+}
+
+
+@pytest.fixture(scope="module")
+def opaque(tmp_path_factory):
+    out = {}
+    for name, source in _OPAQUE_SOURCES.items():
+        project_dir = tmp_path_factory.mktemp(name.lower())
+        path = project_dir / f"{name}.sol"
+        path.write_text(textwrap.dedent(source).strip() + "\n")
+        contract = next(c for c in Slither(str(path)).contracts if c.name == name)
+        predicate_trees = build_predicate_artifacts(contract)
+        effects = build_effects(contract)
+        semantic_control = _build_semantic_control_summary(contract, project_dir, predicate_trees, effects)
+        targets = build_controller_tracking(contract, project_dir, predicate_trees, effects, semantic_control)
+        plan = build_control_tracking_plan(  # type: ignore[arg-type]
+            {"subject": {"address": "0x" + "22" * 20, "name": name}, "controller_tracking": targets}
+        )
+        out[name] = {
+            "contract": contract,
+            "effects": effects,
+            "specs": {spec["topic0"]: spec for spec in extract_governance_topics(dict(plan))},
+        }
+    return out
+
+
+def _allowed(derived) -> dict:
+    spec = derived["specs"].get(_topic0("Allowed(address)"))
+    assert spec is not None, "the clean pair produced no spec at all"
+    return spec
+
+
+def test_the_clean_pair_qualifies_without_an_opaque_path(opaque):
+    """The guard's negative space, and the baseline the three demotions below
+    are read against. ``adminTouch`` reaches an internal assembly helper — the
+    Solady/OZ-v5 shape — but it is owner-gated, so it does not survive
+    subtracting the restricted functions and the qualification stands."""
+    derived = opaque["SoladyShaped"]
+    # Non-vacuity: the assembly write really is there and really is opaque.
+    assert derived["effects"]["functions"]["adminTouch(address)"]["assembly_state_access"] is True
+    assert "adminTouch(address)" not in _state_writers_from_effects(derived["effects"]).get("gated", set())
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
+    assert spec["writer_openness"] == "restricted"
+    assert spec["event_type"] == "member_changed:gated"
+
+
+def test_an_assembly_only_writer_demotes_the_qualification(opaque):
+    derived = opaque["OpaqueAssembly"]
+    effects = derived["effects"]
+    # Non-vacuity: present in the artifact as an assembly writer, and absent
+    # from every attributed writer set — so an intersection with one is empty.
+    assert effects["functions"]["anyoneAsm(address)"]["assembly_state_access"] is True
+    writers = _state_writers_from_effects(effects)
+    # It is attributed to a raw SLOT, never to a variable — so intersecting the
+    # opaque set with any variable's writer set is empty exactly when this shape
+    # is present, which is why the guard cannot be an intersection.
+    assert "anyoneAsm(address)" in writers["assembly_storage:slot"]
+    assert all("anyoneAsm(address)" not in fns for var, fns in writers.items() if not var.startswith("assembly_"))
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+
+def test_an_open_delegatecall_demotes_the_qualification(opaque):
+    derived = opaque["OpaqueDelegatecall"]
+    effects = derived["effects"]
+    sinks = effects["functions"]["anyoneDc(address,bytes)"]["sinks"]
+    assert any(sink["kind"] == "delegatecall" for sink in sinks)
+    # The callee writes THIS contract's storage and is not in this compilation
+    # unit, so no write is attributed to the caller at all.
+    assert all("anyoneDc(address,bytes)" not in fns for fns in _state_writers_from_effects(effects).values())
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+
+def test_a_library_storage_write_demotes_the_qualification(opaque):
+    derived = opaque["OpaqueLibrary"]
+    contract = derived["contract"]
+    caller = next(fn for fn in contract.functions if fn.full_name == "anyoneLib(address)")
+    # Non-vacuity: the write is invisible to BOTH attribution routes — the
+    # effects writer set and Slither's recursive accessor.
+    assert list(caller.all_state_variables_written()) == []
+    assert all("anyoneLib(address)" not in fns for fns in _state_writers_from_effects(derived["effects"]).values())
+    callee = next(call.function for call in caller.all_library_calls())
+    assert any(getattr(p, "location", None) == "storage" for p in callee.parameters)
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+
+def test_ordinary_library_use_is_not_opaque(opaque):
+    """A library taking no storage pointer cannot write the caller's state, so
+    Math-style and SafeERC20-style use must leave the qualification alone —
+    otherwise the guard nullifies F3 on most real contracts."""
+    from services.static.contract_analysis_pipeline.tracking import _library_storage_write_functions
+
+    derived = opaque["PlainLibrary"]
+    contract = derived["contract"]
+    caller = next(fn for fn in contract.functions if fn.full_name == "anyoneMax(uint256)")
+    # Non-vacuity: an UNGATED entry point really does call a library here.
+    assert list(caller.all_library_calls())
+    assert _library_storage_write_functions(contract) == frozenset()
+
+    spec = _allowed(derived)
+    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
+    assert spec["event_type"] == "member_changed:gated"
+
+
+# ---------------------------------------------------------------------------
 # Shape 5 — canonical family
 # ---------------------------------------------------------------------------
 

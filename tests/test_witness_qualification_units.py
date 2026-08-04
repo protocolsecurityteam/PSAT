@@ -192,6 +192,23 @@ def test_the_latch_class_alone_subtracts_nothing():
     assert _writer_survives_hygiene(facts, "s", None, _IR_PROVEN) is False
 
 
+def test_the_opaque_set_reads_both_shapes_the_artifact_records():
+    """Inline-assembly storage access and a delegatecall are the two
+    unattributable write shapes ``effects`` records per function."""
+    from services.static.contract_analysis_pipeline.tracking import _unattributable_write_functions
+
+    effects = {
+        "functions": {
+            "asm()": {"assembly_state_access": True, "sinks": []},
+            "dc()": {"assembly_state_access": False, "sinks": [{"kind": "delegatecall", "target": "impl"}]},
+            "plain()": {"assembly_state_access": False, "sinks": [{"kind": "state_write", "target": "m"}]},
+            "call()": {"assembly_state_access": False, "sinks": [{"kind": "external_call", "target": "t"}]},
+        }
+    }
+    assert _unattributable_write_functions(effects) == frozenset({"asm()", "dc()"})
+    assert _unattributable_write_functions(None) == frozenset()
+
+
 # ---------------------------------------------------------------------------
 # F8 — member projection
 # ---------------------------------------------------------------------------
