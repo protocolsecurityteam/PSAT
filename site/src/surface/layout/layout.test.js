@@ -586,7 +586,7 @@ describe("collectIndirectCallers — witnessed-agency walk", () => {
     expect(indirect).toEqual([]);
   });
 
-  it("does not re-publish a direct caller as indirect, and ignores principals with no route", () => {
+  it("ignores principals with no agency route to a direct caller", () => {
     const companyData = companyWith(
       [
         {

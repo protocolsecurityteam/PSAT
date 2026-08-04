@@ -526,7 +526,7 @@ describe("ProtocolSurface — function lane categorization (via buildMachines)",
 });
 
 // Sanity: the rich fixture used here is the same one consumers will use
-// to test buildMachines / guardSummary / collectPrincipals once those are
+// to test buildMachines / guardSummary / collectDirectCallers once those are
 // extracted as standalone helpers — pinning the fixture here means the
 // extraction and the fixture stay in lockstep.
 describe("rich fixture", () => {

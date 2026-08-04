@@ -2144,23 +2144,6 @@ def _build_flows_and_principals(
                     continue
                 add_flow(node_addr, target, "principal", chain)
 
-    # The authority edges the scorer's control closure walks (see
-    # _protocol_reach_edges), carried verbatim: the score document publishes
-    # reach over exactly these pairs, and one this graph drops is a route the
-    # frontend can only report as "not carried". No holder gate — the closure
-    # routes through whatever the witnessed rows name, including a
-    # RolesAuthority that gates functions without ever being a
-    # FunctionPrincipal, an implementation row the page does not render, and
-    # contracts never enrolled in the inventory at all. The relations admitted
-    # here all carry established authority provenance (an unattributed value
-    # lands on controller_value_unattributed, which neither the scorer nor
-    # this pass walks), so a beneficiary state-var cannot ride in — and the
-    # FP-gated passes stay authoritative for which addresses become principal
-    # CARDS; this pass emits edges only. add_flow dedups per pair, so a pair a
-    # gate above already emitted keeps its richer type.
-    for chain_tok, holder, subject, _relation, _label in reach_edges:
-        add_flow(holder, subject, "controller", chain_tok)
-
     # Collect non-contract principals from control graph + function principals.
     # First pass: find safe_owner edges so we can nest Safe owners later.
     principal_map: dict[str, dict[str, Any]] = {}
@@ -2308,6 +2291,25 @@ def _build_flows_and_principals(
                 principal_map[pa]["controls"].append(target)
             principal_map[pa]["chains"].add(_coalesce_chain(chain))
             add_flow(pa, target, "principal", chain)
+
+    # The authority edges the scorer's control closure walks (see
+    # _protocol_reach_edges), carried verbatim: the score document publishes
+    # reach over exactly these pairs, and one this graph drops is a route the
+    # frontend can only report as "not carried". No holder gate — the closure
+    # routes through whatever the witnessed rows name, including a
+    # RolesAuthority that gates functions without ever being a
+    # FunctionPrincipal, an implementation row the page does not render, and
+    # contracts never enrolled in the inventory at all. The relations admitted
+    # here all carry established authority provenance (an unattributed value
+    # lands on controller_value_unattributed, which neither the scorer nor
+    # this pass walks), so a beneficiary state-var cannot ride in — and the
+    # FP-gated passes stay authoritative for which addresses become principal
+    # CARDS; this pass emits edges only. It runs LAST so add_flow's
+    # first-writer-wins dedup lets every pass above keep its richer type
+    # (``principal``, gate-derived ``controller``) — reach edges only fill
+    # pairs no other witness emitted.
+    for chain_tok, holder, subject, _relation, _label in reach_edges:
+        add_flow(holder, subject, "controller", chain_tok)
 
     # ``chains`` accumulates as a set during collection (a principal may govern
     # on several chains); the payload carries a sorted list. It stays additive —

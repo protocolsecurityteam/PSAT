@@ -600,9 +600,7 @@ class DiscoveryWorker(BaseWorker):
                 # still protocol-less (adoption only ran on the fetch path).
                 cached_row = session.get(Contract, new_contract_id)
                 if cached_row is not None:
-                    adopted_pid = _maybe_adopt_existing_contract(
-                        session, job, cached_row, job.request if isinstance(job.request, dict) else {}
-                    )
+                    adopted_pid = _maybe_adopt_existing_contract(session, job, cached_row, request)
                     if adopted_pid is not None:
                         session.commit()
                         from services.monitoring.enrollment import mark_enrollment_dirty
@@ -721,9 +719,10 @@ class DiscoveryWorker(BaseWorker):
         )
 
         # Set when an *already-existing* contract row is adopted into a protocol
-        # below (structural or deployer-cascade). Such a row may already have a
-        # completed policy job, so no later trigger re-enrolls it — mark the
-        # protocol dirty after the commit so the reconciler picks it up.
+        # below (any evidence arm of _maybe_adopt_existing_contract). Such a row
+        # may already have a completed policy job, so no later trigger re-enrolls
+        # it — mark the protocol dirty after the commit so the reconciler picks
+        # it up.
         adopted_pid: int | None = None
 
         if existing:
