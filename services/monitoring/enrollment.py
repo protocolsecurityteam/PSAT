@@ -27,6 +27,16 @@ from services.governance.control_graph_types import reconcile_control_graph_type
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 from services.monitoring.event_topics import extract_governance_topics
 from services.monitoring.polling_plan import build_polling_plan
+from services.monitoring.tracking_plan_state import (
+    CONTRACT_NOT_ANALYZED,
+    MATERIALIZATION_LOOKUP_FAILED,
+    NO_CURRENT_MATERIALIZATION,
+    PLAN_LOAD_ERROR,
+    PLAN_NOT_READABLE,
+    PLAN_OBJECT_ABSENT,
+    POLLING_PLAN_KEY,
+    merge_stale_tracking_plan,
+)
 from utils.chains import chain_enabled
 from utils.rpc import rpc_request
 
@@ -224,9 +234,18 @@ def enroll_protocol_contracts(
     # local-fork override; ``rpc_for_chain`` keeps it verbatim for mainnet and
     # resolves the chain's eRPC route otherwise. Memoized per chain so a
     # many-contract protocol issues one head read per chain.
-    block_by_chain: dict[str, int] = {}
+    block_by_chain: dict[str, int | None] = {}
 
-    def _block_for(contract_chain: str) -> int:
+    def _block_for(contract_chain: str) -> int | None:
+        """The chain's head, or ``None`` when the read did not answer.
+
+        A head read that failed is not-determined, and block 0 is not its
+        stand-in: enrolling at 0 mints a row whose scan cursor claims the whole
+        chain as backlog (the scanner then serves it first, every pass, forever)
+        and whose enrollment floor licenses every historical event it finds as a
+        live change. The caller skips creating the row instead — enrollment is
+        idempotent and the reconciler re-runs it.
+        """
         if contract_chain not in block_by_chain:
             try:
                 result = rpc_request(
@@ -236,9 +255,18 @@ def enroll_protocol_contracts(
                     chain_id=chain_id_for(contract_chain),
                 )
                 block_by_chain[contract_chain] = int(result, 16)
-            except Exception:
-                logger.warning("Could not get current block for chain %s, defaulting to 0", contract_chain)
-                block_by_chain[contract_chain] = 0
+            except Exception as exc:
+                logger.warning(
+                    "Chain head not determined; deferring enrollment of new rows on this chain",
+                    extra={
+                        "chain": contract_chain,
+                        "protocol_id": protocol_id,
+                        "reason": "head_read_not_determined",
+                        "site": "enrollment",
+                        "exc_type": type(exc).__name__,
+                    },
+                )
+                block_by_chain[contract_chain] = None
         return block_by_chain[contract_chain]
 
     enrolled: list[MonitoredContract] = []
@@ -297,8 +325,6 @@ def enroll_protocol_contracts(
         monitoring_config = _build_monitoring_config(
             summary, cv_rows, contract_type, tracked_topics, polling_plan, plan_not_determined=plan_not_determined
         )
-        initial_state = _build_initial_state(contract, cv_rows, polling_plan)
-        needs_poll = bool(polling_plan)
 
         # Check for existing MonitoredContract
         existing = session.execute(
@@ -307,6 +333,20 @@ def enroll_protocol_contracts(
                 MonitoredContract.chain == contract_chain,
             )
         ).scalar_one_or_none()
+
+        if existing is not None:
+            # Enrollment rebuilds the config wholesale, so a plan we cannot read
+            # today would replace what a plan we DID read told us with a token
+            # and an empty watch list. Merge first — everything below derives
+            # from the config, so the merged plan is what seeds the state and
+            # decides whether this row still polls.
+            monitoring_config = merge_stale_tracking_plan(monitoring_config, existing.monitoring_config)
+            carried_plan = monitoring_config.get(POLLING_PLAN_KEY)
+            if isinstance(carried_plan, list):
+                polling_plan = carried_plan
+
+        initial_state = _build_initial_state(contract, cv_rows, polling_plan)
+        needs_poll = bool(polling_plan)
 
         if existing:
             existing.protocol_id = protocol_id
@@ -340,6 +380,21 @@ def enroll_protocol_contracts(
                 existing.watched_proxy_id = None
             mc = existing
         else:
+            if current_block is None:
+                # No witnessed head ⇒ no honest cursor and no honest enrollment
+                # floor. Skip; the next enrollment (fast path or reconciler)
+                # creates the row once the chain answers.
+                logger.warning(
+                    "Skipping enrollment: chain head not determined",
+                    extra={
+                        "address": contract.address,
+                        "chain": contract_chain,
+                        "protocol_id": protocol_id,
+                        "reason": "head_read_not_determined",
+                        "site": "enrollment",
+                    },
+                )
+                continue
             # Concurrent policy workers enrolling the same protocol can insert
             # this (address, chain) between the SELECT above and here. ON
             # CONFLICT DO NOTHING keeps a concurrent loser a no-op instead of a
@@ -556,7 +611,7 @@ def _load_tracking_plan_artifacts(
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return [], None, "materialization_lookup_failed"
+        return [], None, MATERIALIZATION_LOOKUP_FAILED
 
     if row is None:
         # ``find_by_address`` collapses three distinct facts into ``None``: no
@@ -570,7 +625,7 @@ def _load_tracking_plan_artifacts(
             "no current tracking_plan materialization for %s; enrolling from the baseline registry only",
             contract.address,
         )
-        return [], None, "no_current_materialization"
+        return [], None, NO_CURRENT_MATERIALIZATION
 
     try:
         # ``hydrate_tracking_plan`` keeps the same three states: a dict is
@@ -582,7 +637,7 @@ def _load_tracking_plan_artifacts(
         # Two different remedies, so two different tokens: an object the bucket
         # says it does not hold will read the same on every retry; a bucket that
         # could not be asked may answer next time.
-        token = "plan_object_absent" if isinstance(exc, StorageContentAbsent) else "plan_not_readable"
+        token = PLAN_OBJECT_ABSENT if isinstance(exc, StorageContentAbsent) else PLAN_NOT_READABLE
         logger.error(
             "tracking_plan for %s is not determined (%s); enrolling from the baseline registry only",
             contract.address,
@@ -599,7 +654,7 @@ def _load_tracking_plan_artifacts(
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        return [], None, "plan_load_error"
+        return [], None, PLAN_LOAD_ERROR
 
     return extract_governance_topics(plan), plan, None
 
@@ -630,7 +685,12 @@ def _build_monitoring_config(
     (pre-discriminant rows; caller-supplied configs are stamped at the route,
     see ``routers/monitored.py``). Earlier, the read-and-named-nothing state
     was itself signalled by key absence, making it indistinguishable from
-    those rows."""
+    those rows.
+
+    The builder never emits BOTH keys — it has no access to any earlier read.
+    A persisted config carrying both is the staleness merge its caller applies
+    (``tracking_plan_state.merge_stale_tracking_plan``): topics from the last
+    plan we read, plus the reason we cannot re-read them now."""
     config: dict[str, Any] = {
         "watch_upgrades": contract_type == "proxy",
         "watch_ownership": True,
@@ -792,7 +852,7 @@ def _bridge_to_watched_proxy(
     session: Session,
     mc: MonitoredContract,
     contract: Contract,
-    current_block: int,
+    current_block: int | None,
     chain: str,
 ) -> None:
     """Create or link a WatchedProxy row for backward compatibility.
@@ -800,6 +860,10 @@ def _bridge_to_watched_proxy(
     *chain* is the MonitoredContract's resolved chain (``contract.chain`` or the
     caller's fallback), so the WatchedProxy is keyed on the same ``(address,
     chain)`` as its MonitoredContract instead of an independent mainnet default.
+
+    *current_block* is ``None`` when the chain head was not determined; only the
+    create branch needs it (same floor-0 cursor hazard as the MonitoredContract
+    insert), so the link is deferred to the next pass rather than seeded at 0.
     """
     existing_wp = session.execute(
         select(WatchedProxy).where(
@@ -818,6 +882,17 @@ def _bridge_to_watched_proxy(
             existing_wp.label = contract.contract_name
         mc.watched_proxy_id = existing_wp.id
     else:
+        if current_block is None:
+            logger.warning(
+                "Skipping WatchedProxy creation: chain head not determined",
+                extra={
+                    "address": contract.address,
+                    "chain": chain,
+                    "reason": "head_read_not_determined",
+                    "site": "enrollment_watched_proxy",
+                },
+            )
+            return
         # Race-safe on uq_watched_proxy_address_chain — same rationale as the
         # MonitoredContract insert: a concurrent enroller for the same proxy
         # shell must become a no-op rather than poison the session.
@@ -856,7 +931,7 @@ def _enroll_controller_addresses(
     contracts: Sequence[Contract],
     protocol_id: int,
     chain: str,
-    current_block: int,
+    current_block: int | None,
 ) -> None:
     """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
     MonitoredContract rows, and demote any that are no longer controllers.
@@ -888,6 +963,10 @@ def _enroll_controller_addresses(
     MonitoredEvent history survives a later re-promotion or an audit.
     Protocol-contract rows (owned by the main loop in
     ``enroll_protocol_contracts``) are never touched.
+
+    A ``None`` *current_block* (head read not determined) suppresses only the
+    creation of new rows — re-promotion and demotion of rows that already exist
+    need no cursor and still converge.
     """
     from services.aggregations.company_overview import controllers_for_protocol
 
@@ -913,6 +992,18 @@ def _enroll_controller_addresses(
             existing.is_active = True
             existing.enrollment_source = "auto"
         else:
+            if current_block is None:
+                logger.warning(
+                    "Skipping controller enrollment: chain head not determined",
+                    extra={
+                        "address": addr,
+                        "chain": chain,
+                        "protocol_id": protocol_id,
+                        "reason": "head_read_not_determined",
+                        "site": "enrollment_controllers",
+                    },
+                )
+                continue
             # Primary controllers are principals on *other* contracts, not
             # analyzed themselves, so the polling plan resolves to vendored
             # entries only — Safe gets ``getThreshold``, Timelock gets
@@ -927,7 +1018,7 @@ def _enroll_controller_addresses(
             # read a tracking plan for it: the config carries the
             # contract_not_analyzed token and no tracked_topics key at all.
             config = _build_monitoring_config(
-                None, [], monitored_type, None, polling_plan, plan_not_determined="contract_not_analyzed"
+                None, [], monitored_type, None, polling_plan, plan_not_determined=CONTRACT_NOT_ANALYZED
             )
             # Race-safe on uq_monitored_contract_address_chain — a concurrent
             # reconcile / re-enroll for the same controller must become a no-op

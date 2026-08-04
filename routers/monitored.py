@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol
 from schemas.api_requests import UpdateMonitoredContractRequest, UpsertMonitoredContractRequest
 from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
+from services.monitoring.tracking_plan_state import CONFIG_SUPPLIED_BY_CALLER
 from utils.chains import UnsupportedChainError, require_supported_chain
 from utils.rpc import rpc_request
 
@@ -22,16 +23,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _current_head_block(chain: str | None) -> int:
-    """Best-effort current head on the enrolled contract's OWN chain, used to seed
-    a manually-added contract's scan cursor and enrollment floor.
+def _current_head_block(chain: str | None) -> int | None:
+    """Current head on the enrolled contract's OWN chain, used to seed a
+    manually-added contract's scan cursor and enrollment floor. ``None`` when
+    the read did not answer.
 
     ``chain`` selects the RPC route: mainnet (and any unresolvable chain) keeps
     ``deps.DEFAULT_RPC_URL`` verbatim, a second chain resolves its own eRPC route
     from the registry (same ``rpc_for_chain`` the scanner uses). Without this a
     non-mainnet enrollment seeded ``enrollment_block`` from the MAINNET head — a
-    wrong, immutable pre-watch floor. Falls back to 0 on RPC failure — the same
-    degradation the enrollment path accepts (``enrollment.py``)."""
+    wrong, immutable pre-watch floor.
+
+    A failed read is not-determined and block 0 is not its stand-in: it seeds a
+    cursor claiming the whole chain as backlog and a floor that licenses every
+    historical event as live. The caller refuses the enrollment instead (same
+    rule as ``enrollment._block_for``)."""
     try:
         return int(
             rpc_request(
@@ -46,9 +52,9 @@ def _current_head_block(chain: str | None) -> int:
         logger.warning(
             "Could not read head block for monitoring upsert: %s",
             exc,
-            extra={"exc_type": type(exc).__name__, "chain": chain},
+            extra={"exc_type": type(exc).__name__, "chain": chain, "reason": "head_read_not_determined"},
         )
-        return 0
+        return None
 
 
 #: Stamped into every caller-supplied ``monitoring_config``. The auto-enrollment
@@ -61,7 +67,7 @@ def _current_head_block(chain: str | None) -> int:
 #: key would read as a builder output that never existed. This token is the
 #: honest answer for the caller-authored case and keeps the builder's states
 #: earned; NEITHER key survives only on rows that predate the discriminant.
-CALLER_SUPPLIED_TRACKING_PLAN = "config_supplied_by_caller"
+CALLER_SUPPLIED_TRACKING_PLAN = CONFIG_SUPPLIED_BY_CALLER
 
 
 def _stamp_caller_supplied(monitoring_config: dict[str, Any] | None) -> dict[str, Any]:
@@ -159,6 +165,11 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
             # below which the scanner records events as pre-watch history
             # without notifying (consistent with the auto-enrollment inserts).
             head_block = _current_head_block(request.chain)
+            if head_block is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Chain head not determined; cannot seed a scan cursor or enrollment floor. Retry.",
+                )
             existing = MonitoredContract(
                 address=request.address,
                 chain=request.chain,
