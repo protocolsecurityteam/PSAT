@@ -106,10 +106,27 @@ const WRITE_TARGET_TO_KIND = {
   min_delay: "timelock",
 };
 
+// Pull the state-variable name out of a witnessed type's payload:
+// `value_changed:state_variable:owner` → "owner",
+// `member_changed:fromDenyList` → "fromDenyList".
+function witnessedSlot(type) {
+  const match = /^(value|member)_changed:(.+)$/.exec(String(type || ""));
+  if (!match) return null;
+  return { stem: match[1], slot: match[2].split(":").pop() };
+}
+
 export function eventKind(evt) {
   // Back-compat: callers historically passed just the event_type string.
   const event = typeof evt === "string" ? { event_type: evt } : evt;
-  if (event?.event_type === "state_changed_poll") return "state";
+  const type = String(event?.event_type || "");
+  if (type === "state_changed_poll") return "state";
+  // Witnessed types name the slot that was PROVEN to move, so the kind comes
+  // from that slot rather than from the emitter's donated write set (which is
+  // exactly the evidence the taxonomy stopped trusting).
+  const witnessed = witnessedSlot(type);
+  if (witnessed) {
+    return WRITE_TARGET_TO_KIND[witnessed.slot] || "state";
+  }
   const tags = tagsForEvent(event);
   const writes = tags.writes || [];
   for (const wt of writes) {
@@ -118,7 +135,7 @@ export function eventKind(evt) {
   // Producer's neutral terminal fallback (`state_changed:<controller_id>`):
   // a tracked slot was written and nothing classified it. "State change" is
   // what that says; it stays out of every control/authority kind.
-  if (String(event?.event_type || "").startsWith("state_changed")) return "state";
+  if (type.startsWith("state_changed")) return "state";
   return "other";
 }
 
@@ -160,6 +177,13 @@ export function eventSeverity(evt) {
 
 function arrowSub(from, to) {
   return from && to ? `${shortenAddress(from)} → ${shortenAddress(to)}` : null;
+}
+
+// Addresses and hashes shorten; numbers, booleans and names render whole —
+// truncating a uint would state a different value.
+function shortenIfHex(value) {
+  const s = String(value);
+  return /^0x[0-9a-f]{40}$/i.test(s) ? shortenAddress(s) : s;
 }
 
 // Per-write-target renderers. Each renderer is ``(data, event_type) → {
@@ -279,14 +303,46 @@ export function decodeEvent(evt) {
   const d = evt?.data || {};
   const type = evt?.event_type || "unknown";
 
-  // Synthetic poll event — no decoder, no tags, render directly.
+  // Synthetic poll event — no decoder, no tags, render directly. The poller
+  // writes `old_value`/`new_value`; the shorter keys are read too because the
+  // read-verified path below and older rows use them.
   if (type === "state_changed_poll") {
     const field = d.field || "state";
-    const before = d.old != null ? String(d.old) : null;
-    const after = d.new != null ? String(d.new) : null;
+    const rawBefore = d.old != null ? d.old : d.old_value;
+    const rawAfter = d.new != null ? d.new : d.new_value;
+    const before = rawBefore != null ? String(rawBefore) : null;
+    const after = rawAfter != null ? String(rawAfter) : null;
     return {
       title: `${field} changed (polled)`,
       sub: before && after ? `${before} → ${after}` : null,
+    };
+  }
+
+  // Witnessed types. `value_changed:<controller_id>` carries a read-verified
+  // old→new diff; `member_changed:<mapping_var>` carries a qualified entry
+  // change with the key/value/direction in data. Both are handled ahead of
+  // the tag-driven table on purpose: the proven payload is the claim, and the
+  // emitter's donated write set must not re-title it as something else.
+  const witnessed = witnessedSlot(type);
+  if (witnessed?.stem === "value") {
+    const before = d.old != null ? shortenIfHex(d.old) : null;
+    const after = d.new != null ? shortenIfHex(d.new) : null;
+    return {
+      title: `${witnessed.slot} changed (verified)`,
+      sub: before && after ? `${before} → ${after}` : null,
+    };
+  }
+  if (witnessed?.stem === "member") {
+    const key = d.key != null ? shortenIfHex(d.key) : null;
+    // `direction` is the event's own statement about what happened to the
+    // entry; without one the honest rendering names no verb.
+    const verb = { add: "added", remove: "removed", set: "set" }[d.direction] || "changed";
+    const parts = [];
+    if (key) parts.push(key);
+    if (d.value != null) parts.push(`= ${shortenIfHex(d.value)}`);
+    return {
+      title: `${witnessed.slot} entry ${verb}`,
+      sub: parts.length ? parts.join(" ") : null,
     };
   }
 

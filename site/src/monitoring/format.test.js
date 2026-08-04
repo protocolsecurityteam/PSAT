@@ -500,3 +500,69 @@ describe("state_changed:<controller_id>", () => {
     expect(result.title).toBe("Ownership transferred");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Witnessed vocabulary — the types the taxonomy mints once a change is proven
+// ---------------------------------------------------------------------------
+
+describe("value_changed:<controller_id>", () => {
+  const ownerRow = {
+    event_type: "value_changed:state_variable:owner",
+    data: { field: "owner", controller_id: "state_variable:owner", old: ADDR_A, new: ADDR_B, witness: "read_verified" },
+  };
+
+  it("renders the read-verified diff, not the emitter's write set", () => {
+    const result = decodeEvent(ownerRow);
+    expect(result.title).toBe("owner changed (verified)");
+    expect(result.sub).toBe("0x1111...1111 → 0x2222...2222");
+  });
+
+  it("takes its kind from the slot the read proved moved", () => {
+    expect(eventKind(ownerRow)).toBe("owner");
+    expect(eventKindLabel(ownerRow)).toBe("Ownership");
+    expect(eventSeverity(ownerRow)).toBe("critical");
+  });
+
+  it("falls back to the state kind for a slot with no mapping", () => {
+    const row = { event_type: "value_changed:state_variable:feeBps", data: { old: 30, new: 50 } };
+    expect(eventKind(row)).toBe("state");
+    expect(decodeEvent(row).sub).toBe("30 → 50");
+  });
+
+  it("is not re-titled by a donated write set", () => {
+    // The emitter that hinted at this read wrote several slots; only the
+    // read's own field is the claim.
+    const row = {
+      event_type: "value_changed:state_variable:feeBps",
+      data: { field: "feeBps", old: 30, new: 50, effect_tags: { writes: ["owner", "feeBps"] } },
+    };
+    expect(decodeEvent(row).title).toBe("feeBps changed (verified)");
+  });
+});
+
+describe("member_changed:<mapping_var>", () => {
+  it("renders the key/value/direction from data, never from the type", () => {
+    const row = {
+      event_type: "member_changed:fromDenyList",
+      data: { key: ADDR_A, value: true, direction: "add" },
+    };
+    const result = decodeEvent(row);
+    expect(result.title).toBe("fromDenyList entry added");
+    expect(result.sub).toBe("0x1111...1111 = true");
+    expect(row.event_type).not.toContain(ADDR_A);
+  });
+
+  it("names no verb when the event stated no direction", () => {
+    const result = decodeEvent({ event_type: "member_changed:peers", data: { key: "42" } });
+    expect(result.title).toBe("peers entry changed");
+  });
+});
+
+describe("state_changed_poll old/new key aliases", () => {
+  it("renders the poller's own old_value/new_value shape", () => {
+    const result = decodeEvent(
+      evt("state_changed_poll", { field: "owner", old_value: ADDR_A, new_value: ADDR_B }),
+    );
+    expect(result.sub).toBe(`${ADDR_A} → ${ADDR_B}`);
+  });
+});
