@@ -13,6 +13,7 @@ which job.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,11 +31,14 @@ from db.contract_materializations import (
     PUBLISH_ALREADY_CURRENT,
     PUBLISH_INCOMPLETE_BUNDLE,
     PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS,
+    PUBLISH_REFRESHED,
     PUBLISH_WRITTEN,
     build_provenance,
+    builder_claim_is_stale,
     publish_materialization,
 )
-from db.models import ContractMaterialization
+from db.models import ContractMaterialization, Job, JobStage, JobStatus
+from db.queue import proven_analysis_schema_version
 from tests.conftest import requires_postgres
 
 ADDR = "0x" + "a1" * 20
@@ -216,6 +220,127 @@ def test_provenance_records_an_unknown_job_as_null():
     assert stamp["source_job_id"] is None
 
 
+@requires_postgres
+def test_the_pipeline_refreshes_a_current_row_whose_bundle_differs(cm_db):
+    """Byte-identical code does not imply an identical bundle: the analyzer
+    improves without every improvement earning a version bump, and without this
+    a ready row is frozen forever and later analyzer work never reaches the
+    store enrollment reads."""
+    _publish()
+    improved = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:owner"}]}
+
+    assert _publish(tracking_plan=improved, refresh_on_differ=True) == PUBLISH_REFRESHED
+    cm_db.expire_all()
+    row = _row(cm_db)
+    assert row is not None
+    assert row.tracking_plan == improved
+    assert row.status == "ready"
+
+    # Identical bundle, same flag: nothing to say, nothing written.
+    assert _publish(tracking_plan=improved, refresh_on_differ=True) == PUBLISH_ALREADY_CURRENT
+
+
+@requires_postgres
+def test_the_sweep_never_overwrites_a_current_row_with_an_older_bundle(cm_db):
+    """The promotion sweep's source is an older job's artifact; refreshing from
+    it would be a downgrade, so the row stands."""
+    _publish()
+    older = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "stale"}]}
+    assert _publish(tracking_plan=older) == PUBLISH_ALREADY_CURRENT
+    cm_db.expire_all()
+    row = _row(cm_db)
+    assert row is not None and row.tracking_plan == PLAN
+
+
+@requires_postgres
+def test_an_already_current_return_leaves_the_stored_payload_untouched(cm_db, monkeypatch):
+    """``already_current`` is a claim about what the row still holds, so the
+    decision has to precede the upload — not follow it."""
+    _publish()
+    puts: list[str] = []
+    monkeypatch.setattr(
+        "db.contract_materializations._put_blob",
+        lambda _c, key, _p: puts.append(key),  # pragma: no cover - guard
+    )
+    assert _publish() == PUBLISH_ALREADY_CURRENT
+    assert puts == []
+
+
+@requires_postgres
+def test_a_stale_builder_claim_does_not_read_as_a_running_builder(cm_db):
+    cm_db.add(
+        ContractMaterialization(
+            chain="1",
+            bytecode_keccak=KECCAK,
+            address=ADDR.lower(),
+            status="building",
+            builder_started_at=datetime.now(timezone.utc) - timedelta(hours=6),
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        )
+    )
+    cm_db.commit()
+    assert builder_claim_is_stale("building", datetime.now(timezone.utc) - timedelta(hours=6)) is True
+    assert builder_claim_is_stale("building", datetime.now(timezone.utc)) is False
+    assert _publish() == PUBLISH_WRITTEN
+
+
+# ---------------------------------------------------------------------------
+# The analyzer era a job's artifacts were produced under
+# ---------------------------------------------------------------------------
+
+
+def _job_row(session, *, version: int | None, donor: Any = None) -> Job:
+    request: dict = {"address": ADDR}
+    if donor is not None:
+        request |= {"static_cached": True, "cache_source_job_id": str(donor)}
+    job = Job(
+        id=uuid.uuid4(),
+        address=ADDR,
+        status=JobStatus.completed,
+        stage=JobStage.done,
+        request=request,
+        analysis_schema_version=version,
+    )
+    session.add(job)
+    session.commit()
+    return job
+
+
+@requires_postgres
+def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
+    """discovery stamps the era only on the fetch path, so a same-address cache
+    hit leaves the column NULL on a job whose artifacts are perfectly current.
+    The stamp is still findable where it was witnessed — 24 of the working DB's
+    32 NULL-version cache-hit jobs resolve this way."""
+    donor = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
+    hit = _job_row(cm_db, version=None, donor=donor.id)
+    second_hop = _job_row(cm_db, version=None, donor=hit.id)
+
+    assert proven_analysis_schema_version(cm_db, donor) == ANALYSIS_SCHEMA_VERSION
+    assert proven_analysis_schema_version(cm_db, hit) == ANALYSIS_SCHEMA_VERSION
+    assert proven_analysis_schema_version(cm_db, second_hop) == ANALYSIS_SCHEMA_VERSION
+
+
+@requires_postgres
+def test_an_unwitnessed_era_stays_unwitnessed(cm_db):
+    """Absence of the stamp anywhere in the chain is the third state, not
+    "current" — the remaining 8 of those 32."""
+    unstamped = _job_row(cm_db, version=None)
+    assert proven_analysis_schema_version(cm_db, unstamped) is None
+    assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=unstamped.id)) is None
+    # A dangling donor reference resolves to nothing rather than raising.
+    assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=uuid.uuid4())) is None
+
+
+@requires_postgres
+def test_a_donor_cycle_terminates(cm_db):
+    a = _job_row(cm_db, version=None)
+    b = _job_row(cm_db, version=None, donor=a.id)
+    a.request = {**(a.request or {}), "cache_source_job_id": str(b.id)}
+    cm_db.commit()
+    assert proven_analysis_schema_version(cm_db, a) is None
+
+
 # ---------------------------------------------------------------------------
 # F4a wiring — the static stage publishes what it just produced
 # ---------------------------------------------------------------------------
@@ -229,8 +354,14 @@ class _FakeStaticWorker:
     _publish_materialization = StaticWorker._publish_materialization
 
 
-def _fake_job() -> Any:
-    return SimpleNamespace(id=uuid.uuid4(), request={}, chain_id=1, source_content_hash="0x" + "fe" * 32)
+def _fake_job(version: int | None = ANALYSIS_SCHEMA_VERSION, request: dict | None = None) -> Any:
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        request=request if request is not None else {},
+        chain_id=1,
+        source_content_hash="0x" + "fe" * 32,
+        analysis_schema_version=version,
+    )
 
 
 @pytest.fixture()
@@ -269,6 +400,45 @@ def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_pu
         "source_job_id": str(job.id),
         "materialized_at": call["provenance"]["materialized_at"],
     }
+
+
+def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch, captured_publish):
+    """A row is stamped with the current version, so it may only be written for
+    a bundle proven to be of that era. A same-address cache hit returns before
+    discovery's stamp, leaving the column NULL — and NULL is not "current"."""
+    _stub_artifacts(
+        monkeypatch,
+        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+    )
+    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: None)
+    _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
+    assert captured_publish == []
+
+    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: ANALYSIS_SCHEMA_VERSION - 1)
+    _FakeStaticWorker()._publish_materialization(None, _fake_job(version=None), ADDR, "C")
+    assert captured_publish == []
+
+
+def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypatch, captured_publish):
+    """The era is recoverable for a cache-hit job: copy_static_cache copied the
+    donor's artifacts, so the donor's stamp IS this job's artifacts' era."""
+    _stub_artifacts(
+        monkeypatch,
+        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+    )
+    monkeypatch.setattr("db.queue.proven_analysis_schema_version", lambda _s, _j: ANALYSIS_SCHEMA_VERSION)
+    job = _fake_job(version=None, request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
+    _FakeStaticWorker()._publish_materialization(None, job, ADDR, "C")
+    assert len(captured_publish) == 1
+
+
+def test_the_pipeline_asks_for_refresh_on_differ(monkeypatch, captured_publish):
+    _stub_artifacts(
+        monkeypatch,
+        {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
+    )
+    _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
+    assert captured_publish[0]["refresh_on_differ"] is True
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):

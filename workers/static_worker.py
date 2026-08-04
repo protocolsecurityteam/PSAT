@@ -2076,20 +2076,49 @@ class StaticWorker(BaseWorker):
         they are identical on the fresh and the static-cache paths, and a bundle
         that failed to store is one this row must not claim to hold.
 
+        A row is stamped ``ANALYSIS_SCHEMA_VERSION``, so it may only be written
+        for a bundle PROVEN to be of that era. The stamp lives on the job, but
+        only the fetch path writes it — a same-address cache hit copies the
+        donor's artifacts and returns before it, leaving NULL. NULL is not
+        "current", so ``proven_analysis_schema_version`` follows the cache chain
+        to the era that was actually witnessed, and a job whose era stays
+        undetermined publishes nothing. Same rule the promotion sweep applies to
+        the same fact.
+
         Best-effort in every arm. Supply is not the analysis: a bucket outage, a
         keccak we cannot read, or a row another writer holds must never fail a
         job whose analysis succeeded. Each refusal is logged with its reason.
         """
         from db.contract_materializations import (
+            ANALYSIS_SCHEMA_VERSION,
             PRODUCED_BY_PIPELINE,
+            PUBLISH_ALREADY_CURRENT,
+            PUBLISH_REFRESHED,
             PUBLISH_WRITTEN,
             build_provenance,
             is_enabled,
             publish_materialization,
         )
+        from db.queue import proven_analysis_schema_version
 
         if not is_enabled():
             return
+
+        era = proven_analysis_schema_version(session, job)
+        if era != ANALYSIS_SCHEMA_VERSION:
+            record_degraded(
+                phase="materialization_publish",
+                exc=RuntimeError(f"analyzer era not proven current (job era={era})"),
+                context={"address": address, "job_era": era},
+            )
+            logger.warning(
+                "Static stage: no materialization published for %s — analyzer era not proven current (job era=%s)",
+                address,
+                era,
+                extra={"address": address, "job_era": era, "outcome": "schema_version_not_proven"},
+            )
+            return
+
         try:
             analysis = get_artifact(session, job.id, "contract_analysis")
             tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
@@ -2140,6 +2169,10 @@ class StaticWorker(BaseWorker):
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
+                # This bundle was produced by the current analyzer against this
+                # exact contract, so where it differs from the stored row it is
+                # the better record — see ``publish_materialization``.
+                refresh_on_differ=True,
             )
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
@@ -2150,7 +2183,13 @@ class StaticWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
             return
-        log = logger.info if outcome == PUBLISH_WRITTEN else logger.warning
+        if outcome in (PUBLISH_WRITTEN, PUBLISH_REFRESHED):
+            log = logger.info
+        elif outcome == PUBLISH_ALREADY_CURRENT:
+            # The steady state on every re-run of an unchanged contract.
+            log = logger.debug
+        else:
+            log = logger.warning
         log(
             "Static stage: materialization %s for %s (%s)",
             outcome,
