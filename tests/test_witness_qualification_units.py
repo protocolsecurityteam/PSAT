@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.monitoring.event_topics import (  # noqa: E402
     MAX_EVENT_TYPE_LENGTH,
+    WITNESS_TIER_ACTIVITY,
+    WITNESS_TIER_HINT,
     extract_governance_topics,
     is_member_changed_event_type,
     member_witness_mapping_var,
@@ -33,7 +35,7 @@ from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
 from services.static.contract_analysis_pipeline.writer_openness import (  # noqa: E402
     WRITER_OPENNESS_NOT_DETERMINED,
     WRITER_OPENNESS_RESTRICTED,
-    openness_of_emitters,
+    openness_of_write_paths,
     restricted_function_signatures,
 )
 
@@ -116,13 +118,28 @@ def test_a_function_without_a_tree_is_not_determined():
     assert restricted_function_signatures({"schema_version": "semantic", "error": "boom"}) == frozenset()
 
 
-def test_one_unrestricted_emitter_demotes_the_event():
+def test_one_unrestricted_path_demotes_the_event():
     restricted = frozenset({"a()", "b()"})
-    assert openness_of_emitters({"a()"}, restricted) == WRITER_OPENNESS_RESTRICTED
-    assert openness_of_emitters({"a()", "b()"}, restricted) == WRITER_OPENNESS_RESTRICTED
-    assert openness_of_emitters({"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
-    # Nothing proven about a path we never found.
-    assert openness_of_emitters(set(), restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == WRITER_OPENNESS_RESTRICTED
+    assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == WRITER_OPENNESS_RESTRICTED
+    # An open EMITTER demotes.
+    assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    # An open WRITER demotes even when every emitter we found is gated — this
+    # is the arm that survives an emitter set the IR walk could not complete.
+    assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    # Nothing proven about paths we never found.
+    assert openness_of_write_paths(set(), {"a()"}, restricted) == WRITER_OPENNESS_NOT_DETERMINED
+    assert openness_of_write_paths({"a()"}, set(), restricted) == WRITER_OPENNESS_NOT_DETERMINED
+
+
+def test_the_kill_switch_cannot_promote(monkeypatch):
+    """``PSAT_AUTHORITY_EARNED_PUBLIC=0`` turns the resolution plane's
+    earned-public projection off, which there NARROWS what publishes. Here the
+    same test only withholds a promotion, so honouring the switch would make it
+    a promoter: a cofinite denylist would read as a proof of restriction."""
+    for value in ("0", "1"):
+        monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", value)
+        assert restricted_function_signatures(_trees(**{"f()": _DENYLIST})) == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +154,9 @@ def _fact(var="s", member=None, hygiene="normal"):
         "granularity": "member" if member else "var",
         "hygiene_class": hygiene,
     }
+
+
+_IR_PROVEN = frozenset({"s"})
 
 
 @pytest.mark.parametrize(
@@ -159,7 +179,16 @@ def _fact(var="s", member=None, hygiene="normal"):
     ],
 )
 def test_writer_hygiene_subtracts_only_what_is_proven(facts, member_path, survives):
-    assert _writer_survives_hygiene(facts, "s", member_path) is survives
+    assert _writer_survives_hygiene(facts, "s", member_path, _IR_PROVEN) is survives
+
+
+def test_the_latch_class_alone_subtracts_nothing():
+    """``hygiene_class`` carries a name fallback ({locked, _status, *reentran*})
+    with no IR behind it. It may suppress a fact nobody admits; it may not
+    delete a controller, so the drop needs the var in the IR-proven set."""
+    facts = [_fact(hygiene="reentrancy_guard")]
+    assert _writer_survives_hygiene(facts, "s", None, frozenset()) is True
+    assert _writer_survives_hygiene(facts, "s", None, _IR_PROVEN) is False
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +300,43 @@ def test_a_record_naming_no_variable_mints_no_member_type():
     assert member_witness_mapping_var({"key_position": 0, "direction": "add"}) == ""
     spec = extract_governance_topics(_plan_with({"key_position": 0, "direction": "add"}))[0]
     assert spec["event_type"] == "state_changed:state_variable:m"
+    # And the TIER falls with the type. A spec that publishes under the slot
+    # stem while classified self_describing would carry an entry key into
+    # last_known_state and a ControllerValue row as the slot's value: the
+    # is_member_changed_event_type guards key off the type, so a promotion the
+    # type refused must not survive.
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert "member_witness" not in spec
+
+
+def test_a_key_outside_the_events_arg_list_mints_no_member_type():
+    """The type names the mapping; only ``data.key`` names the entry."""
+    witness = {"mapping_name": "m", "key_position": 3, "direction": "add"}
+    spec = extract_governance_topics(_plan_with(witness))[0]
+    assert spec["event_type"] == "state_changed:state_variable:m"
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert "member_witness" not in spec
+
+
+def test_a_log_that_cannot_name_the_entry_publishes_nothing():
+    """A spec that DID qualify, decoding a log whose args do not reach the
+    proven key position: the row would claim "some entry of m moved" and name
+    none. Refused, exactly as an undecodable log is."""
+    spec = {
+        "event_type": "member_changed:m",
+        "inputs": [{"name": "user", "type": "address", "indexed": True}],
+        "member_witness": {"mapping_name": "m", "key_position": 2, "direction": "add"},
+    }
+    log = {
+        "topics": ["0x" + "ab" * 32, "0x" + "0" * 24 + "cd" * 20],
+        "data": "0x",
+        "blockNumber": "0x1",
+        "transactionHash": "0x" + "ab" * 32,
+        "logIndex": "0x0",
+    }
+    from services.monitoring.event_topics import parse_tracked_log
+
+    assert parse_tracked_log(log, spec) is None
 
 
 def test_a_mapping_name_that_would_overflow_the_column_mints_no_member_type():
@@ -286,6 +352,30 @@ def test_an_unproven_writer_mints_no_member_type(openness):
     witness = {"mapping_name": "m", "key_position": 0, "direction": "add"}
     spec = extract_governance_topics(_plan_with(witness, openness))[0]
     assert spec["event_type"] == "state_changed:state_variable:m"
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert "member_witness" not in spec
+
+
+def test_one_topic0_on_two_controllers_resolves_by_evidence():
+    """A donated topic0 can appear under several controllers. Which spec wins
+    decided the published claim, and it used to be decided by the controllers'
+    alphabetical label order."""
+    topic0 = "0x" + "ab" * 32
+    weak = {
+        "controller_id": "state_variable:aaa",
+        "read_spec": None,
+        "event_watch": {"events": [{"signature": "E(address)", "topic0": topic0, "inputs": []}]},
+    }
+    strong = {
+        "controller_id": "state_variable:zzz",
+        "read_spec": {"strategy": "getter_call", "type_kind": "address", "target": "zzz"},
+        "event_watch": {"events": [{"signature": "E(address)", "topic0": topic0, "inputs": []}]},
+    }
+    for order in ([weak, strong], [strong, weak]):
+        specs = extract_governance_topics({"tracked_controllers": order})
+        assert len(specs) == 1
+        assert specs[0]["witness_tier"] == WITNESS_TIER_HINT
+        assert specs[0]["controller_id"] == "state_variable:zzz"
 
 
 # ---------------------------------------------------------------------------

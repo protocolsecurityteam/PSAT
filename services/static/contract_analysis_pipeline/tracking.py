@@ -27,6 +27,7 @@ from schemas.contract_analysis import (
     SemanticControlAnalysis,
 )
 
+from .effects import _collect_reentrancy_guard_vars
 from .mapping_events import member_witness_records
 from .shared import (
     _contract_functions,
@@ -38,7 +39,7 @@ from .shared import (
 from .writer_openness import (
     WRITER_OPENNESS_NOT_DETERMINED,
     WRITER_OPENNESS_RESTRICTED,
-    openness_of_emitters,
+    openness_of_write_paths,
     restricted_function_signatures,
 )
 
@@ -353,13 +354,13 @@ def _entry_point_emitters(contract, event_index: dict[str, list]) -> dict[str, s
 class _EventQualification:
     """F3's two facts, precomputed once per contract.
 
-    An event qualifies to publish a mapping/struct member change directly when
-    BOTH hold: its args carry the written entry's key (emit-write
-    correspondence, from ``mapping_events``), and every externally-callable
-    path that can emit it both writes the tracked variable and is proven to
+    An event qualifies to publish a mapping member change directly when BOTH
+    hold: its args carry the written entry's key (emit-write correspondence,
+    from ``mapping_events``), and every path that can change the mapping — every
+    emitter of the event AND every writer of the variable — is proven to
     restrict its caller. Either fact missing leaves the event unqualified, and
     the monitoring plane then treats an occurrence as a hint or as bare
-    activity — never as a change claim.
+    activity, never as a change claim.
     """
 
     def __init__(
@@ -367,10 +368,17 @@ class _EventQualification:
         contract,
         event_index: dict[str, list],
         predicate_trees: Mapping[str, Any] | None,
+        effects: Mapping[str, Any] | None,
     ) -> None:
         self._witness_by_pair = member_witness_records(contract)
-        self._emitters = _entry_point_emitters(contract, event_index) if self._witness_by_pair else {}
-        self._restricted = restricted_function_signatures(predicate_trees) if self._witness_by_pair else frozenset()
+        active = bool(self._witness_by_pair)
+        self._emitters = _entry_point_emitters(contract, event_index) if active else {}
+        self._restricted = restricted_function_signatures(predicate_trees) if active else frozenset()
+        self._writers_by_var = _state_writers_from_effects(effects) if active else {}
+        # A function reaching storage through inline assembly writes slots this
+        # analysis cannot attribute to a variable, so it may be a writer of the
+        # witnessed mapping without appearing in ``_writers_by_var`` at all.
+        self._opaque_writers = _assembly_state_access_functions(effects) if active else frozenset()
 
     def for_event(
         self,
@@ -393,10 +401,18 @@ class _EventQualification:
             # is the witness for two different mappings, so an occurrence does
             # not say which entry moved.
             return None, WRITER_OPENNESS_NOT_DETERMINED
+        witness = witnesses[0]
         emitters = self._emitters.get(signature) or set()
         if not emitters or any(not (writers_by_signature.get(fn) or set()) & target_vars for fn in emitters):
-            return witnesses[0], WRITER_OPENNESS_NOT_DETERMINED
-        return witnesses[0], openness_of_emitters(emitters, self._restricted)
+            return witness, WRITER_OPENNESS_NOT_DETERMINED
+        mapping_var = witness["mapping_name"]
+        writers = set(self._writers_by_var.get(mapping_var) or set())
+        if writers & self._opaque_writers:
+            # One of the writers reaches storage through assembly: the write set
+            # attributed to this mapping is not the whole write set, so "every
+            # writer is restricted" would quantify over an incomplete domain.
+            return witness, WRITER_OPENNESS_NOT_DETERMINED
+        return witness, openness_of_write_paths(emitters, writers, self._restricted)
 
 
 def _dedupe_event_refs(events: list[tuple[AssociatedEvent, Evidence]]) -> list[AssociatedEvent]:
@@ -804,6 +820,24 @@ def _function_is_initializer(function: Any) -> bool:
     return False
 
 
+def _assembly_state_access_functions(effects: Mapping[str, Any] | None) -> frozenset[str]:
+    """Functions the effects artifact recorded reaching storage (or a
+    delegate target) through inline assembly.
+
+    Their writes land on a raw slot, so they are attributed to
+    ``assembly_storage:<slot>`` rather than to a variable name: such a function
+    can be a writer of a tracked mapping without appearing in that mapping's
+    writer set at all.
+    """
+    if not isinstance(effects, dict):
+        return frozenset()
+    return frozenset(
+        fn_sig
+        for fn_sig, info in (effects.get("functions") or {}).items()
+        if isinstance(fn_sig, str) and isinstance(info, dict) and info.get("assembly_state_access")
+    )
+
+
 def _state_writers_from_effects(
     effects: Mapping[str, Any] | None,
 ) -> dict[str, set[str]]:
@@ -863,15 +897,21 @@ def _writer_survives_hygiene(
     facts: list[dict[str, Any]] | None,
     var: str,
     member_path: tuple[str, ...] | None,
+    transient_vars: frozenset[str] = frozenset(),
 ) -> bool:
     """Does this function write *var* (at *member_path*, when one is given) in a
     way worth watching?
 
     Two exclusions, both requiring the fact to be PROVEN before it subtracts:
 
-      * every recorded write of *var* here is the transient-latch class — the
-        function sets and restores it within one call, so the value it leaves
-        behind is the value it found;
+      * every recorded write of *var* here is the transient-latch class AND
+        *var* is in *transient_vars* — the IR-proven guard set (written on both
+        sides of a modifier's ``_;``). The membership test is not redundant:
+        ``hygiene_class`` also carries a NAME fallback (``locked``, ``_status``,
+        anything containing "reentran"), which is sound only as a suppressor of
+        facts nobody admits. Dropping a controller on it would make a name the
+        witness, and ``bool public locked`` is a perfectly ordinary owner-gated
+        withdrawal pause;
       * a member-scoped controller whose writes here are all proven to land on
         OTHER members. A ``var``-granularity write says which variable but not
         which member, so it is kept: not knowing which member moved is not
@@ -884,7 +924,7 @@ def _writer_survives_hygiene(
     for_var = [fact for fact in facts if fact.get("var") == var]
     if not for_var:
         return True
-    if all(fact.get("hygiene_class") == _TRANSIENT_HYGIENE_CLASS for fact in for_var):
+    if var in transient_vars and all(fact.get("hygiene_class") == _TRANSIENT_HYGIENE_CLASS for fact in for_var):
         return False
     if member_path:
         wanted = list(member_path)
@@ -915,11 +955,14 @@ def _writer_records_from_effects(
         return [], []
     writers_by_var = _state_writers_from_effects(effects)
     facts_by_signature = _write_facts_by_signature(effects)
+    # IR-proven guards only (see ``_writer_survives_hygiene``); cached per
+    # contract by the effects module, so this is a lookup after the first call.
+    transient_vars = _collect_reentrancy_guard_vars(contract)
     # Invert: function-signature → set of vars it writes that we care about.
     writes_by_signature: dict[str, set[str]] = {}
     for var in target_set:
         for signature in writers_by_var.get(var, set()):
-            if not _writer_survives_hygiene(facts_by_signature.get(signature), var, member_path):
+            if not _writer_survives_hygiene(facts_by_signature.get(signature), var, member_path, transient_vars):
                 continue
             writes_by_signature.setdefault(signature, set()).add(var)
 
@@ -1223,7 +1266,7 @@ def build_controller_tracking(
     the writer side.
     """
     event_lookup = _event_index(contract)
-    qualification = _EventQualification(contract, event_lookup, predicate_trees)
+    qualification = _EventQualification(contract, event_lookup, predicate_trees, effects)
     state_vars_by_name = {sv.name: sv for sv in getattr(contract, "state_variables_ordered", [])}
     getter_by_var = _build_getter_index(contract)
 

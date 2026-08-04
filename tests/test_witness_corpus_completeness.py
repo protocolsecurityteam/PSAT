@@ -43,6 +43,11 @@ from services.monitoring.event_topics import (  # noqa: E402
 from services.monitoring.polling_plan import build_polling_plan  # noqa: E402
 from services.resolution.tracking_plan import build_control_tracking_plan  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
+from services.static.contract_analysis_pipeline.mapping_events import (  # noqa: E402
+    discover_mapping_writer_events,
+    member_witness_records,
+    multi_entry_writers,
+)
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts,
 )
@@ -69,17 +74,27 @@ contract WitnessCorpus {
     AccountantState public accountantState;
     mapping(address => bool) public fromDenyList;
     mapping(address => bool) public registered;
+    mapping(address => bool) public claimed;
+    mapping(address => bool) public wards;
+    mapping(address => bool) public marks;
+    mapping(address => uint256) public balances;
     mapping(uint256 => uint128) public gasLimits;
-    uint256 private locked = 1;
+    uint256 private _status = 1;
+    bool public locked;
 
     event OwnerUpdated(address indexed user, address indexed newOwner);
     event DenyFrom(address indexed user);
     event AllowFrom(address indexed user);
     event Registered(address indexed user);
+    event Claimed(address indexed user);
+    event WardAdded(address indexed usr, uint256 value);
+    event MarkSet(address indexed user);
+    event Transfer(address indexed from, address indexed to, uint256 amount);
     event ExchangeRateUpdated(uint96 oldRate, uint96 newRate);
     event PayoutAddressUpdated(address oldPayout, address newPayout);
     event ChainSetGasLimit(uint256 indexed id, uint128 limit);
     event Deposited(address indexed user, uint256 amount);
+    event Locked(address indexed by);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -87,10 +102,10 @@ contract WitnessCorpus {
     }
 
     modifier nonReentrant() {
-        require(locked == 1, "reentrant");
-        locked = 2;
+        require(_status == 1, "reentrant");
+        _status = 2;
         _;
-        locked = 1;
+        _status = 1;
     }
 
     function setOwner(address newOwner) external onlyOwner {
@@ -119,6 +134,57 @@ contract WitnessCorpus {
         emit Registered(msg.sender);
     }
 
+    // Gated ONLY by a cofinite denylist: every address the owner has not named
+    // may call it, so the correspondence must not promote the event.
+    function claim() external {
+        require(!fromDenyList[msg.sender], "denied");
+        claimed[msg.sender] = true;
+        emit Claimed(msg.sender);
+    }
+
+    function useClaim() external view {
+        require(claimed[msg.sender], "unclaimed");
+    }
+
+    // ``value`` is an unrelated amount riding along; the write is a flag set,
+    // so the record proves NO value for the entry.
+    function addWard(address usr, uint256 value) external onlyOwner {
+        wards[usr] = true;
+        emit WardAdded(usr, value);
+    }
+
+    function sweep() external view {
+        require(wards[msg.sender], "not ward");
+    }
+
+    function useMark() external view {
+        require(marks[msg.sender], "unmarked");
+    }
+
+    function adminMark(address user) external onlyOwner {
+        marks[user] = true;
+        emit MarkSet(user);
+    }
+
+    // The same topic0 as adminMark's, emitted from inline assembly where no
+    // EventCall IR node exists to see it — and open to anyone.
+    function anyoneMark() external {
+        marks[msg.sender] = true;
+        bytes32 topic = keccak256("MarkSet(address)");
+        bytes32 key = bytes32(uint256(uint160(msg.sender)));
+        assembly {
+            log2(0, 0, topic, key)
+        }
+    }
+
+    // One event, TWO entries written. A record can name only one of them.
+    function transfer(address to, uint256 amount) external onlyOwner {
+        require(balances[msg.sender] >= amount, "funds");
+        balances[msg.sender] = balances[msg.sender] - amount;
+        balances[to] = balances[to] + amount;
+        emit Transfer(msg.sender, to, amount);
+    }
+
     function updateExchangeRate(uint96 rate) external onlyOwner {
         uint96 old = accountantState.exchangeRate;
         accountantState.exchangeRate = rate;
@@ -131,7 +197,7 @@ contract WitnessCorpus {
         emit PayoutAddressUpdated(old, payout);
     }
 
-    function claimFees() external {
+    function claimFees() external view {
         require(msg.sender == accountantState.payoutAddress, "not payee");
     }
 
@@ -142,6 +208,17 @@ contract WitnessCorpus {
     function deposit(uint256 amount) external nonReentrant {
         require(!fromDenyList[msg.sender], "denied");
         emit Deposited(msg.sender, amount);
+    }
+
+    // Named ``locked``, but a real owner-gated withdrawal pause: set and never
+    // restored inside the call.
+    function pauseWithdrawals() external onlyOwner {
+        locked = true;
+        emit Locked(msg.sender);
+    }
+
+    function withdraw() external view {
+        require(!locked, "paused");
     }
 }
 """
@@ -172,6 +249,7 @@ def corpus(tmp_path_factory):
     planned = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     polling = build_polling_plan(contract_type="regular", tracking_plan=plan, tracked_topics=specs)
     return {
+        "contract": contract,
         "effects": effects,
         "targets": {target["controller_id"]: target for target in targets},
         "plan": plan,
@@ -219,7 +297,12 @@ def test_corpus_covers_all_five_degenerate_shapes(corpus):
     assert "state_changed:state_variable:registered" in tiers[WITNESS_TIER_ACTIVITY]
     # 1. reentrancy guard — no watched controller at all, asserted with its
     #    non-vacuity proof in test_reentrancy_latch_donates_nothing.
-    assert "state_variable:locked" not in corpus["planned"]
+    assert "state_variable:_status" not in corpus["planned"]
+    # 2b. the same open-writer shape gated by a cofinite DENYLIST rather than a
+    #     business condition — the arm that keeps ERC-20 Transfers out.
+    assert "state_changed:state_variable:claimed" in tiers[WITNESS_TIER_ACTIVITY]
+    # 2c. a gated EventCall emitter and an open assembly emitter of one topic0.
+    assert "state_changed:state_variable:marks" in tiers[WITNESS_TIER_ACTIVITY]
 
 
 # ---------------------------------------------------------------------------
@@ -228,19 +311,34 @@ def test_corpus_covers_all_five_degenerate_shapes(corpus):
 
 
 def test_reentrancy_latch_donates_nothing(corpus):
-    """``deposit`` writes ``locked`` and emits ``Deposited``. Before the hygiene
-    filter that made every deposit a ``state_changed:state_variable:locked``
+    """``deposit`` writes ``_status`` and emits ``Deposited``. Before the hygiene
+    filter that made every deposit a ``state_changed:state_variable:_status``
     publication — 2 of the 446 audited rows, and unbounded on real traffic."""
     writers = _state_writers_from_effects(corpus["effects"])
-    assert "deposit(uint256)" in writers.get("locked", set()), "corpus lost the latch-write shape"
+    assert "deposit(uint256)" in writers.get("_status", set()), "corpus lost the latch-write shape"
 
     # With no writer left, the latch has no event watch and no address-like
     # read, so it is not a runtime-resolvable controller and never reaches the
     # plan — the ``Deposited`` topic it used to donate is watched by nothing.
-    assert corpus["targets"]["state_variable:locked"]["associated_events"] == []
-    assert corpus["targets"]["state_variable:locked"]["writer_functions"] == []
-    assert "state_variable:locked" not in corpus["planned"]
+    assert corpus["targets"]["state_variable:_status"]["associated_events"] == []
+    assert corpus["targets"]["state_variable:_status"]["writer_functions"] == []
+    assert "state_variable:_status" not in corpus["planned"]
     assert _topic0("Deposited(address,uint256)") not in corpus["specs"]
+
+
+def test_a_var_named_locked_is_not_a_latch_without_the_ir_proof(corpus):
+    """``bool public locked`` is an owner-gated withdrawal pause: set inside the
+    call and never restored. The hygiene class the effects artifact gives it is
+    the NAME fallback, which is sound only as a suppressor of facts nobody
+    admits — deleting a controller on it would make the name the witness and
+    stop watching a real pause. Only the IR-proven set (written on both sides of
+    a modifier's ``_;``) may subtract."""
+    writers = _state_writers_from_effects(corpus["effects"])
+    assert "pauseWithdrawals()" in writers.get("locked", set())
+
+    assert "state_variable:locked" in corpus["planned"]
+    assert _spec(corpus, "Locked(address)")["witness_tier"] == WITNESS_TIER_HINT
+    assert "locked" in corpus["polling"]
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +362,62 @@ def test_open_writer_mapping_stays_activity(corpus):
     registered_event = next(e for e in events if e["signature"] == "Registered(address)")
     assert registered_event["member_witness"]["mapping_name"] == "registered"
     assert "writer_openness" not in registered_event
+
+
+def test_a_denylist_gated_writer_is_not_a_restricted_one(corpus):
+    """``claim`` proves correspondence and its only gate is
+    ``require(!fromDenyList[msg.sender])`` — a cofinite denylist that admits
+    every address the owner has not named. This is the shape the earned-public
+    arm exists for; without it the same reasoning would qualify every ERC-20
+    ``Transfer`` on a token with a denylist (P1b, 444 of the 446 audited rows).
+    """
+    spec = _spec(corpus, "Claimed(address)")
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+
+    events = corpus["targets"]["state_variable:claimed"]["associated_events"]
+    claimed_event = next(e for e in events if e["signature"] == "Claimed(address)")
+    assert claimed_event["member_witness"]["mapping_name"] == "claimed"
+    assert "writer_openness" not in claimed_event
+
+
+def test_an_open_writer_demotes_even_when_its_emit_is_invisible(corpus):
+    """``adminMark`` emits ``MarkSet`` through an ``EventCall`` node and is
+    owner-gated; ``anyoneMark`` writes the same mapping and emits the same
+    topic0 from inline assembly, where no ``EventCall`` node exists. Quantifying
+    over EMITTERS alone would see only the gated one and publish every
+    ``MarkSet`` as a witnessed member change with an attacker-chosen key.
+
+    The writers-side quantifier is what closes it: an open path that changes the
+    mapping has to WRITE it, and the effects artifact attributes that write
+    whether or not the emit was visible.
+    """
+    # Non-vacuity: the invisible emitter really is invisible to the emitter walk.
+    assert "anyoneMark()" in _state_writers_from_effects(corpus["effects"]).get("marks", set())
+    assert corpus["effects"]["functions"]["anyoneMark()"]["assembly_state_access"] is False
+
+    spec = _spec(corpus, "MarkSet(address)")
+    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
+    assert spec["writer_openness"] == "not_determined"
+    assert spec["event_type"] == "state_changed:state_variable:marks"
+
+
+def test_a_two_entry_write_names_no_single_entry(corpus):
+    """``transfer`` writes ``balances[from]`` and ``balances[to]`` under one
+    ``Transfer``. The discovery pass keeps the first of the two, so a record
+    survives that names the sender and says nothing about the recipient — a
+    false description of the event rather than a partial one."""
+    specs = discover_mapping_writer_events(corpus["contract"])
+    assert any(
+        spec["mapping_name"] == "balances" and spec["event_signature"] == "Transfer(address,address,uint256)"
+        for spec in specs
+    ), "corpus lost the multi-entry write shape"
+
+    assert ("balances", "transfer(address,uint256)") in multi_entry_writers(corpus["contract"])
+    records = member_witness_records(corpus["contract"])
+    assert ("balances", "Transfer(address,address,uint256)") not in records
+    # The single-entry writers on the same contract are untouched.
+    assert ("fromDenyList", "DenyFrom(address)") in records
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +504,31 @@ def test_qualified_member_change_decodes_key_value_and_direction(corpus):
     assert parsed["value"] == 42
     assert parsed["direction"] == "set"
     assert "7" not in parsed["event_type"]
+
+
+def test_a_flag_set_publishes_no_value_even_when_an_arg_is_named_value(corpus):
+    """``WardAdded(address indexed usr, uint256 value)`` for ``wards[usr] = true``.
+    The record proves the event states NO value for the entry, so the amount
+    that happens to ride along under the name ``value`` must not be published as
+    one — on a ``member_changed`` row ``data.value`` is the witnessed new value
+    of the entry, and nothing else."""
+    spec = _spec(corpus, "WardAdded(address,uint256)")
+    assert spec["event_type"] == "member_changed:wards"
+    assert spec["member_witness"]["value_position"] is None
+
+    ward = "0x" + "ef" * 20
+    log = {
+        "topics": [_topic0("WardAdded(address,uint256)"), "0x" + "0" * 24 + "ef" * 20],
+        "data": "0x" + "0" * 62 + "09",
+        "blockNumber": "0x64",
+        "transactionHash": "0x" + "ab" * 32,
+        "logIndex": "0x2",
+    }
+    parsed = parse_tracked_log(log, spec)
+    assert parsed is not None
+    assert parsed["key"] == ward
+    assert parsed["direction"] == "add"
+    assert "value" not in parsed
 
 
 def test_add_remove_events_publish_no_value(corpus):

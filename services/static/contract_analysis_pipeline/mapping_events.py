@@ -390,20 +390,54 @@ def member_witness_record(spec: WriterEventSpec) -> dict[str, Any]:
     }
 
 
+def multi_entry_writers(contract: Any) -> set[tuple[str, str]]:
+    """``(mapping_name, writer_function)`` pairs where ONE call writes more than
+    one entry of the mapping.
+
+    ``discover_mapping_writer_events`` deduplicates on
+    ``(mapping, event_signature, direction)``, so an ERC-20 ``transfer`` —
+    ``balances[from]`` and ``balances[to]`` under a single ``Transfer`` — keeps
+    only the first of the two writes and yields a record that names one entry.
+    A consumer publishing that record's key would name the sender and say
+    nothing about the recipient, while claiming to describe the event.
+    """
+    out: set[tuple[str, str]] = set()
+    for function in _contract_functions(contract):
+        if getattr(function, "is_constructor", False):
+            continue
+        keys_by_mapping: dict[str, set[str]] = {}
+        for mapping_name, key_vars, _value in _extract_index_writes(function):
+            if not mapping_name or not key_vars:
+                continue
+            keys_by_mapping.setdefault(mapping_name, set()).add(_var_name(key_vars[-1]))
+        name = getattr(function, "full_name", getattr(function, "name", ""))
+        for mapping_name, keys in keys_by_mapping.items():
+            if len(keys) > 1:
+                out.add((mapping_name, name))
+    return out
+
+
 def member_witness_records(contract: Any) -> dict[tuple[str, str], dict[str, Any]]:
     """``(mapping_name, event_signature)`` → the one correspondence record that
     pair proves.
 
-    A pair matched by several specs that disagree on key/value position or
-    direction is OMITTED: the event then says an entry moved without saying
-    which way, and publishing one of the candidate directions would be a guess
-    wearing a witness's clothes.
+    Two omissions, each because the event does not state a single entry change:
+
+      * a pair matched by several specs that disagree on key/value position or
+        direction — the event says an entry moved without saying which way; and
+      * a pair whose writer changes SEVERAL entries of the mapping in one call
+        (:func:`multi_entry_writers`) — the record names one of them, and a
+        one-entry claim over a two-entry write is a false description of the
+        event, not a partial one.
     """
+    multi_entry = multi_entry_writers(contract)
     by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for spec in discover_mapping_writer_events(contract):
         mapping_name = spec.get("mapping_name")
         signature = spec.get("event_signature")
         if not mapping_name or not signature:
+            continue
+        if (mapping_name, spec.get("writer_function") or "") in multi_entry:
             continue
         by_pair.setdefault((mapping_name, signature), []).append(member_witness_record(spec))
     out: dict[tuple[str, str], dict[str, Any]] = {}

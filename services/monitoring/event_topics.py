@@ -809,6 +809,33 @@ def member_changed_event_type(mapping_var: str | None) -> str:
     return f"{_MEMBER_CHANGED_STEM}:{var}" if var else _MEMBER_CHANGED_STEM
 
 
+# How much an occurrence of a spec is allowed to claim, as an order. Used to
+# resolve a topic0 donated to more than one controller by evidence rather than
+# by the controllers' label order.
+_TIER_STRENGTH = {
+    WITNESS_TIER_ACTIVITY: 0,
+    WITNESS_TIER_HINT: 1,
+    WITNESS_TIER_SELF_DESCRIBING: 2,
+}
+
+
+def _member_key_is_extractable(member_witness: object, inputs: list[dict]) -> bool:
+    """Can the proven key actually be read off a log of this event?
+
+    ``member_changed`` names the mapping; the ENTRY is named only by
+    ``data.key``. A record whose ``key_position`` falls outside the event's own
+    parameter list would publish "some entry of M moved" with no entry — a claim
+    weaker than the type asserts, and one nothing can act on. The spec does not
+    qualify at all rather than publish it.
+    """
+    if not is_member_witness(member_witness):
+        return False
+    key_position = member_witness.get("key_position")
+    if not isinstance(key_position, int) or isinstance(key_position, bool):
+        return False
+    return 0 <= key_position < len(inputs)
+
+
 def is_member_changed_event_type(event_type: object) -> bool:
     """True for the qualified-member-change vocabulary.
 
@@ -989,8 +1016,8 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
     # time to keep the two modules acyclic; keep the favour symmetrical.
     from services.monitoring.polling_plan import _is_poll_decodable
 
-    seen: set[str] = set()
-    out: list[dict] = []
+    by_topic: dict[str, dict] = {}
+    order: list[str] = []
     for tc in tracking_plan.get("tracked_controllers") or []:
         ew = tc.get("event_watch")
         if not ew:
@@ -1007,9 +1034,6 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             # selectors, etc.) the generic path can't reproduce.
             if topic0 in ALL_EVENT_TOPICS:
                 continue
-            if topic0 in seen:
-                continue
-            seen.add(topic0)
             effect_tags = ev.get("effect_tags") if isinstance(ev.get("effect_tags"), dict) else None
             inputs = list(ev.get("inputs") or [])
             event_type = _resolve_event_type(
@@ -1032,13 +1056,21 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             # index). A canonical family already carries a semantic claim of its
             # own and keeps it.
             mapping_var = member_witness_mapping_var(member_witness)
-            if (
-                mapping_var
-                and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED
+            qualified = (
+                bool(mapping_var)
+                and writer_openness == WRITER_OPENNESS_RESTRICTED
                 and not _is_canonical_family(event_type)
                 and len(member_changed_event_type(mapping_var)) <= MAX_EVENT_TYPE_LENGTH
-            ):
+                and _member_key_is_extractable(member_witness, inputs)
+            )
+            if qualified:
                 event_type = member_changed_event_type(mapping_var)
+            # A qualification that cannot be published is not a qualification.
+            # When any arm above refuses, the witness is dropped from the spec
+            # entirely rather than left to promote a spec that publishes under
+            # the slot stem — a ``state_changed:`` row carrying an entry key
+            # where its consumers read a slot value.
+            witness_for_tier = member_witness if qualified else None
             spec: dict = {
                 "topic0": topic0,
                 "signature": ev.get("signature"),
@@ -1050,7 +1082,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
                     controller_id=controller_id,
                     inputs=inputs,
                     effect_tags=effect_tags,
-                    member_witness=member_witness,
+                    member_witness=witness_for_tier,
                     writer_openness=writer_openness,
                     poll_decodable=poll_decodable,
                 ),
@@ -1060,10 +1092,19 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             }
             if effect_tags:
                 spec["effect_tags"] = effect_tags
-            if is_member_witness(member_witness):
-                spec["member_witness"] = member_witness
-            out.append(spec)
-    return out
+            if is_member_witness(witness_for_tier):
+                spec["member_witness"] = witness_for_tier
+            if topic0 in by_topic:
+                # One topic0 can be donated to several controllers. Which spec
+                # wins decided the published claim, and it was decided by the
+                # controllers' alphabetical label order — so resolve it by
+                # evidence instead: the strongest tier, first-seen on a tie.
+                if _TIER_STRENGTH[spec["witness_tier"]] <= _TIER_STRENGTH[by_topic[topic0]["witness_tier"]]:
+                    continue
+            else:
+                order.append(topic0)
+            by_topic[topic0] = spec
+    return [by_topic[topic0] for topic0 in order]
 
 
 def parse_tracked_log(log: dict, spec: dict) -> dict | None:
@@ -1174,36 +1215,54 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     # non-standard ABI names (Solmate's ``user`` / ``newOwner``) all
     # surface the canonical sync keys.
     _assign_semantic_keys(event, event["event_type"], inputs, args_in_order)
-    _assign_member_witness_keys(event, spec, by_declaration)
+    if not _assign_member_witness_keys(event, spec, by_declaration):
+        return None
 
     return event
 
 
-def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[int, object]) -> None:
+# The three keys a ``member_changed`` row's payload is: which entry, what it now
+# holds, and which way it moved. On such a row they are the WITNESSED values, so
+# an identically-named ABI parameter must not survive underneath them.
+_MEMBER_PAYLOAD_KEYS = ("key", "value", "direction")
+
+
+def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[int, object]) -> bool:
     """Fill ``key`` / ``value`` / ``direction`` on a qualified member change.
+
+    Returns False when the log cannot carry the claim its spec's type makes —
+    the caller then treats it as an unparseable log and publishes nothing.
 
     Gated on the event_type stem, not on the presence of a witness record: only
     a spec that mints ``member_changed:<mapping_var>`` has fixed the meaning of
     these three keys, so a spec carrying a record under some other type keeps
-    its ABI names untouched. Written last for the same reason — on a
-    ``member_changed`` row ``data.key`` means the WITNESSED key, and an ABI
-    parameter that happens to share the name does not get to define it.
+    its ABI names untouched.
 
-    Each of the three is published only when the record proves it: an
-    ``add``/``remove`` event states no value, so none is invented for it.
+    Each key is CLEARED before it is filled, and each is filled only from what
+    the record proves. Leaving the decode loop's same-named parameter in place
+    was the hole: ``WardAdded(address indexed usr, uint256 value)`` for
+    ``wards[usr] = true`` would publish ``data.value`` — the amount that
+    happened to ride along — as the witnessed new value of the entry, while the
+    record proved the event states no value at all.
     """
     event_type = event.get("event_type")
     if not isinstance(event_type, str) or not event_type.startswith(f"{_MEMBER_CHANGED_STEM}:"):
-        return
+        return True
     witness = spec.get("member_witness")
     if not is_member_witness(witness):
-        return
+        return True
+    for payload_key in _MEMBER_PAYLOAD_KEYS:
+        event.pop(payload_key, None)
     key_position = witness.get("key_position")
-    if isinstance(key_position, int) and key_position in by_declaration:
-        event["key"] = by_declaration[key_position]
+    if not isinstance(key_position, int) or isinstance(key_position, bool) or key_position not in by_declaration:
+        # The type names the mapping; only ``data.key`` names the entry. A row
+        # that cannot say which entry moved is not the claim this type makes.
+        return False
+    event["key"] = by_declaration[key_position]
     value_position = witness.get("value_position")
-    if isinstance(value_position, int) and value_position in by_declaration:
+    if isinstance(value_position, int) and not isinstance(value_position, bool) and value_position in by_declaration:
         event["value"] = by_declaration[value_position]
     direction = witness.get("direction")
     if isinstance(direction, str) and direction:
         event["direction"] = direction
+    return True

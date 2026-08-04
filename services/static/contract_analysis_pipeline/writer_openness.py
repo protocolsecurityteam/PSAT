@@ -7,6 +7,17 @@ do not exist when the tracking plan is built, so this module proves the same
 thing from the artifact the static stage already has: the lowered predicate
 trees.
 
+The earned-public shape test is applied unconditionally here, while the
+resolution plane gates the same test behind ``PSAT_AUTHORITY_EARNED_PUBLIC``.
+That is deliberate and it is the one place the two planes are meant to
+disagree: there the test OPENS a capability, so a kill switch that disables it
+narrows what gets published; here it only WITHHOLDS a promotion, so honouring
+the switch would turn it into a promoter — with the flag off, a cofinite
+denylist gate would read as a proof of restriction and every ERC-20 ``Transfer``
+on a denylisted token would qualify as a witnessed member change. A kill switch
+that widens published claims is not a kill switch, so this one does not reach
+here (pinned by ``test_the_kill_switch_cannot_promote``).
+
 Only ``restricted`` is ever minted. Proving ``open`` needs the resolution
 plane's earned-public projection over a resolved capability; the static tree
 alone cannot distinguish "no gate" from "a gate we failed to lower"
@@ -113,17 +124,32 @@ def restricted_function_signatures(predicate_trees: Mapping[str, Any] | None) ->
     )
 
 
-def openness_of_emitters(emitters: set[str], restricted: frozenset[str]) -> str:
-    """The openness of an event, given every externally-callable function that
-    can emit it.
+def openness_of_write_paths(emitters: set[str], writers: set[str], restricted: frozenset[str]) -> str:
+    """The openness of the mapping whose entry changes an event announces.
 
-    ``restricted`` only when the emitter set is non-empty and every member of
-    it is proven restricted: one open path is enough to make an occurrence of
-    the event no evidence of a gated write. An empty emitter set is the
-    not-determined case — nothing was proven about a path we could not find.
+    Two quantifiers, and the second is the load-bearing one:
+
+      * every function seen to EMIT the event is restricted — otherwise an
+        occurrence can come from an open path; and
+      * every function that WRITES the mapping is restricted.
+
+    The emitter set alone cannot carry the claim because it cannot be
+    complete: it is built by walking ``EventCall`` IR, and a log emitted from
+    inline assembly (``log2(0, 0, topic0, key)``) appears in no such node. A
+    contract with one gated ``EventCall`` emitter and one open assembly emitter
+    of the same topic0 satisfies "every emitter is restricted" over an emitter
+    set that never saw the second one.
+
+    Quantifying over writers is what makes that incompleteness harmless. An
+    unaccounted emitter that changes nothing is not a member change at all;
+    one that does change the mapping has to WRITE it, and the effects
+    artifact attributes those writes whether or not the emit was visible. So
+    an open writer demotes the event even when the open path's emit is
+    invisible. Either set empty is not-determined — nothing was proven about
+    paths we could not find.
     """
-    if not emitters:
+    if not emitters or not writers:
         return WRITER_OPENNESS_NOT_DETERMINED
-    if emitters <= restricted:
+    if emitters <= restricted and writers <= restricted:
         return WRITER_OPENNESS_RESTRICTED
     return WRITER_OPENNESS_NOT_DETERMINED
