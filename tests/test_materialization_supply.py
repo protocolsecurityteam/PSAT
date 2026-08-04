@@ -170,16 +170,24 @@ def test_publish_refuses_an_address_already_bound_to_other_bytecode(cm_db):
 
 @requires_postgres
 @pytest.mark.parametrize(
-    "status,version",
-    [("failed", ANALYSIS_SCHEMA_VERSION), ("pending", ANALYSIS_SCHEMA_VERSION), ("ready", ANALYSIS_SCHEMA_VERSION - 1)],
+    "status,version,builder_started_at",
+    [
+        ("failed", ANALYSIS_SCHEMA_VERSION, None),
+        ("pending", ANALYSIS_SCHEMA_VERSION, None),
+        ("ready", ANALYSIS_SCHEMA_VERSION - 1, None),
+        # A live builder claim included deliberately: that builder's phase-3
+        # recheck finds our ready row and drops its duplicate build.
+        ("building", ANALYSIS_SCHEMA_VERSION, "now"),
+    ],
 )
-def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version):
+def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version, builder_started_at):
     cm_db.add(
         ContractMaterialization(
             chain="1",
             bytecode_keccak=KECCAK,
             address=ADDR.lower(),
             status=status,
+            builder_started_at=datetime.now(timezone.utc) if builder_started_at else None,
             analysis_schema_version=version,
         )
     )
@@ -310,8 +318,8 @@ def _job_row(session, *, version: int | None, donor: Any = None) -> Job:
 def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
     """discovery stamps the era only on the fetch path, so a same-address cache
     hit leaves the column NULL on a job whose artifacts are perfectly current.
-    The stamp is still findable where it was witnessed — 24 of the working DB's
-    32 NULL-version cache-hit jobs resolve this way."""
+    The stamp is still findable where it was witnessed: all 32 of the working
+    DB's NULL-version cache-hit jobs resolve to a stamped v5 donor."""
     donor = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
     hit = _job_row(cm_db, version=None, donor=donor.id)
     second_hop = _job_row(cm_db, version=None, donor=hit.id)
@@ -322,9 +330,22 @@ def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
 
 
 @requires_postgres
+def test_a_long_cache_chain_is_walked_to_its_terminus(cm_db):
+    """Every cache-hit re-run appends a hop, so the chain grows on exactly the
+    addresses that get re-analyzed most. The working DB's chains terminate
+    between 1 and 14 hops out; a fixed hop budget would silently convert the far
+    end of that distribution into "no witnessed era" and refuse supply for the
+    busiest contracts."""
+    job = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
+    for _ in range(20):
+        job = _job_row(cm_db, version=None, donor=job.id)
+    assert proven_analysis_schema_version(cm_db, job) == ANALYSIS_SCHEMA_VERSION
+
+
+@requires_postgres
 def test_an_unwitnessed_era_stays_unwitnessed(cm_db):
-    """Absence of the stamp anywhere in the chain is the third state, not
-    "current" — the remaining 8 of those 32."""
+    """A chain that ends without a stamp anywhere is the third state, not
+    "current"."""
     unstamped = _job_row(cm_db, version=None)
     assert proven_analysis_schema_version(cm_db, unstamped) is None
     assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=unstamped.id)) is None
@@ -432,13 +453,36 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
     assert len(captured_publish) == 1
 
 
-def test_the_pipeline_asks_for_refresh_on_differ(monkeypatch, captured_publish):
+def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publish):
+    """A static-cache job's artifacts are an ancestor's, copied. They pass the
+    era gate (era equality is not recency) but they are not the later record: let
+    them refresh and a fresh analysis and a later cache hit reproducing its
+    ancestor take turns overwriting each other, each flip moving where monitoring
+    watches."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
     )
     _FakeStaticWorker()._publish_materialization(None, _fake_job(), ADDR, "C")
     assert captured_publish[0]["refresh_on_differ"] is True
+
+    cached = _fake_job(request={"static_cached": True, "cache_source_job_id": str(uuid.uuid4())})
+    _FakeStaticWorker()._publish_materialization(None, cached, ADDR, "C")
+    assert captured_publish[1]["refresh_on_differ"] is False
+
+
+@requires_postgres
+def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
+    """End to end on the row itself: the fresh analysis stands, and the cache
+    hit reports ``already_current`` rather than flipping it back."""
+    fresh_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:authority"}]}
+    ancestor_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "ancestors_authority"}]}
+    assert _publish(tracking_plan=fresh_plan, refresh_on_differ=True) == PUBLISH_WRITTEN
+
+    assert _publish(tracking_plan=ancestor_plan, refresh_on_differ=False) == PUBLISH_ALREADY_CURRENT
+    cm_db.expire_all()
+    row = _row(cm_db)
+    assert row is not None and row.tracking_plan == fresh_plan
 
 
 def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_publish):
