@@ -246,6 +246,76 @@ def _generic_render_fallback(
     return []
 
 
+def _safe_exec_fields(safe_exec: dict) -> list[dict]:
+    """Render a decoded Safe execution — the difference between "safe_tx_executed
+    on 0x41df…6ae" and "Safe executed setFee(uint256) on 0x7a4…e7 (call)".
+
+    Every undecoded outcome renders its OWN reason instead of nothing: a
+    recipient who sees no target must be able to tell "the Safe called nobody"
+    from "we did not decode this", and an embed that renders identically in
+    both cases cannot.
+    """
+    status = safe_exec.get("status")
+    if status != "decoded":
+        reason = {
+            "not_top_level_call": (
+                "the observed transaction was not this Safe's own execTransaction "
+                "(relayer, nested Safe, or wrapper) — the inner call is not witnessed"
+            ),
+            "over_budget": "not decoded this pass (per-pass transaction budget)",
+            "args_undecodable": "execTransaction arguments did not decode",
+        }.get(str(status), f"not decoded ({status})")
+        return [{"name": "Safe call", "value": reason, "inline": False}]
+
+    fields: list[dict] = []
+    target = safe_exec.get("to")
+    if target:
+        fields.append({"name": "Target", "value": f"`{target}`", "inline": True})
+
+    target_function = safe_exec.get("target_function") or {}
+    # The signature when one was RESOLVED from the target's own verified
+    # source; the raw selector otherwise. A selector renders fine and is true.
+    label = target_function.get("signature") or safe_exec.get("selector")
+    if label:
+        fields.append({"name": "Function", "value": f"`{label}`", "inline": True})
+
+    value = safe_exec.get("value")
+    if value is not None:
+        fields.append({"name": "Value", "value": f"{value} wei", "inline": True})
+
+    operation_label = safe_exec.get("operation_label")
+    if operation_label:
+        recognized = safe_exec.get("multisend_recognized")
+        suffix = (
+            ""
+            if operation_label != "delegatecall"
+            else (" (pinned MultiSend)" if recognized else " (target NOT a pinned MultiSend)")
+        )
+        fields.append({"name": "Operation", "value": f"{operation_label}{suffix}", "inline": True})
+
+    batch = safe_exec.get("batch")
+    if isinstance(batch, list):
+        summary = ", ".join(
+            str(call.get("signature") or call.get("selector") or "?") for call in batch[:4] if isinstance(call, dict)
+        )
+        if len(batch) > 4:
+            summary = f"{summary}, …"
+        fields.append(
+            {
+                "name": "Batch",
+                "value": f"{len(batch)} call(s){f': {summary}' if summary else ''}",
+                "inline": False,
+            }
+        )
+    elif safe_exec.get("batch_status") == "undecodable":
+        # No partial list, and the embed says so: a truncated batch would
+        # understate what the Safe did.
+        fields.append(
+            {"name": "Batch", "value": "MultiSend payload did not decode — contents not listed", "inline": False}
+        )
+    return fields
+
+
 def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     """Build a Discord embed for a governance/monitoring event."""
     mc = event.monitored_contract
@@ -309,6 +379,12 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
         if data.get("new") is not None:
             fields.append({"name": "New", "value": _render_event_value(data["new"]), "inline": True})
         fields.append({"name": "Witness", "value": "verification read", "inline": True})
+    elif isinstance(data.get("safe_exec"), dict):
+        # The decoded execution IS the content of a Safe embed; the tag-driven
+        # path below has no render spec for the ``_safe_op`` marker (it names no
+        # single slot), so before enrichment these embeds carried nothing but
+        # the address and the block.
+        fields.extend(_safe_exec_fields(data["safe_exec"]))
     else:
         tags = data.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event.event_type) or {}
         writes = tags.get("writes") or []

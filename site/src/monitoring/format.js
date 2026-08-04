@@ -308,6 +308,16 @@ function diffSub(before, after) {
 //
 // Underscore-prefixed targets render activity events (no addressable
 // slot); the renderer surfaces the meaningful tx args.
+
+// Why a Safe execution carries no decoded call. Mirrors the backend's
+// ``safe_exec.status`` values (``services/monitoring/enrichment.py``); an
+// unknown status renders verbatim rather than as silence.
+const SAFE_EXEC_STATUS_SUB = {
+  not_top_level_call: "not a direct execTransaction on this Safe — inner call not witnessed",
+  over_budget: "not decoded this pass (transaction budget)",
+  args_undecodable: "execTransaction arguments did not decode",
+};
+
 const RENDER_BY_WRITE_TARGET = {
   owner: (d) => {
     const renounced = d.new_owner && /^0x0+$/i.test(d.new_owner);
@@ -372,12 +382,48 @@ const RENDER_BY_WRITE_TARGET = {
       sub: oldD && newD ? `${oldD} → ${newD}` : null,
     };
   },
-  _safe_op: (d, type) => ({
-    title: type === "safe_tx_executed" ? "Safe transaction executed" : "Safe transaction reverted",
-    sub: d.safe_tx_hash
-      ? `safeTxHash ${shortHash(d.safe_tx_hash)}${d.payment ? ` · payment ${d.payment} wei` : ""}`
-      : null,
-  }),
+  _safe_op: (d, type) => {
+    const executed = type === "safe_tx_executed";
+    // Pre-enrichment shape, and the shape a row keeps when the transaction was
+    // never fetched: the Safe-internal hash is all that was witnessed.
+    const unenriched = {
+      title: executed ? "Safe transaction executed" : "Safe transaction reverted",
+      sub: d.safe_tx_hash
+        ? `safeTxHash ${shortHash(d.safe_tx_hash)}${d.payment ? ` · payment ${d.payment} wei` : ""}`
+        : null,
+    };
+    const se = d.safe_exec;
+    if (!se || typeof se !== "object") return unenriched;
+
+    // A stated decode gap renders AS one. Falling back to the bare hash here
+    // would make "we could not examine this" look like the whole story.
+    if (se.status !== "decoded") {
+      return { ...unenriched, sub: SAFE_EXEC_STATUS_SUB[se.status] || `not decoded (${se.status})` };
+    }
+
+    const verb = executed ? "Safe executed" : "Safe execution reverted";
+    if (se.batch_status === "undecodable") {
+      return {
+        title: `${verb} a MultiSend batch that did not decode`,
+        sub: se.to ? `${shortenAddress(se.to)} · delegatecall` : null,
+      };
+    }
+
+    const batch = Array.isArray(se.batch) ? se.batch : null;
+    const head = batch && batch.length ? batch[0] : null;
+    const call = head || se;
+    // A resolved signature when one exists, the raw selector otherwise — a
+    // selector is a real fact, and a name is never invented to replace it.
+    const name = (head ? head.signature : se.target_function?.signature) || call.selector || null;
+    const parts = [];
+    if (call.to) parts.push(shortenAddress(call.to));
+    if (call.operation_label) parts.push(call.operation_label);
+    if (batch && batch.length > 1) parts.push(`+${batch.length - 1} more in batch`);
+    return {
+      title: name ? `${verb} ${name}` : verb,
+      sub: parts.length ? parts.join(" · ") : null,
+    };
+  },
   _safe_module_op: (d, type) => ({
     title: type === "safe_module_executed" ? "Safe module executed" : "Safe module reverted",
     sub: d.module ? `module ${shortenAddress(d.module)}` : null,

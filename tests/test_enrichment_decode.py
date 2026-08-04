@@ -1018,6 +1018,102 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
         assert set(basis) <= sal.SALIENCE_BASIS_VALUES
 
 
+# ---------------------------------------------------------------------------
+# §5a — the Discord embed
+# ---------------------------------------------------------------------------
+
+
+def embed_fields(db_session, event) -> dict[str, str]:
+    from services.monitoring.notifier import _format_governance_embed
+
+    row = db_session.get(MonitoredEvent, event.id)
+    return {field["name"]: field["value"] for field in _format_governance_embed(row, db_session)["fields"]}
+
+
+def test_the_embed_renders_the_decoded_call(db_session, safe, known_target):
+    """The single highest-value operator-facing change in the spec: an embed
+    that said "safe_tx_executed on 0x…" now says what was executed."""
+    known_target(TARGET, SET_FEE, "setFee(uint256)")
+    tx_hash = "0x" + "f1" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+    run(
+        db_session,
+        [event],
+        {
+            tx_hash: tx(
+                to=SAFE,
+                tx_hash=tx_hash,
+                input_hex=exec_transaction_input(to=TARGET, value=3, data=bytes.fromhex(SET_FEE[2:])),
+            )
+        },
+    )
+
+    fields = embed_fields(db_session, event)
+    assert fields["Target"] == f"`{TARGET}`"
+    assert fields["Function"] == "`setFee(uint256)`"
+    assert fields["Value"] == "3 wei"
+    assert fields["Operation"] == "call"
+
+
+def test_the_embed_names_an_unrecognized_delegatecall_as_one(db_session, safe):
+    tx_hash = "0x" + "f2" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+    run(
+        db_session,
+        [event],
+        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=UNKNOWN_LIB, operation=1))},
+    )
+
+    fields = embed_fields(db_session, event)
+    assert fields["Operation"] == "delegatecall (target NOT a pinned MultiSend)"
+
+
+def test_the_embed_summarizes_a_batch_and_refuses_a_partial_one(db_session, safe, known_target):
+    known_target(TARGET, SET_FEE, "setFee(uint256)")
+    decoded_hash, undecodable_hash = "0x" + "f3" * 32, "0x" + "f4" * 32
+    decoded = seed_event(db_session, safe, "safe_tx_executed", decoded_hash)
+    undecodable = seed_event(db_session, safe, "safe_tx_executed", undecodable_hash)
+    run(
+        db_session,
+        [decoded],
+        {
+            decoded_hash: tx(
+                to=SAFE,
+                tx_hash=decoded_hash,
+                input_hex=exec_transaction_input(
+                    to=MULTISEND_1_3_0,
+                    operation=1,
+                    data=multisend_payload([(0, TARGET, 0, bytes.fromhex(SET_FEE[2:])), (0, TARGET, 1, b"")]),
+                ),
+            )
+        },
+    )
+    run(
+        db_session,
+        [undecodable],
+        {
+            undecodable_hash: tx(
+                to=SAFE,
+                tx_hash=undecodable_hash,
+                input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=b"\x00"),
+            )
+        },
+    )
+
+    assert embed_fields(db_session, decoded)["Batch"] == "2 call(s): setFee(uint256), ?"
+    assert "did not decode" in embed_fields(db_session, undecodable)["Batch"]
+
+
+def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(db_session, safe):
+    """A recipient who sees no target must be able to tell "the Safe called
+    nobody" from "we did not decode this"."""
+    tx_hash = "0x" + "f5" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+    run(db_session, [event], {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef")})
+
+    assert "not this Safe's own execTransaction" in embed_fields(db_session, event)["Safe call"]
+
+
 def test_the_pinned_allowlist_is_the_published_deployment_set(db_session):
     """The list is a vendored witness, so its contents are pinned here: a
     silent addition would quiet a delegatecall nobody vouched for, and a silent

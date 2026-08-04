@@ -264,6 +264,125 @@ describe("decodeEvent — Safe activity", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The enriched Safe execution (§5c). The renderer reads what the backend
+// decoded and NEVER re-derives it: a mirrored decode would drift, and a
+// drifted mirror that renders the wrong call is worse than a bare hash.
+// ---------------------------------------------------------------------------
+
+describe("decodeEvent — enriched Safe executions", () => {
+  const safeOp = (data) => decodeEvent(evt("safe_tx_executed", { effect_tags: { writes: ["_safe_op"] }, ...data }));
+
+  it("names the resolved function, the target and the operation", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_A,
+        selector: "0x69fe0e2d",
+        operation: 0,
+        operation_label: "call",
+        target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+      },
+    });
+    expect(result.title).toBe("Safe executed setFee(uint256)");
+    expect(result.sub).toBe(`${shortenAddress(ADDR_A)} · call`);
+  });
+
+  it("falls back to the raw selector when no signature resolved", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_A,
+        selector: "0x8456cb59",
+        operation: 0,
+        operation_label: "call",
+        target_function: { selector: "0x8456cb59", signature: null },
+      },
+    });
+    expect(result.title).toBe("Safe executed 0x8456cb59");
+  });
+
+  it("summarizes a MultiSend batch from its first call", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch: [
+          { operation: 0, operation_label: "call", to: ADDR_A, selector: "0x69fe0e2d", signature: "setFee(uint256)" },
+          { operation: 0, operation_label: "call", to: ADDR_B, selector: "0x8456cb59", signature: null },
+          { operation: 0, operation_label: "call", to: ADDR_B, selector: "0x8456cb59", signature: null },
+        ],
+      },
+    });
+    expect(result.title).toBe("Safe executed setFee(uint256)");
+    expect(result.sub).toBe(`${shortenAddress(ADDR_A)} · call · +2 more in batch`);
+  });
+
+  it("says an undecodable batch did not decode rather than listing part of it", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch_status: "undecodable",
+      },
+    });
+    expect(result.title).toBe("Safe executed a MultiSend batch that did not decode");
+    expect(result.sub).toBe(`${shortenAddress(ADDR_B)} · delegatecall`);
+  });
+
+  it("renders an unrecognized delegatecall as the delegatecall it is", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        selector: "0x69fe0e2d",
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: false,
+        target_function: { selector: "0x69fe0e2d", signature: null },
+      },
+    });
+    expect(result.title).toBe("Safe executed 0x69fe0e2d");
+    expect(result.sub).toBe(`${shortenAddress(ADDR_B)} · delegatecall`);
+  });
+
+  it("renders each undecoded status as its own stated reason", () => {
+    const cases = {
+      not_top_level_call: "not a direct execTransaction",
+      over_budget: "transaction budget",
+      args_undecodable: "did not decode",
+      something_new: "not decoded (something_new)",
+    };
+    for (const [status, fragment] of Object.entries(cases)) {
+      const result = safeOp({ safe_tx_hash: "0x" + "ab".repeat(32), safe_exec: { status } });
+      expect(result.title).toBe("Safe transaction executed");
+      expect(result.sub).toContain(fragment);
+    }
+  });
+
+  it("keeps the pre-enrichment rendering when no safe_exec block exists", () => {
+    const result = safeOp({ safe_tx_hash: "0x" + "ab".repeat(32), payment: 0 });
+    expect(result.title).toBe("Safe transaction executed");
+    expect(result.sub).toContain("safeTxHash");
+  });
+
+  it("uses the reverted verb on a decoded failure", () => {
+    const result = decodeEvent(
+      evt("safe_tx_failed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: { status: "decoded", to: ADDR_A, selector: "0x69fe0e2d", operation: 0, operation_label: "call" },
+      }),
+    );
+    expect(result.title).toBe("Safe execution reverted 0x69fe0e2d");
+  });
+});
+
 describe("decodeEvent — timelock", () => {
   it("renders timelock_scheduled with target, selector, delay", () => {
     const result = decodeEvent(
