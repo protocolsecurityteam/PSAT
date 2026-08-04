@@ -45,6 +45,7 @@ from db.queue import (
     HEARTBEAT_PROTOCOL_SCANNER,
 )
 from services.monitoring.process_meta import PROCESS_META, stale_after_seconds
+from services.monitoring.tracking_plan_state import plan_coverage_counts
 from utils.chains import UnknownChainError, chain_by_id, chain_cache_token
 
 from .audits_pipeline import build_audits_pipeline
@@ -405,6 +406,11 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> dict
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
         "by_chain": mon_by_chain,
+        # Liveness says the scanner is running; this says what it is running
+        # WITH. A contract watching on the baseline registry alone is quiet for
+        # the same reason a healthy one is, and without this census the two are
+        # indistinguishable on the page.
+        "plan_coverage": plan_coverage_counts(session),
     }
 
     return {"now": now.isoformat(), "jobs": jobs, "daemons": daemons, "watchers": watchers}
