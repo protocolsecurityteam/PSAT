@@ -134,9 +134,12 @@ def test_replay_classifies_every_window_spec(db_session):
 
     ``_balances`` and ``locked`` are activity — neither controller has a
     poll-decodable read spec, so no verification read exists to witness them.
-    ``locked`` is the Solmate reentrancy guard: it is ``private``, exposes no
-    getter, and is therefore not readable until F8 adds the analyzer-derived
-    storage-slot emitter. The two ``authority_updated`` specs stay
+    ``locked`` is the Solmate reentrancy guard: it is ``private`` and exposes no
+    getter, so it is not readable at all. F7 closes that residual from the other
+    end — a latch written and restored inside one call is no longer a writer of
+    anything, so it stops being a controller and this spec is not derived at
+    all on a re-analysed contract. The row here is the PERSISTED one, which is
+    what the fixture pins. The two ``authority_updated`` specs stay
     self_describing (canonical family, signature-corroborated) — they emitted
     no logs in this window, which is why nothing was ADDED.
     """
