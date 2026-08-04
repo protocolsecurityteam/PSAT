@@ -819,6 +819,19 @@ def normalized_writer_openness(raw: object) -> str:
     return WRITER_OPENNESS_NOT_DETERMINED
 
 
+def is_member_witness(raw: object) -> bool:
+    """True only for a populated correspondence record.
+
+    This is the G2↔G3 trust boundary and the strongest promotion in the
+    taxonomy — it is what lets a mapping write publish directly. A truthy
+    non-dict (``True``, ``"yes"``, ``1``, a stray list) is not a proof of
+    emit-write correspondence, and accepting one would let a serialization bug
+    upstream promote every event on the contract. An empty dict is the same
+    absence written differently.
+    """
+    return isinstance(raw, dict) and bool(raw)
+
+
 def _is_canonical_family(event_type: str | None) -> bool:
     """True when *event_type* is a canonical family name rather than one of
     the terminal ``<stem>:<controller_id>`` / bare-stem forms.
@@ -909,7 +922,7 @@ def classify_witness_tier(
     project struct members, member-path controllers become ``hint`` here with
     no change to this function.
     """
-    if member_witness and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED:
+    if is_member_witness(member_witness) and normalized_writer_openness(writer_openness) == WRITER_OPENNESS_RESTRICTED:
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
             return WITNESS_TIER_SELF_DESCRIBING
 
@@ -1005,7 +1018,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             }
             if effect_tags:
                 spec["effect_tags"] = effect_tags
-            if member_witness:
+            if is_member_witness(member_witness):
                 spec["member_witness"] = member_witness
             out.append(spec)
     return out
