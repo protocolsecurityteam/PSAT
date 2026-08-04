@@ -18,15 +18,27 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from db.contract_materializations import (
     ANALYSIS_SCHEMA_VERSION,
+    PRODUCED_BY_PROMOTION_SWEEP,
     PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK,
     PUBLISH_ALREADY_CURRENT,
     PUBLISH_KECCAK_BOUND_TO_OTHER_ADDRESS,
+    PUBLISH_WRITTEN,
+    find_by_address,
 )
-from db.models import ContractMaterialization, Job, JobStage, JobStatus, MonitoredContract
+from db.models import (
+    ContractMaterialization,
+    Job,
+    JobStage,
+    JobStatus,
+    MonitoredContract,
+    MonitoringEnrollmentQueue,
+    Protocol,
+)
 from db.queue import store_artifact
 from scripts.promote_tracking_plans import (
     BYTECODE_KECCAK_NOT_CACHED,
@@ -36,6 +48,7 @@ from scripts.promote_tracking_plans import (
     NO_COMPLETED_JOB,
     PROMOTABLE,
     _notify_gains,
+    apply_promotions,
     plan_promotions,
     qualification_witness,
     summarize,
@@ -93,6 +106,27 @@ def sweep_db(db_session):
     db_session.query(ContractMaterialization).delete()
     db_session.execute(text("DELETE FROM bytecode_cache"))
     db_session.commit()
+
+
+@pytest.fixture()
+def apply_db(sweep_db, monkeypatch):
+    """``sweep_db`` plus the publisher's own sessions routed at the test DB.
+
+    The mutating path is operator-run against a real deployment, which is
+    exactly why it is exercised here — on ``psat_test``, never on the working
+    database this spec's evidence comes from.
+    """
+    import os
+
+    test_url = os.environ.get("TEST_DATABASE_URL")
+    if not test_url:
+        pytest.skip("TEST_DATABASE_URL not set")
+    engine = create_engine(test_url)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
+    monkeypatch.setattr("db.contract_materializations.get_storage_client", lambda: None)
+    yield sweep_db
+    engine.dispose()
 
 
 def _monitored(session, n: int, *, chain: str = "ethereum", config=None) -> MonitoredContract:
@@ -308,6 +342,58 @@ def test_the_report_covers_every_active_config(sweep_db):
     assert summary["configs"] == 3
     assert summary["outcomes"][PROMOTABLE] == 1
     assert summary["notify_rights_gains_unattributed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The operator-run mutating path
+# ---------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_apply_writes_the_row_with_its_source_job_and_queues_re_enrollment(apply_db):
+    mc = _monitored(apply_db, 20)
+    mc.protocol_id = None
+    protocol = Protocol(name=f"P-{uuid.uuid4().hex[:8]}")
+    apply_db.add(protocol)
+    apply_db.commit()
+    mc.protocol_id = protocol.id
+    apply_db.commit()
+    job = _job(apply_db, 20)
+    _cache_keccak(apply_db, 20)
+
+    promotions = plan_promotions(apply_db, address=_addr(20))
+    counts = apply_promotions(apply_db, promotions)
+    assert counts[PUBLISH_WRITTEN] == 1
+    assert counts["protocols_marked_for_re_enrollment"] == 1
+
+    apply_db.expire_all()
+    row = apply_db.execute(
+        select(ContractMaterialization).where(ContractMaterialization.address == _addr(20))
+    ).scalar_one()
+    assert (row.chain, row.status, row.analysis_schema_version) == ("1", "ready", ANALYSIS_SCHEMA_VERSION)
+    assert row.tracking_plan == PLAN
+    assert row.analysis == ANALYSIS
+    assert row.provenance["produced_by"] == PRODUCED_BY_PROMOTION_SWEEP
+    assert row.provenance["source_job_id"] == str(job.id)
+    # Enrollment is marked, not performed: the monitor's own pass is the single
+    # writer that knows how to merge a config (F5).
+    queued = (
+        apply_db.execute(select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == protocol.id))
+        .scalars()
+        .all()
+    )
+    assert [q.reason for q in queued] == ["tracking_plan_promoted"]
+    # The row it just wrote is what enrollment now reads.
+    assert find_by_address(apply_db, chain="ethereum", address=_addr(20)) is not None
+
+
+@requires_postgres
+def test_apply_touches_nothing_it_refused(apply_db):
+    _monitored(apply_db, 21)
+    _job(apply_db, 21)  # no cached keccak -> not promotable
+    promotions = plan_promotions(apply_db, address=_addr(21))
+    assert apply_promotions(apply_db, promotions) == {"protocols_marked_for_re_enrollment": 0}
+    assert apply_db.execute(select(ContractMaterialization)).scalars().all() == []
 
 
 # ---------------------------------------------------------------------------
