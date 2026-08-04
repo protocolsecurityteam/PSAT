@@ -79,8 +79,54 @@ def test_replay_publishes_nothing_unwitnessed(db_session):
     assert len(removed) == 446
     assert produced == set()
 
-    # No row survives under either unwitnessed stem.
-    assert not any(et.startswith(("state_changed:", "controller_changed:")) for _a, et, _t, _l in produced)
+    # Every REMOVED row was an unwitnessed stem — i.e. the differential
+    # removed exactly the claims the taxonomy exists to stop making, and not
+    # some canonical event that got caught in the demotion. (Asserting the
+    # absence of such a stem in ``produced`` would be vacuous: it is empty.)
+    assert all(et.startswith("state_changed:") for _a, et, _t, _l in removed)
+
+
+def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_session):
+    """The pre-taxonomy behaviour, reproduced in-suite.
+
+    Before the tier gate, every tracked spec published on every occurrence.
+    Forcing each spec back to ``self_describing`` restores exactly that rule
+    and must reproduce the recording identity-for-identity — all 446 rows
+    across all five decoded event shapes, not just the Transfers.
+
+    This is the harness's own liveness proof and it is load-bearing: without
+    it, "0 produced / 446 removed" is indistinguishable from a fixture whose
+    logs stopped decoding. A fixture bug that pins 0 fails HERE.
+    """
+    fixture = copy.deepcopy(load_replay_fixture())
+    for contract in fixture["contracts"]:
+        for spec in contract["monitoring_config"].get("tracked_topics") or []:
+            spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
+
+    from tests.monitoring_replay import ReplayEnv
+
+    env = ReplayEnv(db_session, fixture).seed()
+    env.run()
+
+    produced = env.persisted_identities()
+    expected = baseline_identities(fixture)
+    assert produced - expected == set()
+    assert expected - produced == set()
+    assert len(produced) == 446
+
+    by_type: dict[str, int] = {}
+    for _addr, event_type, _tx, _li in produced:
+        by_type[event_type] = by_type.get(event_type, 0) + 1
+    assert by_type == {
+        "state_changed:state_variable:_balances": 444,
+        "state_changed:state_variable:locked": 2,
+    }
+
+    # All five decoded ABI shapes in the window actually round-tripped —
+    # Transfer/Approval/DelegateVotesChanged on two tokens, Enter/Exit on one,
+    # Deposit on the teller — so no shape is silently contributing zero.
+    topics_seen = {log["topics"][0] for log in fixture["logs"]}
+    assert len(topics_seen) == 6
 
 
 def test_replay_classifies_every_window_spec(db_session):

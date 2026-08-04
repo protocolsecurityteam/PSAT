@@ -16,7 +16,7 @@ from sqlalchemy import inspect, text
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol, ProtocolSubscription
 from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
-from services.monitoring.notifier import _expand_allowed_event_types, notify_protocol_events
+from services.monitoring.notifier import _expand_allowed_event_types, _filter_allows, notify_protocol_events
 
 
 def ADDR(n: int) -> str:
@@ -179,3 +179,64 @@ def test_the_longest_mintable_type_fits(db_session, notify_env):
             {"et": "v" * (MAX_EVENT_TYPE_LENGTH + 1)},
         )
     db_session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 — the state-polling seed, and stale-plan provenance
+# ---------------------------------------------------------------------------
+
+
+def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify_env):
+    """The "State polling" UI category writes ``["state_changed_poll"]``. A
+    verification read is the same read-witnessed field diff one tick earlier —
+    and because the read advances last_known_state, the poll that would have
+    raised ``state_changed_poll`` finds no diff and never fires. Without this
+    the subscriber hears about the rotation from neither path."""
+    assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:owner")
+    assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:anythingElse")
+
+    event = notify_env(
+        "value_changed:state_variable:owner",
+        {"field": "owner", "old": ADDR(1), "new": ADDR(2), "witness": "read_verified"},
+    )
+    sub = db_session.query(ProtocolSubscription).one()
+    sub.event_filter = {"event_types": ["state_changed_poll"]}
+    db_session.commit()
+    with patch("services.monitoring.notifier._send_discord") as send:
+        notify_protocol_events(db_session, [event])
+    assert send.call_count == 1
+
+
+def test_the_state_polling_seed_is_not_a_blanket_wildcard():
+    """It admits read-witnessed diffs, not everything."""
+    assert not _filter_allows(["state_changed_poll"], "ownership_transferred")
+    assert not _filter_allows(["state_changed_poll"], "member_changed:fromDenyList")
+    assert not _filter_allows(["state_changed_poll"], "state_changed:state_variable:_balances")
+
+
+def test_absent_filter_still_allows_everything(db_session):
+    assert _filter_allows(None, "anything")
+    assert _filter_allows([], "anything")
+
+
+def test_stale_plan_provenance_reaches_the_recipient(db_session, notify_env):
+    """A recipient cannot infer "watching on a plan last read at T" from an
+    embed that looks exactly like a fresh-plan one."""
+    event = notify_env(
+        "ownership_transferred",
+        {"new_owner": ADDR(0x99), "plan_stale_since": "2026-08-01T00:00:00Z"},
+    )
+    with patch("services.monitoring.notifier._send_discord") as send:
+        notify_protocol_events(db_session, [event])
+    embed = send.call_args[0][1]
+    watchlist = next(f for f in embed["fields"] if f["name"] == "Watch-list")
+    assert "2026-08-01T00:00:00Z" in watchlist["value"]
+    assert "coverage may be incomplete" in watchlist["value"]
+
+
+def test_a_fresh_plan_event_claims_no_staleness(db_session, notify_env):
+    event = notify_env("ownership_transferred", {"new_owner": ADDR(0x99)})
+    with patch("services.monitoring.notifier._send_discord") as send:
+        notify_protocol_events(db_session, [event])
+    embed = send.call_args[0][1]
+    assert not any(f["name"] == "Watch-list" for f in embed["fields"])

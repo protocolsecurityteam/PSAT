@@ -15,7 +15,7 @@ import pytest
 from eth_utils.crypto import keccak
 from sqlalchemy import select
 
-from db.models import Contract, Job, MonitoredContract, MonitoredEvent, Protocol
+from db.models import Contract, Job, MonitoredContract, MonitoredEvent, Protocol, ProxyUpgradeEvent, WatchedProxy
 from services.monitoring.event_topics import (
     MAX_EVENT_TYPE_LENGTH,
     WITNESS_TIER_ACTIVITY,
@@ -28,9 +28,17 @@ from services.monitoring.event_topics import (
     value_changed_event_type,
 )
 from services.monitoring.polling_plan import build_polling_plan
-from services.monitoring.unified_watcher import _Cohort, _process_window, scan_for_events
+from services.monitoring.unified_watcher import (
+    _Cohort,
+    _DirtyController,
+    _poll_entry_for_controller,
+    _process_window,
+    _resolve_spec_tier,
+    scan_for_events,
+)
 from services.monitoring.verify_status import (
     VERIFY_ERROR,
+    VERIFY_NO_READ_BINDING,
     VERIFY_OVER_BUDGET,
     VERIFY_UNANSWERED,
     count_verification_read_gaps,
@@ -520,7 +528,7 @@ def test_over_budget_reads_are_recorded_not_dropped(db_session, seeded, monkeypa
     db_session.refresh(mc)
     assert mc.last_poll_status == {"rate": VERIFY_OVER_BUDGET}
     gaps = count_verification_read_gaps(db_session)
-    assert gaps == {"read_failed": 0, "over_budget": 1, "contracts_affected": 1}
+    assert gaps == {"read_failed": 0, "over_budget": 1, "no_read_binding": 0, "contracts_affected": 1}
 
 
 def test_verified_control_slot_change_triggers_reanalysis(db_session):
@@ -608,3 +616,342 @@ def test_verified_control_slot_change_triggers_reanalysis(db_session):
     assert len(jobs) == 1
     request = jobs[0].request or {}
     assert request["reanalysis_trigger"] == "verified_read:owner"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 — read binding, write-through, lease, rotation
+# ---------------------------------------------------------------------------
+
+
+def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
+    """A polling entry is bound to a controller by its ``source`` stamp, never
+    by sharing a field name.
+
+    Two different slots share a name routinely — ``build_polling_plan`` drops
+    an analyzer entry whose field collides with a vendored standard — so a name
+    match would read one storage location and publish under another
+    controller's id, and would let runtime re-classification PROMOTE a spec
+    whose analyzer proved no getter at all.
+    """
+    mc = seeded(None, with_plan=False)
+    config = dict(mc.monitoring_config or {})
+    config["polling_plan"] = [
+        # Same field name, different (vendored) origin — not this controller's.
+        {
+            "field": "rate",
+            "kind": "storage_slot",
+            "slot": "0x1",
+            "type_kind": "address",
+            "source": "vendored:eip1967",
+        }
+    ]
+    mc.monitoring_config = config
+    db_session.commit()
+
+    assert _poll_entry_for_controller(mc, "state_variable:rate") is None
+    # ... and so a tierless legacy spec is NOT promoted to hint by the name.
+    assert _resolve_spec_tier(_tracked_spec(None), mc) == WITNESS_TIER_ACTIVITY
+
+
+def test_unbindable_hint_records_not_determined(db_session, seeded):
+    """Invariant 9: a hint that resolves to no read at all is recorded, not
+    dropped — an unverifiable interval must not look like a quiet one."""
+    mc = seeded(WITNESS_TIER_HINT, with_plan=False)
+    dirty: dict = {}
+    assert _process_window(db_session, _cohort(mc), _logs(2), 200, 210, dirty) == []
+    db_session.commit()
+
+    assert dirty == {}
+    assert db_session.query(MonitoredEvent).count() == 0
+    db_session.refresh(mc)
+    assert mc.last_poll_status == {"controller:state_variable:rate": VERIFY_NO_READ_BINDING}
+    assert count_verification_read_gaps(db_session)["no_read_binding"] == 1
+
+
+def test_verification_read_writes_through_the_proxy_plane(db_session):
+    """Whichever reader observes an implementation move first advances
+    last_known_state and silences the other, so both must record it on the
+    WatchedProxy plane. A missed write-through freezes
+    ``last_known_implementation``, which is what the NEXT scanner-detected
+    upgrade publishes as its old value."""
+    protocol = Protocol(name="proxy-write-through", chains=["ethereum"])
+    db_session.add(protocol)
+    db_session.flush()
+    contract = Contract(protocol_id=protocol.id, address=ADDR(0x44), chain="ethereum")
+    db_session.add(contract)
+    db_session.flush()
+    proxy = WatchedProxy(
+        id=uuid.uuid4(),
+        proxy_address=ADDR(0x44),
+        chain="ethereum",
+        last_known_implementation=ADDR(0xA1),
+        last_scanned_block=0,
+    )
+    db_session.add(proxy)
+    db_session.flush()
+
+    impl_topic = _topic0("ImplBumped(address)")
+    mc = MonitoredContract(
+        id=uuid.uuid4(),
+        address=ADDR(0x44),
+        chain="ethereum",
+        protocol_id=protocol.id,
+        contract_id=contract.id,
+        watched_proxy_id=proxy.id,
+        contract_type="proxy",
+        monitoring_config={
+            "tracked_topics": [
+                {
+                    "topic0": impl_topic,
+                    "signature": "ImplBumped(address)",
+                    "event_type": "state_changed:state_variable:implementation",
+                    "controller_id": "state_variable:implementation",
+                    "inputs": [{"name": "who", "type": "address", "indexed": True}],
+                    "effect_tags": {"writes": ["implementation", "nonce"]},
+                    "witness_tier": WITNESS_TIER_HINT,
+                }
+            ],
+            "polling_plan": [
+                {
+                    "field": "implementation",
+                    "kind": "getter_call",
+                    "target": "implementation",
+                    "selector": "0x5c60da1b",
+                    "type_kind": "address",
+                    "source": "analyzer:state_variable:implementation",
+                }
+            ],
+        },
+        last_known_state={"implementation": ADDR(0xA1)},
+        last_scanned_block=100,
+        enrollment_block=1,
+        is_active=True,
+    )
+    db_session.add(mc)
+    db_session.commit()
+
+    log = FetchedEventLog(
+        tx_hash=b"\x07" * 32,
+        log_index=0,
+        block_number=200,
+        block_hash=b"\xbb" * 32,
+        transaction_index=0,
+        topics=[impl_topic, _word(ADDR(0xA2))],
+        data_words=[],
+        address=ADDR(0x44),
+        raw={
+            "address": ADDR(0x44),
+            "topics": [impl_topic, _word(ADDR(0xA2))],
+            "data": "0x",
+            "blockNumber": "0xc8",
+            "transactionHash": "0x" + "07" * 32,
+            "logIndex": "0x0",
+            "blockHash": "0x" + "bb" * 32,
+            "transactionIndex": "0x0",
+        },
+    )
+    with (
+        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
+        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
+        patch(
+            "services.monitoring.unified_watcher.rpc_batch_request_classified",
+            side_effect=lambda *_a, **_k: [(_word(ADDR(0xA2)), "ok")],
+        ),
+    ):
+        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: [log]
+        scan_for_events(db_session, "http://rpc.invalid")
+
+    upgrades = db_session.execute(select(ProxyUpgradeEvent)).scalars().all()
+    assert len(upgrades) == 1
+    assert upgrades[0].old_implementation == ADDR(0xA1)
+    assert upgrades[0].new_implementation == ADDR(0xA2)
+    db_session.refresh(proxy)
+    assert proxy.last_known_implementation == ADDR(0xA2)
+
+    row = db_session.execute(select(MonitoredEvent)).scalars().one()
+    assert row.event_type == "value_changed:state_variable:implementation"
+    assert (row.data or {})["read_entry_source"] == "analyzer:state_variable:implementation"
+
+
+def test_lost_scanner_lease_cancels_the_verification_reads(db_session, seeded):
+    """value_changed rows carry log_index NULL and so sit outside the identity
+    index — there is no ON CONFLICT to catch a second scanner's duplicate, and
+    a duplicate is a duplicate Discord post and reanalysis job."""
+    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    with (
+        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
+        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
+        patch("services.monitoring.unified_watcher.renew_daemon_lease", return_value=False),
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified") as batch,
+    ):
+        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
+        scan_for_events(db_session, "http://rpc.invalid")
+
+    batch.assert_not_called()
+    assert db_session.query(MonitoredEvent).count() == 0
+    db_session.refresh(mc)
+    assert mc.last_known_state == {"rate": 7}
+
+
+def test_budget_rotates_least_recently_verified_first():
+    """A stable address+id sort hands the budget to the same controllers every
+    pass and starves the tail forever."""
+    from services.monitoring.unified_watcher import _LAST_VERIFIED_AT, _verification_read_order
+
+    mc_id = uuid.uuid4()
+    members = {
+        (mc_id, cid): _DirtyController(
+            monitored_contract_id=mc_id,
+            controller_id=cid,
+            chain="ethereum",
+            address=ADDR(1),
+            entry={"field": cid},
+            block_number=1,
+        )
+        for cid in ("a_first", "b_second", "c_third")
+    }
+    _LAST_VERIFIED_AT.clear()
+    try:
+        # Cold: never-verified controllers sort by the deterministic tiebreak.
+        assert [d.controller_id for d in _verification_read_order(members)] == [
+            "a_first",
+            "b_second",
+            "c_third",
+        ]
+        # After "a_first" is read, it goes to the back rather than winning again.
+        _LAST_VERIFIED_AT[(mc_id, "a_first")] = 100.0
+        assert [d.controller_id for d in _verification_read_order(members)][-1] == "a_first"
+    finally:
+        _LAST_VERIFIED_AT.clear()
+
+
+@pytest.mark.parametrize("witness", [True, "yes", 1, [], {}, ["x"]])
+def test_only_a_populated_correspondence_record_promotes(witness):
+    """The G2<->G3 trust boundary: a truthy non-dict is not a proof of
+    emit-write correspondence, and accepting one would let a serialization bug
+    upstream promote every event on the contract."""
+    assert (
+        classify_witness_tier(
+            event_type="state_changed:state_variable:fromDenyList",
+            controller_id="state_variable:fromDenyList",
+            effect_tags={"writes": ["fromDenyList"]},
+            member_witness=witness,
+            writer_openness="restricted",
+        )
+        == WITNESS_TIER_ACTIVITY
+    )
+
+
+def test_events_from_a_stale_plan_carry_its_timestamp(db_session, seeded):
+    """F5 keeps a last-good watch-list rather than manufacturing an empty one.
+    The rows it catches are real, but the watch-list behind them is only as
+    current as that timestamp, and what it MISSED is invisible by
+    construction — so the event says so rather than reading fresh-equivalent."""
+    mc = seeded(WITNESS_TIER_SELF_DESCRIBING)
+    config = dict(mc.monitoring_config or {})
+    config["tracked_topics_stale_since"] = "2026-08-01T00:00:00Z"
+    mc.monitoring_config = config
+    db_session.commit()
+
+    events = _process_window(db_session, _cohort(mc), _logs(1), 200, 210, {})
+    db_session.commit()
+    assert (events[0].data or {})["plan_stale_since"] == "2026-08-01T00:00:00Z"
+
+
+def test_read_verified_events_carry_no_plan_staleness(db_session, seeded):
+    """Their claim rests on the read, which is current regardless of when the
+    plan was last refreshed — stamping it would imply doubt about a proven
+    fact."""
+    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    config = dict(mc.monitoring_config or {})
+    config["tracked_topics_stale_since"] = "2026-08-01T00:00:00Z"
+    mc.monitoring_config = config
+    db_session.commit()
+
+    _run_scan(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")])
+    row = db_session.execute(select(MonitoredEvent)).scalars().one()
+    assert "plan_stale_since" not in (row.data or {})
+
+
+def _deadlock_error():
+    import psycopg2
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("UPDATE monitored_contracts ...", {}, psycopg2.errors.DeadlockDetected("deadlock detected"))
+
+
+def _conn_lost_error():
+    import psycopg2
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("SELECT 1", {}, psycopg2.OperationalError("server closed the connection unexpectedly"))
+
+
+def test_deadlocked_verification_unit_rolls_back_without_killing_the_pass(db_session, seeded):
+    """maybe_queue_reanalysis's first statement autoflushes the staged
+    last_known_state UPDATE against the rows the scanner's cohort UPDATE locks,
+    so it is a deadlock candidate. Swallowing the DB error would leave the
+    session pending-rollback and the NEXT member's sync would raise
+    PendingRollbackError past the handler, taking the whole pass with it."""
+    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    with (
+        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
+        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
+        patch(
+            "services.monitoring.unified_watcher.rpc_batch_request_classified",
+            side_effect=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")],
+        ),
+        patch("services.monitoring.unified_watcher.maybe_queue_reanalysis", side_effect=_deadlock_error()),
+    ):
+        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
+        result = scan_for_events(db_session, "http://rpc.invalid")
+
+    # The unit rolled back with its event; the pass still returned normally.
+    assert [e for e in result if str(e.event_type).startswith("value_changed")] == []
+    assert db_session.query(MonitoredEvent).count() == 0
+    db_session.refresh(mc)
+    assert mc.last_known_state == {"rate": 7}
+
+
+def test_non_deadlock_db_error_is_not_swallowed_per_unit(db_session, seeded):
+    """A lost connection is not per-unit recoverable — it must reach the
+    caller so the pass records an honest degraded cycle."""
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    with (
+        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
+        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
+        patch(
+            "services.monitoring.unified_watcher.rpc_batch_request_classified",
+            side_effect=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")],
+        ),
+        patch("services.monitoring.unified_watcher.maybe_queue_reanalysis", side_effect=_conn_lost_error()),
+    ):
+        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
+        result = scan_for_events(db_session, "http://rpc.invalid")
+    # scan_for_events catches it at the pass boundary and marks the cycle
+    # degraded rather than pretending the reads happened.
+    assert result.degraded is True
+    assert db_session.query(MonitoredEvent).count() == 0
+
+
+def test_reads_are_issued_before_any_write_is_staged(db_session, seeded):
+    """Transaction shape: holding row locks on monitored_contracts across
+    network IO is what the scanner's cohort UPDATE deadlocks against, so every
+    RPC for a chain is issued before that chain's writes are staged."""
+    seeded(WITNESS_TIER_HINT, state={"rate": 7})
+    dirty_at_read_time: list[bool] = []
+
+    def _batch(*_a, **_k):
+        # Nothing may be pending on the session when the wire is dialled.
+        dirty_at_read_time.append(bool(db_session.dirty or db_session.new))
+        return [("0x" + hex(9)[2:].zfill(64), "ok")]
+
+    with (
+        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
+        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
+        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_batch),
+    ):
+        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
+        scan_for_events(db_session, "http://rpc.invalid")
+
+    assert dirty_at_read_time == [False]
