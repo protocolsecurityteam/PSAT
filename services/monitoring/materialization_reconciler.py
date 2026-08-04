@@ -30,11 +30,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-from db.models import ContractMaterialization, Job, MonitoredContract
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION, builder_claim_is_stale
+from db.models import ContractMaterialization, Job, JobStatus, MonitoredContract
 from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
@@ -90,32 +90,45 @@ class RebuildCandidate:
     protocol_id: int | None
 
 
-def _materialization_state_by_key(session: Session) -> dict[tuple[str, str], tuple[str, int | None]]:
-    """``(chain_token, address) -> (status, analysis_schema_version)``.
+def _materialization_state_by_key(
+    session: Session, addresses: set[str]
+) -> dict[tuple[str, str], tuple[str, int | None, datetime | None]]:
+    """``(chain_token, address) -> (status, analysis_schema_version, builder_started_at)``.
 
     Not a SQL join: ``contract_materializations.chain`` holds chain-id tokens
     while ``monitored_contracts.chain`` holds names, and the two are only
-    comparable through ``chain_cache_token`` (see ``tracking_plan_state``).
+    comparable through ``chain_cache_token`` (see ``tracking_plan_state``). The
+    address filter keeps the read proportional to the monitored fleet rather
+    than to every contract the pipeline has ever materialized — this runs on
+    every ``/api/fleet`` request and every ops tick.
     """
+    if not addresses:
+        return {}
     return {
-        (row.chain, (row.address or "").lower()): (row.status, row.analysis_schema_version)
+        (row.chain, (row.address or "").lower()): (row.status, row.analysis_schema_version, row.builder_started_at)
         for row in session.execute(
             select(
                 ContractMaterialization.chain,
                 ContractMaterialization.address,
                 ContractMaterialization.status,
                 ContractMaterialization.analysis_schema_version,
-            )
+                ContractMaterialization.builder_started_at,
+            ).where(ContractMaterialization.address.in_(sorted(addresses)))
         ).all()
     }
 
 
-def _backlog_reason(state: tuple[str, int | None] | None) -> str | None:
+def _backlog_reason(state: tuple[str, int | None, datetime | None] | None) -> str | None:
     """The reason this address has no current row, or None when it has one."""
     if state is None:
         return REASON_NO_ROW
-    status, version = state
-    if status in ("building", "pending"):
+    status, version, builder_started_at = state
+    if status == "building":
+        # A claim whose builder has gone stale is a crashed worker's leftover,
+        # not a build in flight — ``materialize_or_wait`` takes such a row over.
+        # Counting it as in-flight would exempt it from rebuild forever.
+        return REASON_NO_ROW if builder_claim_is_stale(status, builder_started_at) else REASON_IN_PROGRESS
+    if status == "pending":
         return REASON_IN_PROGRESS
     if status == "failed":
         return REASON_FAILED
@@ -132,9 +145,7 @@ def backlog_candidates(session: Session) -> list[RebuildCandidate]:
     Unbudgeted and unordered-by-priority — the backlog itself. ``plan_rebuilds``
     is what turns it into work.
     """
-    states = _materialization_state_by_key(session)
-    out: list[RebuildCandidate] = []
-    for mc in (
+    monitored = (
         session.execute(
             select(MonitoredContract)
             .where(MonitoredContract.is_active.is_(True))
@@ -142,13 +153,35 @@ def backlog_candidates(session: Session) -> list[RebuildCandidate]:
         )
         .scalars()
         .all()
-    ):
+    )
+    states = _materialization_state_by_key(session, {(mc.address or "").lower() for mc in monitored})
+    out: list[RebuildCandidate] = []
+    for mc in monitored:
         key = (chain_cache_token(mc.chain), (mc.address or "").lower())
         reason = _backlog_reason(states.get(key))
         if reason is None:
             continue
         out.append(RebuildCandidate(address=mc.address, chain=mc.chain, reason=reason, protocol_id=mc.protocol_id))
     return out
+
+
+def _rebuild_jobs_since(session: Session, since: datetime) -> list[Job]:
+    """Reconciler-issued jobs created since *since*, plus any still in flight.
+
+    Both halves matter: the recent ones are the budget already spent, and their
+    addresses are the ones a second pass must not re-queue. An older job that is
+    still queued or processing is in flight regardless of age.
+    """
+    return list(
+        session.execute(
+            select(Job).where(
+                Job.request[REBUILD_REQUEST_KEY].astext == "true",
+                or_(Job.created_at >= since, Job.status.in_([JobStatus.queued, JobStatus.processing])),
+            )
+        )
+        .scalars()
+        .all()
+    )
 
 
 def count_rebuilds_queued_since(session: Session, since: datetime) -> int:
@@ -163,7 +196,12 @@ def count_rebuilds_queued_since(session: Session, since: datetime) -> int:
     )
 
 
-def materialization_backlog(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+def materialization_backlog(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    _candidates: list[RebuildCandidate] | None = None,
+) -> dict[str, Any]:
     """Backlog census for the fleet and ops surfaces (F9c).
 
     ``by_reason`` partitions ``contracts``. The budget fields are published
@@ -171,24 +209,38 @@ def materialization_backlog(session: Session, *, now: datetime | None = None) ->
     being done about it: a large backlog under a spent budget and the same
     backlog under an untouched one are different operational facts.
 
+    ``attempted_not_yet_resolved`` counts distinct addresses this reconciler has
+    a job out for and which are still in the backlog — work issued that has not
+    yet produced a row, which is a different fact from work not yet issued.
+
     No alert threshold is invented here — the counts ride the same
     publish-unconditionally rule as ``plan_coverage`` and ``verification_gaps``.
+
+    *_candidates* lets a caller that already computed the backlog pass it in
+    rather than pay for the scan twice; it is not part of the surface contract.
     """
     now = now or datetime.now(timezone.utc)
-    candidates = backlog_candidates(session)
+    candidates = _candidates or backlog_candidates(session)
     by_reason: dict[str, int] = {}
     for candidate in candidates:
         by_reason[candidate.reason] = by_reason.get(candidate.reason, 0) + 1
     budget = rebuild_budget_per_day()
-    queued = count_rebuilds_queued_since(session, now - timedelta(days=1))
+    window_start = now - timedelta(days=1)
+    recent = _rebuild_jobs_since(session, window_start)
+    queued = sum(1 for job in recent if job.created_at is not None and _aware(job.created_at) >= window_start)
     return {
         "contracts": len(candidates),
         "by_reason": by_reason,
         "budget_per_day": budget,
         "queued_last_24h": queued,
         "queueable_now": max(0, budget - queued),
+        "attempted_not_yet_resolved": len({(job.address or "").lower() for job in recent}),
         "basis": BACKLOG_BASIS,
     }
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def plan_rebuilds(
@@ -199,13 +251,24 @@ def plan_rebuilds(
 ) -> tuple[list[RebuildCandidate], dict[str, Any]]:
     """The rebuild jobs the budget allows right now, and the census behind them.
 
-    Returns ``(candidates, backlog)``. ``in_progress`` candidates are excluded:
-    a builder is already running for them, and queuing a job would pay for the
-    same bundle twice. The remaining order is stable (chain, address) so a
-    repeated dry run proposes the same work.
+    Returns ``(candidates, backlog)``. Two exclusions, and the second is why a
+    second pass makes progress:
+
+    * ``in_progress`` — a builder is already running, so a job would pay for the
+      same bundle twice.
+    * anything this reconciler already has a job out for (in flight, or issued
+      within the budget window). The 24 h counter bounds how MANY jobs are
+      issued, not WHICH — without this, every pass re-proposes the head of the
+      list, and a contract that keeps failing to rebuild starves the tail
+      forever.
+
+    The remaining order is stable (chain, address), so a dry run and the
+    ``--apply`` that follows it propose the same work.
     """
     now = now or datetime.now(timezone.utc)
-    backlog = materialization_backlog(session, now=now)
+    candidates = backlog_candidates(session)
+    backlog = materialization_backlog(session, now=now, _candidates=candidates)
     allowed = backlog["queueable_now"] if budget is None else max(0, budget - backlog["queued_last_24h"])
-    workable = [c for c in backlog_candidates(session) if c.reason != REASON_IN_PROGRESS]
+    attempted = {(job.address or "").lower() for job in _rebuild_jobs_since(session, now - timedelta(days=1))}
+    workable = [c for c in candidates if c.reason != REASON_IN_PROGRESS and (c.address or "").lower() not in attempted]
     return workable[:allowed], backlog

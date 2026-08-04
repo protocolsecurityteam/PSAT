@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
@@ -67,13 +67,37 @@ def _monitored(session, address: str, *, chain: str = "ethereum") -> MonitoredCo
     return mc
 
 
-def _materialization(session, address: str, keccak: str, *, status: str, version: int) -> None:
+def _queue_rebuild_jobs(session, addresses: list[str], *, created_at: datetime | None = None) -> None:
+    for address in addresses:
+        session.add(
+            Job(
+                id=uuid.uuid4(),
+                address=address,
+                status=JobStatus.queued,
+                stage=JobStage.discovery,
+                request={"address": address, "force": True, REBUILD_REQUEST_KEY: True},
+                created_at=created_at or datetime.now(timezone.utc),
+            )
+        )
+    session.commit()
+
+
+def _materialization(
+    session,
+    address: str,
+    keccak: str,
+    *,
+    status: str,
+    version: int,
+    builder_started_at: datetime | None = None,
+) -> None:
     session.add(
         ContractMaterialization(
             chain="1",
             bytecode_keccak=keccak,
             address=address.lower(),
             status=status,
+            builder_started_at=builder_started_at,
             analysis_schema_version=version,
         )
     )
@@ -88,7 +112,14 @@ def test_backlog_names_the_reason_per_contract(cm_db):
     _materialization(cm_db, addrs[0], "0x" + "01" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION)
     _materialization(cm_db, addrs[1], "0x" + "02" * 32, status="ready", version=ANALYSIS_SCHEMA_VERSION - 1)
     _materialization(cm_db, addrs[2], "0x" + "03" * 32, status="failed", version=ANALYSIS_SCHEMA_VERSION)
-    _materialization(cm_db, addrs[3], "0x" + "04" * 32, status="building", version=ANALYSIS_SCHEMA_VERSION)
+    _materialization(
+        cm_db,
+        addrs[3],
+        "0x" + "04" * 32,
+        status="building",
+        version=ANALYSIS_SCHEMA_VERSION,
+        builder_started_at=datetime.now(timezone.utc),
+    )
 
     backlog = materialization_backlog(cm_db)
     assert backlog["contracts"] == 4
@@ -106,7 +137,14 @@ def test_rebuild_plan_is_capped_and_excludes_in_flight_builds(cm_db, monkeypatch
     addrs = ["0x" + f"{n:02x}" * 20 for n in range(10, 16)]
     for addr in addrs:
         _monitored(cm_db, addr)
-    _materialization(cm_db, addrs[0], "0x" + "10" * 32, status="building", version=ANALYSIS_SCHEMA_VERSION)
+    _materialization(
+        cm_db,
+        addrs[0],
+        "0x" + "10" * 32,
+        status="building",
+        version=ANALYSIS_SCHEMA_VERSION,
+        builder_started_at=datetime.now(timezone.utc),
+    )
 
     monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "2")
     candidates, backlog = plan_rebuilds(cm_db)
@@ -160,6 +198,85 @@ def test_budget_counts_what_it_already_spent(cm_db, monkeypatch):
     assert backlog["queued_last_24h"] == 1
     assert backlog["queueable_now"] == 2
     assert len(plan_rebuilds(cm_db, now=now)[0]) == 2
+
+
+@requires_postgres
+def test_a_second_pass_moves_down_the_list_instead_of_re_proposing_the_head(cm_db, monkeypatch):
+    """The 24h counter bounds how MANY jobs are issued, not WHICH. Without an
+    identity exclusion every pass re-proposes the head, and a contract that
+    keeps failing to rebuild starves the tail forever."""
+    addrs = ["0x" + f"{n:02x}" * 20 for n in range(40, 45)]
+    for addr in addrs:
+        _monitored(cm_db, addr)
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "2")
+
+    first, _ = plan_rebuilds(cm_db)
+    assert len(first) == 2
+    _queue_rebuild_jobs(cm_db, [c.address for c in first])
+
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "4")
+    second, backlog = plan_rebuilds(cm_db)
+    assert {c.address for c in second}.isdisjoint({c.address for c in first})
+    assert backlog["attempted_not_yet_resolved"] == 2
+
+
+@requires_postgres
+def test_an_in_flight_rebuild_is_not_re_queued_even_when_it_is_old(cm_db, monkeypatch):
+    addr = "0x" + "50" * 20
+    _monitored(cm_db, addr)
+    _queue_rebuild_jobs(cm_db, [addr], created_at=datetime.now(timezone.utc) - timedelta(days=9))
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
+    candidates, backlog = plan_rebuilds(cm_db)
+    assert candidates == []
+    # Outside the 24h window, so it is not budget already spent — but it is
+    # still an attempt outstanding, and those are different facts.
+    assert backlog["queued_last_24h"] == 0
+    assert backlog["attempted_not_yet_resolved"] == 1
+
+
+@requires_postgres
+def test_a_stale_builder_claim_is_rebuildable_not_in_flight(cm_db, monkeypatch):
+    """A crashed worker's leftover claim would otherwise read as "a builder is
+    running" forever and exempt the contract from every rebuild pass."""
+    fresh, stale = "0x" + "60" * 20, "0x" + "61" * 20
+    _monitored(cm_db, fresh)
+    _monitored(cm_db, stale)
+    now = datetime.now(timezone.utc)
+    for addr, keccak, started in ((fresh, "0x" + "60" * 32, now), (stale, "0x" + "61" * 32, now - timedelta(hours=6))):
+        cm_db.add(
+            ContractMaterialization(
+                chain="1",
+                bytecode_keccak=keccak,
+                address=addr,
+                status="building",
+                builder_started_at=started,
+                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            )
+        )
+    cm_db.commit()
+
+    backlog = materialization_backlog(cm_db)
+    assert backlog["by_reason"] == {REASON_IN_PROGRESS: 1, REASON_NO_ROW: 1}
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
+    assert [c.address for c in plan_rebuilds(cm_db)[0]] == [stale]
+
+
+@requires_postgres
+def test_queued_rebuilds_force_past_the_static_cache(cm_db, monkeypatch):
+    """Discovery's same-address static cache is not version-gated, so a rebuild
+    issued after a schema bump would copy the superseded era's artifacts, skip
+    analysis, and clear the backlog without re-analyzing anything."""
+    from scripts.reconcile_materializations import queue_rebuilds
+
+    addr = "0x" + "70" * 20
+    _monitored(cm_db, addr)
+    monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "1")
+    candidates, _ = plan_rebuilds(cm_db)
+    assert queue_rebuilds(cm_db, candidates)["queued"] == 1
+
+    job = cm_db.execute(select(Job).where(Job.address == addr)).scalar_one()
+    assert job.request["force"] is True
+    assert job.request[REBUILD_REQUEST_KEY] is True
 
 
 @requires_postgres

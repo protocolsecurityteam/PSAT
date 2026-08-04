@@ -50,6 +50,14 @@ def queue_rebuilds(session: Session, candidates: list[RebuildCandidate]) -> dict
     Chain-gated the same way ``reanalysis.maybe_queue_reanalysis`` is: a legacy
     row on a chain this deployment has disabled must never re-spawn analysis
     work on it.
+
+    ``force`` is load-bearing, not a flourish. Discovery's same-address static
+    cache (``find_completed_static_cache``) is NOT version-gated, so without it
+    a rebuild issued after a schema bump — the one event this reconciler exists
+    for — copies the superseded era's artifacts, skips analysis entirely, and
+    clears the backlog without a single contract being re-analyzed. ``force``
+    is the documented escape hatch that makes the job fetch and analyze for
+    real.
     """
     counts = {"queued": 0, "skipped_chain_not_enabled": 0}
     for candidate in candidates:
@@ -60,6 +68,7 @@ def queue_rebuilds(session: Session, candidates: list[RebuildCandidate]) -> dict
             "address": candidate.address,
             "chain": candidate.chain,
             "name": f"Materialization rebuild ({candidate.reason})",
+            "force": True,
             REBUILD_REQUEST_KEY: True,
         }
         if candidate.protocol_id:
