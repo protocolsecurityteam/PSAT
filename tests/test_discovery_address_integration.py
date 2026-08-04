@@ -440,14 +440,14 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
     _patch_discovery(monkeypatch, result)
 
     fetch_calls: list[str] = []
-    creators_calls: list[list[str]] = []
+    creators_calls: list[tuple[list[str], int]] = []
 
     def fake_fetch(addr: str, *, chain_id: int = 1) -> dict:
         fetch_calls.append(addr)
         return result
 
-    def fake_batch_creators(addrs: list[str]) -> dict[str, str]:
-        creators_calls.append(list(addrs))
+    def fake_batch_creators(addrs: list[str], *, chain_id: int = 1) -> dict[str, str]:
+        creators_calls.append((list(addrs), chain_id))
         return {addrs[0].lower(): "0xc0ffee0000000000000000000000000000000001"}
 
     monkeypatch.setattr("workers.discovery.fetch", fake_fetch)
@@ -457,12 +457,15 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
+    # Non-mainnet job: the creators lookup must ask the JOB's chain, not
+    # default to mainnet — a Base-only address answers nothing on chain 1,
+    # which nulled the deployer and starved deployer-cascade adoption.
+    job = _job(chain_id=8453)
 
     worker._process_address(session, job)
 
     assert fetch_calls == [job.address]
-    assert creators_calls == [[job.address]]
+    assert creators_calls == [([job.address], 8453)]
     contract = session.add.call_args[0][0]
     assert contract.deployer == "0xc0ffee0000000000000000000000000000000001"
 
@@ -478,7 +481,7 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
 
     monkeypatch.setattr("workers.discovery.fetch", lambda _addr, **_kw: result)
 
-    def boom(_addrs):
+    def boom(_addrs, **_kw):
         raise RuntimeError("creators API down")
 
     monkeypatch.setattr("workers.discovery._batch_get_creators", boom)
@@ -493,6 +496,38 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
 
     contract = session.add.call_args[0][0]
     assert contract.deployer is None
+
+
+def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
+    """A failed creators refetch must not erase a previously-witnessed
+    deployer on an existing Contract row — None means the lookup answered
+    nothing, never that the contract has no deployer."""
+    from utils.concurrency import RpcExecutor
+
+    RpcExecutor.reset_for_tests()
+    result = _etherscan_result()
+    _patch_discovery(monkeypatch, result)
+
+    monkeypatch.setattr("workers.discovery.fetch", lambda _addr, **_kw: result)
+
+    def boom(_addrs, **_kw):
+        raise RuntimeError("creators API down")
+
+    monkeypatch.setattr("workers.discovery._batch_get_creators", boom)
+
+    worker = DiscoveryWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+    existing_row = MagicMock()
+    existing_row.deployer = "0x0463e60c7ce10e57911ab7bd1667eaa21de3e79b"
+    existing_row.protocol_id = 1
+    existing_row.discovery_sources = ["inventory"]
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = existing_row
+    job = _job()
+
+    worker._process_address(session, job)
+
+    assert existing_row.deployer == "0x0463e60c7ce10e57911ab7bd1667eaa21de3e79b"
 
 
 def test_process_address_fanout_propagates_fetch_exception(monkeypatch):

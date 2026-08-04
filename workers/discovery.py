@@ -566,7 +566,7 @@ class DiscoveryWorker(BaseWorker):
             fan_out = etherscan.parallel_get(
                 {
                     "fetch": lambda a=address: fetch(a, chain_id=fetch_chain_id),
-                    "creators": lambda a=address: _batch_get_creators([a]),
+                    "creators": lambda a=address: _batch_get_creators([a], chain_id=fetch_chain_id),
                 }
             )
         result_or_exc = fan_out["fetch"]
@@ -663,7 +663,10 @@ class DiscoveryWorker(BaseWorker):
             existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
-            existing.deployer = deployer
+            # None means the creators fetch answered nothing for this chain,
+            # never that the contract has no deployer — keep prior evidence.
+            if deployer:
+                existing.deployer = deployer
             existing.remappings = remappings or []
             existing.source_verified = True
             should_adopt = (
