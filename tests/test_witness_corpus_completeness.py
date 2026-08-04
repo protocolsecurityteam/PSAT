@@ -667,9 +667,16 @@ def opaque(tmp_path_factory):
         effects = build_effects(contract)
         semantic_control = _build_semantic_control_summary(contract, project_dir, predicate_trees, effects)
         targets = build_controller_tracking(contract, project_dir, predicate_trees, effects, semantic_control)
-        plan = build_control_tracking_plan(  # type: ignore[arg-type]
-            {"subject": {"address": "0x" + "22" * 20, "name": name}, "controller_tracking": targets}
-        )
+        analysis = {
+            "subject": {
+                "address": "0x" + "22" * 20,
+                "name": name,
+                "compiler_version": "",
+                "source_verified": True,
+            },
+            "controller_tracking": targets,
+        }
+        plan = build_control_tracking_plan(analysis)  # type: ignore[arg-type]
         out[name] = {
             "contract": contract,
             "effects": effects,

@@ -885,8 +885,10 @@ def _library_storage_write_functions(contract) -> frozenset[str]:
         accessor = getattr(function, "all_library_calls", None)
         if not callable(accessor):
             continue
+        calls: list[Any] = []
         try:
-            calls = accessor() or []
+            found: Any = accessor()
+            calls = list(found) if found else []
         except Exception:
             # The question was not answered for this function; an unanswered
             # question is not proof that it writes nothing.
