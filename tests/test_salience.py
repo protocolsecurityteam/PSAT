@@ -806,6 +806,19 @@ def test_verification_read_mint_stamps_the_entrys_signal_class(db_session, make_
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_wire():
+    """The driver's transaction fetch is real from phase 2 on, and these tests
+    hand it an unreachable endpoint. Stub the batch call so the offline suite
+    stays hermetic; the fetch itself is exercised against fixture transactions
+    in ``tests/test_enrichment_decode.py``."""
+    with patch(
+        "services.monitoring.enrichment.rpc_batch_request_classified",
+        side_effect=lambda _url, calls, *_a, **_kw: [(None, "transport")] * len(calls),
+    ):
+        yield
+
+
 def _seed_event(db_session, mc, event_type: str, data: dict) -> MonitoredEvent:
     event = MonitoredEvent(
         id=uuid.uuid4(),
@@ -821,19 +834,23 @@ def _seed_event(db_session, mc, event_type: str, data: dict) -> MonitoredEvent:
     return event
 
 
-def test_the_empty_driver_leaves_rows_untouched(db_session, make_mc):
-    """Phase 1's registry is empty, so the driver is a no-op on every real
-    row — including the salience the mint site already assigned."""
-    assert ENRICHERS == {}
-    assert NEEDS_TX == frozenset()
+def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_mc):
+    """The driver only ever touches a row some enricher has something to say
+    about — including the salience the mint site already assigned.
 
-    mc = make_mc(contract_type="safe")
+    (Phase 1 asserted this with an EMPTY registry. Phase 2 fills it, so the
+    claim is now stated against a type outside it: an ``authority_updated``
+    alone in its transaction has no decoder and no correlation partner.)"""
+    assert set(ENRICHERS) == {"safe_tx_executed", "safe_tx_failed", "timelock_scheduled", "timelock_executed"}
+    assert NEEDS_TX == frozenset({"safe_tx_executed", "safe_tx_failed"})
+
+    mc = make_mc()
     before = {
-        "safe_tx_hash": "0x" + "ab" * 32,
-        "salience": sal.SALIENCE_NOT_DETERMINED,
-        "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
+        "new_authority": ADDR(3),
+        "salience": sal.SALIENCE_ALERT,
+        "salience_basis": [sal.BASIS_CANONICAL_CONFIG_FAMILY],
     }
-    event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
+    event = _seed_event(db_session, mc, "authority_updated", dict(before))
 
     enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
     db_session.commit()
@@ -872,6 +889,15 @@ def test_the_driver_recomputes_salience_for_rows_an_enricher_changed(db_session,
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED]
 
 
+def _without_correlation(data: dict) -> dict:
+    """The row minus the zero-RPC correlation join's own publication.
+
+    E3 runs beside the per-event registry rather than inside it, so a test
+    about ONE enricher's failure has to say which keys it is talking about.
+    """
+    return {key: value for key, value in data.items() if key not in ("correlated_events", "correlated_scope")}
+
+
 def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, make_mc):
     """§3.0 rule 4: enrichment failure is never fatal, and never rewrites."""
     mc = make_mc(contract_type="safe")
@@ -886,7 +912,7 @@ def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, 
     db_session.commit()
     db_session.expire_all()
 
-    assert db_session.get(MonitoredEvent, event.id).data == before
+    assert _without_correlation(db_session.get(MonitoredEvent, event.id).data) == before
 
 
 def test_the_driver_never_changes_event_type_or_witness_tier(db_session, make_mc):
@@ -1105,7 +1131,14 @@ def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
 
 def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
     mc = make_mc(contract_type="safe")
-    before = {"witness_tier": "hint", "salience": sal.SALIENCE_NOT_DETERMINED, "salience_basis": ["x"]}
+    # The seeded level is the one the mint site would have written, so the
+    # correlation join's own recompute is an identity and the only thing this
+    # test can observe is the refused enricher.
+    before = {
+        "witness_tier": "hint",
+        "salience": sal.SALIENCE_NOT_DETERMINED,
+        "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
+    }
     event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
 
     with patch.dict(ENRICHERS, {"safe_tx_executed": lambda *_a: {"witness_tier": "self_describing"}}, clear=False):
@@ -1113,7 +1146,7 @@ def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, mak
     db_session.commit()
     db_session.expire_all()
 
-    assert db_session.get(MonitoredEvent, event.id).data == before
+    assert _without_correlation(db_session.get(MonitoredEvent, event.id).data) == before
 
 
 def test_a_chainless_contract_is_skipped_rather_than_defaulted(db_session, make_mc, caplog):
@@ -1177,17 +1210,21 @@ def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_ses
     correlation and poll-field classification) must still run — a blip on the
     Safe decode may not take them down with it."""
     mc = make_mc(contract_type="safe")
+    victim = make_mc()
     event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
+    # Same transaction (``_seed_event``'s hash is shared), so E3 — which needs
+    # nothing off the wire — has a real link to publish.
+    effect = _seed_event(db_session, victim, "paused", {"salience": sal.SALIENCE_ALERT})
 
     seen: list[dict] = []
 
-    def zero_rpc(_event, _mc, ctx):
+    def observe(inner_event, inner_mc, ctx):
         seen.append(dict(ctx.txs))
-        return {"correlated_events": [{"event_id": "x", "event_type": "paused", "salience": sal.SALIENCE_ALERT}]}
+        return None
 
     with (
         patch("services.monitoring.enrichment._fetch_txs", side_effect=RuntimeError("transport")),
-        patch.dict(ENRICHERS, {"safe_tx_executed": zero_rpc}, clear=False),
+        patch.dict(ENRICHERS, {"safe_tx_executed": observe}, clear=False),
     ):
         enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
     db_session.commit()
@@ -1196,6 +1233,7 @@ def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_ses
     # It ran, and it saw an empty map rather than a fabricated one.
     assert seen == [{}]
     data = db_session.get(MonitoredEvent, event.id).data
+    assert data["correlated_events"][0]["event_id"] == str(effect.id)
     assert data["correlated_events"][0]["event_type"] == "paused"
     assert data["salience"] == sal.SALIENCE_ALERT
     # Both codes ride: the Safe execution itself is still un-decoded (the fetch

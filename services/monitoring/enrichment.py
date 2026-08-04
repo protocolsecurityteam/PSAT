@@ -18,20 +18,34 @@ Ground rules (§3.0, normative):
    ``data.historical`` events from the list this driver receives, so
    pre-enrollment backfill costs zero RPC.
 
-**This module is the phase-1 skeleton.** ``ENRICHERS`` is empty, so the driver
-is a no-op on every real row today; what is real is the *shape*: the registry,
-the per-chain partition, the failure isolation, and — the part that is not an
-optimization — the salience recompute in step 6. Enrichment changes the inputs
-``assign_salience`` reads (``safe_exec.*``, ``correlated_events``), so the
-mint-time assignment is provisional for enrichable types. Recomputing here,
+The salience recompute in step 6 is not an optimization: enrichment changes the
+inputs ``assign_salience`` reads (``safe_exec.*``, ``correlated_events``), so
+the mint-time assignment is provisional for enrichable types. Recomputing here,
 inside the window transaction and BEFORE the commit that precedes
 ``_notify_committed_events``, is what guarantees the notifier and the frontend
 only ever see the post-enrichment level.
 
-Phase 2 fills ``ENRICHERS`` / ``NEEDS_TX`` and implements ``_fetch_txs``
-(deduplicated ``eth_getTransactionByHash`` batch per chain, bounded by
-``PSAT_SCAN_MAX_ENRICH_TX_PER_PASS``, over-budget hashes recorded as
-``status: "over_budget"`` rather than silently dropped).
+What runs, in order, per chain:
+
+* the per-event registry (``ENRICHERS``) — E1 ``execTransaction`` decode, E4
+  MultiSend batch expansion, E2 selector→signature — over the transactions
+  ``_fetch_txs`` brought back;
+* the salience recompute for the rows those touched, so the correlation join
+  reads post-decode levels rather than mint-time provisional ones;
+* the window-level correlation join (E3), which is zero-RPC and writes BOTH
+  directions, followed by its own recompute.
+
+``_SAFE_MULTISEND_ADDRESSES`` provenance
+----------------------------------------
+The pinned MultiSend deployment list is vendored verbatim from
+``safe-global/safe-deployments`` @ ``main`` (read 2026-08-04):
+``src/assets/v1.3.0/multi_send.json``, ``v1.3.0/multi_send_call_only.json``,
+``v1.4.1/multi_send.json``, ``v1.4.1/multi_send_call_only.json``. Address
+equality against a pinned deployment is a *witnessed* comparison, and it is the
+only MultiSend witness this run takes: the stronger ``eth_getCode`` code-hash
+check (OQ3) needs live RPC and is deferred out of the run entirely. An address
+NOT on the list is not proven malicious — it is **not proven to be MultiSend**,
+which is exactly why it raises the level instead of lowering it.
 """
 
 from __future__ import annotations
@@ -45,17 +59,99 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from db.models import MonitoredContract, MonitoredEvent
+from db.models import Contract, EffectiveFunction, MonitoredContract, MonitoredEvent
 from services.monitoring.chain_rpc import chain_id_for
-from services.monitoring.salience import stamp_salience
+from services.monitoring.salience import (
+    SAFE_EXEC_BATCH_UNDECODABLE,
+    SAFE_EXEC_KEY_MULTISEND_RECOGNIZED,
+    SAFE_EXEC_STATUS_DECODED,
+    SAFE_EXEC_STATUS_NOT_TOP_LEVEL,
+    SAFE_EXEC_STATUS_OVER_BUDGET,
+    stamp_salience,
+)
+from services.static.claims.matchers._gates import SAFE_EXEC_TRANSACTION
+from utils.rpc import rpc_batch_request_classified
 
 logger = logging.getLogger(__name__)
 
 # Default budget for the per-pass transaction fetch. Read through
-# ``unified_watcher._scan_int_env`` by the phase-2 fetcher; declared here so
-# the knob's name and default live with the code that spends it.
+# ``unified_watcher._scan_int_env``; declared here so the knob's name and
+# default live with the code that spends it.
 ENRICH_TX_BUDGET_ENV = "PSAT_SCAN_MAX_ENRICH_TX_PER_PASS"
 DEFAULT_MAX_ENRICH_TX_PER_PASS = 50
+
+# Pinned MultiSend deployments — see the module docstring for provenance.
+# Lower-cased at declaration so every comparison is against one normal form.
+# The zkSync-variant deployments are deliberately EXCLUDED: they are the same
+# code at a different address on chains this system does not scan, and an
+# address that is MultiSend on zkSync is an unknown contract on ethereum —
+# admitting it would quiet a delegatecall this list cannot vouch for.
+_SAFE_MULTISEND_ADDRESSES: frozenset[str] = frozenset(
+    address.lower()
+    for address in (
+        # v1.3.0 multi_send.json
+        "0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761",  # canonical
+        "0x998739BFdAAdde7C933B942a68053933098f9EDa",  # eip155
+        # v1.3.0 multi_send_call_only.json
+        "0x40A2aCCbd92BCA938b02010E17A5b8929b49130D",  # canonical
+        "0xA1dabEF33b3B82c7814B6D82A79e50F4AC44102B",  # eip155
+        # v1.4.1 multi_send.json / multi_send_call_only.json
+        "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+        "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+    )
+)
+
+# ``multiSend(bytes)`` — the entry point whose single argument holds the packed
+# batch. Hashed from the published signature rather than transcribed, for the
+# same reason ``_gates`` does it.
+MULTISEND_SELECTOR = "0x8d80ff0a"
+
+# The published Safe ABI's ``execTransaction`` argument list. ``Enum.Operation``
+# lowers to ``uint8``.
+_EXEC_TRANSACTION_ARG_TYPES = [
+    "address",
+    "uint256",
+    "bytes",
+    "uint8",
+    "uint256",
+    "uint256",
+    "uint256",
+    "address",
+    "address",
+    "bytes",
+]
+
+_OPERATION_CALL = 0
+_OPERATION_DELEGATECALL = 1
+_OPERATION_LABELS = {_OPERATION_CALL: "call", _OPERATION_DELEGATECALL: "delegatecall"}
+
+# A proven ``execTransaction`` whose ARGUMENTS would not decode. Not one of the
+# three statuses the salience rules discriminate on, deliberately: the level
+# falls through to ``not_determined`` (visible), and the status says which of
+# the two undecoded worlds this row is in rather than leaving the block absent.
+SAFE_EXEC_STATUS_ARGS_UNDECODABLE = "args_undecodable"
+
+# ``correlated_events`` is scoped to what is MONITORED. An empty list means "no
+# monitored contract emitted in this transaction", never "this execution had no
+# effect", and this key is what keeps a consumer from reading the second.
+CORRELATED_SCOPE_MONITORED_ONLY = "monitored_only"
+
+# The execution families §3.4 treats as the cause when they share a transaction
+# with anything else monitored. Same transaction hash is a witnessed fact; which
+# side is the cause comes from this registry, not from log ordering (a Safe's
+# ``ExecutionSuccess`` is emitted AFTER the calls it made).
+_CAUSE_EVENT_TYPES = frozenset(
+    {
+        "safe_tx_executed",
+        "safe_tx_failed",
+        "safe_module_executed",
+        "safe_module_failed",
+        "timelock_scheduled",
+        "timelock_executed",
+    }
+)
+
+_SIGNATURE_SOURCE_EFFECTIVE_FUNCTIONS = "effective_functions"
 
 
 @dataclass(frozen=True)
@@ -81,12 +177,13 @@ class EnrichmentContext:
 Enricher = Callable[[MonitoredEvent, MonitoredContract, EnrichmentContext], "dict[str, Any] | None"]
 
 # event_type → enricher. Mirrors how ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` already
-# keys behaviour off the canonical type. Empty in phase 1.
+# keys behaviour off the canonical type. Populated at the bottom of the module,
+# once the enrichers it names are defined.
 ENRICHERS: dict[str, Enricher] = {}
 
 # Event types whose enricher wants the top-level transaction. Only these
-# contribute hashes to the per-chain fetch, so an empty registry issues no RPC
-# at all.
+# contribute hashes to the per-chain fetch, so a window with no Safe execution
+# in it issues no RPC at all.
 NEEDS_TX: frozenset[str] = frozenset()
 
 # Invariant 8, enforced rather than documented: enrichment is ADDITIVE. These
@@ -96,9 +193,17 @@ NEEDS_TX: frozenset[str] = frozenset()
 # either would move a side-effect decision from the taxonomy to a decoder. The
 # driver is the natural chokepoint: every enricher's output passes through it,
 # and a rejected key is logged rather than dropped in silence.
+#
+# ``target_function`` is the one widening this lane took, under an explicit
+# orchestrator ruling: the timelock families already publish ``target`` and
+# ``selector`` as bare top-level keys (``event_topics`` decodes them at mint),
+# so their E2 resolution has no ``safe_exec``-shaped block to live inside and
+# gets its own namespaced one. Nothing else is admitted — a key outside this
+# set stays loudly refused.
 ENRICHABLE_KEYS: frozenset[str] = frozenset(
     {
         "safe_exec",
+        "target_function",
         "correlated_events",
         "correlated_scope",
         "caused_by",
@@ -116,24 +221,383 @@ def _fetch_txs(
 ) -> tuple[dict[str, dict], frozenset[str]]:
     """Transaction objects for *tx_hashes*, plus the hashes skipped over budget.
 
-    Phase-1 stub: returns nothing and issues no RPC. Phase 2 implements this as
-    one ``rpc_batch_request_classified`` per chain (passing ``chain_id`` so the
-    URL↔chain guard the rest of monitoring uses applies here too), bounded by
-    ``ENRICH_TX_BUDGET_ENV``. Per-slot failures are already classified there; a
-    failed slot simply leaves its hash out of the returned map, which the
-    context's contract reads as "not fetched", never as "no such transaction".
-    A whole-batch transport failure degrades identically: the caller catches it
-    and proceeds with an empty map rather than denying the chain its zero-RPC
-    enrichers.
+    One ``rpc_batch_request_classified`` per chain, passing ``chain_id`` so the
+    URL↔chain guard the rest of monitoring uses applies here too. Per-slot
+    failures are already classified there; a failed slot simply leaves its hash
+    out of the returned map, which the context's contract reads as "not
+    fetched", never as "no such transaction". A whole-batch transport failure
+    degrades identically: the caller catches it and proceeds with an empty map
+    rather than denying the chain its zero-RPC enrichers.
+
+    The budget bounds how long this round-trip can hold the open window
+    transaction (the same seam holds the cursor update). Hashes past it are
+    RETURNED as over-budget rather than dropped: their events publish
+    ``status: "over_budget"``, which is a recorded decline to look, not a
+    finding about the transaction.
     """
     if not tx_hashes:
         return {}, frozenset()
-    logger.debug(
-        "Enrichment tx fetch not implemented; %d hash(es) left unfetched on chain %d",
-        len(tx_hashes),
-        chain_id,
+
+    # Local import: ``unified_watcher`` imports this module at module scope, so
+    # a top-level import back would close the cycle.
+    from services.monitoring.unified_watcher import _scan_int_env
+
+    budget = max(0, _scan_int_env(ENRICH_TX_BUDGET_ENV, DEFAULT_MAX_ENRICH_TX_PER_PASS))
+    wanted, over_budget = tx_hashes[:budget], frozenset(tx_hashes[budget:])
+    if over_budget:
+        logger.info(
+            "Enrichment tx budget reached on chain %d: %d fetched, %d recorded over budget",
+            chain_id,
+            len(wanted),
+            len(over_budget),
+        )
+    if not wanted:
+        return {}, over_budget
+
+    if not rpc_url:
+        # No endpoint for this chain. Nothing was fetched and nothing was
+        # DECLINED either, so these hashes are not over-budget: their events
+        # publish no block at all, which reads as "enrichment did not run".
+        logger.warning("Enrichment tx fetch skipped on chain %d: no RPC endpoint for the chain", chain_id)
+        return {}, over_budget
+
+    results = rpc_batch_request_classified(
+        rpc_url,
+        [("eth_getTransactionByHash", [tx_hash]) for tx_hash in wanted],
+        chain_id=chain_id,
     )
-    return {}, frozenset()
+
+    txs: dict[str, dict] = {}
+    for tx_hash, (result, status) in zip(wanted, results):
+        # ``ok`` with a null result is a node saying it does not have the
+        # transaction; both that and a non-``ok`` slot leave the hash out, which
+        # the enricher reads as "not fetched" rather than as a fact about it.
+        if status == "ok" and isinstance(result, Mapping):
+            txs[tx_hash] = dict(result)
+    return txs, over_budget
+
+
+# ---------------------------------------------------------------------------
+# E2 — selector → signature, fleet-internal only
+# ---------------------------------------------------------------------------
+
+
+def _normalize_address(value: Any) -> str | None:
+    """The one normal form every published address and every comparison uses."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text.startswith("0x") or len(text) != 42:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+    return text
+
+
+def _normalize_selector(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text.startswith("0x") or len(text) != 10:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+    return text
+
+
+def _resolve_signatures(
+    session: Session,
+    chain: str,
+    wanted: set[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    """``(address, selector) → abi_signature`` for the targets this system has
+    itself analysed.
+
+    Fleet-internal and therefore *witnessed*: the signature comes from the
+    target's own verified source as this pipeline read it, not from a
+    third-party ABI claim (§3.3's Etherscan fallback is deferred and produces a
+    heuristic, which is why it would have to live under ``heuristics``).
+
+    A selector that resolves to more than one DISTINCT signature is left
+    unresolved: two contracts at one address across re-analyses disagreeing
+    about a selector is an ambiguity, and picking one would publish a name no
+    witness picked.
+    """
+    if not wanted:
+        return {}
+
+    addresses = {address for address, _selector in wanted}
+    selectors = {selector for _address, selector in wanted}
+
+    from sqlalchemy import func
+
+    rows = session.execute(
+        select(Contract.address, EffectiveFunction.selector, EffectiveFunction.abi_signature)
+        .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+        .where(
+            func.lower(Contract.address).in_(addresses),
+            Contract.chain == chain,
+            func.lower(EffectiveFunction.selector).in_(selectors),
+            EffectiveFunction.abi_signature.isnot(None),
+        )
+    ).all()
+
+    candidates: dict[tuple[str, str], set[str]] = {}
+    for address, selector, signature in rows:
+        key = (_normalize_address(address), _normalize_selector(selector))
+        if key[0] is None or key[1] is None or not signature:
+            continue
+        candidates.setdefault((key[0], key[1]), set()).add(signature)
+
+    return {key: next(iter(names)) for key, names in candidates.items() if len(names) == 1}
+
+
+def _function_block(selector: str | None, signature: str | None) -> dict[str, Any]:
+    """The §3.3 shape. A raw selector is a real fact and renders fine; an
+    unresolved one publishes ``signature: null`` rather than a guess, and a
+    resolved one names the source that resolved it — a name without a stated
+    source is exactly the thing this system does not let stand for a witness."""
+    block: dict[str, Any] = {"selector": selector, "signature": signature}
+    if signature:
+        block["source"] = _SIGNATURE_SOURCE_EFFECTIVE_FUNCTIONS
+    return block
+
+
+# ---------------------------------------------------------------------------
+# E4 — MultiSend batch expansion
+# ---------------------------------------------------------------------------
+
+# (operation: 1B, to: 20B, value: 32B, dataLength: 32B, data: dataLength B)
+_MULTISEND_ENTRY_HEADER = 1 + 20 + 32 + 32
+
+
+def _decode_multisend(payload: bytes) -> list[dict[str, Any]] | None:
+    """One entry per inner call, or ``None`` when the batch did not decode.
+
+    ``None`` — never a partial list. A truncated batch would understate what
+    the Safe did, which is the one direction this decode may not fail in.
+    """
+    if len(payload) < 4 or "0x" + payload[:4].hex() != MULTISEND_SELECTOR:
+        return None
+
+    from eth_abi.abi import decode as eth_abi_decode
+
+    try:
+        (transactions,) = eth_abi_decode(["bytes"], payload[4:])
+    except Exception:
+        return None
+    if not isinstance(transactions, bytes):
+        return None
+
+    calls: list[dict[str, Any]] = []
+    cursor = 0
+    while cursor < len(transactions):
+        if cursor + _MULTISEND_ENTRY_HEADER > len(transactions):
+            return None
+        operation = transactions[cursor]
+        to = "0x" + transactions[cursor + 1 : cursor + 21].hex()
+        value = int.from_bytes(transactions[cursor + 21 : cursor + 53], "big")
+        data_length = int.from_bytes(transactions[cursor + 53 : cursor + 85], "big")
+        start = cursor + _MULTISEND_ENTRY_HEADER
+        end = start + data_length
+        if end > len(transactions):
+            return None
+        data = transactions[start:end]
+        calls.append(
+            {
+                "operation": operation,
+                "operation_label": _OPERATION_LABELS.get(operation),
+                "to": to,
+                "value": str(value),
+                "selector": "0x" + data[:4].hex() if len(data) >= 4 else None,
+                "data_length": len(data),
+                # Set on every inner call for the same reason it is set on the
+                # outer one: it is the witnessed comparison the salience rules
+                # read, and an inner delegatecall whose target this list cannot
+                # vouch for is what raises the whole batch.
+                SAFE_EXEC_KEY_MULTISEND_RECOGNIZED: to in _SAFE_MULTISEND_ADDRESSES,
+            }
+        )
+        cursor = end
+
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# E1 — Safe ``execTransaction`` decode
+# ---------------------------------------------------------------------------
+
+
+def _enrich_safe_exec(
+    event: MonitoredEvent,
+    mc: MonitoredContract,
+    ctx: EnrichmentContext,
+) -> dict[str, Any] | None:
+    """Decode the transaction that carried a ``safe_tx_executed`` /
+    ``safe_tx_failed`` into what the Safe was actually asked to do.
+
+    Step 1 is a top-level-call check, and it is the whole reason this decoder
+    is honest: the observed transaction is only this Safe's ``execTransaction``
+    when it was sent TO this Safe with that selector. A relayer, a nested Safe
+    (A is an owner of B), or a batch of two ``execTransaction`` calls inside one
+    outer call all fail it — and guessing at the inner call from the outer
+    input would be exactly the unwitnessed inference the overhaul removed.
+    """
+    tx_hash = event.tx_hash if isinstance(event.tx_hash, str) else ""
+    if not tx_hash:
+        return None
+
+    if tx_hash in ctx.over_budget:
+        # A recorded decline to look, not a finding about the transaction.
+        return {"safe_exec": {"status": SAFE_EXEC_STATUS_OVER_BUDGET}}
+
+    tx = ctx.txs.get(tx_hash)
+    if not isinstance(tx, Mapping):
+        # Not fetched (transport failure, missing endpoint, node without the
+        # transaction). No block at all: the salience rules read that as
+        # "enrichment absent" and keep the row visible.
+        return None
+
+    to = _normalize_address(tx.get("to"))
+    tx_input = tx.get("input")
+    tx_input = tx_input.lower() if isinstance(tx_input, str) else ""
+    if to is None or to != mc.address.lower() or tx_input[:10] != SAFE_EXEC_TRANSACTION:
+        return {"safe_exec": {"status": SAFE_EXEC_STATUS_NOT_TOP_LEVEL}}
+
+    from eth_abi.abi import decode as eth_abi_decode
+
+    try:
+        args = eth_abi_decode(_EXEC_TRANSACTION_ARG_TYPES, bytes.fromhex(tx_input[10:]))
+    except Exception as exc:
+        logger.info(
+            "execTransaction arguments did not decode for %s on %s: %s",
+            mc.address,
+            tx_hash,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        return {"safe_exec": {"status": SAFE_EXEC_STATUS_ARGS_UNDECODABLE}}
+
+    target = _normalize_address(args[0]) or str(args[0]).lower()
+    value = int(args[1])
+    data = args[2] if isinstance(args[2], bytes) else b""
+    operation = int(args[3])
+    gas_token = _normalize_address(args[7])
+    refund_receiver = _normalize_address(args[8])
+
+    safe_exec: dict[str, Any] = {
+        "status": SAFE_EXEC_STATUS_DECODED,
+        "to": target,
+        "value": str(value),
+        "selector": "0x" + data[:4].hex() if len(data) >= 4 else None,
+        "data_length": len(data),
+        "operation": operation,
+        "operation_label": _OPERATION_LABELS.get(operation),
+        "gas_token": gas_token,
+        "refund_receiver": refund_receiver,
+        SAFE_EXEC_KEY_MULTISEND_RECOGNIZED: target in _SAFE_MULTISEND_ADDRESSES,
+    }
+
+    batch: list[dict[str, Any]] | None = None
+    if operation == _OPERATION_DELEGATECALL and safe_exec[SAFE_EXEC_KEY_MULTISEND_RECOGNIZED]:
+        batch = _decode_multisend(data)
+        if batch is None:
+            # Either the batch decodes or its failure is on the record. A
+            # recognized-MultiSend delegatecall carrying neither would be a
+            # shape whose contents nobody examined and nobody said so.
+            safe_exec["batch_status"] = SAFE_EXEC_BATCH_UNDECODABLE
+        else:
+            safe_exec["batch"] = batch
+
+    _attach_signatures(ctx, safe_exec, batch)
+    return {"safe_exec": safe_exec}
+
+
+def _attach_signatures(
+    ctx: EnrichmentContext,
+    safe_exec: dict[str, Any],
+    batch: list[dict[str, Any]] | None,
+) -> None:
+    """E2 over the outer call and every inner one, in a single query.
+
+    Name resolution is DISPLAY only: nothing here may change a level, and the
+    salience rules read none of these keys.
+    """
+    wanted: set[tuple[str, str]] = set()
+    outer_to = _normalize_address(safe_exec.get("to"))
+    outer_selector = _normalize_selector(safe_exec.get("selector"))
+    if outer_to and outer_selector:
+        wanted.add((outer_to, outer_selector))
+    for call in batch or ():
+        call_to = _normalize_address(call.get("to"))
+        call_selector = _normalize_selector(call.get("selector"))
+        if call_to and call_selector:
+            wanted.add((call_to, call_selector))
+
+    try:
+        resolved = _resolve_signatures(ctx.session, ctx.chain, wanted)
+    except Exception as exc:
+        logger.warning(
+            "Selector resolution failed on %s; selectors publish unresolved: %s",
+            ctx.chain,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        resolved = {}
+
+    if outer_selector:
+        safe_exec["target_function"] = _function_block(outer_selector, resolved.get((outer_to or "", outer_selector)))
+    for call in batch or ():
+        call_selector = _normalize_selector(call.get("selector"))
+        call_to = _normalize_address(call.get("to"))
+        # The §3.5 entry shape names the signature inline; the source rides
+        # with it so a name is never read as sourceless.
+        call["signature"] = resolved.get((call_to or "", call_selector or "")) if call_selector else None
+        if call["signature"]:
+            call["signature_source"] = _SIGNATURE_SOURCE_EFFECTIVE_FUNCTIONS
+
+
+# ---------------------------------------------------------------------------
+# E2 — the timelock families (no decoder work; the args are already published)
+# ---------------------------------------------------------------------------
+
+
+def _enrich_timelock(
+    event: MonitoredEvent,
+    mc: MonitoredContract,
+    ctx: EnrichmentContext,
+) -> dict[str, Any] | None:
+    """Resolve the already-decoded ``target`` + ``selector`` to a signature.
+
+    ``event_topics`` decodes ``CallScheduled``/``CallExecuted`` at mint, so
+    these families need no decoder — only the name. The resolved block is
+    namespaced at ``data.target_function`` rather than folded in beside the
+    bare ``target``/``selector`` keys the taxonomy owns.
+    """
+    data = event.data if isinstance(event.data, Mapping) else {}
+    selector = _normalize_selector(data.get("selector"))
+    if not selector:
+        # No selector was decoded (a plain-value timelock call has no
+        # calldata). There is nothing to resolve and nothing to say.
+        return None
+
+    target = _normalize_address(data.get("target"))
+    try:
+        resolved = _resolve_signatures(ctx.session, ctx.chain, {(target, selector)} if target else set())
+    except Exception as exc:
+        logger.warning(
+            "Selector resolution failed on %s; the timelock selector publishes unresolved: %s",
+            ctx.chain,
+            exc,
+            extra={"exc_type": type(exc).__name__},
+        )
+        resolved = {}
+
+    return {"target_function": _function_block(selector, resolved.get((target or "", selector)))}
 
 
 def _admit_keys(
@@ -158,6 +622,113 @@ def _admit_keys(
             ", ".join(rejected),
         )
     return admitted
+
+
+# ---------------------------------------------------------------------------
+# E3 — cause/effect correlation join (zero RPC, one query per chain)
+# ---------------------------------------------------------------------------
+
+
+def _correlate(
+    session: Session,
+    chain: str,
+    pairs: list[tuple[MonitoredEvent, MonitoredContract]],
+) -> list[tuple[MonitoredEvent, MonitoredContract, dict[str, Any]]]:
+    """Both directions of the same-transaction join, as additive key sets.
+
+    Sharing a transaction hash is a witnessed fact, not an inference — which is
+    why both directions may be published. What is NOT witnessed is which of two
+    executions in one transaction caused a given effect, so ``caused_by`` is
+    written only where exactly one execution is in the transaction; the
+    ambiguous case still links from the execution's side, so nothing is lost.
+
+    Scoped to one chain: two chains can carry the same transaction hash, and a
+    cross-chain "correlation" would be a coincidence published as a cause.
+    Scoped to one window: an effect in window N whose cause lands in window N+1
+    does not link (§3.4, accepted and recorded), which is exactly why
+    ``correlated_scope`` rides on every list this produces.
+    """
+    causes = [
+        (event, mc)
+        for event, mc in pairs
+        if event.event_type in _CAUSE_EVENT_TYPES and isinstance(event.tx_hash, str) and event.tx_hash
+    ]
+    if not causes:
+        return []
+
+    # Read-witnessed rows persist ``tx_hash = ''``; the empty string is not a
+    # transaction and must never join.
+    hashes = sorted({event.tx_hash for event, _mc in causes})
+    rows = session.execute(
+        select(MonitoredEvent, MonitoredContract)
+        .join(MonitoredContract, MonitoredEvent.monitored_contract_id == MonitoredContract.id)
+        .where(
+            MonitoredEvent.tx_hash.in_(hashes),
+            MonitoredEvent.tx_hash != "",
+            MonitoredContract.chain == chain,
+        )
+    ).all()
+
+    by_tx: dict[str, list[tuple[MonitoredEvent, MonitoredContract]]] = {}
+    for event, mc in rows:
+        data = event.data if isinstance(event.data, Mapping) else {}
+        # §3.0 rule 5: historical rows are never enriched. One that predates
+        # enrollment is not a witness to anything this window did.
+        if data.get("historical"):
+            continue
+        by_tx.setdefault(event.tx_hash, []).append((event, mc))
+
+    produced: list[tuple[MonitoredEvent, MonitoredContract, dict[str, Any]]] = []
+
+    for cause, cause_mc in causes:
+        siblings = [(event, mc) for event, mc in by_tx.get(cause.tx_hash, []) if event.id != cause.id]
+        entries = []
+        for event, mc in siblings:
+            entry: dict[str, Any] = {
+                "event_id": str(event.id),
+                "event_type": event.event_type,
+                "contract_address": mc.address,
+            }
+            data = event.data if isinstance(event.data, Mapping) else {}
+            level = data.get("salience")
+            if isinstance(level, str) and level:
+                # The effect's OWN level rides on the entry: the rule that
+                # raises a cause to the max of its effects reads this list and
+                # does not query, so an entry without it would silently
+                # under-rate a cause whose effect is an alert.
+                entry["salience"] = level
+            entries.append(entry)
+        produced.append(
+            (
+                cause,
+                cause_mc,
+                {"correlated_events": entries, "correlated_scope": CORRELATED_SCOPE_MONITORED_ONLY},
+            )
+        )
+
+    for tx_hash, members in by_tx.items():
+        in_tx_causes = [(event, mc) for event, mc in members if event.event_type in _CAUSE_EVENT_TYPES]
+        if len(in_tx_causes) != 1:
+            if len(in_tx_causes) > 1:
+                logger.debug(
+                    "Transaction %s carries %d executions; ambiguous direction, no caused_by written",
+                    tx_hash,
+                    len(in_tx_causes),
+                )
+            continue
+        cause, _cause_mc = in_tx_causes[0]
+        for event, mc in members:
+            if event.id == cause.id or event.event_type in _CAUSE_EVENT_TYPES:
+                continue
+            produced.append(
+                (
+                    event,
+                    mc,
+                    {"caused_by": {"event_id": str(cause.id), "event_type": cause.event_type}},
+                )
+            )
+
+    return produced
 
 
 def _contracts_for(session: Session, events: list[MonitoredEvent]) -> dict[Any, MonitoredContract]:
@@ -220,8 +791,6 @@ def enrich_events(
             continue
         by_chain.setdefault(mc.chain, []).append((event, mc))
 
-    changed: list[tuple[MonitoredEvent, MonitoredContract]] = []
-
     for chain, pairs in by_chain.items():
         # Deduplicated: two Safe executions in one transaction cost one fetch.
         hashes = sorted(
@@ -276,6 +845,7 @@ def enrich_events(
             over_budget=over_budget,
         )
 
+        changed: list[tuple[MonitoredEvent, MonitoredContract]] = []
         for event, mc in pairs:
             enricher = ENRICHERS.get(event.event_type)
             if enricher is None:
@@ -291,22 +861,61 @@ def enrich_events(
                     extra={"exc_type": type(exc).__name__},
                 )
                 continue
-            if not produced:
-                continue
-            additive = _admit_keys(produced, event, mc)
-            if not additive:
-                continue
-            merged = dict(event.data or {})
-            merged.update(additive)
-            event.data = merged
-            flag_modified(event, "data")
-            changed.append((event, mc))
+            if _merge(produced, event, mc):
+                changed.append((event, mc))
 
-    # Step 6 — the seam that is part of phase 2's contract, not an
-    # optimization. Every row whose data an enricher touched (which includes
-    # every row that gained ``correlated_events`` / ``caused_by``) is re-rated
-    # here, before the commit and therefore before the notifier and the
-    # frontend ever see it.
+        # Step 6, first pass. Run BEFORE the correlation join, not after it:
+        # the join copies each effect's own level onto the cause's entry, and a
+        # level read before the decode landed would be the provisional one.
+        _recompute(session, changed)
+
+        # E3 is zero-RPC and does not go through ENRICHERS: it writes the
+        # reciprocal ``caused_by`` onto rows the per-event registry never
+        # visits (an effect has no enricher of its own), so the driver owns it
+        # the same way it owns the merge.
+        try:
+            correlated = _correlate(session, chain, pairs)
+        except Exception as exc:
+            logger.warning(
+                "Correlation join failed on %s; the window's rows keep their own levels: %s",
+                chain,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            correlated = []
+
+        linked: list[tuple[MonitoredEvent, MonitoredContract]] = []
+        for event, mc, produced in correlated:
+            if _merge(produced, event, mc):
+                linked.append((event, mc))
+        _recompute(session, linked)
+
+
+def _merge(
+    produced: Mapping[str, Any] | None,
+    event: MonitoredEvent,
+    mc: MonitoredContract,
+) -> bool:
+    """Merge an enricher's admitted keys into *event*'s data. True when the row
+    changed and therefore needs re-rating."""
+    if not produced:
+        return False
+    additive = _admit_keys(produced, event, mc)
+    if not additive:
+        return False
+    merged = dict(event.data or {})
+    merged.update(additive)
+    event.data = merged
+    flag_modified(event, "data")
+    return True
+
+
+def _recompute(session: Session, changed: list[tuple[MonitoredEvent, MonitoredContract]]) -> None:
+    """Step 6 — the seam that is part of phase 2's contract, not an
+    optimization. Every row whose data an enricher touched (which includes
+    every row that gained ``correlated_events`` / ``caused_by``) is re-rated
+    before the commit, and therefore before the notifier and the frontend ever
+    see it."""
     for event, mc in changed:
         try:
             stamp_salience(session, event, mc)
@@ -318,3 +927,19 @@ def enrich_events(
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
+
+
+ENRICHERS.update(
+    {
+        "safe_tx_executed": _enrich_safe_exec,
+        "safe_tx_failed": _enrich_safe_exec,
+        "timelock_scheduled": _enrich_timelock,
+        "timelock_executed": _enrich_timelock,
+    }
+)
+
+# Only the Safe executions need the top-level transaction. The timelock
+# families' arguments are already decoded at mint (``event_topics``), and E3
+# reads nothing off the wire — so a window with no Safe execution in it costs
+# zero RPC.
+NEEDS_TX = frozenset({"safe_tx_executed", "safe_tx_failed"})
