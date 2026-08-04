@@ -164,10 +164,29 @@ SIGNAL_CLASS_CONFIG = "config"
 SIGNAL_CLASS_METRIC = "metric"
 
 # ``safe_exec.status`` values these rules discriminate on. The full set is
-# S2's to publish; these three are the ones that change a level.
+# S2's to publish; these are the ones that change a level.
 SAFE_EXEC_STATUS_DECODED = "decoded"
 SAFE_EXEC_STATUS_NOT_TOP_LEVEL = "not_top_level_call"
 SAFE_EXEC_STATUS_OVER_BUDGET = "over_budget"
+# A proven ``execTransaction`` whose ARGUMENTS would not decode.
+SAFE_EXEC_STATUS_ARGS_UNDECODABLE = "args_undecodable"
+# More than one execution of THIS Safe shares the transaction, so the one set
+# of top-level arguments describes at most one of the rows and nothing
+# witnesses which. Proving it needs the Safe nonce / EIP-712 recompute, which
+# is outside this run's RPC budget.
+SAFE_EXEC_STATUS_AMBIGUOUS_ATTRIBUTION = "ambiguous_attribution"
+
+# Statuses that state "a decoder looked and could not attribute a call to this
+# row". They are findings, not silence — so the level is ``not_determined``
+# (visible) and the basis names the enrichment gap rather than falling through
+# to ``no_rule``, which would say no rule considered the row at all.
+_SAFE_EXEC_EXAMINED_UNDECODED = frozenset(
+    {
+        SAFE_EXEC_STATUS_OVER_BUDGET,
+        SAFE_EXEC_STATUS_ARGS_UNDECODABLE,
+        SAFE_EXEC_STATUS_AMBIGUOUS_ATTRIBUTION,
+    }
+)
 
 # ``safe_exec.batch_status`` when the packed MultiSend payload did not decode.
 # A truncated batch would understate what the Safe did, so no partial list is
@@ -269,15 +288,44 @@ def _inner_call_level(call: Any) -> str:
 
     Each inner call is evaluated by the same operation rules as the outer one:
     a delegatecall to a target not proven to be MultiSend is an ``alert``;
-    anything else takes the decoded-call floor.
+    anything else takes the decoded-call floor. A recognized-MultiSend inner
+    call is a batch in its own right and folds the same way, so one extra
+    wrapping layer cannot lower what a hostile inner delegatecall earns.
     """
     if not isinstance(call, Mapping):
         # A batch entry that is not a decoded call is not a finding about
         # that call; it may not lower the batch below its floor.
         return SALIENCE_NOTABLE
-    if call.get("operation") == 1 and not call.get(SAFE_EXEC_KEY_MULTISEND_RECOGNIZED):
-        return SALIENCE_ALERT
+    if call.get("operation") == 1:
+        if not call.get(SAFE_EXEC_KEY_MULTISEND_RECOGNIZED):
+            return SALIENCE_ALERT
+        nested = call.get("batch")
+        if isinstance(nested, list):
+            return max_salience(SALIENCE_NOTABLE, *(_inner_call_level(entry) for entry in nested))
+        # Recognized MultiSend, contents not expanded. Unreachable from the
+        # decoder (an unexpandable nested payload takes the WHOLE batch to a
+        # stated failure), and rated here anyway: an unexamined batch is not a
+        # quiet one. ``_batch_is_unexamined`` is what turns this into the
+        # published level; the fold alone could not, because ``not_determined``
+        # ties with the ``notable`` floor.
+        return SALIENCE_NOT_DETERMINED
     return SALIENCE_NOTABLE
+
+
+def _batch_is_unexamined(batch: Any) -> bool:
+    """Does any entry, at any depth, claim to be a MultiSend whose payload was
+    never expanded? Such a batch states a level about calls nobody read."""
+    if not isinstance(batch, list):
+        return False
+    for entry in batch:
+        if not isinstance(entry, Mapping) or entry.get("operation") != 1:
+            continue
+        if not entry.get(SAFE_EXEC_KEY_MULTISEND_RECOGNIZED):
+            continue
+        nested = entry.get("batch")
+        if not isinstance(nested, list) or _batch_is_unexamined(nested):
+            return True
+    return False
 
 
 def _safe_exec_salience(safe_exec: Mapping[str, Any]) -> tuple[str, list[str]] | None:
@@ -291,8 +339,13 @@ def _safe_exec_salience(safe_exec: Mapping[str, Any]) -> tuple[str, list[str]] |
         # wrapper). The row collapses; it is never dropped.
         return SALIENCE_ROUTINE, [BASIS_SAFE_EXEC_INDIRECT]
 
-    if status == SAFE_EXEC_STATUS_OVER_BUDGET:
-        # We declined to examine it. Nothing was found, so nothing is claimed.
+    if status in _SAFE_EXEC_EXAMINED_UNDECODED:
+        # A decoder looked and could not attribute a call to this row — the
+        # budget declined it, the arguments would not decode, or two executions
+        # of this Safe share the transaction and nothing witnesses which one
+        # these arguments describe. Nothing was found, so nothing is claimed,
+        # and the basis names the enrichment gap rather than saying no rule
+        # considered the row.
         return SALIENCE_NOT_DETERMINED, [BASIS_SAFE_EXEC_NOT_ENRICHED]
 
     if status != SAFE_EXEC_STATUS_DECODED:
@@ -312,6 +365,12 @@ def _safe_exec_salience(safe_exec: Mapping[str, Any]) -> tuple[str, list[str]] |
             # Recognized MultiSend, no expansion and no stated failure: the
             # batch was not examined, so its contents are unknown.
             return SALIENCE_NOT_DETERMINED, [BASIS_SAFE_EXEC_NOT_ENRICHED]
+        if _batch_is_unexamined(batch):
+            # A nested MultiSend somewhere in the tree was never expanded. The
+            # fold below would return the ``notable`` floor for it, which would
+            # publish a level about calls nobody read — one wrapping layer is
+            # not a reason to trust a payload.
+            return SALIENCE_NOT_DETERMINED, [BASIS_SAFE_EXEC_MULTISEND, BASIS_SAFE_EXEC_NOT_ENRICHED]
         level = max_salience(SALIENCE_NOTABLE, *(_inner_call_level(call) for call in batch))
         basis = [BASIS_SAFE_EXEC_MULTISEND]
         if level == SALIENCE_ALERT:

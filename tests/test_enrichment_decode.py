@@ -180,7 +180,14 @@ def seed_event(db_session, mc, event_type: str, tx_hash: str, *, data: dict | No
     return event
 
 
-def run(db_session, events, txs: dict[str, dict] | None = None, *, calls_out: list | None = None):
+def run(
+    db_session,
+    events,
+    txs: dict[str, dict] | None = None,
+    *,
+    calls_out: list | None = None,
+    rpc_by_chain: dict[str, str] | None = None,
+):
     """Drive the real driver with the wire stubbed by fixture transactions."""
 
     def fake_batch(rpc_url, calls, headers=None, *, chain_id=None):
@@ -193,7 +200,7 @@ def run(db_session, events, txs: dict[str, dict] | None = None, *, calls_out: li
         return out
 
     with patch("services.monitoring.enrichment.rpc_batch_request_classified", side_effect=fake_batch):
-        enr.enrich_events(db_session, list(events), {"ethereum": "https://rpc.invalid/eth"})
+        enr.enrich_events(db_session, list(events), rpc_by_chain or {"ethereum": "https://rpc.invalid/eth"})
     db_session.commit()
     db_session.expire_all()
     return [db_session.get(MonitoredEvent, event.id).data for event in events]
@@ -387,6 +394,9 @@ def test_undecodable_arguments_state_the_gap_rather_than_leaving_the_block_absen
 
     assert data["safe_exec"] == {"status": enr.SAFE_EXEC_STATUS_ARGS_UNDECODABLE}
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
+    # A rule DID examine this row, so the basis names the enrichment gap rather
+    # than saying no rule considered it.
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
 
 
 @pytest.mark.parametrize(
@@ -536,26 +546,117 @@ def test_an_inner_delegatecall_raises_the_whole_batch(db_session, safe):
     ]
 
 
-def test_an_inner_delegatecall_to_a_pinned_library_does_not_alert(db_session, safe):
-    """The discriminator is the pinned list, on inner calls as on outer ones."""
-    tx_hash = "0x" + "34" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    payload = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, bytes.fromhex(PAUSE[2:]))])
-
-    (data,) = run(
+def _decode_batch(db_session, safe_mc, tx_hash: str, payload: bytes) -> dict:
+    event = seed_event(db_session, safe_mc, "safe_tx_executed", tx_hash)
+    return run(
         db_session,
         [event],
         {
             tx_hash: tx(
-                to=SAFE,
+                to=safe_mc.address,
                 tx_hash=tx_hash,
                 input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=payload),
             )
         },
-    )
+    )[0]
 
+
+def test_a_nested_batch_is_expanded_and_its_inner_alert_propagates(db_session, safe):
+    """One extra wrapping layer is not a reason to trust a payload. A
+    recognized MultiSend INSIDE a recognized MultiSend is a batch in its own
+    right and is expanded by the same rules — otherwise a hostile delegatecall
+    would be hidden by nesting it, which is executable on-chain (the singleton
+    guard passes in the Safe's delegatecall context)."""
+    inner = multisend_payload([(1, UNKNOWN_LIB, 0, bytes.fromhex(PAUSE[2:]))])
+    payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
+
+    data = _decode_batch(db_session, safe, "0x" + "34" * 32, payload)
+
+    nested = data["safe_exec"]["batch"][1]["batch"]
+    assert [call["to"] for call in nested] == [UNKNOWN_LIB]
+    assert nested[0][sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is False
+    assert data["salience"] == sal.SALIENCE_ALERT
+    assert data["salience_basis"] == [
+        sal.BASIS_SAFE_EXEC_MULTISEND,
+        sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED,
+    ]
+
+
+def test_a_benign_nested_batch_stays_at_the_batch_floor(db_session, safe):
+    """Expansion is not escalation: a nested batch that decodes and holds only
+    calls earns the same floor a flat one does."""
+    inner = multisend_payload([(0, TARGET, 0, bytes.fromhex(PAUSE[2:]))])
+    payload = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
+
+    data = _decode_batch(db_session, safe, "0x" + "37" * 32, payload)
+
+    assert data["safe_exec"]["batch"][0]["batch"][0]["to"] == TARGET
     assert data["salience"] == sal.SALIENCE_NOTABLE
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_MULTISEND]
+
+
+def test_a_nested_payload_that_will_not_decode_takes_the_whole_batch_with_it(db_session, safe):
+    """No partial list, at any depth: an inner MultiSend that will not expand
+    may not stand as an entry whose contents nobody read."""
+    payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, bytes.fromhex(PAUSE[2:]))])
+
+    data = _decode_batch(db_session, safe, "0x" + "38" * 32, payload)
+
+    block = data["safe_exec"]
+    assert block["batch_status"] == "undecodable"
+    assert block["batch_status_reason"] == enr.BATCH_REASON_MALFORMED
+    assert "batch" not in block
+    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE]
+
+
+def test_a_batch_nested_past_the_depth_cap_states_the_gap(db_session, safe):
+    """The cap bounds an adversarially deep payload's cost. Exceeding it is a
+    STATED gap on the WHOLE batch, never a quiet floor over calls nobody read."""
+    payload = multisend_payload([(0, TARGET, 0, b"")])
+    for _ in range(enr.MAX_MULTISEND_DEPTH):
+        payload = multisend_payload([(1, MULTISEND_1_3_0, 0, payload)])
+
+    data = _decode_batch(db_session, safe, "0x" + "39" * 32, payload)
+
+    block = data["safe_exec"]
+    assert block["batch_status"] == "undecodable"
+    assert block["batch_status_reason"] == enr.BATCH_REASON_DEPTH_EXCEEDED
+    assert "batch" not in block
+    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE]
+
+
+def test_the_depth_cap_admits_exactly_max_depth_layers(db_session, safe):
+    """The boundary, pinned: MAX_MULTISEND_DEPTH layers decode, one more does
+    not. A cap nobody measured is a cap that drifts."""
+    payload = multisend_payload([(0, TARGET, 0, b"")])
+    for _ in range(enr.MAX_MULTISEND_DEPTH - 1):
+        payload = multisend_payload([(1, MULTISEND_1_3_0, 0, payload)])
+
+    data = _decode_batch(db_session, safe, "0x" + "3a" * 32, payload)
+
+    assert "batch_status" not in data["safe_exec"]
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_MULTISEND]
+
+
+def test_the_salience_rules_refuse_an_unexpanded_nested_batch(db_session, make_mc):
+    """Defence in depth for the shape the decoder can no longer produce: a
+    batch entry claiming to be a MultiSend with no expansion and no stated
+    failure rates ``not_determined``, not the ``notable`` floor. Asserted
+    against the rules directly, since the decode path cannot build it."""
+    data = {
+        "safe_exec": {
+            "status": "decoded",
+            "operation": 1,
+            "to": MULTISEND_1_3_0,
+            sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED: True,
+            "batch": [{"operation": 1, "to": MULTISEND_CALL_ONLY_1_4_1, sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED: True}],
+        }
+    }
+    level, basis = sal.assign_salience(db_session, "safe_tx_executed", data, make_mc(address=ADDR(0x5AF1)))
+    assert level == sal.SALIENCE_NOT_DETERMINED
+    assert basis == [sal.BASIS_SAFE_EXEC_MULTISEND, sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
 
 
 @pytest.mark.parametrize(
@@ -642,10 +743,12 @@ def test_every_decoded_batch_entry_is_a_mapping(db_session, safe):
     """The batch feeds a salience fold that can only rate a Mapping. The
     decoder never emits anything else — a shape it cannot build as one entry
     takes the whole batch to ``undecodable``."""
-    calls = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01"), (1, UNKNOWN_LIB, 0, b"")]))
-    assert calls is not None
+    calls, reason = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01"), (1, UNKNOWN_LIB, 0, b"")]))
+    assert calls is not None and reason is None
     assert all(isinstance(call, dict) for call in calls)
-    assert enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01")])[:-3]) is None
+    truncated, reason = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01")])[:-3])
+    assert truncated is None
+    assert reason == enr.BATCH_REASON_MALFORMED
 
 
 def test_a_decoded_delegatecall_always_states_the_multisend_discriminator(db_session, safe):
@@ -718,14 +821,49 @@ def test_over_budget_hashes_are_recorded_not_dropped(db_session, make_mc, monkey
     assert payloads[1]["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
 
 
-def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe):
+def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, make_mc, monkeypatch):
+    """The seam the budget protects — the open window transaction — is
+    per-pass, not per-chain, so a fleet on N chains may not spend N×."""
+    monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
+    on_ethereum = make_mc(address=ADDR(0x5A20))
+    on_base = make_mc(address=ADDR(0x5A21), chain="base")
+    hashes = ["0x" + "b8" * 32, "0x" + "b9" * 32]
+    events = [
+        seed_event(db_session, on_ethereum, "safe_tx_executed", hashes[0]),
+        seed_event(db_session, on_base, "safe_tx_executed", hashes[1]),
+    ]
+    txs = {
+        h: tx(to=mc.address, tx_hash=h, input_hex=exec_transaction_input(to=TARGET))
+        for mc, h in zip((on_ethereum, on_base), hashes)
+    }
+
+    calls: list[dict] = []
+    with patch(
+        "services.monitoring.enrichment.chain_id_for", side_effect=lambda chain: 1 if chain == "ethereum" else 8453
+    ):
+        payloads = run(
+            db_session,
+            events,
+            txs,
+            calls_out=calls,
+            rpc_by_chain={"ethereum": "https://eth.invalid", "base": "https://base.invalid"},
+        )
+
+    # One slot in the whole pass, and the second chain records the decline.
+    assert sum(len(call["calls"]) for call in calls) == 1
+    statuses = {payload["safe_exec"]["status"] for payload in payloads}
+    assert statuses == {"decoded", "over_budget"}
+
+
+def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe, make_mc):
     """Two executions in one transaction cost one fetch — the live feed already
     contains that shape — and the chain_id rides so the URL↔chain guard the
     rest of monitoring uses applies here too."""
+    other = make_mc(address=ADDR(0x5A0F))
     tx_hash = "0x" + "a3" * 32
     events = [
         seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
-        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1),
+        seed_event(db_session, other, "safe_tx_executed", tx_hash, log_index=1),
     ]
     calls: list[dict] = []
 
@@ -740,6 +878,102 @@ def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe):
     assert len(calls[0]["calls"]) == 1
     assert calls[0]["chain_id"] == 1
     assert calls[0]["rpc_url"] == "https://rpc.invalid/eth"
+
+
+def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, safe):
+    """The live feed's own shape (two ExecutionSuccess logs, one transaction,
+    one Safe — spec appendix, log_index 414/416). The transaction holds ONE set
+    of top-level ``execTransaction`` arguments, which describes at most one of
+    the two executions; nothing in the transaction object witnesses which.
+    Publishing it on both would state another execution's target, value and
+    operation as a witnessed fact about this row."""
+    tx_hash = "0x" + "a5" * 32
+    events = [
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=414),
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=416),
+    ]
+    calls: list[dict] = []
+
+    payloads = run(
+        db_session,
+        events,
+        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET, value=9))},
+        calls_out=calls,
+    )
+
+    for data in payloads:
+        assert data["safe_exec"] == {"status": enr.SAFE_EXEC_STATUS_AMBIGUOUS_ATTRIBUTION}
+        # The refusal itself is not_determined; each row then also correlates
+        # with its sibling execution (same transaction is a witnessed fact),
+        # which floors the pair at notable. Neither code erases the other, and
+        # nothing here is routine.
+        assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED, sal.BASIS_CORRELATED_CAUSE]
+        assert data["salience"] == sal.SALIENCE_NOTABLE
+    assert sal.assign_salience(db_session, "safe_tx_executed", {"safe_exec": payloads[0]["safe_exec"]}, safe) == (
+        sal.SALIENCE_NOT_DETERMINED,
+        [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
+    )
+    # Still one fetch — refusing the attribution is not refusing to look.
+    assert len(calls) == 1
+
+
+def test_a_sibling_execution_from_an_earlier_window_still_contests(db_session, safe):
+    """The contest is queried, not read off the window: a Safe whose second
+    execution in the same transaction was inserted by an earlier pass must not
+    be decoded now as though it were alone in it."""
+    tx_hash = "0x" + "a6" * 32
+    earlier = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
+    current = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=2)
+
+    (data,) = run(
+        db_session,
+        [current],
+        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
+    )
+
+    assert earlier.id != current.id
+    assert data["safe_exec"] == {"status": enr.SAFE_EXEC_STATUS_AMBIGUOUS_ATTRIBUTION}
+
+
+def test_a_contested_tx_that_is_not_this_safes_call_still_states_that(db_session, safe):
+    """``not_top_level_call`` is a statement about the OBSERVED TRANSACTION and
+    is true of every row in it, so the ambiguity — which is about attributing
+    ARGUMENTS to one row — does not erase it."""
+    tx_hash = "0x" + "a7" * 32
+    events = [
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1),
+    ]
+
+    payloads = run(db_session, events, {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef")})
+
+    for data in payloads:
+        assert data["safe_exec"] == {"status": "not_top_level_call"}
+        # The indirect finding stands; the sibling correlation rides beside it.
+        assert data["salience_basis"][0] == sal.BASIS_SAFE_EXEC_INDIRECT
+    assert sal.assign_salience(db_session, "safe_tx_executed", {"safe_exec": payloads[0]["safe_exec"]}, safe) == (
+        sal.SALIENCE_ROUTINE,
+        [sal.BASIS_SAFE_EXEC_INDIRECT],
+    )
+
+
+def test_two_executions_of_DIFFERENT_safes_in_one_tx_each_decode(db_session, safe, make_mc):
+    """The contest is per (Safe, transaction). Two different Safes in one
+    transaction are two different top-level calls only if each is the
+    transaction's ``to`` — and the one that is gets its decode."""
+    other = make_mc(address=ADDR(0x5A10))
+    tx_hash = "0x" + "a8" * 32
+    mine = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0)
+    theirs = seed_event(db_session, other, "safe_tx_executed", tx_hash, log_index=1)
+
+    mine_data, theirs_data = run(
+        db_session,
+        [mine, theirs],
+        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
+    )
+
+    assert mine_data["safe_exec"]["status"] == "decoded"
+    assert theirs_data["safe_exec"] == {"status": "not_top_level_call"}
 
 
 def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
@@ -965,6 +1199,77 @@ def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make
     assert effect_data["salience"] == sal.SALIENCE_NOT_DETERMINED
 
 
+def test_the_join_does_not_cross_protocols(db_session, safe):
+    """Tenancy. The published entry names another row's id, address and level,
+    and the API spreads ``data`` verbatim — so an unscoped join would hand one
+    protocol's subscriber a row belonging to another."""
+    stranger_protocol = Protocol(name="decode-corpus-other", chains=["ethereum"])
+    db_session.add(stranger_protocol)
+    db_session.flush()
+    contract = Contract(protocol_id=stranger_protocol.id, address=ADDR(0xA11E7), chain="ethereum")
+    db_session.add(contract)
+    db_session.flush()
+    stranger = MonitoredContract(
+        id=uuid.uuid4(),
+        address=ADDR(0xA11E7),
+        chain="ethereum",
+        protocol_id=stranger_protocol.id,
+        contract_id=contract.id,
+        contract_type="regular",
+        monitoring_config={},
+        last_known_state={},
+        enrollment_block=1,
+        is_active=True,
+    )
+    db_session.add(stranger)
+    db_session.commit()
+
+    tx_hash = "0x" + "c8" * 32
+    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
+    theirs = seed_event(
+        db_session, stranger, "ownership_transferred", tx_hash, data={"new_owner": ADDR(9)}, log_index=0
+    )
+
+    cause_data, theirs_data = run(db_session, [cause, theirs], {})
+
+    assert cause_data["correlated_events"] == []
+    assert "caused_by" not in theirs_data
+
+
+def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
+    """DELIBERATE and additive, and recorded as a deviation: §3.4's query has
+    no window restriction, so an effect already stored when its cause arrives
+    still links. It is not the bounded look-back OQ4 declined to build — no
+    extra lookup happens, the cause's own transaction hash is matched against
+    what is already there — and it cannot re-notify a committed row. Pinned so
+    nobody "fixes" it into a regression."""
+    victim = make_mc(address=ADDR(0xC0FFE9), contract_type="regular")
+    tx_hash = "0x" + "c9" * 32
+    # Stored by an earlier pass: it is NOT in the list the driver receives.
+    effect = seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
+    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
+
+    (cause_data,) = run(db_session, [cause], {})
+
+    assert [entry["event_id"] for entry in cause_data["correlated_events"]] == [str(effect.id)]
+    db_session.expire_all()
+    assert db_session.get(MonitoredEvent, effect.id).data["caused_by"]["event_id"] == str(cause.id)
+
+
+def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, make_mc):
+    """One normal form for every published address, so a consumer never has to
+    case-fold to compare two of this system's own facts."""
+    victim = make_mc(address=ADDR(0xC0FFEA).upper().replace("0X", "0x"), contract_type="regular")
+    tx_hash = "0x" + "ca" * 32
+    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
+    seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
+
+    (cause_data,) = run(db_session, [cause], {})
+
+    address = cause_data["correlated_events"][0]["contract_address"]
+    assert address == address.lower()
+
+
 def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_mc):
     """§3.0 rule 5. A pre-enrollment row is not a witness to anything this
     window did, in either direction."""
@@ -1154,6 +1459,23 @@ def test_the_embed_summarizes_a_batch_and_refuses_a_partial_one(db_session, safe
     assert "did not decode" in embed_fields(db_session, undecodable)["Batch"]
 
 
+def test_the_embed_renders_the_timelock_signature(db_session, make_mc, known_target):
+    """The timelock resolution was write-only until now: published, carried
+    through the API, and rendered nowhere."""
+    known_target(TARGET, SET_FEE, "setFee(uint256)")
+    timelock = make_mc(address=ADDR(0x721), contract_type="timelock")
+    event = seed_event(
+        db_session,
+        timelock,
+        "timelock_scheduled",
+        "0x" + "f6" * 32,
+        data={"target": TARGET, "selector": SET_FEE},
+    )
+    run(db_session, [event], {})
+
+    assert embed_fields(db_session, event)["Function"] == "`setFee(uint256)`"
+
+
 def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(db_session, safe):
     """A recipient who sees no target must be able to tell "the Safe called
     nobody" from "we did not decode this"."""
@@ -1177,3 +1499,6 @@ def test_the_pinned_allowlist_is_the_published_deployment_set(db_session):
         "0x9641d764fc13c8b624c04430c7356c1c7c8102e2",
     }
     assert all(address == address.lower() for address in enr._SAFE_MULTISEND_ADDRESSES)
+    # Hashed from the published signature, not transcribed — the comment's
+    # provenance claim is the code's behaviour.
+    assert enr.MULTISEND_SELECTOR == "0x8d80ff0a"
