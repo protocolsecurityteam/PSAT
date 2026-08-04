@@ -498,6 +498,79 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
     assert contract.deployer is None
 
 
+def test_cache_hit_adopts_existing_row_from_request_sources(monkeypatch):
+    """The static-cache-hit early return must still run the ownership gate:
+    an explicit address+company submit carries the ``inventory`` source, and
+    that grant holds even when the address was already analyzed."""
+    from utils.concurrency import RpcExecutor
+
+    RpcExecutor.reset_for_tests()
+    result = _etherscan_result()
+    _patch_discovery(monkeypatch, result)
+
+    monkeypatch.setattr(
+        "workers.discovery.find_completed_static_cache",
+        lambda session, address, chain=None, **kw: SimpleNamespace(id="cached-job-1"),
+    )
+    monkeypatch.setattr("workers.discovery.copy_static_cache", lambda session, src, dst: 42)
+
+    dirty_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "services.monitoring.enrollment.mark_enrollment_dirty",
+        lambda session, pid, reason: dirty_calls.append((pid, reason)),
+    )
+
+    cached_row = MagicMock()
+    cached_row.protocol_id = None
+    cached_row.discovery_sources = None
+    cached_row.deployer = None
+    cached_row.contract_name = "AtomicQueue"
+
+    worker = DiscoveryWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+    session = MagicMock()
+    session.get.return_value = cached_row
+    job = _job(protocol_id=1, request={"discovery_sources": ["inventory"]})
+
+    worker._process_address(session, job)
+
+    assert cached_row.protocol_id == 1
+    assert "inventory" in (cached_row.discovery_sources or [])
+    assert dirty_calls == [(1, "discovery_adoption")]
+
+
+def test_fetch_path_adopts_existing_row_from_request_sources(monkeypatch):
+    """The fetch path's existing-row branch honors a HIGH source carried by
+    the request, not only sources already recorded on the row."""
+    from utils.concurrency import RpcExecutor
+
+    RpcExecutor.reset_for_tests()
+    result = _etherscan_result()
+    _patch_discovery(monkeypatch, result)
+
+    monkeypatch.setattr("workers.discovery.find_completed_static_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "services.monitoring.enrollment.mark_enrollment_dirty",
+        lambda session, pid, reason: True,
+    )
+
+    existing_row = MagicMock()
+    existing_row.protocol_id = None
+    existing_row.discovery_sources = None
+    existing_row.deployer = None
+
+    worker = DiscoveryWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = existing_row
+    job = _job(protocol_id=1, request={"discovery_sources": ["inventory"]})
+
+    worker._process_address(session, job)
+
+    assert existing_row.protocol_id == 1
+    assert "inventory" in (existing_row.discovery_sources or [])
+
+
 def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
     """A failed creators refetch must not erase a previously-witnessed
     deployer on an existing Contract row — None means the lookup answered

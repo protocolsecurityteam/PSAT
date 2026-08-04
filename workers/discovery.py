@@ -142,6 +142,64 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
         )
 
 
+def _maybe_adopt_existing_contract(session: Session, job: Job, existing: Contract, request: dict) -> int | None:
+    """Ownership gate for a pre-existing Contract row, shared by the fetch
+    path and the static-cache-hit path.
+
+    Adoption evidence, in order: a HIGH source already on the row, a HIGH
+    source carried by THIS request (an explicit address+company submit adds
+    ``inventory`` at the router — that grant must hold even when the address
+    was analyzed before), the structural parent relationship, then the
+    shared-deployer cascade. Request sources that grant adoption are merged
+    onto the row so the audit trail records how ownership was earned.
+
+    Returns the adopted ``protocol_id``, or ``None`` when no evidence applies
+    (including a row that already belongs to a protocol).
+    """
+    from services.discovery.source_confidence import asserts_ownership
+
+    if existing.protocol_id:
+        return None
+
+    request_sources = request.get("discovery_sources") or []
+    structural_ownership = asserts_ownership(
+        None,
+        parent_owns=bool(request.get("parent_owns_high")),
+        parent_relationship=request.get("discovery_relationship"),
+    )
+
+    adopted_pid: int | None = None
+    if job.protocol_id and (
+        asserts_ownership(existing.discovery_sources) or asserts_ownership(request_sources) or structural_ownership
+    ):
+        existing.protocol_id = job.protocol_id
+        adopted_pid = job.protocol_id
+        merged = list(existing.discovery_sources or [])
+        for source in request_sources:
+            if source not in merged:
+                merged.append(source)
+        if structural_ownership and not asserts_ownership(merged):
+            if "structural_adoption" not in merged:
+                merged.append("structural_adoption")
+        if merged != list(existing.discovery_sources or []):
+            existing.discovery_sources = merged
+
+    # Deployer-cascade adoption — fires when no direct or structural
+    # evidence applies but the deployer EOA is shared with a HIGH-sourced
+    # sibling. See ``_deployer_cascade_protocol_id`` for the rationale.
+    if not existing.protocol_id:
+        cascade_pid = _deployer_cascade_protocol_id(session, existing.deployer)
+        if cascade_pid:
+            existing.protocol_id = cascade_pid
+            adopted_pid = cascade_pid
+            merged = list(existing.discovery_sources or [])
+            if "structural_adoption" not in merged:
+                merged.append("structural_adoption")
+            existing.discovery_sources = merged
+
+    return adopted_pid
+
+
 def _deployer_cascade_protocol_id(session: Session, deployer: str | None) -> int | None:
     """Return a ``protocol_id`` to inherit when *deployer* also deployed
     a HIGH-sourced contract attributed to a protocol.
@@ -536,6 +594,22 @@ class DiscoveryWorker(BaseWorker):
                         job.name = f"{contract_row.contract_name}_{address[2:10]}"
                         session.commit()
 
+                # Ownership gate — the cache hit reuses ANALYSIS, not protocol
+                # membership. Without this, an explicit address+company submit
+                # of an already-analyzed contract returned here with the row
+                # still protocol-less (adoption only ran on the fetch path).
+                cached_row = session.get(Contract, new_contract_id)
+                if cached_row is not None:
+                    adopted_pid = _maybe_adopt_existing_contract(
+                        session, job, cached_row, job.request if isinstance(job.request, dict) else {}
+                    )
+                    if adopted_pid is not None:
+                        session.commit()
+                        from services.monitoring.enrollment import mark_enrollment_dirty
+
+                        mark_enrollment_dirty(session, adopted_pid, "discovery_adoption")
+                        session.commit()
+
                 logger.info(
                     "Discovery cache hit for %s — reused data from job %s",
                     address,
@@ -669,39 +743,7 @@ class DiscoveryWorker(BaseWorker):
                 existing.deployer = deployer
             existing.remappings = remappings or []
             existing.source_verified = True
-            should_adopt = (
-                not existing.protocol_id
-                and job.protocol_id
-                and (asserts_ownership(existing.discovery_sources) or structural_ownership)
-            )
-            if should_adopt:
-                existing.protocol_id = job.protocol_id
-                adopted_pid = job.protocol_id
-                # Audit trail: when ownership comes from the structural
-                # branch (no HIGH source in discovery_sources), record
-                # how it was earned so future readers can tell direct
-                # from inherited adoption.
-                if structural_ownership and not asserts_ownership(existing.discovery_sources):
-                    merged = list(existing.discovery_sources or [])
-                    if "structural_adoption" not in merged:
-                        merged.append("structural_adoption")
-                    existing.discovery_sources = merged
-            # Deployer-cascade adoption — fifth branch, fires when neither
-            # direct nor structural-edge evidence applies but the deployer
-            # EOA is shared with a HIGH-sourced sibling. See
-            # ``_deployer_cascade_protocol_id`` for the rationale. Tags the
-            # row with ``structural_adoption`` to match the audit
-            # convention used by the structural-edge branch above; this is
-            # also the sentinel the companion migration reverts under.
-            if not existing.protocol_id:
-                cascade_pid = _deployer_cascade_protocol_id(session, existing.deployer)
-                if cascade_pid:
-                    existing.protocol_id = cascade_pid
-                    adopted_pid = cascade_pid
-                    merged = list(existing.discovery_sources or [])
-                    if "structural_adoption" not in merged:
-                        merged.append("structural_adoption")
-                    existing.discovery_sources = merged
+            adopted_pid = _maybe_adopt_existing_contract(session, job, existing, request)
         else:
             owning_protocol_id = None
             if job.protocol_id and (asserts_ownership(request_sources) or structural_ownership):
