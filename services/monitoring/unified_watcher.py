@@ -515,6 +515,14 @@ def _process_window(
         if mc.monitoring_config and not _should_watch(mc, parsed):
             continue
 
+        # Pre-enrollment floor: an event below the contract's enrollment_block
+        # predates monitoring (a cohort scans from its MIN member cursor, so a
+        # low-cursor cohort-mate can drag this contract's ancient events into a
+        # window). Record it for the timeline with a marker, but never notify,
+        # sync, or reanalyze — those are for changes since we started watching.
+        # A NULL floor (legacy rows) disables suppression: notify, as before.
+        is_historical = mc.enrollment_block is not None and parsed["block_number"] < mc.enrollment_block
+
         witness_tier: str | None = None
         if spec is not None:
             witness_tier = _resolve_spec_tier(spec, mc)
@@ -523,7 +531,12 @@ def _process_window(
                 # coalesced verification read this pass whose diff — or
                 # earned negative — is the witness; an activity occurrence has
                 # no readable witness at all. Neither publishes a row here.
-                if witness_tier == WITNESS_TIER_HINT and dirty is not None:
+                #
+                # A pre-enrollment hint never marks: the read would compare
+                # the CURRENT slot against last_known_state and publish the
+                # result as a live change, which is the pre-enrollment floor
+                # defeated by a different route.
+                if witness_tier == WITNESS_TIER_HINT and dirty is not None and not is_historical:
                     controller_id = spec.get("controller_id")
                     entry = _poll_entry_for_controller(mc, controller_id)
                     if entry is not None and isinstance(controller_id, str):
@@ -551,13 +564,6 @@ def _process_window(
             # since have been re-enrolled.
             event_data["witness_tier"] = witness_tier
 
-        # Pre-enrollment floor: an event below the contract's enrollment_block
-        # predates monitoring (a cohort scans from its MIN member cursor, so a
-        # low-cursor cohort-mate can drag this contract's ancient events into a
-        # window). Record it for the timeline with a marker, but never notify,
-        # sync, or reanalyze — those are for changes since we started watching.
-        # A NULL floor (legacy rows) disables suppression: notify, as before.
-        is_historical = mc.enrollment_block is not None and parsed["block_number"] < mc.enrollment_block
         if is_historical:
             event_data = dict(event_data)
             event_data["historical"] = True

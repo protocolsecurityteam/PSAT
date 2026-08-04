@@ -393,6 +393,18 @@ def test_hint_occurrences_publish_nothing_and_coalesce_to_one_read(db_session, s
     assert list(dirty) == [(mc.id, "state_variable:rate")]
 
 
+def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
+    """Invariant 9 through the new route: a verification read compares the
+    CURRENT slot against last_known_state, so letting an ancient occurrence
+    trigger one would publish pre-enrollment history as a live change."""
+    mc = seeded(WITNESS_TIER_HINT)
+    mc.enrollment_block = 10_000
+    db_session.commit()
+    dirty: dict = {}
+    assert _process_window(db_session, _cohort(mc), _logs(2), 200, 210, dirty) == []
+    assert dirty == {}
+
+
 def test_activity_occurrences_publish_nothing_and_mark_nothing(db_session, seeded):
     mc = seeded(WITNESS_TIER_ACTIVITY)
     dirty: dict = {}
