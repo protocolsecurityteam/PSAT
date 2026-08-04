@@ -4229,17 +4229,33 @@
     },
     {
       "address": "0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f",
-      "after_source": "none",
+      "after_source": "promoted_job_artifact",
       "applied": null,
-      "bytecode_keccak": null,
+      "bytecode_keccak": "0x9651897e2097bd75f034f2e514e25ca5e1adea0fa2e77933d6e50a06f1ae8b03",
       "chain": "ethereum",
       "contract_name": "TellerWithMultiAssetSupport_e2acf9f8",
-      "notify_gains": [],
-      "outcome": "job_schema_version_not_current",
+      "notify_gains": [
+        {
+          "controller_id": "external_contract:authority",
+          "event_type": "authority_updated",
+          "signature": "AuthorityUpdated(address,address)",
+          "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
+          "witness": {
+            "family": "authority_updated",
+            "kind": "canonical_family",
+            "signature": "AuthorityUpdated(address,address)"
+          }
+        }
+      ],
+      "outcome": "promotable",
       "plan_state_before": "no_current_materialization",
-      "promoted_plan_present": false,
+      "promoted_plan_present": true,
       "source_job_id": "d83ac0e3-5f04-418b-a600-e9ae773659e3",
-      "tiers_after": {},
+      "tiers_after": {
+        "activity": 10,
+        "hint": 2,
+        "self_describing": 1
+      },
       "tiers_before": {}
     },
     {
@@ -4442,25 +4458,24 @@
   ],
   "summary": {
     "configs": 183,
-    "contracts_gaining_topics": 94,
-    "notify_rights_gains": 111,
+    "contracts_gaining_topics": 95,
+    "notify_rights_gains": 112,
     "notify_rights_gains_by_witness": {
-      "canonical_family": 107,
+      "canonical_family": 108,
       "old_new_args_single_writer": 4
     },
     "notify_rights_gains_unattributed": 0,
     "outcomes": {
       "already_current": 23,
       "job_plan_artifact_absent": 26,
-      "job_schema_version_not_current": 1,
       "keccak_bound_to_other_address": 1,
       "no_completed_job": 25,
-      "promotable": 107
+      "promotable": 108
     },
     "specs_by_tier_after": {
-      "activity": 149,
-      "hint": 209,
-      "self_describing": 111
+      "activity": 159,
+      "hint": 211,
+      "self_describing": 112
     },
     "specs_by_tier_before": {
       "unstamped": 145

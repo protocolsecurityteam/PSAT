@@ -12,25 +12,24 @@ stamp, not a tier.
 ```json
 {
   "configs": 183,
-  "contracts_gaining_topics": 94,
-  "notify_rights_gains": 111,
+  "contracts_gaining_topics": 95,
+  "notify_rights_gains": 112,
   "notify_rights_gains_by_witness": {
-    "canonical_family": 107,
+    "canonical_family": 108,
     "old_new_args_single_writer": 4
   },
   "notify_rights_gains_unattributed": 0,
   "outcomes": {
     "already_current": 23,
     "job_plan_artifact_absent": 26,
-    "job_schema_version_not_current": 1,
     "keccak_bound_to_other_address": 1,
     "no_completed_job": 25,
-    "promotable": 107
+    "promotable": 108
   },
   "specs_by_tier_after": {
-    "activity": 149,
-    "hint": 209,
-    "self_describing": 111
+    "activity": 159,
+    "hint": 211,
+    "self_describing": 112
   },
   "specs_by_tier_before": {
     "unstamped": 145
@@ -215,7 +214,7 @@ stamp, not a tier.
 | `0xd5edf7730abad812247f6f54d7bd31a52554e35e` | ethereum | no_current_materialization | job_plan_artifact_absent | no | - | - | 0 |
 | `0xd789870bea40d056a4d26055d0befcc8755da146` | ethereum | no_current_materialization | job_plan_artifact_absent | no | - | - | 0 |
 | `0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0` | ethereum | no_current_materialization | job_plan_artifact_absent | no | - | - | 0 |
-| `0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f` | ethereum | no_current_materialization | job_schema_version_not_current | no | - | - | 0 |
+| `0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f` | ethereum | no_current_materialization | promotable | yes | - | self=1 hint=2 acti=10 | 1 |
 | `0xeb927ef101080eb9b74c410cba50a7c71b7404a3` | ethereum | no_current_materialization | promotable | yes | - | self=1 acti=2 | 1 |
 | `0xed87ae68bb0db3ec922004f8dace44a7c5390894` | ethereum | contract_not_analyzed | no_completed_job | no | - | - | 0 |
 | `0xeda663610638e6557c27e2f4e973d3393e844e70` | ethereum | no_current_materialization | promotable | yes | - | self=1 | 1 |
@@ -341,6 +340,7 @@ the arm of `classify_witness_tier` that earns it.
 | `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | RebalancerSet(address,address) (controller_changed:state_variable:rebalancer) | state_variable:rebalancer | old_new_args_single_writer | `{"args": ["oldRebalancer", "newRebalancer"], "writes": ["rebalancer"]}` |
 | `0xd2b8c78a5eb18a5f3b0392c5479bb45c77d02ff5` | SwapperSet(address,address) (state_changed:external_contract:swapper) | external_contract:swapper | old_new_args_single_writer | `{"args": ["oldSwapper", "newSwapper"], "writes": ["swapper"]}` |
 | `0xd43d99df3d42675ce126a7cff8f7dff037620851` | Initialized(uint8) (initialized) | state_variable:_initialized | canonical_family | `{"family": "initialized", "signature": "Initialized(uint8)"}` |
+| `0xe2acf9f80a2756e51d1e53f9f41583c84279fb1f` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
 | `0xeb927ef101080eb9b74c410cba50a7c71b7404a3` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
 | `0xeda663610638e6557c27e2f4e973d3393e844e70` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
 | `0xf0bb20865277abd641a307ece5ee04e79073416c` | AuthorityUpdated(address,address) (authority_updated) | external_contract:authority | canonical_family | `{"family": "authority_updated", "signature": "AuthorityUpdated(address,address)"}` |
