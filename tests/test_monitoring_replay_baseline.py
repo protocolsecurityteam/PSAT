@@ -187,6 +187,12 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
     writer. Anything weaker than ``restricted`` — including the absent third
     state — leaves them silent, which is invariant 4 measured on real traffic
     rather than on a synthetic spec.
+
+    The injected record is one that could actually be PUBLISHED: it names the
+    mapping whose entry moved, and the spec publishes under that vocabulary. A
+    record naming no mapping does not promote anything (a slot-typed row
+    carrying an entry key is what the member guards exist to prevent), so
+    injecting one here would test the refusal, not the liveness.
     """
     fixture = copy.deepcopy(load_replay_fixture())
     for contract in fixture["contracts"]:
@@ -194,7 +200,12 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
             continue
         for spec in contract["monitoring_config"]["tracked_topics"]:
             if spec["topic0"] == TRANSFER_TOPIC0:
-                spec["member_witness"] = {"key_position": 0, "direction": "set"}
+                spec["member_witness"] = {
+                    "mapping_name": "_balances",
+                    "key_position": 0,
+                    "direction": "set",
+                }
+                spec["event_type"] = "member_changed:_balances"
                 if openness is not None:
                     spec["writer_openness"] = openness
 
@@ -206,6 +217,6 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
 
     if openness == "restricted":
         assert len(produced) == 388
-        assert {et for _a, et, _t, _l in produced} == {"state_changed:state_variable:_balances"}
+        assert {et for _a, et, _t, _l in produced} == {"member_changed:_balances"}
     else:
         assert produced == set()
