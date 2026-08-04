@@ -18,6 +18,11 @@ import { buildSearchResults } from "../layout/search.js";
 const scoreCache = new Map();
 const monitorCache = new Map();
 
+// Sentinel for "could not find out" — a distinct third state from a score doc
+// and from a witnessed absence (404 / shapeless payload). Never cached: a
+// transient failure must not pin a false "no score" for the whole session.
+const SCORE_FETCH_FAILED = Symbol("score-fetch-failed");
+
 function fetchScoreDoc(companyName) {
   if (!scoreCache.has(companyName)) {
     scoreCache.set(
@@ -25,7 +30,11 @@ function fetchScoreDoc(companyName) {
       api(`/api/company/${encodeURIComponent(companyName)}/score`, { silent: true })
         // An empty or shapeless payload is "no score published", not a score.
         .then((doc) => (doc && typeof doc === "object" && doc.grade_state ? doc : null))
-        .catch(() => null),
+        .catch((e) => {
+          if (e?.status === 404) return null; // witnessed absence
+          scoreCache.delete(companyName);
+          return SCORE_FETCH_FAILED;
+        }),
     );
   }
   return scoreCache.get(companyName);
@@ -94,6 +103,9 @@ function GlanceScoreCard({ companyName, scoreDoc, scoreState, projection }) {
   let body = null;
   if (scoreState === "loading") {
     body = <div className="ps-glance-dim">Score loading…</div>;
+  } else if (scoreState === "error") {
+    // "Could not find out" — a different fact from a witnessed absence.
+    body = <div className="ps-glance-dim">Score not available right now.</div>;
   } else if (!scoreDoc || !projection) {
     body = <div className="ps-glance-dim">No score published for this protocol.</div>;
   } else if (projection.withheld) {
@@ -179,6 +191,11 @@ export function DetailEmptyState({
     setScoreState("loading");
     fetchScoreDoc(companyName).then((doc) => {
       if (cancelled) return;
+      if (doc === SCORE_FETCH_FAILED) {
+        setScoreDoc(null);
+        setScoreState("error");
+        return;
+      }
       setScoreDoc(doc);
       setScoreState(doc ? "ok" : "absent");
     });
@@ -191,6 +208,7 @@ export function DetailEmptyState({
   useEffect(() => {
     if (protocolId == null) return undefined;
     let cancelled = false;
+    setMonitor(null); // never show the previous protocol's coverage
     fetchMonitoring(protocolId).then((m) => {
       if (!cancelled) setMonitor(m);
     });

@@ -230,8 +230,14 @@
   color: #475569;
 }
 
-.ps-filter-row .ps-search-modes,
-.ps-filter-row /* Every <button> in the panel inherits the global forms.css hover lift;
+.ps-filter-row .ps-search-modes {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  padding: 0;
+}
+
+/* Every <button> in the panel inherits the global forms.css hover lift;
    flatten it so the filter chips don't bounce. */
 .ps-filter-overlay button:hover {
   transform: none;

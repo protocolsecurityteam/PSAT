@@ -89,6 +89,23 @@ describe("DetailEmptyState — score card", () => {
     // The rest of the panel still stands.
     expect(screen.getByText(/Who holds privileged surface/i)).toBeInTheDocument();
   });
+
+  it("keeps a transport failure apart from a witnessed absence — and never caches it", async () => {
+    seq += 1;
+    const name = `failing${seq}`;
+    let calls = 0;
+    setFetchHandler(new RegExp(`/api/company/${name}/score$`), () => {
+      calls += 1;
+      return new Response("{}", { status: 503, headers: { "Content-Type": "application/json" } });
+    });
+    const first = render(<DetailEmptyState companyName={name} companyData={companyData()} />);
+    await waitFor(() => expect(screen.getByText(/Score not available right now/)).toBeInTheDocument());
+    expect(screen.queryByText(/No score published/)).not.toBeInTheDocument();
+    first.unmount();
+    // A remount retries — the failure was not pinned in the module cache.
+    render(<DetailEmptyState companyName={name} companyData={companyData()} />);
+    await waitFor(() => expect(calls).toBe(2));
+  });
 });
 
 describe("DetailEmptyState — posture tiles", () => {

@@ -236,7 +236,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     await user.click(within(targets).getByRole("button", { name: /BoringVault/ }));
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent(
-      "Switched the control surface to Base — BoringVault is deployed there.",
+      "Switched the control surface to Base — BoringVault is on that chain.",
     );
     expect(status.textContent).not.toContain("not on the control surface");
   });

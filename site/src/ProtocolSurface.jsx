@@ -591,13 +591,25 @@ function ProtocolSurface({
     // chain" is exactly the claim this graph cannot make.
     const requestedChain = coalesceChain(example?.chain || activeChain);
     if (requestedChain !== activeChain) {
+      // The page can only scope to a chain it has contracts on — outside that,
+      // handleSelectChain would silently degrade to the default and the
+      // "switched" outcome would be a lie.
+      const scopable = availableChains.some((c) => c.name === requestedChain);
+      // The witness must be explicit: a contract row on that chain, or a
+      // principal whose OWN chains list names it. principalOnChain's
+      // legacy-payload default (no list → every chain) is exactly the
+      // default-as-witness shape this check exists to refuse.
       const witnessedThere =
+        scopable &&
         Boolean(address) &&
         ((companyData?.contracts || []).some(
           (c) => coalesceChain(c.chain) === requestedChain && (c.address || "").toLowerCase() === address,
         ) ||
           (companyData?.principals || []).some(
-            (p) => (p.address || "").toLowerCase() === address && principalOnChain(p, requestedChain),
+            (p) =>
+              (p.address || "").toLowerCase() === address &&
+              Array.isArray(p.chains) &&
+              p.chains.some((c) => coalesceChain(c) === requestedChain),
           ));
       if (!witnessedThere) return { ok: false, kind: "not-found" };
       pendingCrossChain.current = example;
@@ -661,7 +673,7 @@ function ProtocolSurface({
     // a row inside it.
     if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
     return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
-  }, [activeChain, allMachines, companyData, entityIndex, handleSelectChain, handleSelectPrincipal, selectMachineExample]);
+  }, [activeChain, allMachines, availableChains, companyData, entityIndex, handleSelectChain, handleSelectPrincipal, selectMachineExample]);
 
   useEffect(() => {
     const pending = pendingCrossChain.current;

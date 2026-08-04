@@ -95,7 +95,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     const hintedFn = target?.highlight?.functionSignature;
     showNotice(
       result.kind === "chain-switch"
-        ? `Switched the control surface to ${chainLabel(result.chain)} — ${label} is deployed there.`
+        ? `Switched the control surface to ${chainLabel(result.chain)} — ${label} is on that chain.`
         : result.kind === "contract" && result.functionMissing
           ? `${label} is not among that contract's functions on the surface — the contract is selected instead.`
           : result.highlight?.function === "unpaired" && hintedFn

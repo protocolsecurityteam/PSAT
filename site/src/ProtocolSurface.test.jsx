@@ -341,6 +341,47 @@ describe("ProtocolSurface — multichain chain switcher", () => {
     expect(document.querySelector(".ps-filter-chain").textContent).toContain("Base");
     expectNoCrash();
   });
+
+  // The switch outcome is a claim ("it is on that chain") and must be earned:
+  // a chain the page cannot scope to, or a principal whose chains list does
+  // not name the chain, refuses rather than announcing a switch that the
+  // scoping would silently degrade.
+  it("refuses a cross-chain request the payload does not witness", async () => {
+    const ref = React.createRef();
+    render(
+      <ProtocolSurface
+        ref={ref}
+        companyName="multi"
+        initialData={{
+          ...MULTICHAIN_COMPANY,
+          // A legacy principal (no chains list) at a known address: its
+          // absent list must NOT witness it onto arbitrum.
+          principals: [{ address: "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4", type: "safe", controls: [] }],
+        }}
+        embedded
+      />,
+    );
+    await waitFor(() => expect(ref.current).toBeTruthy());
+    let offProtocolChain;
+    let legacyPrincipal;
+    await act(async () => {
+      // arbitrum: no contracts there at all — not scopable.
+      offProtocolChain = ref.current.selectExample({
+        contractAddress: "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+        chain: "arbitrum",
+      });
+      // base is scopable, but the principal's own chains list doesn't name it.
+      legacyPrincipal = ref.current.selectExample({
+        contractAddress: "0xc4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+        chain: "base",
+      });
+    });
+    expect(offProtocolChain).toEqual({ ok: false, kind: "not-found" });
+    expect(legacyPrincipal).toEqual({ ok: false, kind: "not-found" });
+    // Nothing switched: the pill still wears the default chain.
+    expect(document.querySelector(".ps-filter-chain").textContent).toContain("Ethereum");
+    expectNoCrash();
+  });
 });
 
 // The /functions endpoint payload is keyed by the composite "<chain>::<address>"
