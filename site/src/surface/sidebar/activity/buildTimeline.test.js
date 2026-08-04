@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { buildTimeline } from "./buildTimeline.js";
+import { buildTimeline, filterTimelineBySalience } from "./buildTimeline.js";
 import { shortenAddress } from "../../../graph.js";
 
 const I1 = "0x1111111111111111111111111111111111111111"; // first deployment
@@ -222,5 +222,81 @@ describe("buildTimeline — read-witnessed rows carry no block claim", () => {
     });
     // a genuine on-chain block-0 log (tx_hash present) stays sub-boundary
     expect(out.above.find((r) => r.key === "ev:e-genesis")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Salience carriage + threshold filtering
+// ---------------------------------------------------------------------------
+
+describe("buildTimeline — salience", () => {
+  it("carries the backend level onto each event row beside severity", () => {
+    const { above } = buildTimeline({
+      events: [
+        ev("a", "state_changed_poll", 400, { salience: "routine", salience_basis: ["metric_field_diff"] }),
+        ev("b", "ownership_transferred", 401, { salience: "alert", salience_basis: ["canonical_config_family"] }),
+      ],
+      enrollmentBlock: 300,
+    });
+    const byKey = Object.fromEntries(above.map((r) => [r.key, r]));
+    expect(byKey["ev:a"].salience).toBe("routine");
+    expect(byKey["ev:a"].severity).toBe("routine");
+    expect(byKey["ev:b"].salience).toBe("alert");
+    expect(byKey["ev:b"].severity).toBe("critical");
+  });
+
+  it("reads a row with no backend level as not_determined, never as routine", () => {
+    const { above } = buildTimeline({ events: [ev("a", "safe_tx_executed", 400)], enrollmentBlock: 300 });
+    expect(above[0].salience).toBe("not_determined");
+  });
+
+  it("marks back-filled upgrade rows not_determined — no backend rule rated them", () => {
+    const { below } = buildTimeline({ events: [], proxy: PROXY, enrollmentBlock: 300, isProxy: true });
+    expect(below.length).toBeGreaterThan(0);
+    expect(below.every((r) => r.salience === "not_determined")).toBe(true);
+  });
+});
+
+describe("filterTimelineBySalience", () => {
+  const built = () =>
+    buildTimeline({
+      events: [
+        ev("r1", "state_changed_poll", 400, { salience: "routine" }),
+        ev("r2", "state_changed_poll", 401, { salience: "routine" }),
+        ev("n1", "state_changed_poll", 402, { salience: "notable" }),
+        ev("u1", "safe_tx_executed", 403, { salience: "not_determined" }),
+        ev("a1", "ownership_transferred", 404, { salience: "alert" }),
+      ],
+      enrollmentBlock: 300,
+    });
+
+  it("hides nothing at the All position", () => {
+    const out = filterTimelineBySalience(built(), "routine");
+    expect(out.above).toHaveLength(5);
+    expect(out.hidden).toBe(0);
+  });
+
+  it("hides only proven-routine rows at Notable+, and counts them", () => {
+    const out = filterTimelineBySalience(built(), "notable");
+    expect(out.above.map((r) => r.key)).toEqual(["ev:a1", "ev:u1", "ev:n1"]);
+    expect(out.hidden).toBe(2);
+  });
+
+  it("keeps not_determined visible at Notable+ — unrated is not routine", () => {
+    const out = filterTimelineBySalience(built(), "notable");
+    expect(out.above.some((r) => r.key === "ev:u1")).toBe(true);
+  });
+
+  it("admits only proven alerts at the Alerts-only position", () => {
+    const out = filterTimelineBySalience(built(), "alert");
+    expect(out.above.map((r) => r.key)).toEqual(["ev:a1"]);
+    expect(out.hidden).toBe(4);
+  });
+
+  it("counts hidden backfill rows too", () => {
+    const timeline = buildTimeline({ events: [], proxy: PROXY, enrollmentBlock: 300, isProxy: true });
+    const out = filterTimelineBySalience(timeline, "alert");
+    expect(out.below).toHaveLength(0);
+    expect(out.hidden).toBe(timeline.above.length + timeline.below.length);
   });
 });

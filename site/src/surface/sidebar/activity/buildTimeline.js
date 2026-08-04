@@ -6,7 +6,15 @@
 // No React — unit-testable.
 
 import { shortenAddress } from "../../../graph.js";
-import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../monitoring/format.js";
+import {
+  SALIENCE_NOT_DETERMINED,
+  decodeEvent,
+  eventKind,
+  eventKindLabel,
+  eventSalience,
+  eventSeverity,
+  salienceAllows,
+} from "../../../monitoring/format.js";
 
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
@@ -102,6 +110,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
       kind,
       kindLabel: eventKindLabel(ev),
       severity: eventSeverity(ev),
+      salience: eventSalience(ev),
       title: decoded.title,
       sub: decoded.sub,
       block,
@@ -129,6 +138,10 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
         kind: "upgrade",
         kindLabel: "Upgrade",
         severity: "critical",
+        // A back-filled upgrade is not a monitored_event, so no backend rule
+        // ever rated it. `not_determined` is what that is — and it renders,
+        // where a borrowed `routine` would collapse a real upgrade.
+        salience: SALIENCE_NOT_DETERMINED,
         title: isFirst ? "First deployment" : "Implementation upgraded",
         sub: upgradeSub(im, isFirst),
         block,
@@ -175,4 +188,18 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     }
   }
   return { above, below, boundaryBlock: enrollmentBlock };
+}
+
+// Apply a salience threshold to a built timeline, returning the surviving rows
+// and how many were withheld. The count is not optional bookkeeping: a view
+// that hides rows without saying how many is the suppression this axis exists
+// to prevent (invariant 4), so every caller renders it.
+export function filterTimelineBySalience({ above = [], below = [] }, minSalience) {
+  const keptAbove = above.filter((row) => salienceAllows(row.salience, minSalience));
+  const keptBelow = below.filter((row) => salienceAllows(row.salience, minSalience));
+  return {
+    above: keptAbove,
+    below: keptBelow,
+    hidden: above.length - keptAbove.length + (below.length - keptBelow.length),
+  };
 }

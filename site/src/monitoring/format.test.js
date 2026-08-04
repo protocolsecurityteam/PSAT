@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "./format.js";
+import { decodeEvent, eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows } from "./format.js";
 import { shortenAddress } from "../graph.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";
@@ -618,5 +618,82 @@ describe("state_changed_poll old/new key aliases", () => {
     );
     // addresses shorten like every other renderer; the aliases are what this pins
     expect(result.sub).toBe(`${shortenAddress(ADDR_A)} → ${shortenAddress(ADDR_B)}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Salience — the vocabulary mirror. The backend owns the classification; these
+// tests pin that this file reads it and never re-derives it.
+// ---------------------------------------------------------------------------
+
+describe("eventSalience", () => {
+  it("reads the level the backend published", () => {
+    for (const level of ["alert", "notable", "routine", "not_determined"]) {
+      expect(eventSalience(evt("safe_tx_executed", { salience: level }))).toBe(level);
+    }
+  });
+
+  it("reads an absent or unknown level as not_determined, never as routine", () => {
+    expect(eventSalience(evt("safe_tx_executed", {}))).toBe("not_determined");
+    expect(eventSalience(evt("safe_tx_executed", { salience: "quiet" }))).toBe("not_determined");
+    expect(eventSalience(evt("safe_tx_executed", null))).toBe("not_determined");
+    expect(eventSalience(undefined)).toBe("not_determined");
+  });
+
+  it("does not re-derive a level from the event type", () => {
+    // A canonical config family with NO backend level stays unrated here even
+    // though the backend rule would call it alert — a mirrored ruleset drifts,
+    // and a drifted mirror that hides rows is a silent-suppression bug.
+    expect(eventSalience(evt("ownership_transferred", {}))).toBe("not_determined");
+  });
+});
+
+describe("salienceAllows", () => {
+  it("sorts not_determined with notable, never with routine", () => {
+    expect(salienceAllows("not_determined", "notable")).toBe(true);
+    expect(salienceAllows("notable", "notable")).toBe(true);
+    expect(salienceAllows("routine", "notable")).toBe(false);
+    expect(salienceAllows("alert", "notable")).toBe(true);
+  });
+
+  it("admits only proven alerts at the alert threshold", () => {
+    expect(salienceAllows("alert", "alert")).toBe(true);
+    expect(salienceAllows("not_determined", "alert")).toBe(false);
+    expect(salienceAllows("notable", "alert")).toBe(false);
+  });
+
+  it("admits everything at the routine threshold and for an unreadable one", () => {
+    for (const level of ["alert", "notable", "routine", "not_determined"]) {
+      expect(salienceAllows(level, "routine")).toBe(true);
+      expect(salienceAllows(level, "nonsense")).toBe(true);
+      expect(salienceAllows(level, undefined)).toBe(true);
+    }
+  });
+
+  it("measures an unrated level at the not_determined rank", () => {
+    expect(salienceAllows(undefined, "notable")).toBe(true);
+    expect(salienceAllows(undefined, "alert")).toBe(false);
+  });
+});
+
+describe("eventSeverity — rebased on salience", () => {
+  it("takes the backend level over the kind-derived table", () => {
+    // The old table hardcoded every safe and state event to routine.
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "alert" }))).toBe("critical");
+    expect(eventSeverity(evt("state_changed_poll", { salience: "notable" }))).toBe("major");
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "routine" }))).toBe("routine");
+  });
+
+  it("renders not_determined at notable prominence", () => {
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "not_determined" }))).toBe("major");
+  });
+
+  it("demotes a canonical family the backend proved routine", () => {
+    expect(eventSeverity(evt("ownership_transferred", { salience: "routine" }))).toBe("routine");
+  });
+
+  it("falls back to the kind table for rows written before salience landed", () => {
+    expect(eventSeverity(evt("ownership_transferred", {}))).toBe("critical");
+    expect(eventSeverity(evt("safe_tx_executed", {}))).toBe("routine");
   });
 });

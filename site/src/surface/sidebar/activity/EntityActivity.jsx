@@ -5,7 +5,7 @@ import { AlertControls } from "./AlertControls.jsx";
 import { proxyState } from "./helpers.js";
 import { StatusStrip } from "./StatusStrip.jsx";
 import { Timeline } from "./Timeline.jsx";
-import { buildTimeline } from "./buildTimeline.js";
+import { buildTimeline, filterTimelineBySalience } from "./buildTimeline.js";
 
 const POLL_MS = 30_000;
 
@@ -23,6 +23,8 @@ export function EntityActivity({
   cache,
   onCache,
   now,
+  minSalience = "routine",
+  onHiddenCount,
 }) {
   const [events, setEvents] = useState([]);
   // The settled outcome of the per-contract event read, carried with the
@@ -198,6 +200,13 @@ export function EntityActivity({
     [events, proxy, enrollmentBlock, mayBeProxy],
   );
 
+  // The threshold is the panel's; the COUNT can only be computed here, where
+  // the rows are. Reported up so the control can always state it.
+  const visible = useMemo(() => filterTimelineBySalience(timeline, minSalience), [timeline, minSalience]);
+  useEffect(() => {
+    if (onHiddenCount) onHiddenCount(visible.hidden);
+  }, [visible.hidden, onHiddenCount]);
+
   // "Monitoring started" label: created_at is when the MonitoredContract row was
   // written at enroll time — a truthful stand-in for the block→timestamp we
   // don't have client-side. Fall back to the earliest captured event.
@@ -244,8 +253,8 @@ export function EntityActivity({
         </div>
       ) : null}
       <Timeline
-        above={timeline.above}
-        below={timeline.below}
+        above={visible.above}
+        below={visible.below}
         boundaryBlock={timeline.boundaryBlock}
         boundaryDate={boundaryDate}
         isProxy={mayBeProxy}

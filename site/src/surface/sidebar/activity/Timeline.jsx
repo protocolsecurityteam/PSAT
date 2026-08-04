@@ -1,6 +1,8 @@
+import { useState } from "react";
+
 import { blockExplorerAddressUrl } from "../../../blockExplorer.js";
 import { shortenAddress } from "../../../graph.js";
-import { relativeTime } from "../../../monitoring/format.js";
+import { SALIENCE_ROUTINE, relativeTime } from "../../../monitoring/format.js";
 
 // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
 function txUrl(txHash, chain = "ethereum") {
@@ -57,6 +59,89 @@ function EventRow({ row, chain, now }) {
   );
 }
 
+// Runs of consecutive PROVEN-routine rows collapse into one disclosure row.
+// Only `salience === "routine"` qualifies: `not_determined` is an event no
+// backend rule rated, and collapsing it would be suppression minted from
+// ignorance (invariant 5). A lone routine row renders as itself — a
+// "1 routine event — show" disclosure costs a click and hides nothing useful.
+const MIN_COLLAPSE_RUN = 2;
+
+function groupRoutineRuns(rows) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (run.length >= MIN_COLLAPSE_RUN) {
+      out.push({ collapsedKey: `routine:${run[0].key}`, rows: run });
+    } else {
+      for (const row of run) out.push({ row });
+    }
+    run = [];
+  };
+  for (const row of rows) {
+    if (row.salience === SALIENCE_ROUTINE) {
+      run.push(row);
+      continue;
+    }
+    flush();
+    out.push({ row });
+  }
+  flush();
+  return out;
+}
+
+// Renders a run of routine rows as a count + reveal, expanding IN PLACE so the
+// revealed rows keep their position in the feed. Disclosure state is
+// component-local; nothing about it needs to persist.
+function RoutineRun({ group, chain, now, expanded, onToggle }) {
+  if (expanded) {
+    return (
+      <>
+        <li className="ps-activity-routine-run open">
+          <div className="ps-activity-rail" />
+          <button type="button" className="ps-activity-routine-toggle" onClick={onToggle}>
+            {group.rows.length} routine events — hide
+          </button>
+        </li>
+        {group.rows.map((row) => (
+          <EventRow key={row.key} row={row} chain={chain} now={now} />
+        ))}
+      </>
+    );
+  }
+  return (
+    <li className="ps-activity-routine-run">
+      <div className="ps-activity-rail"><span className="ps-activity-dot routine" /></div>
+      <button type="button" className="ps-activity-routine-toggle" onClick={onToggle}>
+        {group.rows.length} routine events — show
+      </button>
+    </li>
+  );
+}
+
+function TimelineRows({ rows, chain, now }) {
+  const [open, setOpen] = useState(() => new Set());
+  const toggle = (key) => setOpen((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+  return groupRoutineRuns(rows).map((group) =>
+    group.collapsedKey ? (
+      <RoutineRun
+        key={group.collapsedKey}
+        group={group}
+        chain={chain}
+        now={now}
+        expanded={open.has(group.collapsedKey)}
+        onToggle={() => toggle(group.collapsedKey)}
+      />
+    ) : (
+      <EventRow key={group.row.key} row={group.row} chain={chain} now={now} />
+    ),
+  );
+}
+
 // Timeline: `above` rows (live-captured), then the enrollment boundary pill
 // (omitted entirely when boundaryBlock is null — a legacy row with no
 // enrollment_block), then `below` upgrade-only backfill rows or the non-proxy
@@ -99,9 +184,7 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
 
   return (
     <ul className="ps-activity-tl">
-      {above.map((row) => (
-        <EventRow key={row.key} row={row} chain={chain} now={now} />
-      ))}
+      <TimelineRows rows={above} chain={chain} now={now} />
 
       {hasBoundary ? (
         <div className="ps-activity-boundary">
@@ -115,7 +198,7 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
       ) : null}
 
       {hasBoundary && below.length ? (
-        below.map((row) => <EventRow key={row.key} row={row} chain={chain} now={now} />)
+        <TimelineRows rows={below} chain={chain} now={now} />
       ) : hasBoundary && historyState === "pending" ? (
         <div className="ps-activity-empty">Checking for earlier activity…</div>
       ) : hasBoundary && historyState === "not_determined" ? (

@@ -9,6 +9,41 @@ import { eventTypesFromGroupKeys } from "./helpers.js";
 
 const POLL_MS = 30_000;
 
+// Three positions, expressed as the MINIMUM salience each admits. Default is
+// `notable`: routine rows are proven-routine by a backend rule with a stated
+// basis, so collapsing them by default is a display choice about proven
+// findings — not a guess. `not_determined` sorts with `notable`
+// (monitoring/format.js), so an unrated event survives the default.
+export const SALIENCE_MODES = [
+  { key: "routine", label: "All" },
+  { key: "notable", label: "Notable+" },
+  { key: "alert", label: "Alerts only" },
+];
+
+export const DEFAULT_MIN_SALIENCE = "notable";
+
+// The hidden count is rendered unconditionally, including when it is zero:
+// a filter that silently withholds rows is the failure this axis exists to
+// prevent, and "0 hidden" is the statement that it is not doing so.
+export function SalienceControl({ value, onChange, hiddenCount }) {
+  return (
+    <div className="ps-activity-salience" role="group" aria-label="Salience filter">
+      {SALIENCE_MODES.map((mode) => (
+        <button
+          key={mode.key}
+          type="button"
+          className={`ps-activity-salience-opt${value === mode.key ? " on" : ""}`}
+          aria-pressed={value === mode.key}
+          onClick={() => onChange(mode.key)}
+        >
+          {mode.label}
+        </button>
+      ))}
+      <span className="ps-activity-salience-hidden">{hiddenCount} hidden</span>
+    </div>
+  );
+}
+
 // Activity tab — the collapsed Monitor + Upgrades tabs. Two modes:
 //   - nothing selected → protocol-wide feed (ProtocolActivity)
 //   - a contract selected → status strip + alerts + unified timeline (EntityActivity)
@@ -33,6 +68,10 @@ export function ActivityPanel({
   const [subscriptions, setSubscriptions] = useState([]);
   const [savingAddr, setSavingAddr] = useState(null);
   const [now, setNow] = useState(() => Date.now());
+  // Owned here so the choice survives switching selection; the count comes
+  // back UP from whichever mode is mounted, because only it knows its rows.
+  const [minSalience, setMinSalience] = useState(DEFAULT_MIN_SALIENCE);
+  const [hiddenCount, setHiddenCount] = useState(0);
 
   const refresh = useCallback(async () => {
     if (!protocolId) return;
@@ -145,31 +184,45 @@ export function ActivityPanel({
     );
   }
 
+  const control = (
+    <SalienceControl value={minSalience} onChange={setMinSalience} hiddenCount={hiddenCount} />
+  );
+
   if (!entityMachine) {
     return (
-      <ProtocolActivity
-        protocolId={protocolId}
-        companyName={companyName}
-        contracts={chainScopedContracts}
-        machines={machines}
-        onSelect={onSelect}
-        now={now}
-        chain={activeChain}
-      />
+      <>
+        {control}
+        <ProtocolActivity
+          protocolId={protocolId}
+          companyName={companyName}
+          contracts={chainScopedContracts}
+          machines={machines}
+          onSelect={onSelect}
+          now={now}
+          chain={activeChain}
+          minSalience={minSalience}
+          onHiddenCount={setHiddenCount}
+        />
+      </>
     );
   }
 
   return (
-    <EntityActivity
-      machine={entityMachine}
-      contract={entityContract}
-      subscriptions={subscriptions}
-      isAdmin={isAdmin}
-      saving={savingAddr != null && savingAddr === (entityMachine.address || "").toLowerCase()}
-      onAttachWebhook={attachWebhook}
-      cache={cache}
-      onCache={onCache}
-      now={now}
-    />
+    <>
+      {control}
+      <EntityActivity
+        machine={entityMachine}
+        contract={entityContract}
+        subscriptions={subscriptions}
+        isAdmin={isAdmin}
+        saving={savingAddr != null && savingAddr === (entityMachine.address || "").toLowerCase()}
+        onAttachWebhook={attachWebhook}
+        cache={cache}
+        onCache={onCache}
+        now={now}
+        minSalience={minSalience}
+        onHiddenCount={setHiddenCount}
+      />
+    </>
   );
 }

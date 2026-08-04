@@ -159,6 +159,10 @@ export function eventKindLabel(evt) {
 //   critical → owner, pause, upgrade — change anyone should react to
 //   major    → role grant/revoke, threshold/delay changes
 //   routine  → safe tx, module exec, state polls
+//
+// Kept as the FALLBACK only: it is derived from the event kind, which is a
+// statement about what moved, not about whether an operator needs to see it.
+// Where the backend published a salience, that wins (see eventSeverity).
 const SEVERITY = {
   upgrade: "critical",
   owner: "critical",
@@ -171,7 +175,71 @@ const SEVERITY = {
   other: "routine",
 };
 
+// ---------------------------------------------------------------------------
+// Salience — the vocabulary mirror of record
+// ---------------------------------------------------------------------------
+//
+// Mirrors services/monitoring/salience.py. Four values, and the fourth is the
+// point: `not_determined` is an event the backend's rules did not rate, and it
+// renders at `notable` prominence. Nothing here may default to `routine` —
+// that would be silent suppression minted from ignorance, client-side.
+export const SALIENCE_ALERT = "alert";
+export const SALIENCE_NOTABLE = "notable";
+export const SALIENCE_ROUTINE = "routine";
+export const SALIENCE_NOT_DETERMINED = "not_determined";
+
+export const SALIENCE_VALUES = [
+  SALIENCE_ALERT,
+  SALIENCE_NOTABLE,
+  SALIENCE_ROUTINE,
+  SALIENCE_NOT_DETERMINED,
+];
+
+// `not_determined` sorts WITH `notable` (services/monitoring/notifier.py's
+// _SALIENCE_ORDER), so a threshold never drops an event it never rated.
+const SALIENCE_ORDER = {
+  [SALIENCE_ROUTINE]: 0,
+  [SALIENCE_NOT_DETERMINED]: 1,
+  [SALIENCE_NOTABLE]: 1,
+  [SALIENCE_ALERT]: 2,
+};
+
+// The backend owns this classification. There is deliberately NO client-side
+// re-derivation from event_type: a mirrored ruleset would drift, and a drifted
+// mirror that hides rows is a silent-suppression bug. An absent or unknown
+// value reads as `not_determined`, which renders.
+export function eventSalience(evt) {
+  const value = evt?.data?.salience;
+  return SALIENCE_VALUES.includes(value) ? value : SALIENCE_NOT_DETERMINED;
+}
+
+export function salienceRank(level) {
+  const rank = SALIENCE_ORDER[level];
+  return rank === undefined ? SALIENCE_ORDER[SALIENCE_NOT_DETERMINED] : rank;
+}
+
+// Does `level` clear a `minimum` threshold? An unrecognized minimum admits
+// everything rather than filtering on a bar we cannot read.
+export function salienceAllows(level, minimum) {
+  if (!SALIENCE_VALUES.includes(minimum)) return true;
+  return salienceRank(level) >= salienceRank(minimum);
+}
+
+// Salience → tick colour. `not_determined` maps to `major`, the same
+// prominence as `notable`: unrated is visible.
+const SEVERITY_BY_SALIENCE = {
+  [SALIENCE_ALERT]: "critical",
+  [SALIENCE_NOTABLE]: "major",
+  [SALIENCE_ROUTINE]: "routine",
+  [SALIENCE_NOT_DETERMINED]: "major",
+};
+
+// Rebased on salience when the row carries one — which removes the old
+// hardcoding of every `safe` and `state` event to `routine`. Rows written
+// before salience landed keep the kind-derived table.
 export function eventSeverity(evt) {
+  const level = evt?.data?.salience;
+  if (SALIENCE_VALUES.includes(level)) return SEVERITY_BY_SALIENCE[level];
   return SEVERITY[eventKind(evt)] || "routine";
 }
 

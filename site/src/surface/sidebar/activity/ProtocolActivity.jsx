@@ -4,7 +4,15 @@ import { api } from "../../../api/client.js";
 import { proxyDisplayName } from "../../../displayName.js";
 import { coalesceChain, entityKey } from "../../entityKey.js";
 import { shortenAddress } from "../../../graph.js";
-import { decodeEvent, eventKind, eventKindLabel, relativeTime, scannerHealth } from "../../../monitoring/format.js";
+import {
+  decodeEvent,
+  eventKind,
+  eventKindLabel,
+  eventSalience,
+  relativeTime,
+  salienceAllows,
+  scannerHealth,
+} from "../../../monitoring/format.js";
 
 const POLL_MS = 30_000;
 
@@ -22,7 +30,17 @@ function earliestEnrollment(contracts) {
 // summary, and the newest events across every monitored address. Absorbs the
 // standalone monitoring page's overview. The canvas is the spatial protocol map;
 // clicking a recent row selects that contract → the panel switches to entity mode.
-export function ProtocolActivity({ protocolId, companyName, contracts, machines, onSelect, now, chain = "ethereum" }) {
+export function ProtocolActivity({
+  protocolId,
+  companyName,
+  contracts,
+  machines,
+  onSelect,
+  now,
+  chain = "ethereum",
+  minSalience = "routine",
+  onHiddenCount,
+}) {
   const [events, setEvents] = useState([]);
   const [labelMap, setLabelMap] = useState({});
   const activeChain = coalesceChain(chain);
@@ -102,7 +120,17 @@ export function ProtocolActivity({ protocolId, companyName, contracts, machines,
   const health = scannerHealth(contracts, now);
   const headBlock = (contracts || []).reduce((max, c) => Math.max(max, c.last_scanned_block || 0), 0);
   const liveSince = earliestEnrollment(contracts);
-  const recent = (events || []).slice(0, 8);
+  // Filtered before the slice, so the threshold changes WHICH eight rows the
+  // feed shows rather than shortening it.
+  const admitted = useMemo(
+    () => (events || []).filter((ev) => salienceAllows(eventSalience(ev), minSalience)),
+    [events, minSalience],
+  );
+  const hidden = (events || []).length - admitted.length;
+  useEffect(() => {
+    if (onHiddenCount) onHiddenCount(hidden);
+  }, [hidden, onHiddenCount]);
+  const recent = admitted.slice(0, 8);
 
   return (
     <section className="ps-activity-protocol">

@@ -686,3 +686,78 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     expect(/role granted/i.test(entity.textContent)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Salience: the three-position control, the always-visible hidden count, and
+// the routine-run collapse. Invariant 4 (routine hides, never deletes) and
+// invariant 5 (unclassified is visible) are what these pin.
+// ---------------------------------------------------------------------------
+
+const SALIENT_EVENTS = [
+  evRow("s1", "ownership_transferred", 401, { salience: "alert", salience_basis: ["canonical_config_family"] }),
+  evRow("s2", "safe_tx_executed", 402, { salience: "not_determined", salience_basis: ["safe_exec_not_enriched"] }),
+  evRow("s3", "state_changed_poll", 403, { salience: "routine", salience_basis: ["metric_field_diff"], field: "a" }),
+  evRow("s4", "state_changed_poll", 404, { salience: "routine", salience_basis: ["metric_field_diff"], field: "b" }),
+  evRow("s5", "state_changed_poll", 405, { salience: "routine", salience_basis: ["metric_field_diff"], field: "c" }),
+];
+
+describe("ActivityPanel — salience filter", () => {
+  beforeEach(() => {
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: SALIENT_EVENTS });
+  });
+
+  it("defaults to Notable+ and states how many rows that hides", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+    expect(screen.getByRole("button", { name: "Notable+" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "false");
+    // The three proven-routine poll diffs.
+    await waitFor(() => expect(screen.getByText("3 hidden")).toBeTruthy());
+    expect(screen.queryByText(/changed \(polled\)/)).toBeNull();
+  });
+
+  it("keeps an unrated Safe execution visible under the default", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    expect(await screen.findByText("Safe transaction executed")).toBeTruthy();
+  });
+
+  it("reveals the routine rows collapsed behind a count when All is chosen", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    // Collapsed, not dropped: the count is the row.
+    const toggle = screen.getByRole("button", { name: "3 routine events — show" });
+    expect(screen.queryByText(/changed \(polled\)/)).toBeNull();
+
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getAllByText(/changed \(polled\)/)).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "3 routine events — hide" })).toBeTruthy();
+  });
+
+  it("admits only the proven alert at Alerts only, and says so", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Alerts only" }).click();
+    });
+
+    expect(screen.getByText("Ownership transferred")).toBeTruthy();
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+  });
+
+  it("filters the protocol-wide feed with the same predicate and count", async () => {
+    mockActivity({ contracts: [SAFE_CONTRACT], protocolEvents: SALIENT_EVENTS });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    await waitFor(() => expect(screen.getByText("3 hidden")).toBeTruthy());
+  });
+});
