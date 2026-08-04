@@ -266,8 +266,6 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
         # control-plane fact and every republished row says so, with its basis.
         rated = env.persisted_salience()
         assert len(rated) == 388
-        assert {(level, basis) for _et, level, basis in rated} == {
-            (SALIENCE_ALERT, (BASIS_QUALIFIED_MEMBER_CHANGE,))
-        }
+        assert {(level, basis) for _et, level, basis in rated} == {(SALIENCE_ALERT, (BASIS_QUALIFIED_MEMBER_CHANGE,))}
     else:
         assert produced == set()
