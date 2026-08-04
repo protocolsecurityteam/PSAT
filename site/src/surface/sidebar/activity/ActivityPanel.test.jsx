@@ -811,4 +811,38 @@ describe("ActivityPanel — a filter-emptied timeline claims no absence", () => 
     });
     expect(screen.getByRole("button", { name: "2 routine events — show" })).toBeTruthy();
   });
+
+  it("does not call a filter-emptied protocol feed 'nothing captured yet'", async () => {
+    // Every event is proven-routine, so the default Notable+ empties the feed
+    // while the control says how many it withheld.
+    mockActivity({
+      contracts: [SAFE_CONTRACT],
+      protocolEvents: [
+        evRow("p1", "state_changed_poll", 401, { salience: "routine", field: "a" }),
+        evRow("p2", "state_changed_poll", 402, { salience: "routine", field: "b" }),
+      ],
+    });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+
+    await waitFor(() => expect(screen.getByText("2 hidden")).toBeTruthy());
+    expect(screen.queryByText(/Nothing captured yet/)).toBeNull();
+    expect(screen.getByText("2 events are hidden by the current filter.")).toBeTruthy();
+
+    // Reachability: the rows were withheld, not dropped.
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    expect(screen.queryByText("2 events are hidden by the current filter.")).toBeNull();
+    expect(screen.getAllByText(/changed \(polled\)/).length).toBe(2);
+  });
+
+  it("still says the scanner has seen nothing when nothing was withheld", async () => {
+    mockActivity({ contracts: [SAFE_CONTRACT], protocolEvents: [] });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    expect(await screen.findByText(/Nothing captured yet/)).toBeTruthy();
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+  });
 });

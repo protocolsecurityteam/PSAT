@@ -158,7 +158,18 @@ export function ProtocolActivity({
 
       <div>
         <div className="ps-activity-sect-title" style={{ marginBottom: 8 }}>Recent across protocol</div>
-        {recent.length === 0 ? (
+        {recent.length === 0 && hidden > 0 ? (
+          // Events exist and the threshold withheld all of them. "The scanner
+          // hasn't seen an event" is a claim about the scanner; this is a
+          // statement about the filter, which is the only thing that happened.
+          // Checked before the absence prose for the same reason the Timeline
+          // checks its own hidden counts first.
+          <div className="ps-activity-empty">
+            {hidden === 1
+              ? "1 event is hidden by the current filter."
+              : `${hidden} events are hidden by the current filter.`}
+          </div>
+        ) : recent.length === 0 ? (
           <div className="ps-activity-empty">Nothing captured yet — the scanner hasn&apos;t seen an event.</div>
         ) : (
           <div className="ps-activity-recent">

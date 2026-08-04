@@ -1168,3 +1168,37 @@ def test_max_salience_requires_a_stated_floor():
     assert sal.max_salience(sal.SALIENCE_NOTABLE) == sal.SALIENCE_NOTABLE
     assert sal.max_salience(sal.SALIENCE_NOTABLE, *[]) == sal.SALIENCE_NOTABLE
     assert sal.max_salience(sal.SALIENCE_ROUTINE) == sal.SALIENCE_ROUTINE
+
+
+def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_session, make_mc):
+    """A transport failure on the transaction batch degrades exactly as a
+    per-slot failure does: the hashes are absent from ``ctx.txs``, which reads
+    as "not fetched". The enrichers that need nothing from that map (§3.9's
+    correlation and poll-field classification) must still run — a blip on the
+    Safe decode may not take them down with it."""
+    mc = make_mc(contract_type="safe")
+    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
+
+    seen: list[dict] = []
+
+    def zero_rpc(_event, _mc, ctx):
+        seen.append(dict(ctx.txs))
+        return {"correlated_events": [{"event_id": "x", "event_type": "paused", "salience": sal.SALIENCE_ALERT}]}
+
+    with (
+        patch("services.monitoring.enrichment._fetch_txs", side_effect=RuntimeError("transport")),
+        patch.dict(ENRICHERS, {"safe_tx_executed": zero_rpc}, clear=False),
+    ):
+        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
+    db_session.commit()
+    db_session.expire_all()
+
+    # It ran, and it saw an empty map rather than a fabricated one.
+    assert seen == [{}]
+    data = db_session.get(MonitoredEvent, event.id).data
+    assert data["correlated_events"][0]["event_type"] == "paused"
+    assert data["salience"] == sal.SALIENCE_ALERT
+    # Both codes ride: the Safe execution itself is still un-decoded (the fetch
+    # failed), and correlation is what raised it. Neither statement erases the
+    # other — that is what the ordered basis list is for.
+    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED, sal.BASIS_CORRELATED_CAUSE]

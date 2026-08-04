@@ -122,6 +122,9 @@ def _fetch_txs(
     ``ENRICH_TX_BUDGET_ENV``. Per-slot failures are already classified there; a
     failed slot simply leaves its hash out of the returned map, which the
     context's contract reads as "not fetched", never as "no such transaction".
+    A whole-batch transport failure degrades identically: the caller catches it
+    and proceeds with an empty map rather than denying the chain its zero-RPC
+    enrichers.
     """
     if not tx_hashes:
         return {}, frozenset()
@@ -228,21 +231,42 @@ def enrich_events(
                 if event.event_type in NEEDS_TX and isinstance(event.tx_hash, str) and event.tx_hash
             }
         )
+        # Two guards, because the two failures are not the same failure.
+        #
+        # An unresolvable chain is fatal to this chain: without a chain_id
+        # there is no URL↔chain guard, and an enricher that reads ctx.chain_id
+        # would be reading a value nobody resolved. Skip it. (Guarded at all
+        # because this function's contract is that it never raises, and
+        # chain_rpc is free to become fail-loud on an unknown chain — that must
+        # cost the chain its enrichment, never the window commit.)
         try:
-            # chain_id_for is inside the guard with the fetch it feeds: this
-            # function's contract is that it never raises, and chain_rpc is
-            # free to become fail-loud on an unknown chain. An unresolvable
-            # chain must cost that chain its enrichment, never the window.
             chain_id = chain_id_for(chain)
-            txs, over_budget = _fetch_txs(rpc_by_chain.get(chain), chain_id, hashes)
         except Exception as exc:
             logger.warning(
-                "Enrichment setup failed for %s; that chain is not enriched this pass: %s",
+                "Enrichment skipped for %s: chain id not resolved: %s",
                 chain,
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
             continue
+
+        # A failed transaction fetch is NOT fatal. It degrades exactly as a
+        # per-slot failure does — the hashes are simply absent from ctx.txs,
+        # which the context's contract already reads as "not fetched", never as
+        # "no such transaction". The zero-RPC enrichers (§3.9: correlation and
+        # the poll-field classification) need nothing from this map and must
+        # still run, so a transport blip on the Safe decode may not take them
+        # down with it.
+        try:
+            txs, over_budget = _fetch_txs(rpc_by_chain.get(chain), chain_id, hashes)
+        except Exception as exc:
+            logger.warning(
+                "Enrichment transaction fetch failed for %s; enrichers that need a tx will publish a status: %s",
+                chain,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+            txs, over_budget = {}, frozenset()
 
         ctx = EnrichmentContext(
             chain=chain,
