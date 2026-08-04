@@ -15,7 +15,12 @@ from db.models import (
     Protocol,
     ProtocolSubscription,
 )
-from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
+from services.monitoring.event_topics import (
+    _HANDROLLED_EVENT_TYPE_TO_TAGS,
+    WITNESS_TIER_ACTIVITY,
+    WITNESS_TIER_HINT,
+    value_changed_event_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +328,22 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     if event.tx_hash:
         fields.append({"name": "Tx", "value": f"`{event.tx_hash}`", "inline": False})
 
+    # The event is real; the watch-list that caught it was built from a plan
+    # that could not be re-read at the last enrollment. Saying so is the
+    # difference between "we are watching this contract" and "we are watching
+    # it on a plan last read at T" — the recipient cannot infer the second
+    # from an embed that looks exactly like a fresh-plan one, and what the
+    # stale plan may have MISSED is invisible by construction.
+    plan_stale_since = data.get("plan_stale_since")
+    if plan_stale_since:
+        fields.append(
+            {
+                "name": "Watch-list",
+                "value": f"from a tracking plan last read {plan_stale_since} — coverage may be incomplete",
+                "inline": False,
+            }
+        )
+
     # If a re-analysis job was queued for this event, note it.
     reanalysis_job_id = data.get("reanalysis_job_id")
     if reanalysis_job_id:
@@ -362,7 +383,21 @@ _CONTROLLER_ID_PREFIXES = ("", "state_variable:", "external_contract:")
 
 
 def _value_changed_forms(write_target: str) -> set[str]:
-    return {f"value_changed:{prefix}{write_target}" for prefix in _CONTROLLER_ID_PREFIXES}
+    return {value_changed_event_type(f"{prefix}{write_target}") for prefix in _CONTROLLER_ID_PREFIXES}
+
+
+# Seeds that ask for read-witnessed field diffs in general rather than for one
+# named slot. ``state_changed_poll`` is the only one today: it is what the
+# "State polling" UI category writes, and a subscriber who picked it asked to
+# hear when a polled field's value moves. A verification read is that same
+# fact observed by the same machinery one tick earlier — and because the read
+# advances ``last_known_state``, the poll that would otherwise have raised
+# ``state_changed_poll`` finds no diff and never fires. Without this rule such
+# a subscriber hears about the rotation from neither path.
+#
+# Per-contract controller ids cannot be enumerated into a static set, so this
+# is a stem rule rather than an expansion.
+_READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 
 
 def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
@@ -403,11 +438,27 @@ def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     return expanded
 
 
+def _filter_allows(allowed_types: list[str] | None, event_type: str) -> bool:
+    """Does a saved webhook filter cover *event_type*?
+
+    An empty / absent filter covers everything (the existing contract). Beyond
+    the enumerable expansion, a wildcard seed admits any read-witnessed type —
+    see ``_READ_WITNESSED_WILDCARD_SEEDS``.
+    """
+    if not allowed_types:
+        return True
+    if event_type in _expand_allowed_event_types(allowed_types):
+        return True
+    if event_type.startswith("value_changed"):
+        return any(seed in _READ_WITNESSED_WILDCARD_SEEDS for seed in allowed_types)
+    return False
+
+
 # Tiers whose occurrences prove only that a writer ran. They never reach the
 # notify list from the scanner (no row is inserted at all), so this is the
 # second lock on the same door: any caller handing the notifier a hint- or
 # activity-tier row is refused rather than trusted.
-_NON_NOTIFYING_TIERS = frozenset({"hint", "activity"})
+_NON_NOTIFYING_TIERS = frozenset({WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
 
 
 def _may_notify(event: MonitoredEvent) -> bool:
@@ -473,8 +524,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                 # picks up the related Safe execution events that were
                 # added later under the same UI grouping.
                 if sub.event_filter and isinstance(sub.event_filter, dict):
-                    allowed_types = sub.event_filter.get("event_types")
-                    if allowed_types and event.event_type not in _expand_allowed_event_types(allowed_types):
+                    if not _filter_allows(sub.event_filter.get("event_types"), event.event_type):
                         continue
 
                 try:

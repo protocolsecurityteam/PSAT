@@ -110,6 +110,13 @@ export const MONITOR_ALERT_GROUPS = [
     key: "state",
     label: "State polling",
     flags: ["watch_state"],
+    // `value_changed:<controller_id>` belongs to this group too — a scan-pass
+    // verification read is the same read-witnessed field diff the poller
+    // produces. It is not listed because the controller_id is per-contract and
+    // cannot be enumerated into a static set. The backend treats
+    // `state_changed_poll` as a seed admitting any `value_changed:` type
+    // (notifier._READ_WITNESSED_WILDCARD_SEEDS), so a subscription saved from
+    // this checkbox still delivers them.
     eventTypes: ["state_changed_poll"],
     needsPolling: true,
   },
