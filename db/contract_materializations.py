@@ -912,23 +912,28 @@ def publish_materialization(
     store (F4b). Coverage then follows from analysis having run, instead of from
     which dependencies the authority recursion happened to visit.
 
-    **Fill-or-refresh, never a downgrade.** Rows that are absent, ``failed``,
-    ``pending``, stamped at a superseded version, or claimed by a builder that
-    has gone stale are written outright.
+    **Fill-or-refresh, never a downgrade.** Any row that is not ready at the
+    current schema version is written outright — absent, ``failed``, ``pending``,
+    superseded, or ``building``. Overwriting a live ``building`` claim is safe
+    and deliberate: that builder's phase-3 recheck finds our ready row and
+    discards its own duplicate build, which is the same coalescing
+    ``materialize_or_wait`` performs between two builders.
 
     A ready row at the current schema version is compared, not assumed:
 
-    * ``refresh_on_differ=True`` (the pipeline path) — the caller's bundle came
-      out of the current analyzer, run against this exact contract, so where it
-      DIFFERS from the stored bundle it is the better record and the row is
-      refreshed (``refreshed``). Identical bytecode does not imply an identical
-      bundle: the analyzer improves without every improvement earning an
-      ``ANALYSIS_SCHEMA_VERSION`` bump (a bump invalidates the whole fleet at
-      once and bills a re-analysis of it), so without this a ready row is frozen
-      forever and later analyzer work never reaches the store it was written to.
-    * ``refresh_on_differ=False`` (the promotion sweep) — the caller's bundle is
-      an OLDER job's artifact. Overwriting a current row with it would be a
-      downgrade, so the row stands.
+    * ``refresh_on_differ=True`` — the caller's bundle was PRODUCED BY THE CALLER
+      under the current analyzer, so where it DIFFERS from the stored bundle it
+      is the later record and the row is refreshed (``refreshed``). Identical
+      bytecode does not imply an identical bundle: the analyzer improves without
+      every improvement earning an ``ANALYSIS_SCHEMA_VERSION`` bump (a bump
+      invalidates the whole fleet at once and bills a re-analysis of it), so
+      without this a ready row is frozen forever and later analyzer work never
+      reaches the store it was written to.
+    * ``refresh_on_differ=False`` — the caller is passing on a bundle SOMEONE
+      ELSE produced earlier: the promotion sweep's older job artifact, or a
+      static-cache job's copy of an ancestor's. Same era is not the same as
+      later, and two such callers that disagree would take turns overwriting
+      each other forever, so the stored row stands.
 
     Either way an identical bundle returns ``already_current`` and touches
     nothing — including the blobs, which is why the comparison happens under the

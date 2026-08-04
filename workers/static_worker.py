@@ -2142,6 +2142,11 @@ class StaticWorker(BaseWorker):
             return
 
         chain = _parent_chain_name(job)
+        request = job.request if isinstance(job.request, dict) else {}
+        # Did THIS job's analysis produce these artifacts, or did it copy an
+        # ancestor's? The era gate above proves they are of the current era; it
+        # says nothing about which of two same-era bundles is the later record.
+        produced_here = not request.get("static_cached")
         try:
             from utils.rpc import get_code_with_keccak
 
@@ -2169,10 +2174,13 @@ class StaticWorker(BaseWorker):
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
-                # This bundle was produced by the current analyzer against this
-                # exact contract, so where it differs from the stored row it is
-                # the better record — see ``publish_materialization``.
-                refresh_on_differ=True,
+                # Only a bundle THIS job produced may overwrite a current row.
+                # On the static-cache path these artifacts are an ancestor's,
+                # copied — same era (the gate above proves that), but not the
+                # newer record: a fresh analysis and a later cache hit reproducing
+                # its ancestor would then take turns overwriting each other, and
+                # each flip moves where monitoring watches.
+                refresh_on_differ=produced_here,
             )
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
