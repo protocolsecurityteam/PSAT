@@ -1708,8 +1708,8 @@ describe("ProtocolSurface — reached-from route on the entity card", () => {
     ]);
     // The witnessed role rides through from the payload; the unwitnessed hop
     // shows its flow type alone.
-    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("principal · role_principal roles 77");
-    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controller");
+    expect(hops[0].querySelector(".ps-reach-kind").textContent).toBe("can call · role holder roles 77");
+    expect(hops[1].querySelector(".ps-reach-kind").textContent).toBe("controls");
     expectNoCrash();
   });
 
