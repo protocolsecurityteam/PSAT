@@ -220,6 +220,7 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
     for key, payload in (
         ("tracked_topics", [{"topic0": TOPIC0}]),
         ("polling_plan", [_PLAN_ENTRY]),
+        ("scan_gaps", [{"from_block": 1, "to_block": 2, "reason": "unfloored_runaway"}]),
     ):
         resp = api_client.patch(
             f"/api/monitored-contracts/{contract_id}",
@@ -228,6 +229,22 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
         )
         assert resp.status_code == 422, resp.text
         assert key in resp.text
+
+
+def test_caller_supplied_scan_gaps_are_rejected(api_client, protocol_id, admin_headers):
+    """``scan_gaps`` is the scanner's own record of what it never covered.
+
+    It is written only by the cursor-clamp repair and is carried across every
+    subsequent config rebuild (``tracking_plan_state.preserve_scan_plane_facts``),
+    so a forged entry would be indistinguishable from a clamp-authored one and
+    would outlive every enrollment — asserting a coverage hole nobody observed.
+    Rejected rather than dropped, like the analyzer-owned keys: a silently
+    discarded value would leave the caller believing it was recorded.
+    """
+    gap = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
+    resp = _post(api_client, protocol_id, admin_headers, {"scan_gaps": gap})
+    assert resp.status_code == 422, resp.text
+    assert "scan_gaps" in resp.text
 
 
 def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):
