@@ -1338,6 +1338,14 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
         seed_event(db_session, safe, "safe_tx_executed", "0x" + "e2" * 32),
         exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=multisend_payload([(1, UNKNOWN_LIB, 0, b"")])),
     )
+    nested = decode(
+        seed_event(db_session, safe, "safe_tx_executed", "0x" + "e5" * 32),
+        exec_transaction_input(
+            to=MULTISEND_1_3_0,
+            operation=1,
+            data=multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, multisend_payload([(1, UNKNOWN_LIB, 0, b"")]))]),
+        ),
+    )
     failure = decode(
         seed_event(db_session, safe, "safe_tx_failed", "0x" + "e3" * 32),
         exec_transaction_input(to=TARGET),
@@ -1355,6 +1363,7 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
     minted = {
         "outer delegatecall, unrecognized": (outer["salience"], tuple(outer["salience_basis"])),
         "inner delegatecall, unrecognized": (inner["salience"], tuple(inner["salience_basis"])),
+        "nested inner delegatecall, unrecognized": (nested["salience"], tuple(nested["salience_basis"])),
         "execution failure": (failure["salience"], tuple(failure["salience_basis"])),
         "correlated cause": (correlated["salience"], tuple(correlated["salience_basis"])),
     }
@@ -1362,6 +1371,10 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
     assert minted == {
         "outer delegatecall, unrecognized": (sal.SALIENCE_ALERT, (sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED,)),
         "inner delegatecall, unrecognized": (
+            sal.SALIENCE_ALERT,
+            (sal.BASIS_SAFE_EXEC_MULTISEND, sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED),
+        ),
+        "nested inner delegatecall, unrecognized": (
             sal.SALIENCE_ALERT,
             (sal.BASIS_SAFE_EXEC_MULTISEND, sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED),
         ),
