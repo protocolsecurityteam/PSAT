@@ -264,6 +264,10 @@ def _safe_exec_fields(safe_exec: dict) -> list[dict]:
             ),
             "over_budget": "not decoded this pass (per-pass transaction budget)",
             "args_undecodable": "execTransaction arguments did not decode",
+            "ambiguous_attribution": (
+                "this Safe executed more than once in this transaction; which call these "
+                "arguments describe is not witnessed, so none is published"
+            ),
         }.get(str(status), f"not decoded ({status})")
         return [{"name": "Safe call", "value": reason, "inline": False}]
 
@@ -309,10 +313,13 @@ def _safe_exec_fields(safe_exec: dict) -> list[dict]:
         )
     elif safe_exec.get("batch_status") == "undecodable":
         # No partial list, and the embed says so: a truncated batch would
-        # understate what the Safe did.
-        fields.append(
-            {"name": "Batch", "value": "MultiSend payload did not decode — contents not listed", "inline": False}
-        )
+        # understate what the Safe did. The reason names WHICH layer failed.
+        why = {
+            "malformed_payload": "the MultiSend payload did not decode",
+            "nested_payload_undecodable": "a nested MultiSend payload did not decode",
+            "nested_depth_exceeded": "the batch nests deeper than this decoder expands",
+        }.get(str(safe_exec.get("batch_status_reason")), "the MultiSend payload did not decode")
+        fields.append({"name": "Batch", "value": f"{why} — contents not listed", "inline": False})
     return fields
 
 

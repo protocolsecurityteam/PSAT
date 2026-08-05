@@ -471,7 +471,11 @@ def _decode_multisend(payload: bytes, depth: int = 1) -> tuple[list[dict[str, An
                 return None, BATCH_REASON_DEPTH_EXCEEDED
             nested, reason = _decode_multisend(data, depth + 1)
             if nested is None:
-                return None, reason or BATCH_REASON_NESTED_UNDECODABLE
+                # Which LAYER failed is part of the gap: an outer payload this
+                # decoder could not read is a different fact from an outer one
+                # that read fine and a payload under it that did not.
+                # ``nested_depth_exceeded`` already names its own layer.
+                return None, BATCH_REASON_NESTED_UNDECODABLE if reason == BATCH_REASON_MALFORMED else reason
             entry["batch"] = nested
 
         calls.append(entry)
@@ -776,16 +780,21 @@ def _correlate(
         )
     ).all()
 
-    # Keyed by (protocol, tx): the tenancy scope is part of the join key rather
-    # than a filter applied afterwards, so no code path can reach a row across
-    # it. A NULL protocol_id is not a tenant and is dropped outright.
+    # Two indexes, because tenancy scopes what may be PUBLISHED and not what is
+    # KNOWN. ``by_tx`` is keyed by (protocol, tx) — the scope of every write, so
+    # no code path can reach a row across it, and a NULL protocol_id is not a
+    # tenant and is dropped outright. ``members_by_tx`` holds every row in the
+    # transaction regardless of tenant, and exists for exactly one purpose:
+    # counting how many executions could have caused a given effect.
     by_tx: dict[tuple[Any, str], list[tuple[MonitoredEvent, MonitoredContract]]] = {}
+    members_by_tx: dict[str, list[tuple[MonitoredEvent, MonitoredContract]]] = {}
     for event, mc in rows:
         data = event.data if isinstance(event.data, Mapping) else {}
         # §3.0 rule 5: historical rows are never enriched. One that predates
         # enrollment is not a witness to anything this window did.
         if data.get("historical"):
             continue
+        members_by_tx.setdefault(event.tx_hash, []).append((event, mc))
         if mc.protocol_id is None:
             continue
         by_tx.setdefault((mc.protocol_id, event.tx_hash), []).append((event, mc))
@@ -822,8 +831,15 @@ def _correlate(
             )
         )
 
-    for (_protocol_id, tx_hash), members in by_tx.items():
-        in_tx_causes = [(event, mc) for event, mc in members if event.event_type in _CAUSE_EVENT_TYPES]
+    for (protocol_id, tx_hash), members in by_tx.items():
+        # Counted over EVERY row in the transaction, not just this tenant's.
+        # Another protocol's execution in the same transaction is exactly as
+        # plausible a cause, and the shared hash witnesses direction no better
+        # across a tenancy boundary than within one — so a per-protocol count
+        # would name a cause the transaction does not single out.
+        in_tx_causes = [
+            (event, mc) for event, mc in members_by_tx.get(tx_hash, []) if event.event_type in _CAUSE_EVENT_TYPES
+        ]
         if len(in_tx_causes) != 1:
             if len(in_tx_causes) > 1:
                 logger.debug(
@@ -832,7 +848,13 @@ def _correlate(
                     len(in_tx_causes),
                 )
             continue
-        cause, _cause_mc = in_tx_causes[0]
+        cause, cause_mc = in_tx_causes[0]
+        if cause_mc.protocol_id != protocol_id:
+            # The transaction's only execution belongs to another tenant. It is
+            # the only plausible cause and it is not this tenant's to name, so
+            # the link is simply not published — never redirected to a row that
+            # merely happens to be in scope.
+            continue
         for event, mc in members:
             if event.id == cause.id or event.event_type in _CAUSE_EVENT_TYPES:
                 continue
@@ -920,15 +942,6 @@ def enrich_events(
                 if event.event_type in NEEDS_TX and isinstance(event.tx_hash, str) and event.tx_hash
             }
         )
-        wanted, over_budget = hashes[:budget_remaining], frozenset(hashes[budget_remaining:])
-        budget_remaining -= len(wanted)
-        if over_budget:
-            logger.info(
-                "Enrichment tx budget exhausted on %s: %d fetched, %d recorded over budget",
-                chain,
-                len(wanted),
-                len(over_budget),
-            )
         # Two guards, because the two failures are not the same failure.
         #
         # An unresolvable chain is fatal to this chain: without a chain_id
@@ -947,6 +960,19 @@ def enrich_events(
                 extra={"exc_type": type(exc).__name__},
             )
             continue
+
+        # Spent only once the chain is known to be enrichable: a chain skipped
+        # above fetches nothing, so it may not consume budget the next chain
+        # would have spent on transactions it actually reads.
+        wanted, over_budget = hashes[:budget_remaining], frozenset(hashes[budget_remaining:])
+        budget_remaining -= len(wanted)
+        if over_budget:
+            logger.info(
+                "Enrichment tx budget exhausted on %s: %d fetched, %d recorded over budget",
+                chain,
+                len(wanted),
+                len(over_budget),
+            )
 
         # A failed transaction fetch is NOT fatal. It degrades exactly as a
         # per-slot failure does — the hashes are simply absent from ctx.txs,

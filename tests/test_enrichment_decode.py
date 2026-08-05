@@ -604,10 +604,31 @@ def test_a_nested_payload_that_will_not_decode_takes_the_whole_batch_with_it(db_
 
     block = data["safe_exec"]
     assert block["batch_status"] == "undecodable"
-    assert block["batch_status_reason"] == enr.BATCH_REASON_MALFORMED
+    # WHICH layer failed is part of the gap: an outer payload this decoder
+    # could not read is a different fact from an outer one that read fine and a
+    # payload under it that did not.
+    assert block["batch_status_reason"] == enr.BATCH_REASON_NESTED_UNDECODABLE
     assert "batch" not in block
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE]
+
+
+def test_every_batch_failure_reason_is_reachable(db_session, safe):
+    """Each reason names a distinct layer, and each is produced by a real
+    payload — a code no input can mint is a code that describes nothing."""
+    inner_bad = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, b"\x00")])
+    too_deep = multisend_payload([(0, TARGET, 0, b"")])
+    for _ in range(enr.MAX_MULTISEND_DEPTH):
+        too_deep = multisend_payload([(1, MULTISEND_1_3_0, 0, too_deep)])
+
+    reasons = {
+        enr.BATCH_REASON_MALFORMED: _decode_batch(db_session, safe, "0x" + "3b" * 32, b"\x00\x01"),
+        enr.BATCH_REASON_NESTED_UNDECODABLE: _decode_batch(db_session, safe, "0x" + "3c" * 32, inner_bad),
+        enr.BATCH_REASON_DEPTH_EXCEEDED: _decode_batch(db_session, safe, "0x" + "3d" * 32, too_deep),
+    }
+    for expected, data in reasons.items():
+        assert data["safe_exec"]["batch_status_reason"] == expected
+        assert "batch" not in data["safe_exec"]
 
 
 def test_a_batch_nested_past_the_depth_cap_states_the_gap(db_session, safe):
@@ -853,6 +874,39 @@ def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, mak
     assert sum(len(call["calls"]) for call in calls) == 1
     statuses = {payload["safe_exec"]["status"] for payload in payloads}
     assert statuses == {"decoded", "over_budget"}
+
+
+def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkeypatch):
+    """A chain whose id will not resolve fetches nothing, so it may not spend
+    budget the next chain would have spent on transactions it actually reads."""
+    monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
+    unresolvable = make_mc(address=ADDR(0x5A30), chain="nosuchchain")
+    resolvable = make_mc(address=ADDR(0x5A31))
+    hashes = ["0x" + "ba" * 32, "0x" + "bb" * 32]
+    events = [
+        seed_event(db_session, unresolvable, "safe_tx_executed", hashes[0]),
+        seed_event(db_session, resolvable, "safe_tx_executed", hashes[1]),
+    ]
+    txs = {
+        h: tx(to=mc.address, tx_hash=h, input_hex=exec_transaction_input(to=TARGET))
+        for mc, h in zip((unresolvable, resolvable), hashes)
+    }
+
+    def only_ethereum(chain):
+        if chain != "ethereum":
+            raise ValueError(f"unknown chain {chain}")
+        return 1
+
+    with patch("services.monitoring.enrichment.chain_id_for", side_effect=only_ethereum):
+        payloads = run(
+            db_session,
+            events,
+            txs,
+            rpc_by_chain={"ethereum": "https://eth.invalid", "nosuchchain": "https://nope.invalid"},
+        )
+
+    assert "safe_exec" not in payloads[0]
+    assert payloads[1]["safe_exec"]["status"] == "decoded"
 
 
 def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe, make_mc):
@@ -1236,6 +1290,49 @@ def test_the_join_does_not_cross_protocols(db_session, safe):
     assert "caused_by" not in theirs_data
 
 
+def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, make_mc):
+    """Tenancy scopes what may be PUBLISHED, not what is KNOWN. Another
+    protocol's execution in the same transaction is exactly as plausible a
+    cause, so counting causes per protocol would name a cause the transaction
+    does not single out. The count runs over every row; the writes stay inside
+    the protocol."""
+    stranger_protocol = Protocol(name="decode-corpus-tenant-b", chains=["ethereum"])
+    db_session.add(stranger_protocol)
+    db_session.flush()
+    contract = Contract(protocol_id=stranger_protocol.id, address=ADDR(0x5AFB), chain="ethereum")
+    db_session.add(contract)
+    db_session.flush()
+    their_safe = MonitoredContract(
+        id=uuid.uuid4(),
+        address=ADDR(0x5AFB),
+        chain="ethereum",
+        protocol_id=stranger_protocol.id,
+        contract_id=contract.id,
+        contract_type="safe",
+        monitoring_config={},
+        last_known_state={},
+        enrollment_block=1,
+        is_active=True,
+    )
+    db_session.add(their_safe)
+    db_session.commit()
+
+    victim = make_mc(address=ADDR(0xC0FFEB), contract_type="regular")
+    tx_hash = "0x" + "cb" * 32
+    mine = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=2)
+    theirs = seed_event(db_session, their_safe, "safe_tx_executed", tx_hash, log_index=1)
+    effect = seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
+
+    mine_data, theirs_data, effect_data = run(db_session, [mine, theirs, effect], {})
+
+    # Two executions could have caused it, across the tenancy boundary — so no
+    # direction is claimed.
+    assert "caused_by" not in effect_data
+    # And neither execution's list has reached across that boundary.
+    assert [entry["event_id"] for entry in mine_data["correlated_events"]] == [str(effect.id)]
+    assert theirs_data["correlated_events"] == []
+
+
 def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
     """DELIBERATE and additive, and recorded as a deviation: §3.4's query has
     no window restriction, so an effect already stored when its cause arrives
@@ -1487,6 +1584,41 @@ def test_the_embed_renders_the_timelock_signature(db_session, make_mc, known_tar
     run(db_session, [event], {})
 
     assert embed_fields(db_session, event)["Function"] == "`setFee(uint256)`"
+
+
+def test_the_embed_names_the_ambiguous_attribution(db_session, safe):
+    """The most operator-relevant status the attribution refusal introduced. An
+    embed that rendered it as a bare code would leave a reader unable to tell it
+    from a decode that simply failed."""
+    tx_hash = "0x" + "f7" * 32
+    events = [
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
+        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1),
+    ]
+    run(db_session, events, {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))})
+
+    rendered = embed_fields(db_session, events[0])["Safe call"]
+    assert "executed more than once in this transaction" in rendered
+    assert "not witnessed" in rendered
+
+
+def test_the_embed_names_which_batch_layer_failed(db_session, safe):
+    inner_bad = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, b"\x00")])
+    tx_hash = "0x" + "f8" * 32
+    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
+    run(
+        db_session,
+        [event],
+        {
+            tx_hash: tx(
+                to=SAFE,
+                tx_hash=tx_hash,
+                input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=inner_bad),
+            )
+        },
+    )
+
+    assert embed_fields(db_session, event)["Batch"] == "a nested MultiSend payload did not decode — contents not listed"
 
 
 def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(db_session, safe):

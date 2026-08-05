@@ -352,11 +352,27 @@ describe("decodeEvent — enriched Safe executions", () => {
     expect(result.sub).toBe(`${shortenAddress(ADDR_B)} · delegatecall`);
   });
 
+  it("names which layer of a batch failed to expand", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch_status: "undecodable",
+        batch_status_reason: "nested_payload_undecodable",
+      },
+    });
+    expect(result.sub).toContain("a nested payload did not decode");
+  });
+
   it("renders each undecoded status as its own stated reason", () => {
     const cases = {
       not_top_level_call: "not a direct execTransaction",
       over_budget: "transaction budget",
       args_undecodable: "did not decode",
+      ambiguous_attribution: "executed more than once in this transaction",
       something_new: "not decoded (something_new)",
     };
     for (const [status, fragment] of Object.entries(cases)) {

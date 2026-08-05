@@ -316,6 +316,15 @@ const SAFE_EXEC_STATUS_SUB = {
   not_top_level_call: "not a direct execTransaction on this Safe — inner call not witnessed",
   over_budget: "not decoded this pass (transaction budget)",
   args_undecodable: "execTransaction arguments did not decode",
+  ambiguous_attribution:
+    "this Safe executed more than once in this transaction — which call these arguments describe is not witnessed",
+};
+
+// Which layer of a batch failed to expand. Mirrors ``batch_status_reason``.
+const SAFE_EXEC_BATCH_REASON = {
+  malformed_payload: "payload did not decode",
+  nested_payload_undecodable: "a nested payload did not decode",
+  nested_depth_exceeded: "nested deeper than the decoder expands",
 };
 
 const RENDER_BY_WRITE_TARGET = {
@@ -403,9 +412,14 @@ const RENDER_BY_WRITE_TARGET = {
 
     const verb = executed ? "Safe executed" : "Safe execution reverted";
     if (se.batch_status === "undecodable") {
+      const why = SAFE_EXEC_BATCH_REASON[se.batch_status_reason];
+      const parts = [];
+      if (se.to) parts.push(shortenAddress(se.to));
+      parts.push("delegatecall");
+      if (why) parts.push(why);
       return {
         title: `${verb} a MultiSend batch that did not decode`,
-        sub: se.to ? `${shortenAddress(se.to)} · delegatecall` : null,
+        sub: parts.join(" · "),
       };
     }
 
