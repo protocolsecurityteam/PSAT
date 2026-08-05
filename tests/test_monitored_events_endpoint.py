@@ -330,3 +330,50 @@ def test_protocol_monitoring_list_serializes_enrollment_block(api_client, db_ses
             db_session.delete(mc)
         db_session.delete(proto)
         db_session.commit()
+
+
+def test_protocol_feed_scopes_to_the_requested_chain(api_client, db_session, seeded_events):
+    """`/api/protocols/{id}/events?chain=` returns only that chain's monitored
+    rows' events. The fixture's shared address is the load-bearing case: the
+    same address is a distinct deployment per chain, so only the monitored
+    row's own chain — never the address — can scope the feed. Every row also
+    carries its chain so an unscoped fetch is self-describing.
+    """
+    from db.models import MonitoredContract, Protocol
+
+    proto = Protocol(name="__feed_chain_scope__")
+    db_session.add(proto)
+    db_session.flush()
+    for key in ("mc_eth_id", "mc_base_id", "mc_other_id"):
+        db_session.get(MonitoredContract, seeded_events[key]).protocol_id = proto.id
+    db_session.commit()
+
+    try:
+        unscoped = api_client.get(f"/api/protocols/{proto.id}/events")
+        assert unscoped.status_code == 200
+        assert len(unscoped.json()) == 4
+        assert all(row["data"]["chain"] in ("ethereum", "base") for row in unscoped.json())
+
+        base = api_client.get(f"/api/protocols/{proto.id}/events", params={"chain": "base"})
+        assert base.status_code == 200
+        rows = base.json()
+        # Only the base twin's event — not the ethereum twin's at the SAME address.
+        assert [r["block_number"] for r in rows] == [200]
+        assert rows[0]["data"]["contract_address"] == seeded_events["addr"]
+        assert rows[0]["data"]["chain"] == "base"
+        # The row states its emitter's type — the frontend badge must never
+        # have to guess it from a local lookup that can miss.
+        assert rows[0]["data"]["contract_type"] == "safe"
+
+        eth = api_client.get(f"/api/protocols/{proto.id}/events", params={"chain": "ethereum"})
+        assert sorted(r["block_number"] for r in eth.json()) == [100, 101, 300]
+
+        # The legacy fold: "mainnet" scopes identically to "ethereum".
+        mainnet = api_client.get(f"/api/protocols/{proto.id}/events", params={"chain": "mainnet"})
+        assert sorted(r["block_number"] for r in mainnet.json()) == [100, 101, 300]
+    finally:
+        for key in ("mc_eth_id", "mc_base_id", "mc_other_id"):
+            db_session.get(MonitoredContract, seeded_events[key]).protocol_id = None
+        db_session.commit()
+        db_session.delete(proto)
+        db_session.commit()

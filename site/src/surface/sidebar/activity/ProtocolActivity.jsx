@@ -50,12 +50,25 @@ export function ProtocolActivity({
   const refresh = useCallback(async () => {
     if (!protocolId) return;
     try {
-      const evs = await api(`/api/protocols/${protocolId}/events?limit=100`);
+      // Chain-scoped server-side: the same address is a distinct deployment
+      // per chain, so only the backend (which knows each event's monitored
+      // row) can scope a shared-address protocol's feed correctly.
+      const evs = await api(
+        `/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`,
+      );
       setEvents(Array.isArray(evs) ? evs : []);
     } catch {
       /* transient — keep the last good feed */
     }
-  }, [protocolId]);
+  }, [protocolId, activeChain]);
+
+  // A chain (or protocol) switch must not leave the previous scope's rows
+  // rendering while the new fetch is in flight — that would be a positive
+  // claim about the wrong chain, the same failure the entity panel pins with
+  // its state-must-not-outlive-selection tests.
+  useEffect(() => {
+    setEvents([]);
+  }, [protocolId, activeChain]);
 
   useEffect(() => {
     refresh();
@@ -178,7 +191,11 @@ export function ProtocolActivity({
             {recent.map((ev) => {
               const contract = contractById.get(ev.monitored_contract_id);
               const addr = contract?.address || ev.data?.contract_address;
-              const type = contract?.contract_type || "regular";
+              // The event states its own emitter's type (the API joins the
+              // monitored row); the local lookup is only a fresher override.
+              // "regular" is a last-resort default for pre-upgrade payloads,
+              // never a substitute for a stated type the row carries.
+              const type = contract?.contract_type || ev.data?.contract_type || "regular";
               const machine = addr ? machineByAddress.get(addr.toLowerCase()) : null;
               const kind = eventKind(ev);
               const decoded = decodeEvent(ev, { nameFor });

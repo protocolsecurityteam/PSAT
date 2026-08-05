@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from db.models import (
     MonitoredContract,
@@ -167,8 +167,15 @@ def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
 
 
 @router.get("/api/protocols/{protocol_id}/events")
-def list_protocol_events(protocol_id: int, limit: int = 50) -> list[dict[str, Any]]:
-    """List MonitoredEvents for all contracts in a protocol."""
+def list_protocol_events(protocol_id: int, limit: int = 50, chain: str | None = None) -> list[dict[str, Any]]:
+    """List MonitoredEvents for all contracts in a protocol.
+
+    ``chain`` scopes the feed to one chain's monitored rows. The same address
+    is a distinct deployment per chain, so this is the only correct place to
+    scope — the payload's ``contract_address`` alone cannot distinguish a
+    shared Safe's ethereum events from its base ones. NULL/``mainnet``
+    monitored rows fold to ``ethereum`` (the legacy-read convention).
+    """
     with deps.SessionLocal() as session:
         stmt = (
             select(MonitoredEvent, MonitoredContract)
@@ -177,6 +184,12 @@ def list_protocol_events(protocol_id: int, limit: int = 50) -> list[dict[str, An
             .order_by(MonitoredEvent.detected_at.desc())
             .limit(limit)
         )
+        if chain:
+            token = chain.strip().lower()
+            token = "ethereum" if token in ("", "mainnet") else token
+            row_chain = func.lower(func.coalesce(MonitoredContract.chain, "ethereum"))
+            row_token = case((row_chain == "mainnet", "ethereum"), else_=row_chain)
+            stmt = stmt.where(row_token == token)
         rows = session.execute(stmt).all()
         return [
             {
@@ -185,7 +198,16 @@ def list_protocol_events(protocol_id: int, limit: int = 50) -> list[dict[str, An
                 "event_type": e.event_type,
                 "block_number": e.block_number,
                 "tx_hash": e.tx_hash,
-                "data": {**(e.data or {}), "contract_address": mc.address},
+                # ``chain`` and ``contract_type`` ride beside
+                # ``contract_address`` so a row is self-describing even in an
+                # unscoped fetch — the consumer must never re-derive either
+                # from a local lookup that can miss (and then guess).
+                "data": {
+                    **(e.data or {}),
+                    "contract_address": mc.address,
+                    "chain": mc.chain,
+                    "contract_type": mc.contract_type,
+                },
                 "detected_at": e.detected_at.isoformat() if e.detected_at else None,
             }
             for e, mc in rows

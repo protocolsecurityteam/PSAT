@@ -300,10 +300,23 @@ describe("ActivityPanel — multichain (F4)", () => {
   });
 
   it("scopes the protocol-wide feed to the active chain (base row only, not ethereum)", async () => {
+    // The event fetch itself must state the chain — the same address is a
+    // distinct deployment per chain, so only the server (which knows each
+    // event's monitored row) can scope a shared-address protocol's feed.
+    const eventFetches = [];
+    setFetchHandler(
+      (url) => /\/api\/protocols\/\d+\/events$/.test(url.pathname),
+      (url) => {
+        eventFetches.push(url.searchParams.get("chain"));
+        return [];
+      },
+    );
     renderPanel({ chain: "base" });
     await waitFor(() => {
       expect(screen.getByText(/addresses monitored/i)).toHaveTextContent("1 addresses monitored");
     });
+    await waitFor(() => expect(eventFetches.length).toBeGreaterThan(0));
+    expect(eventFetches.every((c) => c === "base")).toBe(true);
   });
 });
 
@@ -789,6 +802,27 @@ describe("ActivityPanel — salience filter", () => {
     renderPanel({ selectedMachine: null });
     await screen.findByText("Recent across protocol");
     await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+  });
+
+  it("badges a feed row with the type the event itself states when no local row matches", async () => {
+    // A row whose monitored contract is not in the active chain's list (or is
+    // simply unknown to this client) must NOT be minted "regular" from the
+    // missed lookup — the API joins the monitored row and states its type.
+    mockActivity({
+      contracts: [],
+      protocolEvents: [
+        evRow("b1", "safe_tx_executed", 500, {
+          salience: "alert",
+          salience_basis: ["execution_failure"],
+          contract_address: "0x" + "77".repeat(20),
+          contract_type: "safe",
+        }),
+      ],
+    });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    expect(await screen.findByText("safe")).toBeTruthy();
+    expect(screen.queryByText("regular")).toBeNull();
   });
 });
 
