@@ -396,12 +396,31 @@ def parse_governance_log(log: dict) -> dict | None:
             event["new_delay"] = int(raw[64:128], 16)
 
     elif event_type in ("safe_tx_executed", "safe_tx_failed"):
-        # data = (bytes32 txHash, uint256 payment) — both non-indexed.
-        # txHash here is the Safe-internal transaction hash (the EIP-712
-        # hash of the SafeTx, not the on-chain tx_hash) — useful as a
-        # stable id to correlate execution against the Safe Transaction
-        # Service's pending queue if we ever integrate that.
-        if data and data != "0x" and len(data.replace("0x", "")) >= 128:
+        # Execution[Success|Failure](bytes32 txHash, uint256 payment). txHash is
+        # the Safe-internal SafeTx hash (EIP-712), not the on-chain tx hash.
+        #
+        # The singletons disagree about whether txHash is indexed — 1.4.1
+        # indexes it (topics[1] + a one-word body holding payment), 1.3.0 and
+        # earlier do not (topic0 only + a two-word body) — and since indexing
+        # does not enter the signature, topic0 is identical either way. This is
+        # the same divergence the module/guard read below is hardened against.
+        # Reading the body only decoded every 1.4.1 execution as neither field.
+        #
+        # Each field is published only from bytes the log carried, and only from
+        # the layout the log proves it is in: a second topic proves txHash is
+        # indexed, so the body is payment alone; without it the body must have
+        # room for both words. A body matching neither layout publishes nothing —
+        # left-padding a short body would mint ``payment: 0``, a witnessed
+        # "no fee was refunded", out of bytes nobody emitted.
+        body = data[2:] if isinstance(data, str) and data.startswith("0x") else ""
+        if len(topics) >= 2:
+            hash_word = _strict_word(topics[1])
+            if hash_word is not None:
+                event["safe_tx_hash"] = "0x" + hash_word
+            payment_word = _strict_word(data) if len(body) == 64 else None
+            if payment_word is not None:
+                event["payment"] = int(payment_word, 16)
+        elif len(body) >= 128:
             raw = data.replace("0x", "")
             event["safe_tx_hash"] = "0x" + raw[:64]
             event["payment"] = int(raw[64:128], 16)

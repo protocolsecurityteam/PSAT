@@ -1006,6 +1006,100 @@ class TestSafeExecutionEvents:
         assert "safe_tx_hash" not in ev
         assert "payment" not in ev
 
+    def test_indexed_txhash_variant_decodes(self):
+        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash and the
+        body is payment alone.
+
+        Byte-for-byte the log at index 414 of mainnet tx
+        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431``,
+        emitted by Safe ``0x607d0c7e3578802eb46d388cb86cfba8ff657306`` — one of
+        the four executions that decoded to neither field before this arm
+        existed (topic0 is identical to the non-indexed form, so nothing else
+        distinguished them).
+        """
+        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
+
+        log = {
+            "address": "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
+            "topics": [
+                EXECUTION_SUCCESS_TOPIC0,
+                "0x557306e1acffe8fbc5eeed5d3c7f67aae3713431d50c9224fec4ec51efc2a7b2",
+            ],
+            "data": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "blockNumber": hex(25683190),
+            "transactionHash": "0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431",
+            "logIndex": hex(414),
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["event_type"] == "safe_tx_executed"
+        assert ev["safe_tx_hash"] == "0x557306e1acffe8fbc5eeed5d3c7f67aae3713431d50c9224fec4ec51efc2a7b2"
+        assert ev["payment"] == 0
+
+    def test_indexed_failure_variant_decodes(self):
+        from services.monitoring.event_topics import EXECUTION_FAILURE_TOPIC0, parse_governance_log
+
+        log = {
+            "topics": [EXECUTION_FAILURE_TOPIC0, "0x" + "cd" * 32],
+            "data": "0x" + format(4200, "x").zfill(64),
+            "blockNumber": "0x100",
+            "transactionHash": "0xbabe",
+            "logIndex": "0x0",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["event_type"] == "safe_tx_failed"
+        assert ev["safe_tx_hash"] == "0x" + "cd" * 32
+        assert ev["payment"] == 4200
+
+    def test_indexed_variant_with_two_word_body_publishes_no_payment(self):
+        """A second topic proves txHash is indexed, so the body should be payment
+        alone. A body that is not says the layout is not the one we can read —
+        the hash still decodes from its own topic, and no payment is invented
+        from a word we cannot place."""
+        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
+
+        log = {
+            "topics": [EXECUTION_SUCCESS_TOPIC0, "0x" + "ab" * 32],
+            "data": "0x" + "11" * 32 + "22" * 32,
+            "blockNumber": "0x1",
+            "transactionHash": "0xa",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["safe_tx_hash"] == "0x" + "ab" * 32
+        assert "payment" not in ev
+
+    def test_indexed_variant_with_empty_body_publishes_no_payment(self):
+        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
+
+        log = {
+            "topics": [EXECUTION_SUCCESS_TOPIC0, "0x" + "ab" * 32],
+            "data": "0x",
+            "blockNumber": "0x1",
+            "transactionHash": "0xa",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert ev["safe_tx_hash"] == "0x" + "ab" * 32
+        assert "payment" not in ev
+
+    def test_indexed_variant_with_malformed_topic_publishes_no_hash(self):
+        """The payment word is still witnessed; the hash is not, and a truncated
+        topic is never left-padded into one."""
+        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
+
+        log = {
+            "topics": [EXECUTION_SUCCESS_TOPIC0, "0xabcd"],
+            "data": "0x" + format(7, "x").zfill(64),
+            "blockNumber": "0x1",
+            "transactionHash": "0xa",
+        }
+        ev = parse_governance_log(log)
+        assert ev is not None
+        assert "safe_tx_hash" not in ev
+        assert ev["payment"] == 7
+
     def test_execution_from_module_success_decodes(self):
         """Module-triggered Safe executions: address indexed in topics[1],
         no SafeTx hash, no payment. Used when a pre-authorised module
