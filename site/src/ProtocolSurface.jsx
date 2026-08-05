@@ -946,6 +946,8 @@ function ProtocolSurface({
               selectedMachine={selectedMachine}
               selectedPrincipal={selectedPrincipal}
               onSelect={handleSelectMachine}
+              onPreview={(addr) => focusPreview(addr)}
+              onNavigate={handleNavigate}
               isAdmin={isAdmin}
               cache={upgradeHistoryCache}
               onCache={cacheUpgradeHistory}

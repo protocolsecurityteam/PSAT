@@ -12,6 +12,7 @@ import {
   relativeTime,
   salienceAllows,
   scannerHealth,
+  targetText,
 } from "../../../monitoring/format.js";
 
 const POLL_MS = 30_000;
@@ -198,9 +199,13 @@ export function ProtocolActivity({
                       <span className={`ps-activity-kind k-${kind}`}>{eventKindLabel(ev)}</span>
                       <span
                         className="ps-activity-recent-sub"
-                        title={decoded.titleDetail || undefined}
+                        title={
+                          [decoded.titleDetail, decoded.target?.onGraph === false ? decoded.target.address : null]
+                            .filter(Boolean)
+                            .join(" · ") || undefined
+                        }
                       >
-                        {[decoded.title, decoded.sub].filter(Boolean).join(" · ")}
+                        {[decoded.title, targetText(decoded.target), decoded.sub].filter(Boolean).join(" · ")}
                       </span>
                     </div>
                   </div>

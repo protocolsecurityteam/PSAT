@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decodeEvent, eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows } from "./format.js";
+import { decodeEvent, eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows, targetText } from "./format.js";
 import { shortenAddress } from "../graph.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";
@@ -286,7 +286,11 @@ describe("decodeEvent — enriched Safe executions", () => {
     });
     expect(result.title).toBe("Executed setFee()");
     expect(result.titleDetail).toBe("setFee(uint256)");
-    expect(result.sub).toBe(`on ${shortenAddress(ADDR_A)}`);
+    // No resolver supplied → label null, and onGraph is null (the question
+    // "is this on the graph" was never asked), never false.
+    expect(result.target).toEqual({ address: ADDR_A, label: null, prep: "on", onGraph: null });
+    expect(targetText(result.target)).toBe(`on ${shortenAddress(ADDR_A)}`);
+    expect(result.sub).toBe(null);
   });
 
   it("resolves the target to a protocol name when the caller supplies one", () => {
@@ -304,7 +308,26 @@ describe("decodeEvent — enriched Safe executions", () => {
       }),
       { nameFor: (addr) => (addr.toLowerCase() === ADDR_A.toLowerCase() ? "Accountant" : null) },
     );
-    expect(result.sub).toBe("on Accountant");
+    expect(result.target).toEqual({ address: ADDR_A, label: "Accountant", prep: "on", onGraph: true });
+    expect(targetText(result.target)).toBe("on Accountant");
+  });
+
+  it("states off-graph when a resolver exists and cannot name the target", () => {
+    const result = decodeEvent(
+      evt("safe_tx_executed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: {
+          status: "decoded",
+          to: ADDR_B,
+          selector: "0x69fe0e2d",
+          operation: 0,
+          operation_label: "call",
+        },
+      }),
+      { nameFor: () => null },
+    );
+    expect(result.target).toEqual({ address: ADDR_B, label: null, prep: "on", onGraph: false });
+    expect(targetText(result.target)).toBe(`on ${shortenAddress(ADDR_B)} (not on graph)`);
   });
 
   it("falls back to the raw selector when no signature resolved", () => {
@@ -337,7 +360,8 @@ describe("decodeEvent — enriched Safe executions", () => {
       },
     });
     expect(result.title).toBe("Executed setFee()");
-    expect(result.sub).toBe(`on ${shortenAddress(ADDR_A)} · +2 more in batch`);
+    expect(result.target?.address).toBe(ADDR_A);
+    expect(result.sub).toBe("+2 more in batch");
   });
 
   it("says an undecodable batch did not decode rather than listing part of it", () => {
@@ -352,7 +376,8 @@ describe("decodeEvent — enriched Safe executions", () => {
       },
     });
     expect(result.title).toBe("MultiSend batch — did not decode");
-    expect(result.sub).toBe(`delegatecall → ${shortenAddress(ADDR_B)}`);
+    expect(result.target?.address).toBe(ADDR_B);
+    expect(result.sub).toBe("delegatecall");
   });
 
   it("renders an unrecognized delegatecall as the delegatecall it is", () => {
@@ -368,7 +393,8 @@ describe("decodeEvent — enriched Safe executions", () => {
       },
     });
     expect(result.title).toBe("Executed 0x69fe0e2d");
-    expect(result.sub).toBe(`on ${shortenAddress(ADDR_B)} · delegatecall — not a pinned MultiSend`);
+    expect(result.target?.address).toBe(ADDR_B);
+    expect(result.sub).toBe("delegatecall — not a pinned MultiSend");
   });
 
   it("names which layer of a batch failed to expand", () => {
@@ -458,7 +484,7 @@ describe("decodeEvent — timelock", () => {
       }),
     );
     expect(result.title).toBe("Timelock scheduled sel 0xdeadbeef");
-    expect(result.sub).toContain("on ");
+    expect(result.target?.address).toBe(ADDR_A);
     expect(result.sub).toContain("delay");
   });
 
@@ -471,8 +497,8 @@ describe("decodeEvent — timelock", () => {
       }),
     );
     expect(result.title).toBe("Timelock executed sel 0xdeadbeef");
-    expect(result.sub).toContain("on ");
-    expect(result.sub).not.toContain("delay");
+    expect(result.target?.address).toBe(ADDR_A);
+    expect(result.sub).toBe(null);
   });
 
   it("renders delay_changed with formatted seconds", () => {

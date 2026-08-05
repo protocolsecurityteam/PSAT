@@ -123,6 +123,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
       salience: eventSalience(ev),
       title: decoded.title,
       titleDetail: decoded.titleDetail || null,
+      target: decoded.target || null,
       sub: withCause(decoded.sub, ev),
       block,
       timestamp: ev.detected_at ? Date.parse(ev.detected_at) : null,

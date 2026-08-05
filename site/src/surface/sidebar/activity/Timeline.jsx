@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { TargetRef } from "./TargetRef.jsx";
+
 import { blockExplorerAddressUrl } from "../../../blockExplorer.js";
 import { shortenAddress } from "../../../graph.js";
 import { SALIENCE_ROUTINE, relativeTime } from "../../../monitoring/format.js";
@@ -19,7 +21,7 @@ function timeLabel(ms, now) {
   return new Date(ms).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
 
-function EventRow({ row, chain, now }) {
+function EventRow({ row, chain, now, onPreview, onNavigate }) {
   const link = txUrl(row.txHash, chain);
   const dotClass = [
     "ps-activity-dot",
@@ -41,8 +43,10 @@ function EventRow({ row, chain, now }) {
           {row.backfill ? <span className="ps-activity-backfill">backfill</span> : null}
           <span className="ps-activity-ev-time">{timeLabel(row.timestamp, now)}</span>
         </div>
-        {row.sub ? (
+        {row.target || row.sub ? (
           <div className="ps-activity-ev-sub">
+            {row.target ? <TargetRef target={row.target} onPreview={onPreview} onNavigate={onNavigate} /> : null}
+            {row.target && row.sub ? " · " : null}
             {row.sub}
             {row.isCurrent ? <span className="ps-activity-tag"> · current</span> : null}
           </div>
@@ -92,7 +96,7 @@ function groupRoutineRuns(rows) {
 // Renders a run of routine rows as a count + reveal, expanding IN PLACE so the
 // revealed rows keep their position in the feed. Disclosure state is
 // component-local; nothing about it needs to persist.
-function RoutineRun({ group, chain, now, expanded, onToggle }) {
+function RoutineRun({ group, chain, now, expanded, onToggle, onPreview, onNavigate }) {
   if (expanded) {
     return (
       <>
@@ -103,7 +107,7 @@ function RoutineRun({ group, chain, now, expanded, onToggle }) {
           </button>
         </li>
         {group.rows.map((row) => (
-          <EventRow key={row.key} row={row} chain={chain} now={now} />
+          <EventRow key={row.key} row={row} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
         ))}
       </>
     );
@@ -118,7 +122,7 @@ function RoutineRun({ group, chain, now, expanded, onToggle }) {
   );
 }
 
-function TimelineRows({ rows, chain, now }) {
+function TimelineRows({ rows, chain, now, onPreview, onNavigate }) {
   const [open, setOpen] = useState(() => new Set());
   const toggle = (key) => setOpen((prev) => {
     const next = new Set(prev);
@@ -135,9 +139,11 @@ function TimelineRows({ rows, chain, now }) {
         now={now}
         expanded={open.has(group.collapsedKey)}
         onToggle={() => toggle(group.collapsedKey)}
+        onPreview={onPreview}
+        onNavigate={onNavigate}
       />
     ) : (
-      <EventRow key={group.row.key} row={group.row} chain={chain} now={now} />
+      <EventRow key={group.row.key} row={group.row} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
     ),
   );
 }
@@ -183,6 +189,8 @@ export function Timeline({
   historyState = "pending",
   hiddenAbove = 0,
   hiddenBelow = 0,
+  onPreview,
+  onNavigate,
 }) {
   const dateLabel = boundaryDate
     ? new Date(boundaryDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
@@ -216,7 +224,7 @@ export function Timeline({
 
   return (
     <ul className="ps-activity-tl">
-      <TimelineRows rows={above} chain={chain} now={now} />
+      <TimelineRows rows={above} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
 
       {hasBoundary ? (
         <div className="ps-activity-boundary">
@@ -230,7 +238,7 @@ export function Timeline({
       ) : null}
 
       {hasBoundary && below.length ? (
-        <TimelineRows rows={below} chain={chain} now={now} />
+        <TimelineRows rows={below} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
       ) : hasBoundary && hiddenBelow > 0 ? (
         // Back-filled rows exist below the line and the filter withheld them.
         // Checked BEFORE the historyState chain: the history read answered

@@ -57,6 +57,8 @@ export function ActivityPanel({
   selectedMachine,
   selectedPrincipal,
   onSelect,
+  onPreview,
+  onNavigate,
   isAdmin,
   cache,
   onCache,
@@ -259,6 +261,8 @@ export function ActivityPanel({
         minSalience={minSalience}
         onHiddenCount={setHiddenCount}
         nameFor={nameFor}
+        onPreview={onPreview}
+        onNavigate={onNavigate}
       />
     </>
   );

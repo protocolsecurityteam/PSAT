@@ -446,3 +446,24 @@
   justify-self: start;
 }
 .ps-activity-dot.routine { opacity: 0.45; }
+
+/* Call-target reference in a timeline row. The link is styled flat on purpose
+   — shell/forms.css gives every bare <button> a teal gradient + shadow. */
+.ps-activity-target { color: var(--muted); }
+.ps-activity-target-link {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  border-bottom: 1px dotted rgba(148, 163, 184, 0.45);
+}
+.ps-activity-target-link:hover { border-bottom-color: var(--ink); box-shadow: none; transform: none; }
+.ps-activity-target .ps-goto-arrow { margin-left: 4px; }
+/* An off-graph target shows its whole address — it has no name to stand in
+   for it, so the full witness wraps rather than truncates. */
+.ps-activity-target-addr { word-break: break-all; color: var(--ink); }
+.ps-activity-target-note { color: var(--status-mute); font-style: italic; }

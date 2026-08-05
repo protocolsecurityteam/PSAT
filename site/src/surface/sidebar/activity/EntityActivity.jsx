@@ -26,6 +26,8 @@ export function EntityActivity({
   minSalience = "routine",
   onHiddenCount,
   nameFor,
+  onPreview,
+  onNavigate,
 }) {
   const [events, setEvents] = useState([]);
   // The settled outcome of the per-contract event read, carried with the
@@ -270,6 +272,8 @@ export function EntityActivity({
         // to draw, and renders the second as the first.
         hiddenAbove={visible.hiddenAbove}
         hiddenBelow={visible.hiddenBelow}
+        onPreview={onPreview}
+        onNavigate={onNavigate}
       />
     </section>
   );

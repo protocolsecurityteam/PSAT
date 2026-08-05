@@ -347,6 +347,29 @@ function addrDisplay(addr, opts) {
   return name || shortenAddress(addr);
 }
 
+// Structured call target for rows that have one (Safe executions, timelock
+// operations, module calls). `label` is the resolved graph name or null;
+// `onGraph` is stated only when a resolver was supplied — without one the
+// question "is this on the graph" was never asked, and null (not false)
+// says so. Consumers render an off-graph target with its FULL address: a
+// contract this protocol's graph cannot name deserves the whole witness,
+// not a truncation.
+function callTarget(addr, opts, prep = "on") {
+  if (!addr) return null;
+  const label = opts?.nameFor ? opts.nameFor(addr) : null;
+  return { address: addr, label, prep, onGraph: opts?.nameFor ? Boolean(label) : null };
+}
+
+// Plain-text form of a call target, for single-line contexts (the protocol
+// feed row is itself a <button>, so it cannot nest an interactive chip).
+export function targetText(target) {
+  if (!target?.address) return null;
+  const prep = target.prep || "on";
+  if (target.label) return `${prep} ${target.label}`;
+  const short = shortenAddress(target.address);
+  return target.onGraph === false ? `${prep} ${short} (not on graph)` : `${prep} ${short}`;
+}
+
 const RENDER_BY_WRITE_TARGET = {
   owner: (d) => {
     const renounced = d.new_owner && /^0x0+$/i.test(d.new_owner);
@@ -432,10 +455,11 @@ const RENDER_BY_WRITE_TARGET = {
 
     if (se.batch_status === "undecodable") {
       const why = SAFE_EXEC_BATCH_REASON[se.batch_status_reason];
-      const parts = [`delegatecall → ${addrDisplay(se.to, opts)}`];
+      const parts = ["delegatecall"];
       if (why) parts.push(why);
       return {
         title: `${executed ? "MultiSend batch" : "Reverted MultiSend batch"} — did not decode`,
+        target: callTarget(se.to, opts),
         sub: parts.join(" · "),
       };
     }
@@ -456,7 +480,6 @@ const RENDER_BY_WRITE_TARGET = {
       : `Reverted: ${name || "Safe transaction"}`;
 
     const parts = [];
-    if (call.to) parts.push(`on ${addrDisplay(call.to, opts)}`);
     // `call` is the default operation — only a delegatecall is worth ink,
     // and an unrecognized one says so out loud (it is what the alert is).
     if (call.operation === 1 || call.operation_label === "delegatecall") {
@@ -471,12 +494,14 @@ const RENDER_BY_WRITE_TARGET = {
     return {
       title,
       titleDetail: signature || null,
+      target: callTarget(call.to, opts),
       sub: parts.length ? parts.join(" · ") : null,
     };
   },
   _safe_module_op: (d, type, opts) => ({
     title: type === "safe_module_executed" ? "Safe module executed" : "Safe module reverted",
-    sub: d.module ? `module ${addrDisplay(d.module, opts)}` : null,
+    target: callTarget(d.module, opts, "via module"),
+    sub: null,
   }),
   _timelock_op: (d, type, opts) => {
     const scheduled = type === "timelock_scheduled";
@@ -486,11 +511,11 @@ const RENDER_BY_WRITE_TARGET = {
     const name = fnDisplay(signature) || (d.selector ? `sel ${d.selector}` : null);
     const delay = fmtSeconds(d.delay);
     const subParts = [];
-    if (d.target) subParts.push(`on ${addrDisplay(d.target, opts)}`);
     if (scheduled && delay) subParts.push(`delay ${delay}`);
     return {
       title: `Timelock ${scheduled ? "scheduled" : "executed"}${name ? ` ${name}` : " operation"}`,
       titleDetail: signature,
+      target: callTarget(d.target, opts),
       sub: subParts.length ? subParts.join(" · ") : null,
     };
   },
