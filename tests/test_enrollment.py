@@ -1001,6 +1001,97 @@ class TestEnrollmentIntegration:
         ).scalar_one_or_none()
         assert eoa_mc is None
 
+    def test_controllers_enroll_on_the_chain_of_the_contracts_they_govern(self, pg_session, monkeypatch):
+        """Chain-as-island, per controller: a Safe shared across chains gets a
+        MonitoredContract row on EACH chain it governs on, and a base-only
+        controller lands on base — never on a caller-default chain. This is
+        the multichain shape the old single-chain fallback got wrong: a
+        protocol spanning two chains enrolled every controller on the caller's
+        chain, so the base twin of a shared Safe was never monitored.
+        """
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
+        monkeypatch.setenv("ERPC_BASE_URL", "http://erpc.local")
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        shared_safe = "0x" + "a1" * 20
+        base_only_safe = "0x" + "a2" * 20
+
+        # The shared Safe governs one contract per chain; the base-only Safe
+        # governs only the second base contract.
+        for caddr, cchain, principal in [
+            ("0x" + "d4" * 20, "ethereum", shared_safe),
+            ("0x" + "d5" * 20, "base", shared_safe),
+            ("0x" + "d6" * 20, "base", base_only_safe),
+        ]:
+            contract = Contract(address=caddr, chain=cchain, protocol_id=proto.id, contract_name=f"C{caddr[-2:]}")
+            pg_session.add(contract)
+            pg_session.flush()
+            job = _create_completed_job(pg_session, caddr, proto.id)
+            # The job carries its chain (as the enqueue path dual-writes it) so
+            # the governance build matches it to the right Contract row.
+            job.request = {"chain": cchain}
+            job.chain_id = 8453 if cchain == "base" else 1
+            pg_session.flush()
+            _grant_primary_authority(pg_session, contract.id, principal, resolved_type="safe")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        shared_rows = (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == shared_safe))
+            .scalars()
+            .all()
+        )
+        assert sorted(mc.chain for mc in shared_rows) == ["base", "ethereum"]
+        assert all(mc.contract_type == "safe" and mc.is_active for mc in shared_rows)
+
+        base_rows = (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == base_only_safe))
+            .scalars()
+            .all()
+        )
+        assert [mc.chain for mc in base_rows] == ["base"]
+
+    def test_off_allowlist_controller_chain_is_skipped_not_redirected(self, pg_session, monkeypatch):
+        """A controller governing only on a disabled chain gets NO row — not a
+        row on some enabled chain it does not govern on."""
+        from db.models import Contract, Protocol
+        from services.monitoring.enrollment import enroll_protocol_contracts
+
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+
+        proto = Protocol(name=PROTO_NAME)
+        pg_session.add(proto)
+        pg_session.flush()
+
+        base_safe = "0x" + "a3" * 20
+        contract = Contract(address="0x" + "d7" * 20, chain="base", protocol_id=proto.id, contract_name="BaseC")
+        pg_session.add(contract)
+        pg_session.flush()
+        job = _create_completed_job(pg_session, contract.address, proto.id)
+        job.request = {"chain": "base"}
+        job.chain_id = 8453
+        pg_session.flush()
+        _grant_primary_authority(pg_session, contract.id, base_safe, resolved_type="safe")
+        pg_session.commit()
+
+        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
+            enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
+
+        rows = (
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == base_safe))
+            .scalars()
+            .all()
+        )
+        assert rows == []
+
     def test_enroll_cgn_unknown_governance_safe_still_enrolls(self, pg_session):
         """A governance Safe whose ControlGraphNode is typed ``unknown`` (the
         resolution-stage walk never classified it) must still enroll, because

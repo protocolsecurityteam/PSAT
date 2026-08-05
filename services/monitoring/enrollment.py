@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from sqlalchemy import func, select, text, tuple_
@@ -488,33 +488,15 @@ def enroll_protocol_contracts(
     # re-includes existing controller rows from the DB, so skipping this pass
     # never deactivates controllers a prior reconciler enrolled.
     if enroll_controllers:
-        # v1 is chain-as-island: a controller's chain equals the chain
-        # of the contracts it governs — control edges never cross chains. Derive
-        # it from the protocol's enrolled contracts rather than the caller's
-        # default so a non-mainnet protocol's controllers enroll on their own
-        # chain; fall back to the caller's ``chain`` when the contracts don't pin
-        # a single one.
-        contract_chains = {c.chain for c in contracts if c.chain}
-        controller_chain = contract_chains.pop() if len(contract_chains) == 1 else chain
-        # Controllers enroll on a single chain (chain-as-island); gate that
-        # chain against the allowlist so a disabled chain's controllers get no
-        # monitoring state either.
-        if chain_enabled(controller_chain):
-            deferred += _enroll_controller_addresses(
-                session, contracts, protocol_id, controller_chain, _block_for(controller_chain)
-            )
-            # Flush so controller rows are visible to the stale-detection query below.
-            session.flush()
-        else:
-            logger.info(
-                "Skipping controller enrollment: chain not enabled for this deployment",
-                extra={
-                    "chain": controller_chain,
-                    "protocol_id": protocol_id,
-                    "reason": "chain_not_enabled",
-                    "site": "enrollment_controllers",
-                },
-            )
+        # Chain-as-island: each controller enrolls on the chain(s) of the
+        # contracts it governs — ``controllers_for_protocol`` keys per
+        # (address, chain) from the per-chain primary contests, so a
+        # multichain protocol's Base guardian lands on ``base`` and a Safe
+        # shared across chains gets a row per chain it governs on. The
+        # ``chain_enabled`` allowlist gate applies per chain inside.
+        deferred += _enroll_controller_addresses(session, contracts, protocol_id, _block_for)
+        # Flush so controller rows are visible to the stale-detection query below.
+        session.flush()
 
     # Deactivate stale MonitoredContract rows for this protocol that are no
     # longer in the enrolled set (e.g. inventory addresses that were never
@@ -994,12 +976,21 @@ def _bridge_to_watched_proxy(
 _CONTROLLER_MONITORED_TYPES = ("safe", "timelock", "proxy")
 
 
+def _chain_token(chain: str | None) -> str:
+    """Coalesced chain token matching ``company_overview._coalesce_chain`` (and
+    the frontend's ``coalesceChain``): NULL/empty/``"mainnet"`` fold to
+    ``"ethereum"``, everything else lowercases as-is — so keys built here
+    compare equal to ``controllers_for_protocol``'s entity-derived chain half.
+    """
+    token = (chain or "").strip().lower()
+    return "ethereum" if token in ("", "mainnet") else token
+
+
 def _enroll_controller_addresses(
     session: Session,
     contracts: Sequence[Contract],
     protocol_id: int,
-    chain: str,
-    current_block: int | None,
+    block_for: Callable[[str], int | None],
 ) -> int:
     """Enroll the protocol's controllers (Safes / Timelocks / proxy admins) as
     MonitoredContract rows, and demote any that are no longer controllers.
@@ -1032,24 +1023,47 @@ def _enroll_controller_addresses(
     Protocol-contract rows (owned by the main loop in
     ``enroll_protocol_contracts``) are never touched.
 
-    A ``None`` *current_block* (head read not determined) suppresses only the
-    creation of new rows — re-promotion and demotion of rows that already exist
-    need no cursor and still converge. Returns the number of controller rows
-    whose creation was deferred that way.
+    Controllers enroll per (address, chain): the chain comes from the
+    contracts the principal governs (``controllers_for_protocol``'s key), so a
+    multichain protocol's Base guardian lands on ``base`` and a Safe shared
+    across chains gets one row per chain it governs on. Each chain is gated on
+    ``chain_enabled`` individually.
+
+    A ``None`` head block for a chain (head read not determined) suppresses
+    only the creation of new rows on that chain — re-promotion and demotion of
+    rows that already exist need no cursor and still converge. Returns the
+    number of controller rows whose creation was deferred that way.
     """
     from services.aggregations.company_overview import controllers_for_protocol
 
-    enrolled_contract_addrs = {c.address.lower() for c in contracts}
+    enrolled_contract_keys = {(c.address.lower(), _chain_token(c.chain)) for c in contracts}
     controllers = controllers_for_protocol(session, protocol_id)
     deferred = 0
+    head_by_chain: dict[str, int | None] = {}
 
     # Pass 1: enroll / re-promote each controller (primary + co-controller).
-    # Sorted by lowercased address: this loop takes progressive row locks via
-    # per-iteration SELECTs, so a concurrent drain and manual re-enroll that
-    # overlap here acquire them in one global order and can't deadlock.
-    for addr, monitored_type in sorted(controllers.items(), key=lambda kv: (kv[0] or "").lower()):
-        if not addr or addr in enrolled_contract_addrs:
+    # Sorted by (lowercased address, chain): this loop takes progressive row
+    # locks via per-iteration SELECTs, so a concurrent drain and manual
+    # re-enroll that overlap here acquire them in one global order and can't
+    # deadlock.
+    for (addr, chain), monitored_type in sorted(controllers.items()):
+        if not addr or (addr, chain) in enrolled_contract_keys:
             continue
+        if not chain_enabled(chain):
+            logger.info(
+                "Skipping controller enrollment: chain not enabled for this deployment",
+                extra={
+                    "address": addr,
+                    "chain": chain,
+                    "protocol_id": protocol_id,
+                    "reason": "chain_not_enabled",
+                    "site": "enrollment_controllers",
+                },
+            )
+            continue
+        if chain not in head_by_chain:
+            head_by_chain[chain] = block_for(chain)
+        current_block = head_by_chain[chain]
         existing = session.execute(
             select(MonitoredContract).where(
                 MonitoredContract.address == addr,
@@ -1134,9 +1148,10 @@ def _enroll_controller_addresses(
     )
     for mc in existing_controllers:
         addr = (mc.address or "").lower()
-        if not addr or addr in enrolled_contract_addrs:
+        key = (addr, _chain_token(mc.chain))
+        if not addr or key in enrolled_contract_keys:
             continue
-        if addr in controllers:
+        if key in controllers:
             continue
         mc.is_active = False
         mc.enrollment_source = "auto_deprimary"
