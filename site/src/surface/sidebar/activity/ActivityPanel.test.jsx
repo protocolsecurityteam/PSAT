@@ -4,9 +4,10 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor, within, act } from "@testing-library/react";
+import { render, screen, waitFor, within, act, fireEvent } from "@testing-library/react";
 
 import { ActivityPanel } from "./ActivityPanel.jsx";
+import { eventTypesFromGroupKeys, groupKeysFromConfig } from "./helpers.js";
 import { setFetchHandler } from "../../../test/fetchMock.js";
 
 const PROXY = "0x30880000000000000000000000000000000000f2";
@@ -124,6 +125,15 @@ function renderPanel(props) {
   return render(panelElement(props));
 }
 
+// Structural tests assert rows the Alerts default withholds (backfill and
+// pre-salience rows are not_determined). Their subject is the timeline's
+// structure, so they view All; the filter's own tests exercise the default.
+async function showAll() {
+  await act(async () => {
+    screen.getByRole("button", { name: "All" }).click();
+  });
+}
+
 const notDetermined = () =>
   new Response(JSON.stringify({ detail: "Artifact state not determined" }), {
     status: 503,
@@ -144,6 +154,7 @@ describe("ActivityPanel — proxy entity mode", () => {
 
   it("renders the status strip, enrollment boundary, and impl attribution", async () => {
     renderPanel({ selectedMachine: PROXY_MACHINE, isAdmin: true });
+    await showAll();
 
     // Status strip identity.
     expect(await screen.findByText("LiquidityPool")).toBeInTheDocument();
@@ -283,14 +294,29 @@ describe("ActivityPanel — multichain (F4)", () => {
       return el;
     });
     expect(within(watch).getByText("Upgrades")).toBeInTheDocument(); // base row resolved
-    expect(within(watch).queryByText("Safe activity")).toBeNull(); // NOT the ethereum row
+    // NOT the ethereum row — neither of the two groups its watch flag offers.
+    expect(within(watch).queryByText("Safe signers")).toBeNull();
+    expect(within(watch).queryByText("Safe executions")).toBeNull();
   });
 
   it("scopes the protocol-wide feed to the active chain (base row only, not ethereum)", async () => {
+    // The event fetch itself must state the chain — the same address is a
+    // distinct deployment per chain, so only the server (which knows each
+    // event's monitored row) can scope a shared-address protocol's feed.
+    const eventFetches = [];
+    setFetchHandler(
+      (url) => /\/api\/protocols\/\d+\/events$/.test(url.pathname),
+      (url) => {
+        eventFetches.push(url.searchParams.get("chain"));
+        return [];
+      },
+    );
     renderPanel({ chain: "base" });
     await waitFor(() => {
       expect(screen.getByText(/addresses monitored/i)).toHaveTextContent("1 addresses monitored");
     });
+    await waitFor(() => expect(eventFetches.length).toBeGreaterThan(0));
+    expect(eventFetches.every((c) => c === "base")).toBe(true);
   });
 });
 
@@ -345,6 +371,7 @@ describe("ActivityPanel — a failed event poll does not erase proven events", (
     try {
       renderPanel({ selectedMachine: PROXY_MACHINE });
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await showAll();
       expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
       expect(screen.queryByText(/refresh did not complete/i)).toBeNull();
 
@@ -400,6 +427,7 @@ describe("ActivityPanel — a contract whose proxyhood contradicts itself", () =
     // arrive must render, not be dropped for failing a boolean.
     mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
     renderPanel({ selectedMachine: BEACON_MACHINE });
+    await showAll();
     expect(await screen.findByText("First deployment")).toBeInTheDocument();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
@@ -596,6 +624,7 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     // real history replaces it with rows.
     mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
     renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
     expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
@@ -611,6 +640,7 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
 
     const { rerender } = renderPanel({ selectedMachine: PROXY_MACHINE, cache: POOL_CACHE });
+    await showAll();
     expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE, cache: POOL_CACHE }));
@@ -647,6 +677,7 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     );
 
     const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE }));
@@ -678,11 +709,253 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     );
 
     const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/role granted/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE }));
     expect(await screen.findByText("Pool")).toBeInTheDocument();
     const entity = container.querySelector(".ps-activity-entity");
     expect(/role granted/i.test(entity.textContent)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Salience: the two-position control (All / Alerts, default Alerts), the
+// always-visible hidden count, and the routine-run collapse. Invariant 4
+// (routine hides, never deletes) is what these pin; the count + one-click All
+// is what keeps the Alerts default from being silent suppression.
+// ---------------------------------------------------------------------------
+
+const SALIENT_EVENTS = [
+  evRow("s1", "ownership_transferred", 401, { salience: "alert", salience_basis: ["canonical_config_family"] }),
+  evRow("s2", "safe_tx_executed", 402, { salience: "not_determined", salience_basis: ["safe_exec_not_enriched"] }),
+  evRow("s3", "state_changed_poll", 403, { salience: "routine", salience_basis: ["metric_field_diff"], field: "a" }),
+  evRow("s4", "state_changed_poll", 404, { salience: "routine", salience_basis: ["metric_field_diff"], field: "b" }),
+  evRow("s5", "state_changed_poll", 405, { salience: "routine", salience_basis: ["metric_field_diff"], field: "c" }),
+];
+
+describe("ActivityPanel — salience filter", () => {
+  beforeEach(() => {
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: SALIENT_EVENTS });
+  });
+
+  it("defaults to Alerts and states how many rows that hides", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+    expect(screen.getByRole("button", { name: "Alerts" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "false");
+    // The unrated Safe execution + the three proven-routine poll diffs.
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
+    expect(screen.queryByText(/changed \(polled\)/)).toBeNull();
+  });
+
+  it("counts an unrated Safe execution behind the default and keeps it reachable", async () => {
+    // The default withholds not_determined rows — the accepted tradeoff of
+    // opening on Alerts. The count says so, and one click restores them.
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+    await showAll();
+    expect(await screen.findByText("Safe transaction executed")).toBeTruthy();
+  });
+
+  it("reveals the routine rows collapsed behind a count when All is chosen", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    // Collapsed, not dropped: the count is the row.
+    const toggle = screen.getByRole("button", { name: "3 routine events — show" });
+    expect(screen.queryByText(/changed \(polled\)/)).toBeNull();
+
+    await act(async () => {
+      toggle.click();
+    });
+    expect(screen.getAllByText(/changed \(polled\)/)).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "3 routine events — hide" })).toBeTruthy();
+  });
+
+  it("round-trips All and back to Alerts without losing the count", async () => {
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+    await showAll();
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    expect(screen.getByText("Safe transaction executed")).toBeTruthy();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Alerts" }).click();
+    });
+
+    expect(screen.getByText("Ownership transferred")).toBeTruthy();
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+  });
+
+  it("filters the protocol-wide feed with the same predicate and count", async () => {
+    mockActivity({ contracts: [SAFE_CONTRACT], protocolEvents: SALIENT_EVENTS });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+  });
+
+  it("badges a feed row with the type the event itself states when no local row matches", async () => {
+    // A row whose monitored contract is not in the active chain's list (or is
+    // simply unknown to this client) must NOT be minted "regular" from the
+    // missed lookup — the API joins the monitored row and states its type.
+    mockActivity({
+      contracts: [],
+      protocolEvents: [
+        evRow("b1", "safe_tx_executed", 500, {
+          salience: "alert",
+          salience_basis: ["execution_failure"],
+          contract_address: "0x" + "77".repeat(20),
+          contract_type: "safe",
+        }),
+      ],
+    });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    expect(await screen.findByText("safe")).toBeTruthy();
+    expect(screen.queryByText("regular")).toBeNull();
+  });
+});
+
+// A section the filter emptied has NOT earned an absence claim. Both empty
+// states below were reproduced rendering the absence prose over rows that
+// exist; these pin the two branches.
+describe("ActivityPanel — a filter-emptied timeline claims no absence", () => {
+  it("does not call the withheld back-filled upgrades 'no activity before the line'", async () => {
+    mockActivity({
+      contracts: [PROXY_CONTRACT],
+      monitoredEvents: [evRow("a1", "ownership_transferred", 401, { salience: "alert" })],
+      history: HISTORY,
+    });
+    renderPanel({ selectedMachine: PROXY_MACHINE });
+    await screen.findByText("Ownership transferred");
+    // The Alerts default withholds the not_determined backfill rows from the
+    // start — the empty state below the line must still claim no absence.
+    expect(screen.queryByText("First deployment")).toBeNull();
+    expect(screen.queryByText(/No activity before the line/)).toBeNull();
+    expect(screen.queryByText(/isn't back-filled/)).toBeNull();
+    // I1 (block 100) and I2 (200) fall below the enrollment boundary at 250;
+    // CUR (300) is above it. All three are not_determined and all three are
+    // withheld — the two below the line are the ones this branch renders.
+    expect(screen.getByText("2 back-filled upgrades are hidden by the current filter.")).toBeTruthy();
+  });
+
+  it("does not call two withheld routine events 'no activity recorded yet'", async () => {
+    // enrollment_block null → no boundary → the early-return empty state.
+    mockActivity({
+      contracts: [{ ...SAFE_CONTRACT, enrollment_block: null }],
+      monitoredEvents: [
+        evRow("r1", "state_changed_poll", 401, { salience: "routine", field: "a" }),
+        evRow("r2", "state_changed_poll", 402, { salience: "routine", field: "b" }),
+      ],
+    });
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+
+    await waitFor(() => expect(screen.getByText("2 hidden")).toBeTruthy());
+    expect(screen.queryByText("No activity recorded yet.")).toBeNull();
+    expect(screen.getByText("2 events are hidden by the current filter.")).toBeTruthy();
+
+    // And the rows are reachable — routine hides, it never deletes.
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+    expect(screen.getByRole("button", { name: "2 routine events — show" })).toBeTruthy();
+  });
+
+  it("does not call a filter-emptied protocol feed 'nothing captured yet'", async () => {
+    // Every event is proven-routine, so the default Notable+ empties the feed
+    // while the control says how many it withheld.
+    mockActivity({
+      contracts: [SAFE_CONTRACT],
+      protocolEvents: [
+        evRow("p1", "state_changed_poll", 401, { salience: "routine", field: "a" }),
+        evRow("p2", "state_changed_poll", 402, { salience: "routine", field: "b" }),
+      ],
+    });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+
+    await waitFor(() => expect(screen.getByText("2 hidden")).toBeTruthy());
+    expect(screen.queryByText(/Nothing captured yet/)).toBeNull();
+    expect(screen.getByText("2 events are hidden by the current filter.")).toBeTruthy();
+
+    // Reachability: the rows were withheld, not dropped.
+    await act(async () => {
+      screen.getByRole("button", { name: "All" }).click();
+    });
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    expect(screen.queryByText("2 events are hidden by the current filter.")).toBeNull();
+    expect(screen.getAllByText(/changed \(polled\)/).length).toBe(2);
+  });
+
+  it("still says the scanner has seen nothing when nothing was withheld", async () => {
+    mockActivity({ contracts: [SAFE_CONTRACT], protocolEvents: [] });
+    renderPanel({ selectedMachine: null });
+    await screen.findByText("Recent across protocol");
+    expect(await screen.findByText(/Nothing captured yet/)).toBeTruthy();
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+  });
+});
+
+// The `groups` discriminator is only worth anything if the save actually
+// carries it: the notifier reads its ABSENCE as "this filter predates the
+// safe_exec split", so a producer that quietly stopped writing it would turn
+// every new save into a legacy one and nothing else would notice.
+describe("ActivityPanel — the attached webhook states its alert groups", () => {
+  beforeEach(() => {
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });
+  });
+
+  async function attach() {
+    const posted = [];
+    setFetchHandler(
+      (url, init) => /\/api\/protocols\/\d+\/subscribe$/.test(url.pathname) && init?.method === "POST",
+      (url, init) => {
+        posted.push(JSON.parse(init.body));
+        return {};
+      },
+    );
+    renderPanel({ selectedMachine: SAFE_MACHINE, isAdmin: true });
+    const attachBtn = await screen.findByText(/attach Discord/i);
+    await act(async () => {
+      attachBtn.click();
+    });
+    fireEvent.change(screen.getByLabelText("Discord webhook URL"), {
+      target: { value: "https://discord.com/api/webhooks/1/abc" },
+    });
+    await act(async () => {
+      fireEvent.submit(document.querySelector(".ps-activity-webhook-form"));
+    });
+    await waitFor(() => expect(posted.length).toBe(1));
+    return posted[0];
+  }
+
+  it("POSTs the group keys it derived from the contract's config", async () => {
+    const body = await attach();
+    const config = SAFE_CONTRACT.monitoring_config;
+    expect(body.event_filter.groups).toEqual(groupKeysFromConfig(config));
+    // Not a tautology against the helper alone: a Safe offers both halves of
+    // the split, which is the case the discriminator exists for.
+    expect(body.event_filter.groups).toEqual(["signers", "safe_exec"]);
+  });
+
+  it("POSTs exactly those groups' event types beside them", async () => {
+    const body = await attach();
+    expect(new Set(body.event_filter.event_types)).toEqual(
+      new Set(eventTypesFromGroupKeys(groupKeysFromConfig(SAFE_CONTRACT.monitoring_config))),
+    );
+    // Invariant 7 at the producer: the save still enumerates every type the
+    // pre-split `signers` group carried.
+    expect(body.event_filter.event_types).toContain("safe_tx_executed");
+    expect(body.event_filter.event_types).toContain("signer_added");
   });
 });

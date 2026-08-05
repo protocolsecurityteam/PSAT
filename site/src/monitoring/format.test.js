@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "./format.js";
+import { decodeEvent, eventKind, eventKindLabel, eventSalience, eventSeverity, salienceAllows, targetText } from "./format.js";
 import { shortenAddress } from "../graph.js";
 
 const ADDR_A = "0x1111111111111111111111111111111111111111";
@@ -264,6 +264,215 @@ describe("decodeEvent — Safe activity", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The enriched Safe execution (§5c). The renderer reads what the backend
+// decoded and NEVER re-derives it: a mirrored decode would drift, and a
+// drifted mirror that renders the wrong call is worse than a bare hash.
+// ---------------------------------------------------------------------------
+
+describe("decodeEvent — enriched Safe executions", () => {
+  const safeOp = (data) => decodeEvent(evt("safe_tx_executed", { effect_tags: { writes: ["_safe_op"] }, ...data }));
+
+  it("names the resolved function, the target and the operation", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_A,
+        selector: "0x69fe0e2d",
+        operation: 0,
+        operation_label: "call",
+        target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+      },
+    });
+    expect(result.title).toBe("Executed setFee()");
+    expect(result.titleDetail).toBe("setFee(uint256)");
+    // No resolver supplied → label null, and onGraph is null (the question
+    // "is this on the graph" was never asked), never false.
+    expect(result.target).toEqual({ address: ADDR_A, label: null, prep: "on", onGraph: null });
+    expect(targetText(result.target)).toBe(`on ${shortenAddress(ADDR_A)}`);
+    expect(result.sub).toBe(null);
+  });
+
+  it("resolves the target to a protocol name when the caller supplies one", () => {
+    const result = decodeEvent(
+      evt("safe_tx_executed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: {
+          status: "decoded",
+          to: ADDR_A,
+          selector: "0x69fe0e2d",
+          operation: 0,
+          operation_label: "call",
+          target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+        },
+      }),
+      { nameFor: (addr) => (addr.toLowerCase() === ADDR_A.toLowerCase() ? "Accountant" : null) },
+    );
+    expect(result.target).toEqual({ address: ADDR_A, label: "Accountant", prep: "on", onGraph: true });
+    expect(targetText(result.target)).toBe("on Accountant");
+  });
+
+  it("states off-graph when a resolver exists and cannot name the target", () => {
+    const result = decodeEvent(
+      evt("safe_tx_executed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: {
+          status: "decoded",
+          to: ADDR_B,
+          selector: "0x69fe0e2d",
+          operation: 0,
+          operation_label: "call",
+        },
+      }),
+      { nameFor: () => null },
+    );
+    expect(result.target).toEqual({ address: ADDR_B, label: null, prep: "on", onGraph: false });
+    expect(targetText(result.target)).toBe(`on ${shortenAddress(ADDR_B)} (not on graph)`);
+  });
+
+  it("falls back to the raw selector when no signature resolved", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_A,
+        selector: "0x8456cb59",
+        operation: 0,
+        operation_label: "call",
+        target_function: { selector: "0x8456cb59", signature: null },
+      },
+    });
+    expect(result.title).toBe("Executed 0x8456cb59");
+  });
+
+  it("summarizes a MultiSend batch from its first call", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch: [
+          { operation: 0, operation_label: "call", to: ADDR_A, selector: "0x69fe0e2d", signature: "setFee(uint256)" },
+          { operation: 0, operation_label: "call", to: ADDR_B, selector: "0x8456cb59", signature: null },
+          { operation: 0, operation_label: "call", to: ADDR_B, selector: "0x8456cb59", signature: null },
+        ],
+      },
+    });
+    expect(result.title).toBe("Executed setFee()");
+    expect(result.target?.address).toBe(ADDR_A);
+    expect(result.sub).toBe("+2 more in batch");
+  });
+
+  it("says an undecodable batch did not decode rather than listing part of it", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch_status: "undecodable",
+      },
+    });
+    expect(result.title).toBe("MultiSend batch — did not decode");
+    expect(result.target?.address).toBe(ADDR_B);
+    expect(result.sub).toBe("delegatecall");
+  });
+
+  it("renders an unrecognized delegatecall as the delegatecall it is", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        selector: "0x69fe0e2d",
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: false,
+        target_function: { selector: "0x69fe0e2d", signature: null },
+      },
+    });
+    expect(result.title).toBe("Executed 0x69fe0e2d");
+    expect(result.target?.address).toBe(ADDR_B);
+    expect(result.sub).toBe("delegatecall — not a pinned MultiSend");
+  });
+
+  it("names which layer of a batch failed to expand", () => {
+    const result = safeOp({
+      safe_exec: {
+        status: "decoded",
+        to: ADDR_B,
+        operation: 1,
+        operation_label: "delegatecall",
+        multisend_recognized: true,
+        batch_status: "undecodable",
+        batch_status_reason: "nested_payload_undecodable",
+      },
+    });
+    expect(result.sub).toContain("a nested payload did not decode");
+  });
+
+  it("renders each undecoded status as its own stated reason", () => {
+    const cases = {
+      not_top_level_call: "not a direct execTransaction",
+      over_budget: "transaction budget",
+      args_undecodable: "did not decode",
+      ambiguous_attribution: "executed more than once in this transaction",
+      something_new: "not decoded (something_new)",
+    };
+    for (const [status, fragment] of Object.entries(cases)) {
+      const result = safeOp({ safe_tx_hash: "0x" + "ab".repeat(32), safe_exec: { status } });
+      expect(result.title).toBe("Safe transaction executed");
+      expect(result.sub).toContain(fragment);
+    }
+  });
+
+  it("keeps the pre-enrichment rendering when no safe_exec block exists", () => {
+    const result = safeOp({ safe_tx_hash: "0x" + "ab".repeat(32), payment: 0 });
+    expect(result.title).toBe("Safe transaction executed");
+    expect(result.sub).toContain("safeTxHash");
+  });
+
+  it("uses the reverted verb on a decoded failure", () => {
+    const result = decodeEvent(
+      evt("safe_tx_failed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: { status: "decoded", to: ADDR_A, selector: "0x69fe0e2d", operation: 0, operation_label: "call" },
+      }),
+    );
+    expect(result.title).toBe("Reverted: 0x69fe0e2d");
+  });
+});
+
+describe("decodeEvent — timelock name resolution", () => {
+  it("shows the backend-resolved signature in place of the raw selector", () => {
+    const result = decodeEvent(
+      evt("timelock_scheduled", {
+        target: ADDR_A,
+        selector: "0x69fe0e2d",
+        delay: 86400,
+        target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+        effect_tags: { writes: ["_timelock_op"] },
+      }),
+    );
+    expect(result.title).toBe("Timelock scheduled setFee()");
+    expect(result.titleDetail).toBe("setFee(uint256)");
+    expect(result.sub).not.toContain("sel 0x69fe0e2d");
+  });
+
+  it("keeps the raw selector when nothing resolved it", () => {
+    const result = decodeEvent(
+      evt("timelock_scheduled", {
+        target: ADDR_A,
+        selector: "0x69fe0e2d",
+        target_function: { selector: "0x69fe0e2d", signature: null },
+        effect_tags: { writes: ["_timelock_op"] },
+      }),
+    );
+    expect(result.title).toContain("sel 0x69fe0e2d");
+  });
+});
+
 describe("decodeEvent — timelock", () => {
   it("renders timelock_scheduled with target, selector, delay", () => {
     const result = decodeEvent(
@@ -274,9 +483,8 @@ describe("decodeEvent — timelock", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.title).toBe("Timelock operation scheduled");
-    expect(result.sub).toContain("target");
-    expect(result.sub).toContain("sel");
+    expect(result.title).toBe("Timelock scheduled sel 0xdeadbeef");
+    expect(result.target?.address).toBe(ADDR_A);
     expect(result.sub).toContain("delay");
   });
 
@@ -288,9 +496,9 @@ describe("decodeEvent — timelock", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.title).toBe("Timelock operation executed");
-    expect(result.sub).toContain("target");
-    expect(result.sub).not.toContain("delay");
+    expect(result.title).toBe("Timelock executed sel 0xdeadbeef");
+    expect(result.target?.address).toBe(ADDR_A);
+    expect(result.sub).toBe(null);
   });
 
   it("renders delay_changed with formatted seconds", () => {
@@ -618,5 +826,82 @@ describe("state_changed_poll old/new key aliases", () => {
     );
     // addresses shorten like every other renderer; the aliases are what this pins
     expect(result.sub).toBe(`${shortenAddress(ADDR_A)} → ${shortenAddress(ADDR_B)}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Salience — the vocabulary mirror. The backend owns the classification; these
+// tests pin that this file reads it and never re-derives it.
+// ---------------------------------------------------------------------------
+
+describe("eventSalience", () => {
+  it("reads the level the backend published", () => {
+    for (const level of ["alert", "notable", "routine", "not_determined"]) {
+      expect(eventSalience(evt("safe_tx_executed", { salience: level }))).toBe(level);
+    }
+  });
+
+  it("reads an absent or unknown level as not_determined, never as routine", () => {
+    expect(eventSalience(evt("safe_tx_executed", {}))).toBe("not_determined");
+    expect(eventSalience(evt("safe_tx_executed", { salience: "quiet" }))).toBe("not_determined");
+    expect(eventSalience(evt("safe_tx_executed", null))).toBe("not_determined");
+    expect(eventSalience(undefined)).toBe("not_determined");
+  });
+
+  it("does not re-derive a level from the event type", () => {
+    // A canonical config family with NO backend level stays unrated here even
+    // though the backend rule would call it alert — a mirrored ruleset drifts,
+    // and a drifted mirror that hides rows is a silent-suppression bug.
+    expect(eventSalience(evt("ownership_transferred", {}))).toBe("not_determined");
+  });
+});
+
+describe("salienceAllows", () => {
+  it("sorts not_determined with notable, never with routine", () => {
+    expect(salienceAllows("not_determined", "notable")).toBe(true);
+    expect(salienceAllows("notable", "notable")).toBe(true);
+    expect(salienceAllows("routine", "notable")).toBe(false);
+    expect(salienceAllows("alert", "notable")).toBe(true);
+  });
+
+  it("admits only proven alerts at the alert threshold", () => {
+    expect(salienceAllows("alert", "alert")).toBe(true);
+    expect(salienceAllows("not_determined", "alert")).toBe(false);
+    expect(salienceAllows("notable", "alert")).toBe(false);
+  });
+
+  it("admits everything at the routine threshold and for an unreadable one", () => {
+    for (const level of ["alert", "notable", "routine", "not_determined"]) {
+      expect(salienceAllows(level, "routine")).toBe(true);
+      expect(salienceAllows(level, "nonsense")).toBe(true);
+      expect(salienceAllows(level, undefined)).toBe(true);
+    }
+  });
+
+  it("measures an unrated level at the not_determined rank", () => {
+    expect(salienceAllows(undefined, "notable")).toBe(true);
+    expect(salienceAllows(undefined, "alert")).toBe(false);
+  });
+});
+
+describe("eventSeverity — rebased on salience", () => {
+  it("takes the backend level over the kind-derived table", () => {
+    // The old table hardcoded every safe and state event to routine.
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "alert" }))).toBe("critical");
+    expect(eventSeverity(evt("state_changed_poll", { salience: "notable" }))).toBe("major");
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "routine" }))).toBe("routine");
+  });
+
+  it("renders not_determined at notable prominence", () => {
+    expect(eventSeverity(evt("safe_tx_executed", { salience: "not_determined" }))).toBe("major");
+  });
+
+  it("demotes a canonical family the backend proved routine", () => {
+    expect(eventSeverity(evt("ownership_transferred", { salience: "routine" }))).toBe("routine");
+  });
+
+  it("falls back to the kind table for rows written before salience landed", () => {
+    expect(eventSeverity(evt("ownership_transferred", {}))).toBe("critical");
+    expect(eventSeverity(evt("safe_tx_executed", {}))).toBe("routine");
   });
 });

@@ -1,6 +1,10 @@
+import { useState } from "react";
+
+import { TargetRef } from "./TargetRef.jsx";
+
 import { blockExplorerAddressUrl } from "../../../blockExplorer.js";
 import { shortenAddress } from "../../../graph.js";
-import { relativeTime } from "../../../monitoring/format.js";
+import { SALIENCE_ROUTINE, relativeTime } from "../../../monitoring/format.js";
 
 // Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
 function txUrl(txHash, chain = "ethereum") {
@@ -17,7 +21,7 @@ function timeLabel(ms, now) {
   return new Date(ms).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
 
-function EventRow({ row, chain, now }) {
+function EventRow({ row, chain, now, onPreview, onNavigate }) {
   const link = txUrl(row.txHash, chain);
   const dotClass = [
     "ps-activity-dot",
@@ -35,12 +39,14 @@ function EventRow({ row, chain, now }) {
       <div className="ps-activity-ev-body">
         <div className="ps-activity-ev-top">
           <span className={`ps-activity-kind k-${row.kind}`}>{row.kindLabel}</span>
-          <span className="ps-activity-ev-title">{row.title}</span>
+          <span className="ps-activity-ev-title" title={row.titleDetail || undefined}>{row.title}</span>
           {row.backfill ? <span className="ps-activity-backfill">backfill</span> : null}
           <span className="ps-activity-ev-time">{timeLabel(row.timestamp, now)}</span>
         </div>
-        {row.sub ? (
+        {row.target || row.sub ? (
           <div className="ps-activity-ev-sub">
+            {row.target ? <TargetRef target={row.target} onPreview={onPreview} onNavigate={onNavigate} /> : null}
+            {row.target && row.sub ? " · " : null}
             {row.sub}
             {row.isCurrent ? <span className="ps-activity-tag"> · current</span> : null}
           </div>
@@ -54,6 +60,91 @@ function EventRow({ row, chain, now }) {
         </div>
       </div>
     </li>
+  );
+}
+
+// Runs of consecutive PROVEN-routine rows collapse into one disclosure row.
+// Only `salience === "routine"` qualifies: `not_determined` is an event no
+// backend rule rated, and collapsing it would be suppression minted from
+// ignorance (invariant 5). A lone routine row renders as itself — a
+// "1 routine event — show" disclosure costs a click and hides nothing useful.
+const MIN_COLLAPSE_RUN = 2;
+
+function groupRoutineRuns(rows) {
+  const out = [];
+  let run = [];
+  const flush = () => {
+    if (run.length >= MIN_COLLAPSE_RUN) {
+      out.push({ collapsedKey: `routine:${run[0].key}`, rows: run });
+    } else {
+      for (const row of run) out.push({ row });
+    }
+    run = [];
+  };
+  for (const row of rows) {
+    if (row.salience === SALIENCE_ROUTINE) {
+      run.push(row);
+      continue;
+    }
+    flush();
+    out.push({ row });
+  }
+  flush();
+  return out;
+}
+
+// Renders a run of routine rows as a count + reveal, expanding IN PLACE so the
+// revealed rows keep their position in the feed. Disclosure state is
+// component-local; nothing about it needs to persist.
+function RoutineRun({ group, chain, now, expanded, onToggle, onPreview, onNavigate }) {
+  if (expanded) {
+    return (
+      <>
+        <li className="ps-activity-routine-run open">
+          <div className="ps-activity-rail" />
+          <button type="button" className="ps-activity-routine-toggle" onClick={onToggle}>
+            {group.rows.length} routine events — hide
+          </button>
+        </li>
+        {group.rows.map((row) => (
+          <EventRow key={row.key} row={row} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
+        ))}
+      </>
+    );
+  }
+  return (
+    <li className="ps-activity-routine-run">
+      <div className="ps-activity-rail"><span className="ps-activity-dot routine" /></div>
+      <button type="button" className="ps-activity-routine-toggle" onClick={onToggle}>
+        {group.rows.length} routine events — show
+      </button>
+    </li>
+  );
+}
+
+function TimelineRows({ rows, chain, now, onPreview, onNavigate }) {
+  const [open, setOpen] = useState(() => new Set());
+  const toggle = (key) => setOpen((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+  return groupRoutineRuns(rows).map((group) =>
+    group.collapsedKey ? (
+      <RoutineRun
+        key={group.collapsedKey}
+        group={group}
+        chain={chain}
+        now={now}
+        expanded={open.has(group.collapsedKey)}
+        onToggle={() => toggle(group.collapsedKey)}
+        onPreview={onPreview}
+        onNavigate={onNavigate}
+      />
+    ) : (
+      <EventRow key={group.row.key} row={group.row} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
+    ),
   );
 }
 
@@ -79,13 +170,47 @@ function EventRow({ row, chain, now }) {
 //
 // It changes nothing drawn from rows we have; it governs only the empty states.
 // The default is "pending" so that a caller who forgets the prop claims nothing.
-export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, chain, now, historyState = "pending" }) {
+//
+// `hiddenAbove` / `hiddenBelow` are the rows the caller's salience threshold
+// removed from each section. They exist because EVERY empty state below is a
+// claim about what exists — an earned negative, a hedge, or an answer — and a
+// section the filter emptied has earned none of them. A filter-emptied list
+// rendered as "no activity" is the same unwitnessed absence claim the
+// monitoring plane was overhauled to stop making, one layer up. Both default
+// to 0 so a caller that does not filter behaves exactly as before.
+export function Timeline({
+  above,
+  below,
+  boundaryBlock,
+  boundaryDate,
+  isProxy,
+  chain,
+  now,
+  historyState = "pending",
+  hiddenAbove = 0,
+  hiddenBelow = 0,
+  onPreview,
+  onNavigate,
+}) {
   const dateLabel = boundaryDate
     ? new Date(boundaryDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })
     : null;
   const hasBoundary = boundaryBlock != null;
 
   if (!above.length && !below.length && !hasBoundary) {
+    const hidden = hiddenAbove + hiddenBelow;
+    if (hidden > 0) {
+      // Rows exist and were withheld. Saying "no activity recorded yet" here
+      // would be a statement about the contract; this is a statement about the
+      // filter, which is the only thing that happened.
+      return (
+        <div className="ps-activity-empty">
+          {hidden === 1
+            ? "1 event is hidden by the current filter."
+            : `${hidden} events are hidden by the current filter.`}
+        </div>
+      );
+    }
     return (
       <div className="ps-activity-empty">
         {historyState === "pending"
@@ -99,9 +224,7 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
 
   return (
     <ul className="ps-activity-tl">
-      {above.map((row) => (
-        <EventRow key={row.key} row={row} chain={chain} now={now} />
-      ))}
+      <TimelineRows rows={above} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
 
       {hasBoundary ? (
         <div className="ps-activity-boundary">
@@ -115,7 +238,17 @@ export function Timeline({ above, below, boundaryBlock, boundaryDate, isProxy, c
       ) : null}
 
       {hasBoundary && below.length ? (
-        below.map((row) => <EventRow key={row.key} row={row} chain={chain} now={now} />)
+        <TimelineRows rows={below} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
+      ) : hasBoundary && hiddenBelow > 0 ? (
+        // Back-filled rows exist below the line and the filter withheld them.
+        // Checked BEFORE the historyState chain: the history read answered
+        // (that is where these rows came from), so neither the hedge nor the
+        // absence prose applies — only the filter does.
+        <div className="ps-activity-empty">
+          {hiddenBelow === 1
+            ? "1 back-filled upgrade is hidden by the current filter."
+            : `${hiddenBelow} back-filled upgrades are hidden by the current filter.`}
+        </div>
       ) : hasBoundary && historyState === "pending" ? (
         <div className="ps-activity-empty">Checking for earlier activity…</div>
       ) : hasBoundary && historyState === "not_determined" ? (

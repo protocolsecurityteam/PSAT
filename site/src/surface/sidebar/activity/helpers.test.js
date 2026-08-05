@@ -1,6 +1,88 @@
 import { describe, expect, it } from "vitest";
 
-import { contractTypeForMachine, proxyState } from "./helpers.js";
+import {
+  contractTypeForMachine,
+  eventTypesFromGroupKeys,
+  groupKeysFromConfig,
+  proxyState,
+} from "./helpers.js";
+
+// The event types the `signers` group carried before `safe_exec` was split out
+// of it — pinned literally, so the split is measured against what a Safe
+// actually subscribed to rather than against the current table.
+const PRE_SPLIT_SIGNERS_TYPES = [
+  "signer_added",
+  "signer_removed",
+  "threshold_changed",
+  "safe_tx_executed",
+  "safe_tx_failed",
+  "safe_module_executed",
+  "safe_module_failed",
+];
+
+describe("safe_exec split out of the signers group", () => {
+  it("offers both groups on the flag that gates both", () => {
+    // `_should_watch` gates owners/threshold AND _safe_op/_safe_module_op on
+    // `watch_safe_signers`, so the split withdraws nothing a Safe is watched for.
+    expect(groupKeysFromConfig({ watch_safe_signers: true })).toEqual(["signers", "safe_exec"]);
+    expect(groupKeysFromConfig({ watch_signers: true })).toEqual(["signers", "safe_exec"]);
+  });
+
+  it("subscribes a Safe to exactly what it subscribed to before the split", () => {
+    // Invariant 7, the force-subscribe direction: a webhook attached today gets
+    // the same set as one attached before the split — no type added, none lost.
+    const derived = eventTypesFromGroupKeys(groupKeysFromConfig({ watch_safe_signers: true }));
+    expect(new Set(derived)).toEqual(new Set(PRE_SPLIT_SIGNERS_TYPES));
+  });
+
+  it("lets each group be asked for on its own", () => {
+    // The point of the split: "tell me when the owner set changes" no longer
+    // means "tell me about every transaction this Safe runs".
+    expect(eventTypesFromGroupKeys(["signers"])).toEqual([
+      "signer_added",
+      "signer_removed",
+      "threshold_changed",
+    ]);
+    expect(eventTypesFromGroupKeys(["safe_exec"])).toEqual([
+      "safe_tx_executed",
+      "safe_tx_failed",
+      "safe_module_executed",
+      "safe_module_failed",
+    ]);
+  });
+});
+
+describe("the state-polling group is offered on a witness contracts carry", () => {
+  it("offers it to a contract with a polling plan", () => {
+    const keys = groupKeysFromConfig({ polling_plan: [{ kind: "getter_call", field: "isPaused" }] });
+    expect(keys).toContain("state");
+    expect(eventTypesFromGroupKeys(keys)).toContain("state_changed_poll");
+  });
+
+  it("does not offer it on an empty plan", () => {
+    // `[]` is enrollment's witnessed "the plan was read and named nothing" —
+    // there is no polled field to hear about. (`Boolean([])` is `true`, so this
+    // is the case a truthiness check would get wrong.)
+    expect(groupKeysFromConfig({ polling_plan: [] })).not.toContain("state");
+  });
+
+  it("does not offer it on a config that says nothing about polling", () => {
+    // POSITIVE CONTROL: the group must stay unofferable where it is unearned,
+    // or it would appear on every contract and the fix would be a default.
+    expect(groupKeysFromConfig({ watch_ownership: true })).not.toContain("state");
+    expect(groupKeysFromConfig({ polling_plan: "yes" })).not.toContain("state");
+    expect(groupKeysFromConfig({})).not.toContain("state");
+  });
+
+  it("still honours the flag itself where a config carries it", () => {
+    expect(groupKeysFromConfig({ watch_state: true })).toContain("state");
+  });
+
+  it("offers nothing else on a plan alone", () => {
+    // A polling plan is a witness about polling and nothing more.
+    expect(groupKeysFromConfig({ polling_plan: [{ kind: "storage_slot" }] })).toEqual(["state"]);
+  });
+});
 
 // The three states of `is_pausable`, kept apart at the badge. The pair that
 // matters is the last two: before this split a null and a proven `false` both

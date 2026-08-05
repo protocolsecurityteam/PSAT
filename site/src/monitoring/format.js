@@ -159,6 +159,10 @@ export function eventKindLabel(evt) {
 //   critical → owner, pause, upgrade — change anyone should react to
 //   major    → role grant/revoke, threshold/delay changes
 //   routine  → safe tx, module exec, state polls
+//
+// Kept as the FALLBACK only: it is derived from the event kind, which is a
+// statement about what moved, not about whether an operator needs to see it.
+// Where the backend published a salience, that wins (see eventSeverity).
 const SEVERITY = {
   upgrade: "critical",
   owner: "critical",
@@ -171,7 +175,71 @@ const SEVERITY = {
   other: "routine",
 };
 
+// ---------------------------------------------------------------------------
+// Salience — the vocabulary mirror of record
+// ---------------------------------------------------------------------------
+//
+// Mirrors services/monitoring/salience.py. Four values, and the fourth is the
+// point: `not_determined` is an event the backend's rules did not rate, and it
+// renders at `notable` prominence. Nothing here may default to `routine` —
+// that would be silent suppression minted from ignorance, client-side.
+export const SALIENCE_ALERT = "alert";
+export const SALIENCE_NOTABLE = "notable";
+export const SALIENCE_ROUTINE = "routine";
+export const SALIENCE_NOT_DETERMINED = "not_determined";
+
+export const SALIENCE_VALUES = [
+  SALIENCE_ALERT,
+  SALIENCE_NOTABLE,
+  SALIENCE_ROUTINE,
+  SALIENCE_NOT_DETERMINED,
+];
+
+// `not_determined` sorts WITH `notable` (services/monitoring/notifier.py's
+// _SALIENCE_ORDER), so a threshold never drops an event it never rated.
+const SALIENCE_ORDER = {
+  [SALIENCE_ROUTINE]: 0,
+  [SALIENCE_NOT_DETERMINED]: 1,
+  [SALIENCE_NOTABLE]: 1,
+  [SALIENCE_ALERT]: 2,
+};
+
+// The backend owns this classification. There is deliberately NO client-side
+// re-derivation from event_type: a mirrored ruleset would drift, and a drifted
+// mirror that hides rows is a silent-suppression bug. An absent or unknown
+// value reads as `not_determined`, which renders.
+export function eventSalience(evt) {
+  const value = evt?.data?.salience;
+  return SALIENCE_VALUES.includes(value) ? value : SALIENCE_NOT_DETERMINED;
+}
+
+export function salienceRank(level) {
+  const rank = SALIENCE_ORDER[level];
+  return rank === undefined ? SALIENCE_ORDER[SALIENCE_NOT_DETERMINED] : rank;
+}
+
+// Does `level` clear a `minimum` threshold? An unrecognized minimum admits
+// everything rather than filtering on a bar we cannot read.
+export function salienceAllows(level, minimum) {
+  if (!SALIENCE_VALUES.includes(minimum)) return true;
+  return salienceRank(level) >= salienceRank(minimum);
+}
+
+// Salience → tick colour. `not_determined` maps to `major`, the same
+// prominence as `notable`: unrated is visible.
+const SEVERITY_BY_SALIENCE = {
+  [SALIENCE_ALERT]: "critical",
+  [SALIENCE_NOTABLE]: "major",
+  [SALIENCE_ROUTINE]: "routine",
+  [SALIENCE_NOT_DETERMINED]: "major",
+};
+
+// Rebased on salience when the row carries one — which removes the old
+// hardcoding of every `safe` and `state` event to `routine`. Rows written
+// before salience landed keep the kind-derived table.
 export function eventSeverity(evt) {
+  const level = evt?.data?.salience;
+  if (SALIENCE_VALUES.includes(level)) return SEVERITY_BY_SALIENCE[level];
   return SEVERITY[eventKind(evt)] || "routine";
 }
 
@@ -240,6 +308,68 @@ function diffSub(before, after) {
 //
 // Underscore-prefixed targets render activity events (no addressable
 // slot); the renderer surfaces the meaningful tx args.
+
+// Why a Safe execution carries no decoded call. Mirrors the backend's
+// ``safe_exec.status`` values (``services/monitoring/enrichment.py``); an
+// unknown status renders verbatim rather than as silence.
+const SAFE_EXEC_STATUS_SUB = {
+  not_top_level_call: "not a direct execTransaction on this Safe — inner call not witnessed",
+  over_budget: "not decoded this pass (transaction budget)",
+  args_undecodable: "execTransaction arguments did not decode",
+  ambiguous_attribution:
+    "this Safe executed more than once in this transaction — which call these arguments describe is not witnessed",
+};
+
+// Which layer of a batch failed to expand. Mirrors ``batch_status_reason``.
+const SAFE_EXEC_BATCH_REASON = {
+  malformed_payload: "payload did not decode",
+  nested_payload_undecodable: "a nested payload did not decode",
+  nested_depth_exceeded: "nested deeper than the decoder expands",
+};
+
+// A signature's display form: the function name alone. The parameter-type
+// list is a fact about the ABI, not about what happened — it goes in the
+// tooltip (`titleDetail`), never in the row. A selector stays raw: it is a
+// real fact and no name is invented to replace it.
+function fnDisplay(signature) {
+  const s = String(signature || "");
+  const paren = s.indexOf("(");
+  return paren > 0 ? `${s.slice(0, paren)}()` : s || null;
+}
+
+// Display-only address naming. `nameFor` is the caller's map of the
+// protocol's own contracts (surface machines / principals) — a rendering
+// convenience, never a witness: it changes what a row SAYS an address is
+// called, never what was claimed or how salient it is.
+function addrDisplay(addr, opts) {
+  if (!addr) return null;
+  const name = opts?.nameFor ? opts.nameFor(addr) : null;
+  return name || shortenAddress(addr);
+}
+
+// Structured call target for rows that have one (Safe executions, timelock
+// operations, module calls). `label` is the resolved graph name or null;
+// `onGraph` is stated only when a resolver was supplied — without one the
+// question "is this on the graph" was never asked, and null (not false)
+// says so. Consumers render an off-graph target with its FULL address: a
+// contract this protocol's graph cannot name deserves the whole witness,
+// not a truncation.
+function callTarget(addr, opts, prep = "on") {
+  if (!addr) return null;
+  const label = opts?.nameFor ? opts.nameFor(addr) : null;
+  return { address: addr, label, prep, onGraph: opts?.nameFor ? Boolean(label) : null };
+}
+
+// Plain-text form of a call target, for single-line contexts (the protocol
+// feed row is itself a <button>, so it cannot nest an interactive chip).
+export function targetText(target) {
+  if (!target?.address) return null;
+  const prep = target.prep || "on";
+  if (target.label) return `${prep} ${target.label}`;
+  const short = shortenAddress(target.address);
+  return target.onGraph === false ? `${prep} ${short} (not on graph)` : `${prep} ${short}`;
+}
+
 const RENDER_BY_WRITE_TARGET = {
   owner: (d) => {
     const renounced = d.new_owner && /^0x0+$/i.test(d.new_owner);
@@ -304,27 +434,88 @@ const RENDER_BY_WRITE_TARGET = {
       sub: oldD && newD ? `${oldD} → ${newD}` : null,
     };
   },
-  _safe_op: (d, type) => ({
-    title: type === "safe_tx_executed" ? "Safe transaction executed" : "Safe transaction reverted",
-    sub: d.safe_tx_hash
-      ? `safeTxHash ${shortHash(d.safe_tx_hash)}${d.payment ? ` · payment ${d.payment} wei` : ""}`
-      : null,
-  }),
-  _safe_module_op: (d, type) => ({
+  _safe_op: (d, type, opts) => {
+    const executed = type === "safe_tx_executed";
+    // Pre-enrichment shape, and the shape a row keeps when the transaction was
+    // never fetched: the Safe-internal hash is all that was witnessed.
+    const unenriched = {
+      title: executed ? "Safe transaction executed" : "Safe transaction reverted",
+      sub: d.safe_tx_hash
+        ? `safeTxHash ${shortHash(d.safe_tx_hash)}${d.payment ? ` · payment ${d.payment} wei` : ""}`
+        : null,
+    };
+    const se = d.safe_exec;
+    if (!se || typeof se !== "object") return unenriched;
+
+    // A stated decode gap renders AS one. Falling back to the bare hash here
+    // would make "we could not examine this" look like the whole story.
+    if (se.status !== "decoded") {
+      return { ...unenriched, sub: SAFE_EXEC_STATUS_SUB[se.status] || `not decoded (${se.status})` };
+    }
+
+    if (se.batch_status === "undecodable") {
+      const why = SAFE_EXEC_BATCH_REASON[se.batch_status_reason];
+      const parts = ["delegatecall"];
+      if (why) parts.push(why);
+      return {
+        title: `${executed ? "MultiSend batch" : "Reverted MultiSend batch"} — did not decode`,
+        target: callTarget(se.to, opts),
+        sub: parts.join(" · "),
+      };
+    }
+
+    const batch = Array.isArray(se.batch) ? se.batch : null;
+    const head = batch && batch.length ? batch[0] : null;
+    const call = head || se;
+    // A resolved signature when one exists, the raw selector otherwise — a
+    // selector is a real fact, and a name is never invented to replace it.
+    // The row shows the function NAME; the full signature rides in
+    // `titleDetail` for the tooltip.
+    const signature = head ? head.signature : se.target_function?.signature;
+    const name = fnDisplay(signature) || call.selector || null;
+    const title = executed
+      ? name
+        ? `Executed ${name}`
+        : "Safe transaction executed"
+      : `Reverted: ${name || "Safe transaction"}`;
+
+    const parts = [];
+    // `call` is the default operation — only a delegatecall is worth ink,
+    // and an unrecognized one says so out loud (it is what the alert is).
+    if (call.operation === 1 || call.operation_label === "delegatecall") {
+      parts.push(
+        se.multisend_recognized === false && !batch
+          ? "delegatecall — not a pinned MultiSend"
+          : "delegatecall",
+      );
+    }
+    if (se.value && se.value !== "0") parts.push(`value ${se.value} wei`);
+    if (batch && batch.length > 1) parts.push(`+${batch.length - 1} more in batch`);
+    return {
+      title,
+      titleDetail: signature || null,
+      target: callTarget(call.to, opts),
+      sub: parts.length ? parts.join(" · ") : null,
+    };
+  },
+  _safe_module_op: (d, type, opts) => ({
     title: type === "safe_module_executed" ? "Safe module executed" : "Safe module reverted",
-    sub: d.module ? `module ${shortenAddress(d.module)}` : null,
+    target: callTarget(d.module, opts, "via module"),
+    sub: null,
   }),
-  _timelock_op: (d, type) => {
+  _timelock_op: (d, type, opts) => {
     const scheduled = type === "timelock_scheduled";
-    const target = d.target ? shortenAddress(d.target) : null;
-    const sel = d.selector;
+    // The backend's fleet-internal resolution when it found one; the raw
+    // selector otherwise. Never a name this side invented.
+    const signature = d.target_function?.signature || null;
+    const name = fnDisplay(signature) || (d.selector ? `sel ${d.selector}` : null);
     const delay = fmtSeconds(d.delay);
     const subParts = [];
-    if (target) subParts.push(`target ${target}`);
-    if (sel) subParts.push(`sel ${sel}`);
     if (scheduled && delay) subParts.push(`delay ${delay}`);
     return {
-      title: `Timelock operation ${scheduled ? "scheduled" : "executed"}`,
+      title: `Timelock ${scheduled ? "scheduled" : "executed"}${name ? ` ${name}` : " operation"}`,
+      titleDetail: signature,
+      target: callTarget(d.target, opts),
       sub: subParts.length ? subParts.join(" · ") : null,
     };
   },
@@ -345,7 +536,10 @@ const TITLE_OVERRIDES = {
 // { title, sub } — title is the short prose summary, sub is the supporting
 // detail line (hash, target, etc.). Falls back to a generic shape rather
 // than throwing on unknown types so future event_types still render.
-export function decodeEvent(evt) {
+// `opts.nameFor(address) → name|null` is an optional display-only resolver
+// (the surface's own contract/principal names). It never affects which
+// renderer runs or what is claimed — only how an address reads.
+export function decodeEvent(evt, opts = undefined) {
   const d = evt?.data || {};
   const type = evt?.event_type || "unknown";
 
@@ -397,7 +591,7 @@ export function decodeEvent(evt) {
   for (const wt of writes) {
     const renderer = RENDER_BY_WRITE_TARGET[wt];
     if (renderer) {
-      const result = renderer(d, type);
+      const result = renderer(d, type, opts);
       if (TITLE_OVERRIDES[type]) {
         result.title = TITLE_OVERRIDES[type];
       }
@@ -487,7 +681,10 @@ export function stateRows(contract) {
   if (cfg.watch_roles) watching.push("roles");
   if (cfg.watch_safe_signers || cfg.watch_signers) watching.push("safe");
   if (cfg.watch_timelock) watching.push("timelock");
-  if (cfg.watch_state) watching.push("state");
+  // Same phantom flag as the `state` alert group: nothing writes `watch_state`,
+  // so a polled contract used to render as not watched for state at all. The
+  // polling plan is the witness that it is.
+  if (cfg.watch_state || (Array.isArray(cfg.polling_plan) && cfg.polling_plan.length > 0)) watching.push("state");
   if (watching.length === 0) watching.push("nothing");
   rows.push({ k: "Watching", v: watching.join(" · "), tone: "muted" });
 

@@ -386,6 +386,68 @@ def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
     return index
 
 
+# ---------------------------------------------------------------------------
+# E5 — signal classification (§3.6)
+# ---------------------------------------------------------------------------
+
+# What ONE diff on this entry tells an operator. Stamped at enrollment, read
+# at mint time by ``salience.assign_salience``. The split is total over the
+# entries this builder emits — there is no third state here — but the BASIS
+# rides along so a consumer can see why, and so a later re-analysis can
+# upgrade ``metric`` → ``config`` without a silent behaviour change.
+SIGNAL_CLASS_CONFIG = "config"
+SIGNAL_CLASS_METRIC = "metric"
+
+# Basis codes. ``vendored:*`` is the entry's own ``source`` verbatim (the
+# provenance the plan already carried); the other three are stated here.
+SIGNAL_BASIS_CALLER_GATE = "caller_gate"
+SIGNAL_BASIS_NO_GATE_PROVENANCE = "no_gate_provenance"
+SIGNAL_BASIS_TYPE_KIND_REFERENCE = "type_kind_reference"
+
+# The one ``authority_provenance`` value that PROVES the controller behind an
+# entry gates callers — same literal ``event_topics._PROVEN_CONTROLLER_PROVENANCE``
+# uses, restated here rather than imported so this module stays acyclic.
+_PROVEN_GATE_PROVENANCE = "caller_gate"
+
+# Reference-typed reads name a binding, not a quantity: a moved address or
+# contract reference is a control-plane fact whatever the analyzer proved
+# about its writers.
+_REFERENCE_TYPE_KINDS = frozenset({"address", "contract"})
+
+
+def _signal_class_for_vendored(entry: Mapping[str, Any]) -> tuple[str, str]:
+    """Vendored entries are config by construction: every one of them is a
+    proxy implementation slot, a Safe guard / module head / threshold, or a
+    timelock delay. The basis is the vendored provenance the entry already
+    carries (``vendored:safe``, ``vendored:eip1967``, …)."""
+    source = entry.get("source")
+    basis = source if isinstance(source, str) and source.startswith("vendored:") else "vendored"
+    return SIGNAL_CLASS_CONFIG, basis
+
+
+def _signal_class_for_analyzer(type_kind: str, authority_provenance: str | None) -> tuple[str, str]:
+    """Classify an analyzer-derived entry.
+
+    A reference-typed read is config. A primitive is config only when the
+    plan PROVES its controller gates callers; otherwise it is ``metric`` with
+    ``no_gate_provenance`` — the honest default, because an unclassified
+    number is not presumed to be a control parameter.
+
+    ``no_gate_provenance`` is a POSITIVE basis, not an absent input: the
+    derivation completed for this entry (it has a target, a selector and a
+    type) and carried no gate proof. That is a measured fact about a finished
+    analysis, and it is what lets ``metric`` collapse to ``routine`` at render
+    without suppressing anything on ignorance — a later re-analysis that
+    attaches ``caller_gate`` upgrades the entry with the basis change on the
+    record.
+    """
+    if type_kind in _REFERENCE_TYPE_KINDS:
+        return SIGNAL_CLASS_CONFIG, SIGNAL_BASIS_TYPE_KIND_REFERENCE
+    if authority_provenance == _PROVEN_GATE_PROVENANCE:
+        return SIGNAL_CLASS_CONFIG, SIGNAL_BASIS_CALLER_GATE
+    return SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE
+
+
 def _is_poll_decodable(read_spec: Mapping[str, Any]) -> bool:
     """A controller becomes a polling entry only when we can both call its
     getter (strategy == getter_call) and decode the result (type_kind in the
@@ -525,12 +587,14 @@ def build_polling_plan(
         if vendored_proxy:
             entry = dict(vendored_proxy)
             entry.setdefault("suppress_when_scan_event_types", list(_VENDORED_IMPL_SCAN_EVENTS))
+            entry["signal_class"], entry["signal_class_basis"] = _signal_class_for_vendored(entry)
             by_field[entry["field"]] = entry
 
     # Vendored contract-type templates (safe.getThreshold, timelock.getMinDelay).
     for entry in _VENDORED_CONTRACT_TYPE_ENTRIES.get(contract_type, []):
         copy = dict(entry)
         copy.setdefault("suppress_when_scan_event_types", list(copy.get("suppress_when_scan_event_types") or []))
+        copy["signal_class"], copy["signal_class_basis"] = _signal_class_for_vendored(copy)
         by_field.setdefault(copy["field"], copy)
 
     # Analyzer-derived entries from the tracking plan.
@@ -560,6 +624,7 @@ def build_polling_plan(
             verified_type = value_changed_event_type(tc.get("controller_id"))
             if len(verified_type) <= MAX_EVENT_TYPE_LENGTH and verified_type not in suppress:
                 suppress.append(verified_type)
+            signal_class, signal_basis = _signal_class_for_analyzer(type_kind, tc.get("authority_provenance"))
             entry = {
                 "field": field,
                 "kind": "getter_call",
@@ -567,6 +632,8 @@ def build_polling_plan(
                 "type_kind": type_kind,
                 "type": type_str,
                 "source": f"analyzer:{tc.get('controller_id') or field}",
+                "signal_class": signal_class,
+                "signal_class_basis": signal_basis,
             }
             member_word_index = _member_word_index(read_spec)
             if member_word_index is not None:

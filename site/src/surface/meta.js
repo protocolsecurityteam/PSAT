@@ -85,15 +85,30 @@ export const MONITOR_ALERT_GROUPS = [
   },
   {
     key: "signers",
-    label: "Safe activity",
+    label: "Safe signers",
     // Backend's _should_watch maps both signer changes AND Safe-tx
     // executions onto `watch_safe_signers` — the historical UI-only
     // alias `watch_signers` stays for backward compat with old alerts.
     flags: ["watch_safe_signers", "watch_signers"],
+    eventTypes: ["signer_added", "signer_removed", "threshold_changed"],
+  },
+  {
+    // Split out of `signers`. Both are gated on the same enrollment flag (the
+    // backend gates `_safe_op`/`_safe_module_op` on `watch_safe_signers` just
+    // like `owners`/`threshold`), so a Safe offers both groups and nothing a
+    // Safe is watched for today is withdrawn — but they are not the same fact.
+    // An owner-set change is a config-plane event; an execution is the fleet's
+    // routine traffic (11 of the dev corpus's 12 events), and one group made
+    // "tell me when this Safe's owners change" mean "tell me about every
+    // transaction it runs". Separating the vocabulary is what will let a
+    // subscription say which one it wants — the Alerts control still offers the
+    // whole set, so nothing can ask for one alone until a per-group selector
+    // exists; see notifier._FILTER_GROUP_EXPANSIONS for what keeps the
+    // pre-split subscriptions whole meanwhile.
+    key: "safe_exec",
+    label: "Safe executions",
+    flags: ["watch_safe_signers", "watch_signers"],
     eventTypes: [
-      "signer_added",
-      "signer_removed",
-      "threshold_changed",
       "safe_tx_executed",
       "safe_tx_failed",
       "safe_module_executed",
@@ -109,7 +124,21 @@ export const MONITOR_ALERT_GROUPS = [
   {
     key: "state",
     label: "State polling",
+    // `watch_state` is a phantom flag: no enrollment path writes it
+    // (`enrollment._build_monitoring_config` never emits the key — 0 of 183
+    // monitored contracts carry it) and no backend gate reads it
+    // (`unified_watcher._WRITE_TARGET_TO_CONFIG_KEYS` has no entry, so
+    // `_should_watch` never consults it). Gating the group on it made the group
+    // unofferable, and with it the one subscription path to
+    // `state_changed_poll` — and, via notifier._READ_WITNESSED_WILDCARD_SEEDS,
+    // to every `value_changed:*`. It stays listed so a config that does carry
+    // it is still honoured; `planKeys` is what actually offers the group.
     flags: ["watch_state"],
+    // The witness that a contract is polled at all. `polling_plan` is written
+    // by `polling_plan.build_polling_plan` at enrollment and is the thing that
+    // produces every event in this group — 160 of the 183 monitored contracts
+    // carry a non-empty one.
+    planKeys: ["polling_plan"],
     // `value_changed:<controller_id>` belongs to this group too — a scan-pass
     // verification read is the same read-witnessed field diff the poller
     // produces. It is not listed because the controller_id is per-contract and

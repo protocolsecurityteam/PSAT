@@ -3,9 +3,19 @@
 
 import { MONITOR_ALERT_GROUPS } from "../../meta.js";
 
+// A group may also be offered by a plan the config carries rather than by a
+// watch flag — see the `state` group in meta.js, whose flag nothing writes.
+// The plan must be a non-empty list: `[]` is enrollment's witnessed "the plan
+// was read and named nothing", so there is nothing to subscribe to, and a
+// non-list value proves nothing at all. (`Boolean([])` is `true` in JS, which
+// is exactly why this is not a bare truthiness check.)
+function hasPlanFor(config, group) {
+  return (group.planKeys || []).some((key) => Array.isArray(config?.[key]) && config[key].length > 0);
+}
+
 export function groupKeysFromConfig(config = {}) {
   return MONITOR_ALERT_GROUPS
-    .filter((group) => group.flags.some((flag) => config?.[flag]))
+    .filter((group) => group.flags.some((flag) => config?.[flag]) || hasPlanFor(config, group))
     .map((group) => group.key);
 }
 

@@ -5,7 +5,7 @@ import { AlertControls } from "./AlertControls.jsx";
 import { proxyState } from "./helpers.js";
 import { StatusStrip } from "./StatusStrip.jsx";
 import { Timeline } from "./Timeline.jsx";
-import { buildTimeline } from "./buildTimeline.js";
+import { buildTimeline, filterTimelineBySalience } from "./buildTimeline.js";
 
 const POLL_MS = 30_000;
 
@@ -23,6 +23,11 @@ export function EntityActivity({
   cache,
   onCache,
   now,
+  minSalience = "routine",
+  onHiddenCount,
+  nameFor,
+  onPreview,
+  onNavigate,
 }) {
   const [events, setEvents] = useState([]);
   // The settled outcome of the per-contract event read, carried with the
@@ -194,9 +199,16 @@ export function EntityActivity({
   // eras instead of dropping them; with no history the flag adds no rows either
   // way, so the open case cannot manufacture a timeline.
   const timeline = useMemo(
-    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy }),
-    [events, proxy, enrollmentBlock, mayBeProxy],
+    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy, nameFor }),
+    [events, proxy, enrollmentBlock, mayBeProxy, nameFor],
   );
+
+  // The threshold is the panel's; the COUNT can only be computed here, where
+  // the rows are. Reported up so the control can always state it.
+  const visible = useMemo(() => filterTimelineBySalience(timeline, minSalience), [timeline, minSalience]);
+  useEffect(() => {
+    if (onHiddenCount) onHiddenCount(visible.hidden);
+  }, [visible.hidden, onHiddenCount]);
 
   // "Monitoring started" label: created_at is when the MonitoredContract row was
   // written at enroll time — a truthful stand-in for the block→timestamp we
@@ -244,8 +256,8 @@ export function EntityActivity({
         </div>
       ) : null}
       <Timeline
-        above={timeline.above}
-        below={timeline.below}
+        above={visible.above}
+        below={visible.below}
         boundaryBlock={timeline.boundaryBlock}
         boundaryDate={boundaryDate}
         isProxy={mayBeProxy}
@@ -255,6 +267,13 @@ export function EntityActivity({
         // period, so they have to be driven by the same fact — otherwise the
         // panel hedges in one line and asserts absence in the next.
         historyState={historyState}
+        // What the threshold removed, per section. Without these the Timeline
+        // cannot tell a section that is empty from a section it was told not
+        // to draw, and renders the second as the first.
+        hiddenAbove={visible.hiddenAbove}
+        hiddenBelow={visible.hiddenBelow}
+        onPreview={onPreview}
+        onNavigate={onNavigate}
       />
     </section>
   );

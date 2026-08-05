@@ -1819,6 +1819,15 @@ def build_governance_view(
         # with the active chain).
         p["primary_for"] = sorted({_entity_addr(e) for e in primary_for.get(p_addr_lc, [])})
         p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
+        # The chains the flattening above discards, kept as their own field:
+        # the per-chain contests already ran, so the set of chains this
+        # principal won or co-controls ON is a computed fact — enrollment needs
+        # it to put a controller's MonitoredContract row on the chain of the
+        # contracts it governs instead of a caller-supplied default.
+        p["controls_chains"] = sorted(
+            {_entity_chain(e) for e in primary_for.get(p_addr_lc, [])}
+            | {_entity_chain(e) for e in co_controls.get(p_addr_lc, [])}
+        )
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
 
     # Per-edge ``capabilities``: what THE SOURCE can do to THE TARGET, from
@@ -2651,10 +2660,18 @@ def build_company_overview(session: Session, name: str) -> dict[str, Any]:
     return payload
 
 
-def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, str]:
-    """Map ``principal_address_lc -> MonitoredContract.contract_type`` for every
-    principal that holds governing authority over at least one contract in the
-    protocol — its **primary controllers union its privileged co-controllers**.
+def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[str, str], str]:
+    """Map ``(principal_address_lc, chain) -> MonitoredContract.contract_type``
+    for every principal that holds governing authority over at least one
+    contract in the protocol — its **primary controllers union its privileged
+    co-controllers**, keyed per chain.
+
+    The chain half of the key is the chain of the CONTRACTS the principal
+    governs (``controls_chains``, from the per-chain primary contests), not a
+    caller default: chain-as-island means a controller's monitoring row
+    belongs on each chain where it actually controls something, and a Safe
+    deployed at the same address on two chains gets one row per chain it
+    governs on.
 
     Both sets come from the single source of truth
     (:mod:`services.governance.primary_controller`) via the same loaders +
@@ -2686,7 +2703,7 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, st
     impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
     governance = build_governance_view(session, jobs, contracts_by_job_id, impl_job_by_entity)
 
-    controllers: dict[str, str] = {}
+    controllers: dict[tuple[str, str], str] = {}
     for principal in governance.principals:
         if not (principal.get("primary_for") or principal.get("co_controls")):
             continue
@@ -2694,6 +2711,9 @@ def controllers_for_protocol(session: Session, protocol_id: int) -> dict[str, st
         if ptype not in ("safe", "timelock", "proxy_admin"):
             continue
         addr = (principal.get("address") or "").lower()
-        if addr:
-            controllers[addr] = "proxy" if ptype == "proxy_admin" else ptype
+        if not addr:
+            continue
+        monitored_type = "proxy" if ptype == "proxy_admin" else ptype
+        for chain_token in principal.get("controls_chains") or [_coalesce_chain(None)]:
+            controllers[(addr, chain_token)] = monitored_type
     return controllers

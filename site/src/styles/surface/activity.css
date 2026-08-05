@@ -391,3 +391,79 @@
   line-height: 1.5;
 }
 .ps-activity-empty b { color: var(--muted); }
+
+/* Salience filter — three positions plus the hidden count, which renders
+   unconditionally (including "0 hidden"): a view that withholds rows without
+   saying how many is the suppression this axis exists to prevent. */
+.ps-activity-salience {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.ps-activity-salience-opt {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--status-mute);
+  cursor: pointer;
+}
+.ps-activity-salience-opt.on {
+  background: rgba(148, 163, 184, 0.16);
+  border-color: rgba(148, 163, 184, 0.42);
+  color: var(--ink);
+}
+.ps-activity-salience-hidden {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--status-mute);
+}
+
+/* Collapsed run of PROVEN-routine rows. Never a drop: the count is the row,
+   and one click reveals the members in place. */
+.ps-activity-routine-run {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+}
+.ps-activity-routine-toggle {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: left;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--status-mute);
+  cursor: pointer;
+  border-bottom: 1px dotted rgba(148, 163, 184, 0.28);
+  justify-self: start;
+}
+.ps-activity-dot.routine { opacity: 0.45; }
+
+/* Call-target reference in a timeline row. The link is styled flat on purpose
+   — shell/forms.css gives every bare <button> a teal gradient + shadow. */
+.ps-activity-target { color: var(--muted); }
+.ps-activity-target-link {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  padding: 0;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  border-bottom: 1px dotted rgba(148, 163, 184, 0.45);
+}
+.ps-activity-target-link:hover { border-bottom-color: var(--ink); box-shadow: none; transform: none; }
+.ps-activity-target .ps-goto-arrow { margin-left: 4px; }
+/* An off-graph target shows its whole address — it has no name to stand in
+   for it, so the full witness wraps rather than truncates. */
+.ps-activity-target-addr { word-break: break-all; color: var(--ink); }
+.ps-activity-target-note { color: var(--status-mute); font-style: italic; }

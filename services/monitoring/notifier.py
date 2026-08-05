@@ -21,6 +21,12 @@ from services.monitoring.event_topics import (
     WITNESS_TIER_HINT,
     value_changed_event_type,
 )
+from services.monitoring.salience import (
+    SALIENCE_ALERT,
+    SALIENCE_NOT_DETERMINED,
+    SALIENCE_NOTABLE,
+    SALIENCE_ROUTINE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +246,83 @@ def _generic_render_fallback(
     return []
 
 
+def _safe_exec_fields(safe_exec: dict) -> list[dict]:
+    """Render a decoded Safe execution — the difference between "safe_tx_executed
+    on 0x41df…6ae" and "Safe executed setFee(uint256) on 0x7a4…e7 (call)".
+
+    Every undecoded outcome renders its OWN reason instead of nothing: a
+    recipient who sees no target must be able to tell "the Safe called nobody"
+    from "we did not decode this", and an embed that renders identically in
+    both cases cannot.
+    """
+    status = safe_exec.get("status")
+    if status != "decoded":
+        reason = {
+            "not_top_level_call": (
+                "the observed transaction was not this Safe's own execTransaction "
+                "(relayer, nested Safe, or wrapper) — the inner call is not witnessed"
+            ),
+            "over_budget": "not decoded this pass (per-pass transaction budget)",
+            "args_undecodable": "execTransaction arguments did not decode",
+            "ambiguous_attribution": (
+                "this Safe executed more than once in this transaction; which call these "
+                "arguments describe is not witnessed, so none is published"
+            ),
+        }.get(str(status), f"not decoded ({status})")
+        return [{"name": "Safe call", "value": reason, "inline": False}]
+
+    fields: list[dict] = []
+    target = safe_exec.get("to")
+    if target:
+        fields.append({"name": "Target", "value": f"`{target}`", "inline": True})
+
+    target_function = safe_exec.get("target_function") or {}
+    # The signature when one was RESOLVED from the target's own verified
+    # source; the raw selector otherwise. A selector renders fine and is true.
+    label = target_function.get("signature") or safe_exec.get("selector")
+    if label:
+        fields.append({"name": "Function", "value": f"`{label}`", "inline": True})
+
+    value = safe_exec.get("value")
+    if value is not None:
+        fields.append({"name": "Value", "value": f"{value} wei", "inline": True})
+
+    operation_label = safe_exec.get("operation_label")
+    if operation_label:
+        recognized = safe_exec.get("multisend_recognized")
+        suffix = (
+            ""
+            if operation_label != "delegatecall"
+            else (" (pinned MultiSend)" if recognized else " (target NOT a pinned MultiSend)")
+        )
+        fields.append({"name": "Operation", "value": f"{operation_label}{suffix}", "inline": True})
+
+    batch = safe_exec.get("batch")
+    if isinstance(batch, list):
+        summary = ", ".join(
+            str(call.get("signature") or call.get("selector") or "?") for call in batch[:4] if isinstance(call, dict)
+        )
+        if len(batch) > 4:
+            summary = f"{summary}, …"
+        fields.append(
+            {
+                "name": "Batch",
+                "value": f"{len(batch)} call(s){f': {summary}' if summary else ''}",
+                "inline": False,
+            }
+        )
+    elif safe_exec.get("batch_status") == "undecodable":
+        # No partial list, and the embed says so: a truncated batch would
+        # understate what the Safe did. The reason names WHICH layer failed.
+        why = {
+            "malformed_payload": "the MultiSend payload did not decode",
+            "nested_payload_undecodable": "a nested MultiSend payload did not decode",
+            "nested_depth_exceeded": "the batch nests deeper than this decoder expands",
+        }.get(str(safe_exec.get("batch_status_reason")), "the MultiSend payload did not decode")
+        fields.append({"name": "Batch", "value": f"{why} — contents not listed", "inline": False})
+    return fields
+
+
 def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     """Build a Discord embed for a governance/monitoring event."""
     mc = event.monitored_contract
@@ -303,6 +386,12 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
         if data.get("new") is not None:
             fields.append({"name": "New", "value": _render_event_value(data["new"]), "inline": True})
         fields.append({"name": "Witness", "value": "verification read", "inline": True})
+    elif isinstance(data.get("safe_exec"), dict):
+        # The decoded execution IS the content of a Safe embed; the tag-driven
+        # path below has no render spec for the ``_safe_op`` marker (it names no
+        # single slot), so before enrichment these embeds carried nothing but
+        # the address and the block.
+        fields.extend(_safe_exec_fields(data["safe_exec"]))
     else:
         tags = data.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event.event_type) or {}
         writes = tags.get("writes") or []
@@ -322,6 +411,16 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
                     continue
                 seen_keys.add(data_key)
                 fields.append({"name": label, "value": _render_event_value(value), "inline": inline})
+
+    # The timelock families publish their resolved signature in a namespaced
+    # block of their own (their ``target``/``selector`` are keys the taxonomy
+    # owns). Rendered here rather than in a branch above so the row keeps
+    # whatever its own family already renders.
+    target_function = data.get("target_function")
+    if isinstance(target_function, dict):
+        label = target_function.get("signature") or target_function.get("selector")
+        if label:
+            fields.append({"name": "Function", "value": f"`{label}`", "inline": True})
 
     if event.block_number:
         fields.append({"name": "Block", "value": str(event.block_number), "inline": True})
@@ -371,6 +470,15 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
 # treat it as covering the whole group so the new event types still
 # flow through. Keys are 'seed' types; values are the additions to
 # allow alongside them.
+#
+# These stay after the `safe_exec` group was split out of `signers` in
+# ``site/src/surface/meta.js``: the split changes what a NEW subscription
+# enumerates, and a filter saved before it says nothing about whether its owner
+# wanted executions — the only reading we can witness is the one the UI gave it
+# at the time, which included them. Muting them on the split would be a claim
+# about a subscriber's intent, exactly what this shim exists to refuse. See
+# ``_FILTER_GROUPS_KEY`` for how a filter states the newer vocabulary instead of
+# being assumed into it.
 _FILTER_GROUP_EXPANSIONS: dict[str, set[str]] = {
     "signer_added": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
     "signer_removed": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
@@ -400,7 +508,58 @@ def _value_changed_forms(write_target: str) -> set[str]:
 _READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 
 
-def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
+# ``event_filter`` key naming the alert-group vocabulary a filter was saved
+# against (``site/src/surface/sidebar/activity/helpers.js``'s group keys). It is
+# a POSITIVE token, and the only thing that will distinguish a post-split
+# "signers, and I mean only signers" save from a pre-split "signers" save —
+# the two enumerate byte-identical ``event_types``. Absent, the filter predates
+# the vocabulary and keeps the legacy grouping expansion, so no saved
+# subscription is ever muted by a split it was not written against; present, the
+# save enumerated its own groups and is taken at its word, so no subscription
+# will be force-fed a group it did not name.
+#
+# The discriminator is inert on the notification plane TODAY: the only producer
+# is ``ActivityPanel.attachWebhook``, and the Alerts control passes it the whole
+# offered group set, so no save the UI can currently produce says "signers
+# without executions". It is written now because a filter saved before this key
+# existed and one saved after it are otherwise indistinguishable forever — the
+# discriminator has to land with the split or not at all. A per-group selector
+# is what would make it bite.
+_FILTER_GROUPS_KEY = "groups"
+
+# The group keys the UI can state — mirror of ``MONITOR_ALERT_GROUPS`` in
+# ``site/src/surface/meta.js``. Pinned by
+# ``tests/test_witness_notifier_gating.py`` against that table.
+_KNOWN_FILTER_GROUPS = frozenset(
+    {"upgrades", "ownership", "pause", "roles", "signers", "safe_exec", "timelock", "state"}
+)
+
+
+def _stated_filter_groups(event_filter: object) -> list[str] | None:
+    """The group keys a filter positively states, or ``None`` if it states none.
+
+    An unreadable token is not a statement, and a name from no vocabulary we
+    have is unreadable in exactly the same way a non-list is: both are treated
+    as absent rather than as a claim of coverage. This matters because the token
+    SUPPRESSES the legacy grouping expansion — reading ``["banana"]`` as a
+    statement would mute a subscription's Safe executions on the strength of a
+    word this system has never defined.
+    """
+    if not isinstance(event_filter, dict):
+        return None
+    groups = event_filter.get(_FILTER_GROUPS_KEY)
+    if not isinstance(groups, list) or not groups:
+        return None
+    if not all(isinstance(g, str) for g in groups):
+        return None
+    # An unknown name is dropped rather than fatal — a filter naming a group we
+    # do know still states that one. A token that names nothing we know states
+    # nothing at all.
+    known = [g for g in groups if g in _KNOWN_FILTER_GROUPS]
+    return known or None
+
+
+def _expand_allowed_event_types(allowed_types: list[str] | None, *, filter_groups: list[str] | None = None) -> set[str]:
     """Expand legacy webhook event-type filters to include grouped successors.
 
     Cheap forward-compat shim so adding a new event type to an existing
@@ -422,12 +581,20 @@ def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     published under a neutral ``state_changed`` type or not at all), so
     inventing coverage for them would be a claim about the subscriber's
     intent rather than a reading of it.
+
+    ``filter_groups`` is the filter's own statement of which alert groups it
+    covers (see ``_FILTER_GROUPS_KEY``). When it states them, the historical
+    UI-grouping expansion is not applied — the save already enumerated the
+    groups it wanted, so folding a neighbouring group in would override it. The
+    taxonomy expansion below is unconditional either way: it is not a grouping
+    guess but the same fact under the name the taxonomy now gives it.
     """
     if not allowed_types:
         return set()
     expanded: set[str] = set(allowed_types)
     for seed in allowed_types:
-        expanded |= _FILTER_GROUP_EXPANSIONS.get(seed, set())
+        if not filter_groups:
+            expanded |= _FILTER_GROUP_EXPANSIONS.get(seed, set())
         stem, sep, controller_id = seed.partition(":")
         if sep and stem in ("state_changed", "controller_changed") and controller_id:
             expanded.add(f"value_changed:{controller_id}")
@@ -438,7 +605,12 @@ def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     return expanded
 
 
-def _filter_allows(allowed_types: list[str] | None, event_type: str) -> bool:
+def _filter_allows(
+    allowed_types: list[str] | None,
+    event_type: str,
+    *,
+    filter_groups: list[str] | None = None,
+) -> bool:
     """Does a saved webhook filter cover *event_type*?
 
     An empty / absent filter covers everything (the existing contract). Beyond
@@ -447,7 +619,7 @@ def _filter_allows(allowed_types: list[str] | None, event_type: str) -> bool:
     """
     if not allowed_types:
         return True
-    if event_type in _expand_allowed_event_types(allowed_types):
+    if event_type in _expand_allowed_event_types(allowed_types, filter_groups=filter_groups):
         return True
     if event_type.startswith("value_changed"):
         return any(seed in _READ_WITNESSED_WILDCARD_SEEDS for seed in allowed_types)
@@ -464,6 +636,44 @@ _NON_NOTIFYING_TIERS = frozenset({WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
 def _may_notify(event: MonitoredEvent) -> bool:
     data = event.data if isinstance(event.data, dict) else {}
     return data.get("witness_tier") not in _NON_NOTIFYING_TIERS
+
+
+# Mirror of ``services.monitoring.salience.SALIENCE_ORDER``. ``not_determined``
+# sorts WITH ``notable`` so an unclassified event is never filtered out by a
+# threshold the classifier never rated it against.
+_SALIENCE_ORDER = {
+    SALIENCE_ROUTINE: 0,
+    SALIENCE_NOT_DETERMINED: 1,
+    SALIENCE_NOTABLE: 1,
+    SALIENCE_ALERT: 2,
+}
+
+
+def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) -> bool:
+    """Does *subscription*'s ``min_salience`` admit *event*?
+
+    **Opt-in, and only opt-in** (invariant 7). A subscription without
+    ``min_salience`` receives exactly what it receives today — this is the same
+    no-default-change contract ``_expand_allowed_event_types`` keeps for saved
+    event-type filters, and it is why the threshold rides inside the existing
+    ``event_filter`` JSONB rather than in a new column.
+
+    An unrecognized threshold admits everything: a filter value nothing in the
+    vocabulary matches is a filter we cannot honour, and declining to deliver
+    on that basis would mute a subscriber over our own misreading.
+    """
+    event_filter = subscription.event_filter if isinstance(subscription.event_filter, dict) else {}
+    minimum = event_filter.get("min_salience")
+    if not isinstance(minimum, str) or minimum not in _SALIENCE_ORDER:
+        return True
+    data = event.data if isinstance(event.data, dict) else {}
+    level = data.get("salience")
+    if level not in _SALIENCE_ORDER:
+        # A row minted before salience landed, or one no rule rated. Unrated is
+        # not routine (invariant 5), so it is measured at the not_determined
+        # rank rather than dropped.
+        level = SALIENCE_NOT_DETERMINED
+    return _SALIENCE_ORDER[level] >= _SALIENCE_ORDER[minimum]
 
 
 def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> None:
@@ -522,10 +732,20 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                 # signer_added/removed/threshold_changed; expand the
                 # allowed set on the fly so a historic webhook still
                 # picks up the related Safe execution events that were
-                # added later under the same UI grouping.
+                # added later under the same UI grouping — unless the filter
+                # states its own groups, which only a post-split save does.
                 if sub.event_filter and isinstance(sub.event_filter, dict):
-                    if not _filter_allows(sub.event_filter.get("event_types"), event.event_type):
+                    if not _filter_allows(
+                        sub.event_filter.get("event_types"),
+                        event.event_type,
+                        filter_groups=_stated_filter_groups(sub.event_filter),
+                    ):
                         continue
+                # Composes with the type filter: both must pass. Absent
+                # ``min_salience`` is a no-op, so no existing subscription
+                # changes behaviour.
+                if not _salience_allows(sub, event):
+                    continue
 
                 try:
                     _send_discord(sub.discord_webhook_url, embed)  # type: ignore[arg-type]

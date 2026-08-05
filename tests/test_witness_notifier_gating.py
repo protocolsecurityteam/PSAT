@@ -133,6 +133,96 @@ def test_filter_shim_keeps_the_historical_group_expansions():
     assert "safe_tx_executed" in _expand_allowed_event_types(["signer_added"])
 
 
+_SAFE_EXEC_TYPES = ("safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed")
+_SIGNER_TYPES = ["signer_added", "signer_removed", "threshold_changed"]
+
+
+def test_the_split_mutes_no_pre_split_signers_filter():
+    """`safe_exec` leaving the `signers` group changes what a NEW save
+    enumerates. A filter saved before it enumerated three types under a UI
+    grouping that delivered all seven, and nothing in the row says otherwise —
+    so it keeps all seven."""
+    expanded = _expand_allowed_event_types(_SIGNER_TYPES)
+    for event_type in _SAFE_EXEC_TYPES:
+        assert event_type in expanded
+        assert _filter_allows(_SIGNER_TYPES, event_type)
+
+
+def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
+    """The other direction of invariant 7. A save that names its groups used
+    the post-split vocabulary, so `signers` means signers — the legacy
+    expansion may not put executions back."""
+    groups = ["signers"]
+    for event_type in _SAFE_EXEC_TYPES:
+        assert not _filter_allows(_SIGNER_TYPES, event_type, filter_groups=groups)
+    for event_type in _SIGNER_TYPES:
+        assert _filter_allows(_SIGNER_TYPES, event_type, filter_groups=groups)
+
+
+def test_a_filter_naming_both_groups_hears_both():
+    """What the UI writes today: the watch flag offers both groups, so both are
+    named and both groups' types are enumerated."""
+    both = _SIGNER_TYPES + list(_SAFE_EXEC_TYPES)
+    groups = ["signers", "safe_exec"]
+    for event_type in both:
+        assert _filter_allows(both, event_type, filter_groups=groups)
+
+
+@pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7, ["banana"], ["banana", "kiwi"]])
+def test_an_unreadable_group_token_falls_back_to_no_mute(token):
+    """A token we cannot read is not a statement of coverage — and a name from
+    no vocabulary we have is unreadable in exactly the way a malformed field is.
+    The token SUPPRESSES the legacy expansion, so reading ``["banana"]`` as a
+    statement would mute a subscription's Safe executions on the strength of a
+    word this system has never defined."""
+    from services.monitoring.notifier import _stated_filter_groups
+
+    stated = _stated_filter_groups({"event_types": _SIGNER_TYPES, "groups": token})
+    assert stated is None
+    assert _filter_allows(_SIGNER_TYPES, "safe_tx_executed", filter_groups=stated)
+
+
+def test_an_unknown_name_beside_a_known_one_does_not_erase_the_known_one():
+    from services.monitoring.notifier import _stated_filter_groups
+
+    assert _stated_filter_groups({"groups": ["signers", "banana"]}) == ["signers"]
+
+
+def test_the_known_group_vocabulary_mirrors_the_frontend_table():
+    """``_KNOWN_FILTER_GROUPS`` is a hand-kept mirror of MONITOR_ALERT_GROUPS.
+    A group added there and not here would be silently unreadable, which mutes
+    exactly what the mirror exists to protect."""
+    import re
+    from pathlib import Path
+
+    from services.monitoring.notifier import _KNOWN_FILTER_GROUPS
+
+    meta = Path(__file__).resolve().parents[1] / "site" / "src" / "surface" / "meta.js"
+    table = re.search(r"MONITOR_ALERT_GROUPS = \[(.*?)\n\];", meta.read_text(), re.S)
+    assert table is not None
+    assert set(re.findall(r'key:\s*"([^"]+)"', table.group(1))) == set(_KNOWN_FILTER_GROUPS)
+
+
+def test_a_pre_split_signers_subscription_still_receives_executions(db_session, notify_env):
+    event = notify_env("safe_tx_executed", {"safe_tx_hash": "0x" + "ab" * 32, "payment": 0})
+    sub = db_session.query(ProtocolSubscription).one()
+    sub.event_filter = {"event_types": _SIGNER_TYPES}
+    db_session.commit()
+    with patch("services.monitoring.notifier._send_discord") as send:
+        notify_protocol_events(db_session, [event])
+    assert send.call_count == 1
+
+
+def test_a_post_split_signers_only_subscription_does_not(db_session, notify_env):
+    event = notify_env("safe_tx_executed", {"safe_tx_hash": "0x" + "ab" * 32, "payment": 0})
+    sub = db_session.query(ProtocolSubscription).one()
+    sub.event_filter = {"event_types": _SIGNER_TYPES, "groups": ["signers"]}
+    db_session.commit()
+    with patch("services.monitoring.notifier._send_discord") as send:
+        notify_protocol_events(db_session, [event])
+    assert send.call_count == 0
+
+
 def test_a_filtered_subscription_still_hears_the_verified_successor(db_session, notify_env):
     event = notify_env(
         "value_changed:state_variable:owner",

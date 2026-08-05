@@ -24,6 +24,14 @@ from services.monitoring.event_topics import (
     WITNESS_TIER_SELF_DESCRIBING,
     classify_witness_tier,
 )
+from services.monitoring.salience import (
+    BASIS_QUALIFIED_MEMBER_CHANGE,
+    BASIS_TRACKED_CONFIG_EVENT,
+    SALIENCE_ALERT,
+    SALIENCE_BASIS_VALUES,
+    SALIENCE_NOTABLE,
+    SALIENCE_VALUES,
+)
 from tests.monitoring_replay import baseline_identities, build_replay, load_replay_fixture
 
 TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -178,6 +186,42 @@ def test_replay_queues_no_reanalysis(db_session):
     assert db_session.query(Job).count() == 0
 
 
+def test_every_replayed_publication_carries_an_auditable_salience(db_session):
+    """Salience census (c), on the recording rather than on a synthetic row.
+
+    Run the window with every spec forced to publish — the pre-taxonomy rule,
+    which is the only variant of this replay that produces rows at all — and
+    require all 446 of them to carry a level AND a non-empty basis from the
+    closed vocabulary. Nothing here is allowed to reach the DB unrated.
+
+    These are ``state_changed:<controller_id>`` rows: the self_describing arm
+    of the per-contract taxonomy, so ``notable``. **None of them collapse** —
+    which is the point of running the assertion on real recorded traffic: the
+    routine arms need positive inputs (a stamped ``signal_class``, a decoded
+    ``safe_exec`` status) that no row in this window has.
+    """
+    fixture = copy.deepcopy(load_replay_fixture())
+    for contract in fixture["contracts"]:
+        for spec in contract["monitoring_config"].get("tracked_topics") or []:
+            spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
+
+    from tests.monitoring_replay import ReplayEnv
+
+    env = ReplayEnv(db_session, fixture).seed()
+    env.run()
+
+    rated = env.persisted_salience()
+    assert len(rated) == 446
+    assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
+    assert all(basis and set(basis) <= SALIENCE_BASIS_VALUES for _et, _level, basis in rated)
+
+    by_level: dict[str | None, int] = {}
+    for _event_type, level, _basis in rated:
+        by_level[level] = by_level.get(level, 0) + 1
+    assert by_level == {SALIENCE_NOTABLE: 446}
+    assert {basis for _et, _level, basis in rated} == {(BASIS_TRACKED_CONFIG_EVENT,)}
+
+
 @pytest.mark.parametrize("openness", ["restricted", "open", "not_determined", None])
 def test_member_witness_qualification_republishes_the_transfers(db_session, openness):
     """Liveness + the G3 interface, on the real logs.
@@ -218,5 +262,10 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
     if openness == "restricted":
         assert len(produced) == 388
         assert {et for _a, et, _t, _l in produced} == {"member_changed:_balances"}
+        # Census (c) on the qualified arm: a member change is a first-class
+        # control-plane fact and every republished row says so, with its basis.
+        rated = env.persisted_salience()
+        assert len(rated) == 388
+        assert {(level, basis) for _et, level, basis in rated} == {(SALIENCE_ALERT, (BASIS_QUALIFIED_MEMBER_CHANGE,))}
     else:
         assert produced == set()

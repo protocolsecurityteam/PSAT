@@ -127,6 +127,30 @@ class ReplayEnv:
         ).all()
         return {(a.lower(), et, tx, li) for a, et, tx, li in rows}
 
+    def persisted_salience(self) -> list[tuple[str, str | None, tuple[str, ...]]]:
+        """``(event_type, data.salience, data.salience_basis)`` per persisted row.
+
+        The salience census's liveness unit: a replayed publication that
+        reaches the DB without an auditable level is a spine that stopped
+        covering the path the recording actually exercises. A missing or
+        non-list basis normalizes to the empty tuple so a caller asserting
+        "non-empty" cannot be satisfied by a malformed one.
+        """
+        rows = self.session.execute(select(MonitoredEvent.event_type, MonitoredEvent.data)).all()
+        out: list[tuple[str, str | None, tuple[str, ...]]] = []
+        for event_type, data in rows:
+            payload = data if isinstance(data, dict) else {}
+            level = payload.get("salience")
+            basis = payload.get("salience_basis")
+            out.append(
+                (
+                    event_type,
+                    level if isinstance(level, str) else None,
+                    tuple(str(code) for code in basis) if isinstance(basis, list) else (),
+                )
+            )
+        return out
+
 
 def baseline_identities(fixture: dict[str, Any]) -> set[tuple[str, str, str, int]]:
     return {(a.lower(), et, tx, li) for a, et, tx, li, _hist in fixture["baseline_event_identities"]}

@@ -6,7 +6,15 @@
 // No React — unit-testable.
 
 import { shortenAddress } from "../../../graph.js";
-import { decodeEvent, eventKind, eventKindLabel, eventSeverity } from "../../../monitoring/format.js";
+import {
+  SALIENCE_NOT_DETERMINED,
+  decodeEvent,
+  eventKind,
+  eventKindLabel,
+  eventSalience,
+  eventSeverity,
+  salienceAllows,
+} from "../../../monitoring/format.js";
 
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
@@ -70,13 +78,23 @@ function upgradeSub(im, isFirst) {
   return isFirst ? addr : `→ ${addr}`;
 }
 
+// The reciprocal half of the backend's same-transaction join (§3.4). Sharing a
+// transaction hash is a witnessed fact, so the row may say what caused it — and
+// it says only what the backend published, with no client-side re-derivation.
+function withCause(sub, ev) {
+  const cause = ev?.data?.caused_by;
+  if (!cause || typeof cause !== "object" || !cause.event_type) return sub;
+  const note = `caused by ${eventKindLabel(cause.event_type)}`;
+  return sub ? `${sub} · ${note}` : note;
+}
+
 // buildTimeline({ events, proxy, enrollmentBlock, isProxy }) →
 //   { above, below, boundaryBlock }
 // `above` = live-captured rows (block ≥ enrollment); `below` = upgrade-only
 // backfill rows (dimmed). When enrollmentBlock is null (a row enrolled before
 // the column landed), there is NO boundary — everything renders as-is in
 // `above` and boundaryBlock is null.
-export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false }) {
+export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false, nameFor = null }) {
   const eras = isProxy ? implEras(proxy) : [];
   const current = String(proxy?.current_implementation || "").toLowerCase();
   const seenUpgrades = new Set();
@@ -85,7 +103,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
   // 1. Monitored events → rows (all kinds).
   for (const ev of events) {
     const kind = eventKind(ev);
-    const decoded = decodeEvent(ev);
+    const decoded = decodeEvent(ev, { nameFor });
     const rawBlock = typeof ev.block_number === "number" ? ev.block_number : null;
     // Read-witnessed rows (state_changed_poll, value_changed:*) carry
     // block_number 0 + no tx_hash as a placeholder — there is no on-chain log
@@ -102,8 +120,11 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
       kind,
       kindLabel: eventKindLabel(ev),
       severity: eventSeverity(ev),
+      salience: eventSalience(ev),
       title: decoded.title,
-      sub: decoded.sub,
+      titleDetail: decoded.titleDetail || null,
+      target: decoded.target || null,
+      sub: withCause(decoded.sub, ev),
       block,
       timestamp: ev.detected_at ? Date.parse(ev.detected_at) : null,
       txHash: ev.tx_hash || null,
@@ -129,6 +150,10 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
         kind: "upgrade",
         kindLabel: "Upgrade",
         severity: "critical",
+        // A back-filled upgrade is not a monitored_event, so no backend rule
+        // ever rated it. `not_determined` is what that is — and it renders,
+        // where a borrowed `routine` would collapse a real upgrade.
+        salience: SALIENCE_NOT_DETERMINED,
         title: isFirst ? "First deployment" : "Implementation upgraded",
         sub: upgradeSub(im, isFirst),
         block,
@@ -175,4 +200,27 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     }
   }
   return { above, below, boundaryBlock: enrollmentBlock };
+}
+
+// Apply a salience threshold to a built timeline, returning the surviving rows
+// and how many were withheld. The count is not optional bookkeeping: a view
+// that hides rows without saying how many is the suppression this axis exists
+// to prevent (invariant 4), so every caller renders it.
+// The per-section counts are not bookkeeping either: the Timeline's empty
+// states are claims about what EXISTS (an earned negative, a hedge, or an
+// answer), and a section the filter emptied has not earned any of them. It
+// needs to know which of its empty sections are empty because nothing is there
+// and which are empty because it was told not to draw them.
+export function filterTimelineBySalience({ above = [], below = [] }, minSalience) {
+  const keptAbove = above.filter((row) => salienceAllows(row.salience, minSalience));
+  const keptBelow = below.filter((row) => salienceAllows(row.salience, minSalience));
+  const hiddenAbove = above.length - keptAbove.length;
+  const hiddenBelow = below.length - keptBelow.length;
+  return {
+    above: keptAbove,
+    below: keptBelow,
+    hiddenAbove,
+    hiddenBelow,
+    hidden: hiddenAbove + hiddenBelow,
+  };
 }
