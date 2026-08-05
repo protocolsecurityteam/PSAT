@@ -9,18 +9,23 @@ import { eventTypesFromGroupKeys } from "./helpers.js";
 
 const POLL_MS = 30_000;
 
-// Three positions, expressed as the MINIMUM salience each admits. Default is
-// `notable`: routine rows are proven-routine by a backend rule with a stated
-// basis, so collapsing them by default is a display choice about proven
-// findings — not a guess. `not_determined` sorts with `notable`
-// (monitoring/format.js), so an unrated event survives the default.
+// Two positions, expressed as the MINIMUM salience each admits. A middle
+// "Notable+" tier existed and was removed as redundant: its only distinct
+// effect was hiding proven-routine rows, which the Timeline already
+// collapses into a single "N routine events — show" disclosure inside All.
+//
+// Default is `alert` — an owner decision (2026-08-05): the timeline's
+// non-alert traffic is overwhelmingly routine operations, so the tab opens
+// on what needs eyes. The tradeoff is stated, not hidden: `notable` and
+// `not_determined` (unrated) rows are behind the filter by default, and the
+// always-rendered hidden count plus one-click All is what keeps that from
+// being silent suppression.
 export const SALIENCE_MODES = [
   { key: "routine", label: "All" },
-  { key: "notable", label: "Notable+" },
-  { key: "alert", label: "Alerts only" },
+  { key: "alert", label: "Alerts" },
 ];
 
-export const DEFAULT_MIN_SALIENCE = "notable";
+export const DEFAULT_MIN_SALIENCE = "alert";
 
 // The hidden count is rendered unconditionally, including when it is zero:
 // a filter that silently withholds rows is the failure this axis exists to

@@ -125,6 +125,15 @@ function renderPanel(props) {
   return render(panelElement(props));
 }
 
+// Structural tests assert rows the Alerts default withholds (backfill and
+// pre-salience rows are not_determined). Their subject is the timeline's
+// structure, so they view All; the filter's own tests exercise the default.
+async function showAll() {
+  await act(async () => {
+    screen.getByRole("button", { name: "All" }).click();
+  });
+}
+
 const notDetermined = () =>
   new Response(JSON.stringify({ detail: "Artifact state not determined" }), {
     status: 503,
@@ -145,6 +154,7 @@ describe("ActivityPanel — proxy entity mode", () => {
 
   it("renders the status strip, enrollment boundary, and impl attribution", async () => {
     renderPanel({ selectedMachine: PROXY_MACHINE, isAdmin: true });
+    await showAll();
 
     // Status strip identity.
     expect(await screen.findByText("LiquidityPool")).toBeInTheDocument();
@@ -348,6 +358,7 @@ describe("ActivityPanel — a failed event poll does not erase proven events", (
     try {
       renderPanel({ selectedMachine: PROXY_MACHINE });
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await showAll();
       expect(screen.getByText("Implementation upgraded")).toBeInTheDocument();
       expect(screen.queryByText(/refresh did not complete/i)).toBeNull();
 
@@ -403,6 +414,7 @@ describe("ActivityPanel — a contract whose proxyhood contradicts itself", () =
     // arrive must render, not be dropped for failing a boolean.
     mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
     renderPanel({ selectedMachine: BEACON_MACHINE });
+    await showAll();
     expect(await screen.findByText("First deployment")).toBeInTheDocument();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
   });
@@ -599,6 +611,7 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     // real history replaces it with rows.
     mockActivity({ contracts: [PROXY_CONTRACT], monitoredEvents: [], history: HISTORY });
     renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
     expect(screen.queryByText(ABSENCE_PROSE)).toBeNull();
     expect(screen.queryByText(/unknown, not absent/i)).toBeNull();
@@ -614,6 +627,7 @@ describe("ActivityPanel — upgrade history the read could not answer", () => {
     setFetchHandler((url) => /\/artifact\/upgrade_history$/.test(url.pathname), notDetermined);
 
     const { rerender } = renderPanel({ selectedMachine: PROXY_MACHINE, cache: POOL_CACHE });
+    await showAll();
     expect(await screen.findByText(/unknown, not absent/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE, cache: POOL_CACHE }));
@@ -650,6 +664,7 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     );
 
     const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/First deployment/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE }));
@@ -681,6 +696,7 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
     );
 
     const { rerender, container } = renderPanel({ selectedMachine: PROXY_MACHINE });
+    await showAll();
     expect(await screen.findByText(/role granted/i)).toBeInTheDocument();
 
     rerender(panelElement({ selectedMachine: POOL_MACHINE }));
@@ -691,9 +707,10 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Salience: the three-position control, the always-visible hidden count, and
-// the routine-run collapse. Invariant 4 (routine hides, never deletes) and
-// invariant 5 (unclassified is visible) are what these pin.
+// Salience: the two-position control (All / Alerts, default Alerts), the
+// always-visible hidden count, and the routine-run collapse. Invariant 4
+// (routine hides, never deletes) is what these pin; the count + one-click All
+// is what keeps the Alerts default from being silent suppression.
 // ---------------------------------------------------------------------------
 
 const SALIENT_EVENTS = [
@@ -709,18 +726,25 @@ describe("ActivityPanel — salience filter", () => {
     mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: SALIENT_EVENTS });
   });
 
-  it("defaults to Notable+ and states how many rows that hides", async () => {
+  it("defaults to Alerts and states how many rows that hides", async () => {
     renderPanel({ selectedMachine: SAFE_MACHINE });
     await screen.findByText("Ownership transferred");
-    expect(screen.getByRole("button", { name: "Notable+" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Alerts" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "false");
-    // The three proven-routine poll diffs.
-    await waitFor(() => expect(screen.getByText("3 hidden")).toBeTruthy());
+    // The unrated Safe execution + the three proven-routine poll diffs.
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
     expect(screen.queryByText(/changed \(polled\)/)).toBeNull();
   });
 
-  it("keeps an unrated Safe execution visible under the default", async () => {
+  it("counts an unrated Safe execution behind the default and keeps it reachable", async () => {
+    // The default withholds not_determined rows — the accepted tradeoff of
+    // opening on Alerts. The count says so, and one click restores them.
     renderPanel({ selectedMachine: SAFE_MACHINE });
+    await screen.findByText("Ownership transferred");
+    expect(screen.queryByText("Safe transaction executed")).toBeNull();
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
+    await showAll();
     expect(await screen.findByText("Safe transaction executed")).toBeTruthy();
   });
 
@@ -744,12 +768,15 @@ describe("ActivityPanel — salience filter", () => {
     expect(screen.getByRole("button", { name: "3 routine events — hide" })).toBeTruthy();
   });
 
-  it("admits only the proven alert at Alerts only, and says so", async () => {
+  it("round-trips All and back to Alerts without losing the count", async () => {
     renderPanel({ selectedMachine: SAFE_MACHINE });
     await screen.findByText("Ownership transferred");
+    await showAll();
+    expect(screen.getByText("0 hidden")).toBeTruthy();
+    expect(screen.getByText("Safe transaction executed")).toBeTruthy();
 
     await act(async () => {
-      screen.getByRole("button", { name: "Alerts only" }).click();
+      screen.getByRole("button", { name: "Alerts" }).click();
     });
 
     expect(screen.getByText("Ownership transferred")).toBeTruthy();
@@ -761,7 +788,7 @@ describe("ActivityPanel — salience filter", () => {
     mockActivity({ contracts: [SAFE_CONTRACT], protocolEvents: SALIENT_EVENTS });
     renderPanel({ selectedMachine: null });
     await screen.findByText("Recent across protocol");
-    await waitFor(() => expect(screen.getByText("3 hidden")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("4 hidden")).toBeTruthy());
   });
 });
 
@@ -777,13 +804,8 @@ describe("ActivityPanel — a filter-emptied timeline claims no absence", () => 
     });
     renderPanel({ selectedMachine: PROXY_MACHINE });
     await screen.findByText("Ownership transferred");
-    // Default Notable+ still draws them: backfill rows are not_determined.
-    expect(await screen.findByText("First deployment")).toBeTruthy();
-
-    await act(async () => {
-      screen.getByRole("button", { name: "Alerts only" }).click();
-    });
-
+    // The Alerts default withholds the not_determined backfill rows from the
+    // start — the empty state below the line must still claim no absence.
     expect(screen.queryByText("First deployment")).toBeNull();
     expect(screen.queryByText(/No activity before the line/)).toBeNull();
     expect(screen.queryByText(/isn't back-filled/)).toBeNull();

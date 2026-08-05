@@ -299,13 +299,13 @@ describe("filterTimelineBySalience", () => {
     expect(out.hidden).toBe(0);
   });
 
-  it("hides only proven-routine rows at Notable+, and counts them", () => {
+  it("hides only proven-routine rows at the notable threshold, and counts them", () => {
     const out = filterTimelineBySalience(built(), "notable");
     expect(out.above.map((r) => r.key)).toEqual(["ev:a1", "ev:u1", "ev:n1"]);
     expect(out.hidden).toBe(2);
   });
 
-  it("keeps not_determined visible at Notable+ — unrated is not routine", () => {
+  it("keeps not_determined visible at the notable threshold — unrated is not routine", () => {
     const out = filterTimelineBySalience(built(), "notable");
     expect(out.above.some((r) => r.key === "ev:u1")).toBe(true);
   });
