@@ -47,34 +47,36 @@ export function ProtocolActivity({
   const [labelMap, setLabelMap] = useState({});
   const activeChain = coalesceChain(chain);
 
-  const refresh = useCallback(async () => {
-    if (!protocolId) return;
-    try {
-      // Chain-scoped server-side: the same address is a distinct deployment
-      // per chain, so only the backend (which knows each event's monitored
-      // row) can scope a shared-address protocol's feed correctly.
-      const evs = await api(
-        `/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`,
-      );
-      setEvents(Array.isArray(evs) ? evs : []);
-    } catch {
-      /* transient — keep the last good feed */
-    }
-  }, [protocolId, activeChain]);
-
   // A chain (or protocol) switch must not leave the previous scope's rows
   // rendering while the new fetch is in flight — that would be a positive
   // claim about the wrong chain, the same failure the entity panel pins with
-  // its state-must-not-outlive-selection tests.
+  // its state-must-not-outlive-selection tests. Clearing alone is not enough:
+  // the previous scope's fetch may still be airborne, so its late resolution
+  // must be dropped (`cancelled`), not written into the new scope's view.
   useEffect(() => {
+    if (!protocolId) return undefined;
+    let cancelled = false;
     setEvents([]);
+    const load = async () => {
+      try {
+        // Chain-scoped server-side: the same address is a distinct deployment
+        // per chain, so only the backend (which knows each event's monitored
+        // row) can scope a shared-address protocol's feed correctly.
+        const evs = await api(
+          `/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`,
+        );
+        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
+      } catch {
+        /* transient — keep the last good feed */
+      }
+    };
+    load();
+    const t = setInterval(load, POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, [protocolId, activeChain]);
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, POLL_MS);
-    return () => clearInterval(t);
-  }, [refresh]);
 
   useEffect(() => {
     let cancelled = false;

@@ -1086,9 +1086,7 @@ class TestEnrollmentIntegration:
             enroll_protocol_contracts(pg_session, proto.id, "http://rpc", "ethereum")
 
         rows = (
-            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == base_safe))
-            .scalars()
-            .all()
+            pg_session.execute(select(MonitoredContract).where(MonitoredContract.address == base_safe)).scalars().all()
         )
         assert rows == []
 
