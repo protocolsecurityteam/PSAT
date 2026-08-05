@@ -1190,7 +1190,7 @@ def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make
     tx_hash = "0x" + "c7" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
     first_init = seed_event(db_session, proxy, "initialized", tx_hash, data={"version": 1}, log_index=0)
-    assert first_init.data["salience_basis"] == [sal.BASIS_NO_RULE]
+    assert (first_init.data or {})["salience_basis"] == [sal.BASIS_NO_RULE]
 
     _cause_data, effect_data = run(db_session, [cause, first_init], {})
 
