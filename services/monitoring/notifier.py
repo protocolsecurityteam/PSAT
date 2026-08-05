@@ -510,22 +510,40 @@ _READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 
 # ``event_filter`` key naming the alert-group vocabulary a filter was saved
 # against (``site/src/surface/sidebar/activity/helpers.js``'s group keys). It is
-# a POSITIVE token, and the only thing that distinguishes a post-split
+# a POSITIVE token, and the only thing that will distinguish a post-split
 # "signers, and I mean only signers" save from a pre-split "signers" save —
 # the two enumerate byte-identical ``event_types``. Absent, the filter predates
 # the vocabulary and keeps the legacy grouping expansion, so no saved
 # subscription is ever muted by a split it was not written against; present, the
-# save enumerated its own groups and is taken at its word, so no subscription is
-# force-fed a group it did not name.
+# save enumerated its own groups and is taken at its word, so no subscription
+# will be force-fed a group it did not name.
+#
+# The discriminator is inert on the notification plane TODAY: the only producer
+# is ``ActivityPanel.attachWebhook``, and the Alerts control passes it the whole
+# offered group set, so no save the UI can currently produce says "signers
+# without executions". It is written now because a filter saved before this key
+# existed and one saved after it are otherwise indistinguishable forever — the
+# discriminator has to land with the split or not at all. A per-group selector
+# is what would make it bite.
 _FILTER_GROUPS_KEY = "groups"
+
+# The group keys the UI can state — mirror of ``MONITOR_ALERT_GROUPS`` in
+# ``site/src/surface/meta.js``. Pinned by
+# ``tests/test_witness_notifier_gating.py`` against that table.
+_KNOWN_FILTER_GROUPS = frozenset(
+    {"upgrades", "ownership", "pause", "roles", "signers", "safe_exec", "timelock", "state"}
+)
 
 
 def _stated_filter_groups(event_filter: object) -> list[str] | None:
     """The group keys a filter positively states, or ``None`` if it states none.
 
-    An unreadable token is not a statement: a non-list, or a list holding
-    anything but strings, is treated as absent rather than as an empty claim of
-    coverage.
+    An unreadable token is not a statement, and a name from no vocabulary we
+    have is unreadable in exactly the same way a non-list is: both are treated
+    as absent rather than as a claim of coverage. This matters because the token
+    SUPPRESSES the legacy grouping expansion — reading ``["banana"]`` as a
+    statement would mute a subscription's Safe executions on the strength of a
+    word this system has never defined.
     """
     if not isinstance(event_filter, dict):
         return None
@@ -534,7 +552,11 @@ def _stated_filter_groups(event_filter: object) -> list[str] | None:
         return None
     if not all(isinstance(g, str) for g in groups):
         return None
-    return [str(g) for g in groups]
+    # An unknown name is dropped rather than fatal — a filter naming a group we
+    # do know still states that one. A token that names nothing we know states
+    # nothing at all.
+    known = [g for g in groups if g in _KNOWN_FILTER_GROUPS]
+    return known or None
 
 
 def _expand_allowed_event_types(allowed_types: list[str] | None, *, filter_groups: list[str] | None = None) -> set[str]:

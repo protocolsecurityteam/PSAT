@@ -100,9 +100,11 @@ export const MONITOR_ALERT_GROUPS = [
     // An owner-set change is a config-plane event; an execution is the fleet's
     // routine traffic (11 of the dev corpus's 12 events), and one group made
     // "tell me when this Safe's owners change" mean "tell me about every
-    // transaction it runs". Separating the vocabulary is what lets a
-    // subscription say which one it wants; see notifier._FILTER_GROUP_EXPANSIONS
-    // for what keeps the pre-split subscriptions whole.
+    // transaction it runs". Separating the vocabulary is what will let a
+    // subscription say which one it wants — the Alerts control still offers the
+    // whole set, so nothing can ask for one alone until a per-group selector
+    // exists; see notifier._FILTER_GROUP_EXPANSIONS for what keeps the
+    // pre-split subscriptions whole meanwhile.
     key: "safe_exec",
     label: "Safe executions",
     flags: ["watch_safe_signers", "watch_signers"],

@@ -132,11 +132,16 @@ export function ActivityPanel({
         body: JSON.stringify({
           discord_webhook_url: url,
           label,
-          // `groups` states which alert groups this filter was saved against.
-          // It is what tells the notifier the save used the post-split
-          // vocabulary, so it is taken at its word rather than folded into the
-          // legacy grouping that put Safe executions under `signers`
-          // (notifier._FILTER_GROUPS_KEY).
+          // `groups` states which alert groups this filter was saved against —
+          // what tells the notifier the save used the post-split vocabulary, so
+          // it will be taken at its word rather than folded into the legacy
+          // grouping that put Safe executions under `signers`
+          // (notifier._FILTER_GROUPS_KEY). It changes nothing today: the Alerts
+          // control passes the WHOLE offered group set, so this save always
+          // names every group the contract offers. It is written now because a
+          // save made before the key existed and one made after it are
+          // otherwise indistinguishable forever; a per-group selector is what
+          // would make it bite.
           event_filter: eventTypes.length ? { event_types: eventTypes, groups: groupKeys } : null,
         }),
       });

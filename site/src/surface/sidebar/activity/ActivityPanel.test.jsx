@@ -4,9 +4,10 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor, within, act } from "@testing-library/react";
+import { render, screen, waitFor, within, act, fireEvent } from "@testing-library/react";
 
 import { ActivityPanel } from "./ActivityPanel.jsx";
+import { eventTypesFromGroupKeys, groupKeysFromConfig } from "./helpers.js";
 import { setFetchHandler } from "../../../test/fetchMock.js";
 
 const PROXY = "0x30880000000000000000000000000000000000f2";
@@ -846,5 +847,59 @@ describe("ActivityPanel — a filter-emptied timeline claims no absence", () => 
     await screen.findByText("Recent across protocol");
     expect(await screen.findByText(/Nothing captured yet/)).toBeTruthy();
     expect(screen.getByText("0 hidden")).toBeTruthy();
+  });
+});
+
+// The `groups` discriminator is only worth anything if the save actually
+// carries it: the notifier reads its ABSENCE as "this filter predates the
+// safe_exec split", so a producer that quietly stopped writing it would turn
+// every new save into a legacy one and nothing else would notice.
+describe("ActivityPanel — the attached webhook states its alert groups", () => {
+  beforeEach(() => {
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });
+  });
+
+  async function attach() {
+    const posted = [];
+    setFetchHandler(
+      (url, init) => /\/api\/protocols\/\d+\/subscribe$/.test(url.pathname) && init?.method === "POST",
+      (url, init) => {
+        posted.push(JSON.parse(init.body));
+        return {};
+      },
+    );
+    renderPanel({ selectedMachine: SAFE_MACHINE, isAdmin: true });
+    const attachBtn = await screen.findByText(/attach Discord/i);
+    await act(async () => {
+      attachBtn.click();
+    });
+    fireEvent.change(screen.getByLabelText("Discord webhook URL"), {
+      target: { value: "https://discord.com/api/webhooks/1/abc" },
+    });
+    await act(async () => {
+      fireEvent.submit(document.querySelector(".ps-activity-webhook-form"));
+    });
+    await waitFor(() => expect(posted.length).toBe(1));
+    return posted[0];
+  }
+
+  it("POSTs the group keys it derived from the contract's config", async () => {
+    const body = await attach();
+    const config = SAFE_CONTRACT.monitoring_config;
+    expect(body.event_filter.groups).toEqual(groupKeysFromConfig(config));
+    // Not a tautology against the helper alone: a Safe offers both halves of
+    // the split, which is the case the discriminator exists for.
+    expect(body.event_filter.groups).toEqual(["signers", "safe_exec"]);
+  });
+
+  it("POSTs exactly those groups' event types beside them", async () => {
+    const body = await attach();
+    expect(new Set(body.event_filter.event_types)).toEqual(
+      new Set(eventTypesFromGroupKeys(groupKeysFromConfig(SAFE_CONTRACT.monitoring_config))),
+    );
+    // Invariant 7 at the producer: the save still enumerates every type the
+    // pre-split `signers` group carried.
+    expect(body.event_filter.event_types).toContain("safe_tx_executed");
+    expect(body.event_filter.event_types).toContain("signer_added");
   });
 });

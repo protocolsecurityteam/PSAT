@@ -168,15 +168,39 @@ def test_a_filter_naming_both_groups_hears_both():
         assert _filter_allows(both, event_type, filter_groups=groups)
 
 
-@pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7])
+@pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7, ["banana"], ["banana", "kiwi"]])
 def test_an_unreadable_group_token_falls_back_to_no_mute(token):
-    """A token we cannot read is not a statement of coverage. Reading it as one
-    would mute a subscription on the strength of a malformed field."""
+    """A token we cannot read is not a statement of coverage — and a name from
+    no vocabulary we have is unreadable in exactly the way a malformed field is.
+    The token SUPPRESSES the legacy expansion, so reading ``["banana"]`` as a
+    statement would mute a subscription's Safe executions on the strength of a
+    word this system has never defined."""
     from services.monitoring.notifier import _stated_filter_groups
 
     stated = _stated_filter_groups({"event_types": _SIGNER_TYPES, "groups": token})
     assert stated is None
     assert _filter_allows(_SIGNER_TYPES, "safe_tx_executed", filter_groups=stated)
+
+
+def test_an_unknown_name_beside_a_known_one_does_not_erase_the_known_one():
+    from services.monitoring.notifier import _stated_filter_groups
+
+    assert _stated_filter_groups({"groups": ["signers", "banana"]}) == ["signers"]
+
+
+def test_the_known_group_vocabulary_mirrors_the_frontend_table():
+    """``_KNOWN_FILTER_GROUPS`` is a hand-kept mirror of MONITOR_ALERT_GROUPS.
+    A group added there and not here would be silently unreadable, which mutes
+    exactly what the mirror exists to protect."""
+    import re
+    from pathlib import Path
+
+    from services.monitoring.notifier import _KNOWN_FILTER_GROUPS
+
+    meta = Path(__file__).resolve().parents[1] / "site" / "src" / "surface" / "meta.js"
+    table = re.search(r"MONITOR_ALERT_GROUPS = \[(.*?)\n\];", meta.read_text(), re.S)
+    assert table is not None
+    assert set(re.findall(r'key:\s*"([^"]+)"', table.group(1))) == set(_KNOWN_FILTER_GROUPS)
 
 
 def test_a_pre_split_signers_subscription_still_receives_executions(db_session, notify_env):
