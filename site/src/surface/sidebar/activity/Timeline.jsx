@@ -37,7 +37,7 @@ function EventRow({ row, chain, now }) {
       <div className="ps-activity-ev-body">
         <div className="ps-activity-ev-top">
           <span className={`ps-activity-kind k-${row.kind}`}>{row.kindLabel}</span>
-          <span className="ps-activity-ev-title">{row.title}</span>
+          <span className="ps-activity-ev-title" title={row.titleDetail || undefined}>{row.title}</span>
           {row.backfill ? <span className="ps-activity-backfill">backfill</span> : null}
           <span className="ps-activity-ev-time">{timeLabel(row.timestamp, now)}</span>
         </div>

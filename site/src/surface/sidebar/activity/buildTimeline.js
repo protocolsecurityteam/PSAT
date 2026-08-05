@@ -94,7 +94,7 @@ function withCause(sub, ev) {
 // backfill rows (dimmed). When enrollmentBlock is null (a row enrolled before
 // the column landed), there is NO boundary — everything renders as-is in
 // `above` and boundaryBlock is null.
-export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false }) {
+export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false, nameFor = null }) {
   const eras = isProxy ? implEras(proxy) : [];
   const current = String(proxy?.current_implementation || "").toLowerCase();
   const seenUpgrades = new Set();
@@ -103,7 +103,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
   // 1. Monitored events → rows (all kinds).
   for (const ev of events) {
     const kind = eventKind(ev);
-    const decoded = decodeEvent(ev);
+    const decoded = decodeEvent(ev, { nameFor });
     const rawBlock = typeof ev.block_number === "number" ? ev.block_number : null;
     // Read-witnessed rows (state_changed_poll, value_changed:*) carry
     // block_number 0 + no tx_hash as a placeholder — there is no on-chain log
@@ -122,6 +122,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
       severity: eventSeverity(ev),
       salience: eventSalience(ev),
       title: decoded.title,
+      titleDetail: decoded.titleDetail || null,
       sub: withCause(decoded.sub, ev),
       block,
       timestamp: ev.detected_at ? Date.parse(ev.detected_at) : null,

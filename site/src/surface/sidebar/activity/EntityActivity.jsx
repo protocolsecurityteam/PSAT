@@ -25,6 +25,7 @@ export function EntityActivity({
   now,
   minSalience = "routine",
   onHiddenCount,
+  nameFor,
 }) {
   const [events, setEvents] = useState([]);
   // The settled outcome of the per-contract event read, carried with the
@@ -196,8 +197,8 @@ export function EntityActivity({
   // eras instead of dropping them; with no history the flag adds no rows either
   // way, so the open case cannot manufacture a timeline.
   const timeline = useMemo(
-    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy }),
-    [events, proxy, enrollmentBlock, mayBeProxy],
+    () => buildTimeline({ events, proxy, enrollmentBlock, isProxy: mayBeProxy, nameFor }),
+    [events, proxy, enrollmentBlock, mayBeProxy, nameFor],
   );
 
   // The threshold is the panel's; the COUNT can only be computed here, where

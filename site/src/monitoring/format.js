@@ -327,6 +327,26 @@ const SAFE_EXEC_BATCH_REASON = {
   nested_depth_exceeded: "nested deeper than the decoder expands",
 };
 
+// A signature's display form: the function name alone. The parameter-type
+// list is a fact about the ABI, not about what happened — it goes in the
+// tooltip (`titleDetail`), never in the row. A selector stays raw: it is a
+// real fact and no name is invented to replace it.
+function fnDisplay(signature) {
+  const s = String(signature || "");
+  const paren = s.indexOf("(");
+  return paren > 0 ? `${s.slice(0, paren)}()` : s || null;
+}
+
+// Display-only address naming. `nameFor` is the caller's map of the
+// protocol's own contracts (surface machines / principals) — a rendering
+// convenience, never a witness: it changes what a row SAYS an address is
+// called, never what was claimed or how salient it is.
+function addrDisplay(addr, opts) {
+  if (!addr) return null;
+  const name = opts?.nameFor ? opts.nameFor(addr) : null;
+  return name || shortenAddress(addr);
+}
+
 const RENDER_BY_WRITE_TARGET = {
   owner: (d) => {
     const renounced = d.new_owner && /^0x0+$/i.test(d.new_owner);
@@ -391,7 +411,7 @@ const RENDER_BY_WRITE_TARGET = {
       sub: oldD && newD ? `${oldD} → ${newD}` : null,
     };
   },
-  _safe_op: (d, type) => {
+  _safe_op: (d, type, opts) => {
     const executed = type === "safe_tx_executed";
     // Pre-enrichment shape, and the shape a row keeps when the transaction was
     // never fetched: the Safe-internal hash is all that was witnessed.
@@ -410,15 +430,12 @@ const RENDER_BY_WRITE_TARGET = {
       return { ...unenriched, sub: SAFE_EXEC_STATUS_SUB[se.status] || `not decoded (${se.status})` };
     }
 
-    const verb = executed ? "Safe executed" : "Safe execution reverted";
     if (se.batch_status === "undecodable") {
       const why = SAFE_EXEC_BATCH_REASON[se.batch_status_reason];
-      const parts = [];
-      if (se.to) parts.push(shortenAddress(se.to));
-      parts.push("delegatecall");
+      const parts = [`delegatecall → ${addrDisplay(se.to, opts)}`];
       if (why) parts.push(why);
       return {
-        title: `${verb} a MultiSend batch that did not decode`,
+        title: `${executed ? "MultiSend batch" : "Reverted MultiSend batch"} — did not decode`,
         sub: parts.join(" · "),
       };
     }
@@ -428,33 +445,52 @@ const RENDER_BY_WRITE_TARGET = {
     const call = head || se;
     // A resolved signature when one exists, the raw selector otherwise — a
     // selector is a real fact, and a name is never invented to replace it.
-    const name = (head ? head.signature : se.target_function?.signature) || call.selector || null;
+    // The row shows the function NAME; the full signature rides in
+    // `titleDetail` for the tooltip.
+    const signature = head ? head.signature : se.target_function?.signature;
+    const name = fnDisplay(signature) || call.selector || null;
+    const title = executed
+      ? name
+        ? `Executed ${name}`
+        : "Safe transaction executed"
+      : `Reverted: ${name || "Safe transaction"}`;
+
     const parts = [];
-    if (call.to) parts.push(shortenAddress(call.to));
-    if (call.operation_label) parts.push(call.operation_label);
+    if (call.to) parts.push(`on ${addrDisplay(call.to, opts)}`);
+    // `call` is the default operation — only a delegatecall is worth ink,
+    // and an unrecognized one says so out loud (it is what the alert is).
+    if (call.operation === 1 || call.operation_label === "delegatecall") {
+      parts.push(
+        se.multisend_recognized === false && !batch
+          ? "delegatecall — not a pinned MultiSend"
+          : "delegatecall",
+      );
+    }
+    if (se.value && se.value !== "0") parts.push(`value ${se.value} wei`);
     if (batch && batch.length > 1) parts.push(`+${batch.length - 1} more in batch`);
     return {
-      title: name ? `${verb} ${name}` : verb,
+      title,
+      titleDetail: signature || null,
       sub: parts.length ? parts.join(" · ") : null,
     };
   },
-  _safe_module_op: (d, type) => ({
+  _safe_module_op: (d, type, opts) => ({
     title: type === "safe_module_executed" ? "Safe module executed" : "Safe module reverted",
-    sub: d.module ? `module ${shortenAddress(d.module)}` : null,
+    sub: d.module ? `module ${addrDisplay(d.module, opts)}` : null,
   }),
-  _timelock_op: (d, type) => {
+  _timelock_op: (d, type, opts) => {
     const scheduled = type === "timelock_scheduled";
-    const target = d.target ? shortenAddress(d.target) : null;
     // The backend's fleet-internal resolution when it found one; the raw
     // selector otherwise. Never a name this side invented.
-    const sel = d.target_function?.signature || d.selector;
+    const signature = d.target_function?.signature || null;
+    const name = fnDisplay(signature) || (d.selector ? `sel ${d.selector}` : null);
     const delay = fmtSeconds(d.delay);
     const subParts = [];
-    if (target) subParts.push(`target ${target}`);
-    if (sel) subParts.push(d.target_function?.signature ? sel : `sel ${sel}`);
+    if (d.target) subParts.push(`on ${addrDisplay(d.target, opts)}`);
     if (scheduled && delay) subParts.push(`delay ${delay}`);
     return {
-      title: `Timelock operation ${scheduled ? "scheduled" : "executed"}`,
+      title: `Timelock ${scheduled ? "scheduled" : "executed"}${name ? ` ${name}` : " operation"}`,
+      titleDetail: signature,
       sub: subParts.length ? subParts.join(" · ") : null,
     };
   },
@@ -475,7 +511,10 @@ const TITLE_OVERRIDES = {
 // { title, sub } — title is the short prose summary, sub is the supporting
 // detail line (hash, target, etc.). Falls back to a generic shape rather
 // than throwing on unknown types so future event_types still render.
-export function decodeEvent(evt) {
+// `opts.nameFor(address) → name|null` is an optional display-only resolver
+// (the surface's own contract/principal names). It never affects which
+// renderer runs or what is claimed — only how an address reads.
+export function decodeEvent(evt, opts = undefined) {
   const d = evt?.data || {};
   const type = evt?.event_type || "unknown";
 
@@ -527,7 +566,7 @@ export function decodeEvent(evt) {
   for (const wt of writes) {
     const renderer = RENDER_BY_WRITE_TARGET[wt];
     if (renderer) {
-      const result = renderer(d, type);
+      const result = renderer(d, type, opts);
       if (TITLE_OVERRIDES[type]) {
         result.title = TITLE_OVERRIDES[type];
       }

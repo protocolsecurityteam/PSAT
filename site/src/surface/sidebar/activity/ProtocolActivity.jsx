@@ -40,6 +40,7 @@ export function ProtocolActivity({
   chain = "ethereum",
   minSalience = "routine",
   onHiddenCount,
+  nameFor,
 }) {
   const [events, setEvents] = useState([]);
   const [labelMap, setLabelMap] = useState({});
@@ -179,7 +180,7 @@ export function ProtocolActivity({
               const type = contract?.contract_type || "regular";
               const machine = addr ? machineByAddress.get(addr.toLowerCase()) : null;
               const kind = eventKind(ev);
-              const decoded = decodeEvent(ev);
+              const decoded = decodeEvent(ev, { nameFor });
               return (
                 <button
                   key={ev.id}
@@ -195,7 +196,12 @@ export function ProtocolActivity({
                     </div>
                     <div className="ps-activity-recent-line">
                       <span className={`ps-activity-kind k-${kind}`}>{eventKindLabel(ev)}</span>
-                      <span className="ps-activity-recent-sub">{decoded.sub || decoded.title}</span>
+                      <span
+                        className="ps-activity-recent-sub"
+                        title={decoded.titleDetail || undefined}
+                      >
+                        {[decoded.title, decoded.sub].filter(Boolean).join(" · ")}
+                      </span>
                     </div>
                   </div>
                   <div className="ps-activity-recent-time">{relativeTime(ev.detected_at, now)}</div>

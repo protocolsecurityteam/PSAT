@@ -73,6 +73,31 @@ export function ActivityPanel({
   const [minSalience, setMinSalience] = useState(DEFAULT_MIN_SALIENCE);
   const [hiddenCount, setHiddenCount] = useState(0);
 
+  // Display-only address→name resolver for the row renderers: the surface's
+  // own contracts and principals. Never a witness — it changes how an address
+  // READS in a sub line, not what any row claims.
+  const nameFor = useMemo(() => {
+    const byAddr = new Map();
+    // companyData.contracts is the unfiltered set — machines drops
+    // zero-function contracts, which are still legitimate call targets.
+    for (const c of companyData?.contracts || []) {
+      if (c?.address && c?.name) byAddr.set(String(c.address).toLowerCase(), c.name);
+    }
+    for (const m of machines || []) {
+      if (m?.address && m?.name && !byAddr.has(String(m.address).toLowerCase())) {
+        byAddr.set(String(m.address).toLowerCase(), m.name);
+      }
+    }
+    for (const p of companyData?.principals || []) {
+      const label = principalLabel(p?.label, p?.type, p?.address);
+      if (p?.address && label && !label.startsWith("0x")) {
+        const key = String(p.address).toLowerCase();
+        if (!byAddr.has(key)) byAddr.set(key, label);
+      }
+    }
+    return (addr) => byAddr.get(String(addr || "").toLowerCase()) || null;
+  }, [machines, companyData]);
+
   const refresh = useCallback(async () => {
     if (!protocolId) return;
     try {
@@ -212,6 +237,7 @@ export function ActivityPanel({
           chain={activeChain}
           minSalience={minSalience}
           onHiddenCount={setHiddenCount}
+          nameFor={nameFor}
         />
       </>
     );
@@ -232,6 +258,7 @@ export function ActivityPanel({
         now={now}
         minSalience={minSalience}
         onHiddenCount={setHiddenCount}
+        nameFor={nameFor}
       />
     </>
   );

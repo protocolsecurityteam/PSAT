@@ -284,8 +284,27 @@ describe("decodeEvent — enriched Safe executions", () => {
         target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
       },
     });
-    expect(result.title).toBe("Safe executed setFee(uint256)");
-    expect(result.sub).toBe(`${shortenAddress(ADDR_A)} · call`);
+    expect(result.title).toBe("Executed setFee()");
+    expect(result.titleDetail).toBe("setFee(uint256)");
+    expect(result.sub).toBe(`on ${shortenAddress(ADDR_A)}`);
+  });
+
+  it("resolves the target to a protocol name when the caller supplies one", () => {
+    const result = decodeEvent(
+      evt("safe_tx_executed", {
+        effect_tags: { writes: ["_safe_op"] },
+        safe_exec: {
+          status: "decoded",
+          to: ADDR_A,
+          selector: "0x69fe0e2d",
+          operation: 0,
+          operation_label: "call",
+          target_function: { selector: "0x69fe0e2d", signature: "setFee(uint256)", source: "effective_functions" },
+        },
+      }),
+      { nameFor: (addr) => (addr.toLowerCase() === ADDR_A.toLowerCase() ? "Accountant" : null) },
+    );
+    expect(result.sub).toBe("on Accountant");
   });
 
   it("falls back to the raw selector when no signature resolved", () => {
@@ -299,7 +318,7 @@ describe("decodeEvent — enriched Safe executions", () => {
         target_function: { selector: "0x8456cb59", signature: null },
       },
     });
-    expect(result.title).toBe("Safe executed 0x8456cb59");
+    expect(result.title).toBe("Executed 0x8456cb59");
   });
 
   it("summarizes a MultiSend batch from its first call", () => {
@@ -317,8 +336,8 @@ describe("decodeEvent — enriched Safe executions", () => {
         ],
       },
     });
-    expect(result.title).toBe("Safe executed setFee(uint256)");
-    expect(result.sub).toBe(`${shortenAddress(ADDR_A)} · call · +2 more in batch`);
+    expect(result.title).toBe("Executed setFee()");
+    expect(result.sub).toBe(`on ${shortenAddress(ADDR_A)} · +2 more in batch`);
   });
 
   it("says an undecodable batch did not decode rather than listing part of it", () => {
@@ -332,8 +351,8 @@ describe("decodeEvent — enriched Safe executions", () => {
         batch_status: "undecodable",
       },
     });
-    expect(result.title).toBe("Safe executed a MultiSend batch that did not decode");
-    expect(result.sub).toBe(`${shortenAddress(ADDR_B)} · delegatecall`);
+    expect(result.title).toBe("MultiSend batch — did not decode");
+    expect(result.sub).toBe(`delegatecall → ${shortenAddress(ADDR_B)}`);
   });
 
   it("renders an unrecognized delegatecall as the delegatecall it is", () => {
@@ -348,8 +367,8 @@ describe("decodeEvent — enriched Safe executions", () => {
         target_function: { selector: "0x69fe0e2d", signature: null },
       },
     });
-    expect(result.title).toBe("Safe executed 0x69fe0e2d");
-    expect(result.sub).toBe(`${shortenAddress(ADDR_B)} · delegatecall`);
+    expect(result.title).toBe("Executed 0x69fe0e2d");
+    expect(result.sub).toBe(`on ${shortenAddress(ADDR_B)} · delegatecall — not a pinned MultiSend`);
   });
 
   it("names which layer of a batch failed to expand", () => {
@@ -395,7 +414,7 @@ describe("decodeEvent — enriched Safe executions", () => {
         safe_exec: { status: "decoded", to: ADDR_A, selector: "0x69fe0e2d", operation: 0, operation_label: "call" },
       }),
     );
-    expect(result.title).toBe("Safe execution reverted 0x69fe0e2d");
+    expect(result.title).toBe("Reverted: 0x69fe0e2d");
   });
 });
 
@@ -410,7 +429,8 @@ describe("decodeEvent — timelock name resolution", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.sub).toContain("setFee(uint256)");
+    expect(result.title).toBe("Timelock scheduled setFee()");
+    expect(result.titleDetail).toBe("setFee(uint256)");
     expect(result.sub).not.toContain("sel 0x69fe0e2d");
   });
 
@@ -423,7 +443,7 @@ describe("decodeEvent — timelock name resolution", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.sub).toContain("sel 0x69fe0e2d");
+    expect(result.title).toContain("sel 0x69fe0e2d");
   });
 });
 
@@ -437,9 +457,8 @@ describe("decodeEvent — timelock", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.title).toBe("Timelock operation scheduled");
-    expect(result.sub).toContain("target");
-    expect(result.sub).toContain("sel");
+    expect(result.title).toBe("Timelock scheduled sel 0xdeadbeef");
+    expect(result.sub).toContain("on ");
     expect(result.sub).toContain("delay");
   });
 
@@ -451,8 +470,8 @@ describe("decodeEvent — timelock", () => {
         effect_tags: { writes: ["_timelock_op"] },
       }),
     );
-    expect(result.title).toBe("Timelock operation executed");
-    expect(result.sub).toContain("target");
+    expect(result.title).toBe("Timelock executed sel 0xdeadbeef");
+    expect(result.sub).toContain("on ");
     expect(result.sub).not.toContain("delay");
   });
 
