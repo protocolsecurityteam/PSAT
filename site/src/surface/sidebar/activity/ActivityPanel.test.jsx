@@ -283,7 +283,9 @@ describe("ActivityPanel — multichain (F4)", () => {
       return el;
     });
     expect(within(watch).getByText("Upgrades")).toBeInTheDocument(); // base row resolved
-    expect(within(watch).queryByText("Safe activity")).toBeNull(); // NOT the ethereum row
+    // NOT the ethereum row — neither of the two groups its watch flag offers.
+    expect(within(watch).queryByText("Safe signers")).toBeNull();
+    expect(within(watch).queryByText("Safe executions")).toBeNull();
   });
 
   it("scopes the protocol-wide feed to the active chain (base row only, not ethereum)", async () => {

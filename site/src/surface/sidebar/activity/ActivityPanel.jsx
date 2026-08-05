@@ -132,7 +132,12 @@ export function ActivityPanel({
         body: JSON.stringify({
           discord_webhook_url: url,
           label,
-          event_filter: eventTypes.length ? { event_types: eventTypes } : null,
+          // `groups` states which alert groups this filter was saved against.
+          // It is what tells the notifier the save used the post-split
+          // vocabulary, so it is taken at its word rather than folded into the
+          // legacy grouping that put Safe executions under `signers`
+          // (notifier._FILTER_GROUPS_KEY).
+          event_filter: eventTypes.length ? { event_types: eventTypes, groups: groupKeys } : null,
         }),
       });
     } catch {

@@ -617,7 +617,10 @@ export function stateRows(contract) {
   if (cfg.watch_roles) watching.push("roles");
   if (cfg.watch_safe_signers || cfg.watch_signers) watching.push("safe");
   if (cfg.watch_timelock) watching.push("timelock");
-  if (cfg.watch_state) watching.push("state");
+  // Same phantom flag as the `state` alert group: nothing writes `watch_state`,
+  // so a polled contract used to render as not watched for state at all. The
+  // polling plan is the witness that it is.
+  if (cfg.watch_state || (Array.isArray(cfg.polling_plan) && cfg.polling_plan.length > 0)) watching.push("state");
   if (watching.length === 0) watching.push("nothing");
   rows.push({ k: "Watching", v: watching.join(" · "), tone: "muted" });
 

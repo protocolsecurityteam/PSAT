@@ -470,6 +470,15 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
 # treat it as covering the whole group so the new event types still
 # flow through. Keys are 'seed' types; values are the additions to
 # allow alongside them.
+#
+# These stay after the `safe_exec` group was split out of `signers` in
+# ``site/src/surface/meta.js``: the split changes what a NEW subscription
+# enumerates, and a filter saved before it says nothing about whether its owner
+# wanted executions — the only reading we can witness is the one the UI gave it
+# at the time, which included them. Muting them on the split would be a claim
+# about a subscriber's intent, exactly what this shim exists to refuse. See
+# ``_FILTER_GROUPS_KEY`` for how a filter states the newer vocabulary instead of
+# being assumed into it.
 _FILTER_GROUP_EXPANSIONS: dict[str, set[str]] = {
     "signer_added": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
     "signer_removed": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
@@ -499,7 +508,36 @@ def _value_changed_forms(write_target: str) -> set[str]:
 _READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 
 
-def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
+# ``event_filter`` key naming the alert-group vocabulary a filter was saved
+# against (``site/src/surface/sidebar/activity/helpers.js``'s group keys). It is
+# a POSITIVE token, and the only thing that distinguishes a post-split
+# "signers, and I mean only signers" save from a pre-split "signers" save —
+# the two enumerate byte-identical ``event_types``. Absent, the filter predates
+# the vocabulary and keeps the legacy grouping expansion, so no saved
+# subscription is ever muted by a split it was not written against; present, the
+# save enumerated its own groups and is taken at its word, so no subscription is
+# force-fed a group it did not name.
+_FILTER_GROUPS_KEY = "groups"
+
+
+def _stated_filter_groups(event_filter: object) -> list[str] | None:
+    """The group keys a filter positively states, or ``None`` if it states none.
+
+    An unreadable token is not a statement: a non-list, or a list holding
+    anything but strings, is treated as absent rather than as an empty claim of
+    coverage.
+    """
+    if not isinstance(event_filter, dict):
+        return None
+    groups = event_filter.get(_FILTER_GROUPS_KEY)
+    if not isinstance(groups, list) or not groups:
+        return None
+    if not all(isinstance(g, str) for g in groups):
+        return None
+    return [str(g) for g in groups]
+
+
+def _expand_allowed_event_types(allowed_types: list[str] | None, *, filter_groups: list[str] | None = None) -> set[str]:
     """Expand legacy webhook event-type filters to include grouped successors.
 
     Cheap forward-compat shim so adding a new event type to an existing
@@ -521,12 +559,20 @@ def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     published under a neutral ``state_changed`` type or not at all), so
     inventing coverage for them would be a claim about the subscriber's
     intent rather than a reading of it.
+
+    ``filter_groups`` is the filter's own statement of which alert groups it
+    covers (see ``_FILTER_GROUPS_KEY``). When it states them, the historical
+    UI-grouping expansion is not applied — the save already enumerated the
+    groups it wanted, so folding a neighbouring group in would override it. The
+    taxonomy expansion below is unconditional either way: it is not a grouping
+    guess but the same fact under the name the taxonomy now gives it.
     """
     if not allowed_types:
         return set()
     expanded: set[str] = set(allowed_types)
     for seed in allowed_types:
-        expanded |= _FILTER_GROUP_EXPANSIONS.get(seed, set())
+        if not filter_groups:
+            expanded |= _FILTER_GROUP_EXPANSIONS.get(seed, set())
         stem, sep, controller_id = seed.partition(":")
         if sep and stem in ("state_changed", "controller_changed") and controller_id:
             expanded.add(f"value_changed:{controller_id}")
@@ -537,7 +583,12 @@ def _expand_allowed_event_types(allowed_types: list[str] | None) -> set[str]:
     return expanded
 
 
-def _filter_allows(allowed_types: list[str] | None, event_type: str) -> bool:
+def _filter_allows(
+    allowed_types: list[str] | None,
+    event_type: str,
+    *,
+    filter_groups: list[str] | None = None,
+) -> bool:
     """Does a saved webhook filter cover *event_type*?
 
     An empty / absent filter covers everything (the existing contract). Beyond
@@ -546,7 +597,7 @@ def _filter_allows(allowed_types: list[str] | None, event_type: str) -> bool:
     """
     if not allowed_types:
         return True
-    if event_type in _expand_allowed_event_types(allowed_types):
+    if event_type in _expand_allowed_event_types(allowed_types, filter_groups=filter_groups):
         return True
     if event_type.startswith("value_changed"):
         return any(seed in _READ_WITNESSED_WILDCARD_SEEDS for seed in allowed_types)
@@ -659,9 +710,14 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                 # signer_added/removed/threshold_changed; expand the
                 # allowed set on the fly so a historic webhook still
                 # picks up the related Safe execution events that were
-                # added later under the same UI grouping.
+                # added later under the same UI grouping — unless the filter
+                # states its own groups, which only a post-split save does.
                 if sub.event_filter and isinstance(sub.event_filter, dict):
-                    if not _filter_allows(sub.event_filter.get("event_types"), event.event_type):
+                    if not _filter_allows(
+                        sub.event_filter.get("event_types"),
+                        event.event_type,
+                        filter_groups=_stated_filter_groups(sub.event_filter),
+                    ):
                         continue
                 # Composes with the type filter: both must pass. Absent
                 # ``min_salience`` is a no-op, so no existing subscription
