@@ -183,8 +183,8 @@ export function findCaller(fnView, address) {
 // Every function on the whole graph the target names, as {machine, fnView}.
 //
 // The score document names an example function by bare name and never publishes
-// the contract it was witnessed on — `reach_entities` is the priced closure the
-// capability reaches, not the host. So the graph is the only witness to where
+// the contract it was witnessed on — `reach_entities` is the closure the
+// capability reaches, priced or not, not the host. So the graph is the only witness to where
 // that name lives, and it witnesses a host only when the name lands in exactly
 // one place: a name carried by two contracts resolves to neither. Exact matches
 // (full signature / selector) shadow bare-name matches, so a caller that does
