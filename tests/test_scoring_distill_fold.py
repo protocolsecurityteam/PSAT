@@ -832,7 +832,15 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
 
 
 def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
-    """A reach licence from another protocol's graph is not this protocol's fact."""
+    """A reach licence from another protocol's graph is not this protocol's fact.
+
+    The payloads here are the producer's own shape: the node is written AT THE
+    GATING CONTRACT'S ADDRESS, on the GATED contract's graph, and its
+    ``gated_contract_address`` names that gated contract. The earlier version of
+    this test wrote ``gated_contract_address = manager.address`` — a payload no
+    producer emits — so the arm it exercised was one the real data could never
+    reach and the join it protected was inert on every row in the database.
+    """
     from db.models import ControlGraphNode, Protocol
 
     other = Protocol(name=f"other-{uuid.uuid4().hex[:8]}")
@@ -850,7 +858,7 @@ def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
             address=manager.address,
             details={
                 "gated_contract_backlink": {
-                    "gated_contract_address": manager.address,
+                    "gated_contract_address": foreign.address,
                     "declared_vault_matches_gated_contract": True,
                     "probe_block": 100,
                 }
@@ -879,7 +887,7 @@ def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
                 address=manager.address,
                 details={
                     "gated_contract_backlink": {
-                        "gated_contract_address": manager.address,
+                        "gated_contract_address": vault.address,
                         "declared_vault_matches_gated_contract": True,
                         "probe_block": 100,
                     }

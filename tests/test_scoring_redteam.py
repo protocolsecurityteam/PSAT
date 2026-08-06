@@ -35,6 +35,8 @@ from services.scoring.schema import (
     not_determined_signal_defaults,
 )
 from utils.scoring_status import (
+    GRADE_STATE_COMPUTED,
+    GRADE_STATE_NOT_DETERMINED,
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
@@ -112,6 +114,20 @@ def magnitude(usd: float) -> dict[str, Any]:
     would make every one of them a test of the reach-magnitude term instead.
     """
     return {"reach_magnitude_usd": Tri.proven("proven_floor", usd).to_json()}
+
+
+def bounded_by_sheet(usd: float) -> dict[str, Any]:
+    """An EXACT magnitude witness, so the entity's sheet may bound the charge.
+
+    A magnitude witness is the only thing that puts a dollar figure on a reach:
+    the reached entity's balance sheet answers "how much is there", never "how
+    much can this reach move", and the fold refuses to substitute one for the
+    other. A test whose subject is the exposure budget, the tie disclosure or the
+    floor flag needs a row that publishes dollars at all, so it carries the
+    witness the real signal would have to carry — usually set to the sheet, which
+    is the case where ``min(sheet, witness)`` leaves the sheet standing.
+    """
+    return {"reach_magnitude_usd": Tri.proven("proven_exact", usd).to_json()}
 
 
 def proven(severity: float, basis: tuple[str, ...] = ("capability_class_base",)) -> dict[str, Any]:
@@ -569,6 +585,7 @@ def test_f4_an_unpriced_entity_is_never_exposure_zero(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(50_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -637,6 +654,14 @@ def test_f10_the_transitive_branch_reads_the_signals_value_state(fold):
 
 
 def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
+    """Every closure entity is NAMED, priced or not — and none is priced by its sheet.
+
+    The transitive branch used to publish the closure's balance sheets as the
+    row's value, so the entity that could not be priced was the only one that
+    appeared as a gap. Under the magnitude discipline the sheet prices nothing:
+    a reach with no magnitude witness is not_determined at BOTH entities, and
+    both are named. Membership is untouched — the row still reaches them.
+    """
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -651,9 +676,17 @@ def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
         value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
     )
     finding = document.findings[0]
-    assert finding["value_at_stake_is_floor"] is True
-    assert finding["value_band"].startswith(">= ")
-    assert any(row["entity"] == KEY_V for row in finding["undetermined_instances"])
+    assert finding["reach_entities"] == sorted([KEY_C, KEY_V])
+    assert finding["value_at_stake_usd"] is None
+    assert finding["value_band"] == "not_determined"
+    # The floor flag is about a priced total that under-covers; there is no
+    # total here, so it is False rather than a floor over nothing.
+    assert finding["value_at_stake_is_floor"] is False
+    named = {row["entity"] for row in finding["undetermined_instances"]}
+    assert named == {KEY_C, KEY_V}
+    priced_gap = next(row for row in finding["undetermined_instances"] if row["entity"] == KEY_C)
+    assert priced_gap["why"].startswith("reach_magnitude_not_witnessed")
+    assert finding["magnitude_witness_census"]["magnitude_not_witnessed"] == 1
 
 
 def test_v4_exposure_caps_on_the_entity_contribution_not_the_row_total(fold):
@@ -696,6 +729,7 @@ def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(100_000_000.0),
         **proven(1.0),
         **reaches(KEY_IMPL, KEY_PROXY),
     )
@@ -1092,6 +1126,7 @@ def test_f5_confidence_does_not_rise_when_analysis_is_lost(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=bounded_by_sheet(1_000_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -1210,6 +1245,7 @@ def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):
         gates={
             "asset_class": Tri.proven("proven", "erc20_only").to_json(),
             "asset_identity": Tri.proven("resolved", {"asset_address": "0x" + "7" * 40}).to_json(),
+            **bounded_by_sheet(50_000_000.0),
         },
         **proven(0.9, ("caller_arbitrary_proven",)),
         **reaches(KEY_C),
@@ -1244,6 +1280,7 @@ def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(1_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -1256,6 +1293,7 @@ def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(14_757_365.89),
         **proven(0.55),
         **reaches(KEY_V),
     )
@@ -1282,6 +1320,7 @@ def test_b1_an_entity_both_rows_reach_is_still_charged_once(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+            gates=bounded_by_sheet(1_000_000.0),
             **proven(severity),
             **reaches(KEY_C),
         )
@@ -1371,6 +1410,7 @@ def test_b4_unresolved_contracts_lower_confidence(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=bounded_by_sheet(1_000_000_000.0),
         **proven(1.0),
         **reaches(KEY_V),
     )
@@ -1415,6 +1455,7 @@ def test_b4_an_unpriced_contract_is_in_its_own_denominator(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=bounded_by_sheet(1_000_000_000.0),
         **proven(1.0),
         **reaches(KEY_V),
     )
@@ -1503,6 +1544,7 @@ def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+            gates=bounded_by_sheet(10_000_000.0),
             **proven(1.0),
             **reaches(KEY_C),
         )
@@ -1516,6 +1558,7 @@ def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(2, "ethereum", TIMELOCK),),
+            gates=bounded_by_sheet(100_000_000.0),
             **proven(1.0),
             **reaches(KEY_V),
         )
@@ -1936,6 +1979,7 @@ def test_an_all_dust_sheet_charges_no_finding_a_proven_zero_exposure(fold):
     priced = sig(
         deployment_address=PROXY,
         function_name="g",
+        gates=bounded_by_sheet(5_000_000.0),
         **proven(1.0),
         **reaches(KEY_PROXY),
         authority_openness="open",
@@ -2278,6 +2322,7 @@ def test_r7_an_exhausted_exposure_budget_is_not_a_measured_zero(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(index + 1, "ethereum", address),),
+            gates=bounded_by_sheet(10_000_000.0),
             **proven(1.0),
             **reaches(KEY_C),
         )
@@ -2327,6 +2372,7 @@ def test_r7_a_partly_charged_row_says_its_figure_is_marginal(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(index + 1, "ethereum", address),),
+            gates=bounded_by_sheet(10_000_000.0),
             **proven(1.0),
             **reaches(KEY_C),
         )
@@ -2370,6 +2416,7 @@ def test_r8_rows_that_tie_publish_that_the_order_decided_the_split(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(index + 1, "ethereum", address),),
+            gates=bounded_by_sheet(10_000_000.0),
             **proven(1.0),
             **reaches(KEY_C),
         )
@@ -2402,6 +2449,7 @@ def test_s5_an_entity_holding_unpriced_assets_makes_the_value_a_floor(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(5_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -2428,6 +2476,10 @@ def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold)
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        # One call over two keys, so the EXACT witness is a budget across them:
+        # set above their sum, it leaves both sheets standing and the subject of
+        # this test — the floor flag — is what the assertions read.
+        gates=bounded_by_sheet(7_000_000.0),
         **proven(1.0),
         **reaches(KEY_C, KEY_V),
     )
@@ -2516,10 +2568,13 @@ def _merged_unit_signals(claim: str = "upgrade.implementation"):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(index + 1, "ethereum", safe),),
+            gates=bounded_by_sheet(magnitude_usd),
             **proven(1.0),
             **reaches(entity_key("ethereum", address)),
         )
-        for index, (safe, address) in enumerate(((SAFE_MINORITY, C), (SAFE_MAJORITY, VAULT)))
+        for index, (safe, address, magnitude_usd) in enumerate(
+            ((SAFE_MINORITY, C, 1_000_000.0), (SAFE_MAJORITY, VAULT, 5_000_000.0))
+        )
     ]
 
 
@@ -2600,6 +2655,7 @@ def test_r10_the_burn_sentinel_is_never_charged_a_sheet(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(1_000.0),
         **proven(1.0),
         **reaches(KEY_C, KEY_ZERO),
     )
@@ -2655,17 +2711,36 @@ def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
     priced, so "we could not prove how much this moves" had nowhere to land but
     the grade.
     """
-    unwitnessed = _magnitude_document(fold, witnessed=False).model_parameters["confidence_detail"]
-    witnessed = _magnitude_document(fold, witnessed=True).model_parameters["confidence_detail"]
+    unwitnessed_doc = _magnitude_document(fold, witnessed=False)
+    witnessed_doc = _magnitude_document(fold, witnessed=True)
+    unwitnessed = unwitnessed_doc.model_parameters["confidence_detail"]
+    witnessed = witnessed_doc.model_parameters["confidence_detail"]
     assert unwitnessed["reach_magnitude_witnessed_pct"] == 0.0
     assert witnessed["reach_magnitude_witnessed_pct"] == 100.0
-    # The term is a real term: it drives the headline where it is the minimum.
-    assert unwitnessed["pct"] == 0.0
-    assert unwitnessed["pct"] < witnessed["pct"]
     assert unwitnessed["reach_magnitude_signals"]["proven_reach_in_denominator"] == 1
     assert unwitnessed["reach_magnitude_signals"]["magnitude_witnessed"] == 0
     # Answering the magnitude may only RAISE the term (inv. 6).
     assert witnessed["reach_magnitude_witnessed_pct"] >= unwitnessed["reach_magnitude_witnessed_pct"]
+
+    # The finding SURVIVES its missing magnitude, at the unpriced band's floor:
+    # the reach is proven and only its SIZE is not, which inv. 7's floor rule
+    # governs. It is the dollar figure that is not_determined, never the row.
+    assert unwitnessed_doc.findings[0]["reach_entities"] == [KEY_C]
+    assert unwitnessed_doc.findings[0]["value_band"] == "not_determined"
+    assert unwitnessed_doc.findings[0]["value_at_stake_usd"] is None
+    assert unwitnessed_doc.findings[0]["raw_points"] > 0
+
+    # And the exposure ratio is WITHHELD rather than published as 100. No
+    # finding measured a numerator, so the ratio is a quantity nobody computed —
+    # publishing "0% of tracked value is exposed" out of it would be the same
+    # unproven-number move one axis over. λ is computed and carried in the
+    # withheld block; grade, exposure and confidence stand or fall together
+    # (ck_protocol_scores_grade_pairing), so the whole triple is not_determined.
+    assert unwitnessed_doc.grade_state == GRADE_STATE_NOT_DETERMINED
+    withheld = unwitnessed_doc.provenance["grade_withheld"]
+    assert 0.0 < withheld["grade_lambda_computed"] < 100.0
+    assert witnessed_doc.grade_state == GRADE_STATE_COMPUTED
+    assert witnessed["pct"] > 0.0
 
 
 def test_r11_every_proven_reach_capability_is_in_the_denominator(fold):
@@ -2719,6 +2794,7 @@ def _perimeter_signal():
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(1_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -2802,6 +2878,7 @@ def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
             authority_openness="restricted",
             principal_state="enumerated",
             principal_refs=(PrincipalRef(1, "ethereum", SAFE_MINORITY),),
+            gates=bounded_by_sheet(1_000_000.0),
             **proven(1.0),
             **reaches(KEY_C),
         ),
@@ -2973,3 +3050,239 @@ def test_w3_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
         )
     )
     assert FOLD._closure({KEY_C}, labelled, conditions, code_control=False)[0] == {KEY_C, KEY_V}
+
+
+def test_w3_case3_a_freeze_charges_no_sheet_and_keeps_its_finding(fold):
+    """Regression case 3 — pause.set leaves the grade.
+
+    ``pause_effective`` proves the latch takes effect. It proves no FRACTION: how
+    much of a sheet a freeze immobilises is a quantity nothing in this pipeline
+    measures. Charging the whole sheet for it put three quarters of a billion
+    dollars of unwitnessed magnitude into the grade.
+    """
+    freeze = pause_sig(
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"pause_effective": Tri.proven("proven", True).to_json()},
+        **proven(0.05),
+        **reaches(KEY_C),
+    )
+    priced = _perimeter_signal()
+    document = fold(
+        [freeze, priced],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 745_000_000.0}}),
+    )
+    rows = [f for f in document.findings] + list(document.provenance["subsumed_rows"])
+    frozen = next(r for r in rows if r["capability"] == "pause.set")
+    assert frozen["value_at_stake_usd"] is None
+    assert frozen["value_band"] == "not_determined"
+    assert frozen.get("exposure_usd") is None
+    # The finding survives: a freeze capability is still a finding.
+    assert frozen["raw_points"] > 0
+    assert frozen["reach_entities"] == [KEY_C]
+    # And the unknown has a home: the reach-magnitude term counts it unanswered.
+    detail = document.model_parameters["confidence_detail"]
+    census = detail["reach_magnitude_signals"]["by_capability"]
+    assert census["pause.set"] == [0, 1]
+
+
+def test_w3_case4_a_corrected_backlink_licence_carries_no_magnitude(fold):
+    """Regression case 4 — the R3 trap.
+
+    Correcting the backlink join makes a licence that had never once fired admit
+    a foreign entity into a row's reach. Landing that correction WITHOUT the
+    magnitude bound converts a cite/gate object into a dollar figure — the
+    measured shape was one row going from $0.00 to $1,411,758.83 off the
+    destination's whole sheet. The licence proves REACHABILITY; it proves no
+    magnitude, so it supplies none.
+    """
+    licensed = sig(
+        claim_id="authority.replace",
+        function_name="setAuthority",
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        reach_gate_state="licensed",
+        **proven(0.75),
+        **reaches(KEY_C, KEY_V),
+    )
+    document = fold(
+        [licensed],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000.0}, KEY_V: {"usdc": 1_411_758.83}}),
+    )
+    finding = document.findings[0]
+    # The licence is REACH: the entity is admitted and published.
+    assert finding["reach_entities"] == sorted([KEY_C, KEY_V])
+    # And it is not a magnitude: the destination's sheet is charged nowhere.
+    assert finding["value_at_stake_usd"] is None
+    assert finding["value_by_entity"] == {}
+    assert {row["entity"] for row in finding["undetermined_instances"]} == {KEY_C, KEY_V}
+
+
+def test_w3_a_reach_key_naming_the_burn_sentinel_is_counted_where_it_is_refused(fold):
+    """The fold's own count and gap for a reach key that is the burn sentinel.
+
+    Both are unexercised on every corpus measured, which is exactly why they are
+    pinned: a rule nobody has seen fire is one nobody has seen report either.
+    """
+    signal = sig(
+        claim_id="roles.grant",
+        function_name="grantRole",
+        contract_id=2,
+        selector="0x22222222",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.55),
+        **reaches(KEY_ZERO),
+    )
+    priced = _perimeter_signal()
+    document = fold(
+        [signal, priced],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}, KEY_ZERO: {"usdc": 4_000_000_000.0}}),
+    )
+    rows = list(document.findings) + list(document.provenance["subsumed_rows"])
+    refused = next(r for r in rows if r["zero_address_reach_keys_refused"])
+    assert refused["zero_address_reach_keys_refused"] == 1
+    assert any(
+        row["why"].startswith("every_reach_key_was_the_zero_address") for row in refused["undetermined_instances"]
+    )
+    assert "zero_address_reach_key_refused" in refused["witness_notes"]
+    assert refused["value_at_stake_usd"] is None
+
+
+def _witnessed_elsewhere(principal_id: int = 2) -> FunctionSignal:
+    """One magnitude-witnessed row, so the document has an exposure to publish.
+
+    grade, exposure and confidence are determined together, so a population in
+    which NOTHING carries a magnitude witness withholds all three — correctly,
+    since the exposure ratio would have no numerator anyone measured. A test
+    asserting on a per-finding exposure needs the document to be scored at all.
+    """
+    return sig(
+        claim_id="upgrade.implementation",
+        function_name="upgradeTo",
+        deployment_address=PROXY,
+        contract_id=9,
+        selector="0x11111111",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(principal_id, "ethereum", SAFE),),
+        gates=bounded_by_sheet(500.0),
+        **proven(1.0),
+        **reaches(KEY_PROXY),
+    )
+
+
+def test_w3_case1_a_destination_guard_disproves_the_hop_that_carried_the_money(fold):
+    """Regression case 1 — AtomicQueue's blocked principal.
+
+    The EOA owns AtomicQueue, AtomicQueue holds a role on AtomicSolverV3, and the
+    solver's ``finishSolve`` — the only function the role licenses it — reverts
+    unless the initiator is the solver itself. No authority relation makes the
+    queue the solver, so the hop is not something this walk can establish, and
+    the solver's balance sheet was never the queue owner's to be charged.
+
+    The finding stays ALIVE at the floor: the capability over the queue is
+    proven, and it is the SIZE of what it reaches that is not.
+    """
+    conditions = condition_plane(
+        licensed={(KEY_SOLVER, KEY_C): (("finishSolve", 570, (INITIATOR_GUARD,)),)},
+        by_entity={
+            KEY_SOLVER: (
+                ("finishSolve", 570, (INITIATOR_GUARD,)),
+                ("p2pSolve", 571, ()),
+            )
+        },
+    )
+    plane = value_plane({KEY_C: {"usdc": 1_000.0}, KEY_SOLVER: {"usdc": 1_505_140.39}, KEY_PROXY: {"usdc": 500.0}})
+    shared = dict(
+        principals={1: facts(1, EOA, "eoa"), 2: facts(2, SAFE, "eoa")},
+        closure={KEY_C: {KEY_SOLVER}},
+        value=plane,
+    )
+    population = [_queue_signal("authority.replace"), _witnessed_elsewhere()]
+
+    def queue_row(document):
+        return next(f for f in document.findings if f["principal_unit"] == entity_key("ethereum", EOA))
+
+    blocked = queue_row(fold(population, conditions=conditions, **shared))
+    unguarded = queue_row(fold(population, **shared))
+
+    # The control graph is identical; only the destination's own conditions differ.
+    assert KEY_SOLVER in unguarded["reach_entities"]
+    assert blocked["reach_entities"] == [KEY_C]
+    hop = blocked["reach_hops_not_determined"][0]
+    assert (hop["caller"], hop["destination"]) == (KEY_C, KEY_SOLVER)
+    assert hop["reason"] == FOLD.HOP_REFUSED_CONDITION
+    assert hop["disproving_conditions"][0]["conditions"] == [INITIATOR_GUARD]
+    # Never a proven negative: the principal enumeration behind the licensed
+    # surface is a lower bound, so this is not_determined and says so.
+    assert "not_determined" in hop["reason"] or hop["reason"] == FOLD.HOP_REFUSED_CONDITION
+
+    # Not charged the solver's sheet — and not charged the queue's either,
+    # because no witness proved how much the capability moves.
+    assert blocked["value_at_stake_usd"] is None
+    assert blocked["value_by_entity"] == {}
+    assert blocked["exposure_usd"] is None
+    # Alive at the floor: the row still scores.
+    assert blocked["value_band"] == "not_determined"
+    assert blocked["raw_points"] > 0
+
+
+def test_w3_case2_both_sides_of_the_inversion_fall_to_not_determined(fold):
+    """Regression case 2 — the inversion, at this stage.
+
+    The principal that provably CAN reach the money was published at $0.00 while
+    two that provably cannot were charged $1.5M and $0.7M. Composing a witnessed
+    magnitude for the reachable one is a later change; what this stage must
+    deliver is that the FAKE attribution is gone — neither side carries a dollar
+    figure nobody witnessed, so the document no longer asserts the inversion.
+    """
+    conditions = condition_plane(
+        licensed={(KEY_SOLVER, KEY_C): (("finishSolve", 570, (INITIATOR_GUARD,)),)},
+    )
+    plane = value_plane({KEY_C: {"usdc": 1_000.0}, KEY_SOLVER: {"usdc": 2_229_837.61}, KEY_PROXY: {"usdc": 500.0}})
+    blocked = _queue_signal("authority.replace")
+    reaching = sig(
+        claim_id="authority.replace",
+        function_name="setAuthority",
+        deployment_address=SOLVER,
+        contract_id=2,
+        selector="0x7a9e5e4b",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(2, "ethereum", TIMELOCK),),
+        **proven(0.75),
+        **reaches(KEY_SOLVER),
+    )
+    document = fold(
+        [blocked, reaching, _witnessed_elsewhere(principal_id=3)],
+        principals={
+            1: facts(1, EOA, "eoa"),
+            2: facts(2, TIMELOCK, "timelock", delay=172800.0),
+            3: facts(3, SAFE, "eoa"),
+        },
+        closure={KEY_C: {KEY_SOLVER}},
+        value=plane,
+        conditions=conditions,
+    )
+    by_unit = {f["principal_unit"]: f for f in document.findings}
+    unreachable = by_unit[entity_key("ethereum", EOA)]
+    reachable = by_unit[entity_key("ethereum", TIMELOCK)]
+
+    # The fake attribution: gone. Neither side publishes an unwitnessed dollar.
+    assert unreachable["value_at_stake_usd"] is None
+    assert reachable["value_at_stake_usd"] is None
+    assert unreachable["exposure_usd"] is None
+    assert reachable["exposure_usd"] is None
+    # And the membership still tells the honest story: only the timelock's row
+    # reaches the entity that holds the money.
+    assert KEY_SOLVER not in unreachable["reach_entities"]
+    assert KEY_SOLVER in reachable["reach_entities"]

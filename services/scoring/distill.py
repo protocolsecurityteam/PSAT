@@ -250,17 +250,33 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
     )
     facts.pause_unset_principals = _pause_unset_principals(facts)
 
+    from sqlalchemy import func as _sql_func
+
     from db.models import Contract as _Contract
 
-    # Protocol-scoped: another protocol's backlink names an entity outside this
-    # perimeter, and charging its value here would both invent reach and consume
-    # exposure room that belongs to this protocol's own entities.
+    facts.protocol_entities = {
+        entity_key(coalesce_chain(row_chain), row_address)
+        for row_address, row_chain in session.query(_Contract.address, _Contract.chain)
+        .filter(_Contract.protocol_id == contract.protocol_id)
+        .order_by(_Contract.id)
+        .all()
+    }
+
+    # The backlink node is written AT THE GATING CONTRACT'S ADDRESS, on the gated
+    # contract's graph, and its payload names the gated contract. So the node
+    # that licenses THIS contract is the one whose own address is this contract —
+    # matching instead on the payload address selects the nodes whose gated
+    # contract is this one, which is the node's own contract every time and
+    # licenses this contract to reach itself. Protocol-scoped: another protocol's
+    # backlink names an entity outside this perimeter, and charging its value
+    # here would both invent reach and consume exposure room that belongs to this
+    # protocol's own entities.
     backlinks = (
         session.query(ControlGraphNode)
         .join(_Contract, _Contract.id == ControlGraphNode.contract_id)
         .filter(
             _Contract.protocol_id == contract.protocol_id,
-            ControlGraphNode.details["gated_contract_backlink"]["gated_contract_address"].astext == address,
+            _sql_func.lower(ControlGraphNode.address) == address,
         )
         .order_by(ControlGraphNode.id)
         .all()
@@ -330,9 +346,16 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
     """Entities whose value this contract's gated functions may be charged with.
 
     The backlink is a REACHABILITY licence and nothing else: it never types the
-    contract it names, and a mismatch is not an earned negative — the mismatch
-    payload is byte-identical to the never-read one, so only the proven ``true``
-    arm is consumable and everything else stays ``not_determined``.
+    contract it names, it supplies no magnitude, and a mismatch is not an earned
+    negative — the mismatch payload is byte-identical to the never-read one, so
+    only the proven ``true`` arm is consumable and everything else stays
+    ``not_determined``.
+
+    ``backlinks`` are the nodes written AT this contract's address. The payload's
+    ``gated_contract_address`` must name the contract the node belongs to, which
+    is what makes the pair a licence rather than two unrelated facts sharing a
+    row. A licence onto this contract itself is dropped: it names no entity the
+    reach did not already hold.
     """
     from db.models import Contract
 
@@ -342,12 +365,14 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
         backlink = details.get("gated_contract_backlink")
         if not isinstance(backlink, dict):
             continue
-        if _lower(backlink.get("gated_contract_address")) != address:
-            continue
         if backlink.get("declared_vault_matches_gated_contract") is not True:
             continue
         anchor = session.get(Contract, node.contract_id)
         if anchor is None or anchor.protocol_id is None:
+            continue
+        if _lower(backlink.get("gated_contract_address")) != _lower(anchor.address):
+            # The payload names a contract other than the one whose graph the
+            # node sits on. Two facts in one row is not a licence.
             continue
         anchor_chain = coalesce_chain(anchor.chain)
         if anchor_chain != chain:
@@ -355,6 +380,8 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
             # deployments that share an address.
             continue
         key = entity_key(anchor_chain, anchor.address)
+        if key == entity_key(chain, address):
+            continue
         out.setdefault(
             key,
             {

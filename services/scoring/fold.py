@@ -1649,6 +1649,27 @@ def _witnessed_magnitude(instance: _Instance) -> float | None:
 def _entity_contribution(
     instance: _Instance, key: str, value_plane: P.ValuePlane, *, transitive: bool
 ) -> tuple[float | None, str]:
+    """The dollars this call is PROVEN to move against one entity, or ``None``.
+
+    There is exactly one source of a number here: a magnitude witness. Reach
+    membership answers "can this principal act on that entity"; it does not
+    answer "how much does acting move", and the entity's balance sheet answers
+    only "how much is there". Substituting the third for the second is the
+    balance-sheet-as-a-reach error — an unproven quantity published as a positive
+    number — and it is what charged 387 of 442 proven-reach signals a sheet
+    nobody proved they could move.
+
+    So the fallthrough is ``not_determined``, and the row does NOT disappear:
+    membership stands, ``value_at_stake_usd`` publishes null, the band falls to
+    ``UNPRICED_BAND`` (inv. 7's floor — a rug-shaped capability on an empty
+    contract still scores), and the missing magnitude is charged to confidence's
+    reach-magnitude term, which is the only place an unknown can sit without
+    being published as a number.
+
+    ``key`` is refused outright when two proxies share it as an implementation:
+    the plane folds it onto neither, and charging a shared implementation
+    against a proxy picked by sort order publishes the other proxy's sheet.
+    """
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.
@@ -1672,7 +1693,7 @@ def _entity_contribution(
         return magnitude, "witnessed_reach(floor)"
     if held is None:
         return None, "entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"
-    return held, basis
+    return None, ("reach_magnitude_not_witnessed(not_determined) x " + basis + ("+closure" if transitive else ""))
 
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"
