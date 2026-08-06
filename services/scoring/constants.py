@@ -504,8 +504,14 @@ def model_parameters() -> dict[str, Any]:
                 "composition is the only thing in this version that moves it: flooring an "
                 "unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the "
                 "40 signals composition answered and on nothing else; (c) the 29.0 -> 18.6 fall "
-                "happened WITHIN 1.0.1, from that version's own reach-magnitude term and "
-                "perimeter widening. The letter improvement here was NOT paid for by a "
+                "happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude "
+                "term: the dust third state stopped counting a sheet whose only priced rows are "
+                "storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became "
+                "discovery-fixed, widening 295 -> 468 entities by admitting every recorded "
+                "discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal "
+                "principals — so the term now answers 'what share of {protocol contracts UNION "
+                "signer wallets} did we price', a strictly harder question than the one 33.7 "
+                "answered. The letter improvement here was NOT paid for by a "
                 "confidence fall in this change; both are real, and neither is the other's price"
             ),
             "what_composition_did_not_recover": (

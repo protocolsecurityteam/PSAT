@@ -31,7 +31,7 @@ const LETTER_CUTS = [
 // the only local protocol (etherfi, protocol 1), with the intermediate figure
 // shown because the two halves move λ in opposite directions:
 //
-//     λ           54.1614 → 84.0166 (floored) → 73.2508    letter C+ → B+
+//     λ           54.1614 → 84.0166 (floored) → 73.2508    letter C+ → A− → B+
 //     confidence     29.0 → 18.6
 //     exposure_usd  $1,227,107,593.64 → $76.07 → $18,059,003.86
 //
@@ -46,10 +46,13 @@ const LETTER_CUTS = [
 //       term, and composition is the only thing that moves it: flooring an
 //       unwitnessed magnitude mints no witness. It went 15.3 → 25.6, on the 40
 //       signals composition answered and on nothing else.
-//   (c) the 29.0 → 18.6 fall happened WITHIN 1.0.1, from the same-version
-//       reach-magnitude term and perimeter widening, not from this change. The
-//       letter improvement and the confidence fall are both real and both
-//       published; they are not a trade this change made.
+//   (c) the 29.0 → 18.6 fall happened WITHIN 1.0.1, in the binding
+//       value_priced term — the dust third state plus a discovery-fixed
+//       perimeter that widened 295 → 468 entities by admitting signer wallets,
+//       so confidence now answers "what share of {protocol contracts ∪ signer
+//       wallets} did we price" — not in the magnitude term and not from this
+//       change. The letter improvement and the confidence fall are both real
+//       and both published; they are not a trade this change made.
 //
 // Why the cuts do not move with it.
 //   1. Moving them would fit the table to ONE protocol's λ. That is the same
