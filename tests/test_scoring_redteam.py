@@ -238,6 +238,39 @@ def condition_plane(
     return plane
 
 
+class _StubConferral(P.ConferralPlane):
+    """A conferral plane that answers for signals carrying no ``function_id``.
+
+    The stub signals these tests build have no persisted function behind them,
+    so the real per-function ``state_writes`` lookup would report every gate's
+    rewrites as unextracted and no gate would confer anything. That is the right
+    answer for a real signal and the wrong question for a test asserting reach
+    membership over a hand-built closure, so the grant is stipulated instead —
+    and the stipulation is visible in the call, not hidden in a default.
+    """
+
+    def __init__(self, rewrites, role_functions):
+        super().__init__(role_functions=dict(role_functions or {}))
+        self._rewrites = frozenset(rewrites)
+
+    def grant_for(self, capability, function_id):
+        return P.GateGrant(capability, self._rewrites, True, "stub(test)", self)
+
+    def capability_grant(self, capability):
+        return self.grant_for(capability, None)
+
+
+def conferral_plane(*, rewrites=("owner",), role_functions=None) -> P.ConferralPlane:
+    """What the gates in a test are stipulated to seize, and what roles license.
+
+    ``rewrites`` defaults to ``owner`` because ``closure_of`` labels its edges
+    ``owner``: a test written before conferral existed keeps asserting the reach
+    membership it meant to assert. A test exercising the conferral test itself
+    passes its own.
+    """
+    return _StubConferral(rewrites, role_functions)
+
+
 @pytest.fixture()
 def fold(monkeypatch):
     """Drive the fold with stubbed planes: no database, no network."""
@@ -252,12 +285,14 @@ def fold(monkeypatch):
         eoas=None,
         discovery=None,
         conditions=None,
+        conferral=None,
     ):
         """``signals=None`` drives the PERSISTED path, through the population read."""
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
+        monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or conferral_plane())
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -2057,19 +2092,40 @@ def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
     assert closure.controlled_by(zero) == ()
 
 
-def test_a_single_token_label_restating_its_relation_names_no_state_variable():
-    """ "controller_value" on a controller_value edge is not a variable name.
+def test_a_relation_named_after_a_getter_may_not_suppress_that_getters_label():
+    """The relation-restatement branch is gone, and this is why.
 
-    The multi-word restatements measured today ("role principal", "safe owner")
-    fail the identifier check anyway; this single-token case is the one the
-    restatement branch actually decides, and without it the parser would publish
-    a state variable no source declares.
+    It existed to stop a single-token label equal to its own relation from being
+    read as a variable of that name. It decided nothing — DB-wide the only labels
+    equal to their relation are the multi-word "role principal" and "safe owner",
+    which fail the identifier check on their own — and it carried an inversion:
+    the day a relation was named after a real getter, every genuine label of that
+    name would have been suppressed silently, with no count anywhere. 100
+    ``authority`` labels sit behind that hazard today. A rule that decides
+    nothing and can invert is deleted, not documented.
     """
-    scope = P.parse_edge_scope("controller_value", "controller_value")
-    assert (scope.kind, scope.state_var) == (P.SCOPE_NOT_DETERMINED, None)
-    assert scope.label == "controller_value"
-    # A real getter name on the same relation still earns the state-var reading.
+    scope = P.parse_edge_scope("authority", "authority")
+    assert (scope.kind, scope.state_var) == (P.SCOPE_STATE_VAR, "authority")
+    assert P.parse_edge_scope("controller_value", "controller_value").kind == P.SCOPE_STATE_VAR
+    # The case the deleted branch was protecting is now decided structurally, by
+    # the relation gate: on a role relation the only positive answer is a role.
     assert P.parse_edge_scope("owner", "controller_value").kind == P.SCOPE_STATE_VAR
+
+
+def test_a_role_relation_never_fabricates_a_state_variable():
+    """On ``role_principal`` the answer is a role set or ``not_determined``.
+
+    The identifier reading applied to a role edge minted ``state_var="roles"``
+    out of the literal label ``roles`` — a variable no source declares, on a
+    relation that asserts a role holding and not a variable at all. No live edge
+    carries that label; the fabrication is pinned here so it cannot return.
+    """
+    scope = P.parse_edge_scope("roles", "role_principal")
+    assert (scope.kind, scope.state_var, scope.roles) == (P.SCOPE_NOT_DETERMINED, None, ())
+    assert scope.label == "roles"
+    assert P.parse_edge_scope("someGetter", "role_principal").kind == P.SCOPE_NOT_DETERMINED
+    # A real role label on the same relation is unaffected.
+    assert P.parse_edge_scope("roles 12", "role_principal").roles == (12,)
 
 
 def test_an_unpriced_reading_superseding_a_priced_one_is_counted():
@@ -3047,7 +3103,27 @@ def _queue_signal(claim: str, **over: Any) -> FunctionSignal:
     )
 
 
-def test_w3_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
+def _role_edge(label, principal=None, anchor=None):
+    return P.ControlEdge(
+        principal=principal or KEY_C,
+        anchor=anchor or KEY_V,
+        relation="role_principal",
+        scope=P.parse_edge_scope(label, "role_principal"),
+        witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+    )
+
+
+def _var_edge(label, principal=None, anchor=None):
+    return P.ControlEdge(
+        principal=principal or KEY_C,
+        anchor=anchor or KEY_V,
+        relation="controller_value",
+        scope=P.parse_edge_scope(label, "controller_value"),
+        witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+    )
+
+
+def test_w4a_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
     """The scope bound, and the class split that makes it apply to one side only.
 
     Holding a gate over A gives its holder A's existing functions; whether one of
@@ -3055,40 +3131,124 @@ def test_w3_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
     role and no state variable cannot answer. Controlling A's CODE does not ask
     it — the code exercises whatever the code is authorized to exercise.
     """
-    unlabelled = P.ControlClosure(
-        edges=(
-            P.ControlEdge(
-                principal=KEY_C,
-                anchor=KEY_V,
-                relation="role_principal",
-                scope=P.parse_edge_scope("role principal", "role_principal"),
-                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
-            ),
-        )
-    )
+    unlabelled = P.ControlClosure(edges=(_role_edge("role principal"),))
     assert not unlabelled.edges[0].scope.is_determined
     conditions = condition_plane()
+    grant = conferral_plane().grant_for("ownership.transfer", None)
 
-    gate, gate_hops = FOLD._closure({KEY_C}, unlabelled, conditions, code_control=False)
-    code, code_hops = FOLD._closure({KEY_C}, unlabelled, conditions, code_control=True)
+    gate, gate_hops, licensed = FOLD._closure({KEY_C}, unlabelled, conditions, grant=grant)
+    code, code_hops, _ = FOLD._closure({KEY_C}, unlabelled, conditions, grant=None)
     assert gate == {KEY_C} and code == {KEY_C, KEY_V}
     assert gate_hops[0]["reason"] == FOLD.HOP_REFUSED_SCOPE
-    assert code_hops == []
-    # A determined scope is walked by both at this stage: narrowing it to the
-    # selectors a role actually confers is a later refinement, and it may only
-    # shrink this set.
-    labelled = P.ControlClosure(
+    assert gate_hops[0]["conferral"] == P.CONFERRAL_SCOPE_NOT_DETERMINED
+    # Withheld, never dropped: the label is cited verbatim on the published gap.
+    assert gate_hops[0]["edge_label"] == "role principal"
+    assert licensed == {} and code_hops == []
+
+
+def test_w4a_a_role_confers_only_where_the_join_names_a_function_there(fold):
+    """The role -> selector join, positive and negative on the same edge.
+
+    A ``roles N`` edge is walked where the join names functions role N licenses
+    AT THAT DESTINATION, and those names travel with the reach — they are the
+    answer to "reach to do what", and what a compositional magnitude is later
+    attributed to. Where the join names nothing the hop is not_determined: the
+    label said "role 77" and no witness says what role 77 may do there.
+    """
+    closure = P.ControlClosure(edges=(_role_edge("roles 77"),))
+    conditions = condition_plane()
+
+    licensing = conferral_plane(role_functions={(KEY_V, 77): ("0xdeadbeef exit",)})
+    seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=licensing.grant_for("roles.grant", None))
+    assert seen == {KEY_C, KEY_V}
+    assert hops == []
+    assert licensed == {KEY_V: ["0xdeadbeef exit"]}
+
+    # Same edge, same label, no witness of what the role licenses there.
+    silent = conferral_plane(role_functions={(KEY_V, 78): ("0xdeadbeef exit",)})
+    seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=silent.grant_for("roles.grant", None))
+    assert seen == {KEY_C}
+    assert licensed == {}
+    assert hops[0]["reason"] == FOLD.HOP_REFUSED_CONFERRAL
+    assert hops[0]["conferral"] == P.CONFERRAL_ROLE_NOT_LICENSED
+    # Code control does not ask the question at all.
+    assert FOLD._closure({KEY_C}, closure, conditions, grant=None)[0] == {KEY_C, KEY_V}
+
+
+def test_w4a_a_gate_does_not_confer_a_variable_it_is_not_witnessed_to_rewrite(fold):
+    """ownership.transfer confers an ``owner`` hop and not a ``hook`` one.
+
+    The evidence is the capability's own ``state_writes``: the gate seizes an
+    authority of some kind, the hop runs on an authority of some kind, and the
+    seizure composes down the chain when they are the same kind. Where they
+    differ the hop is NOT disproved — it is not_determined, because whether the
+    seized gate reaches the other authority depends on a function surface
+    nothing witnesses.
+    """
+    conditions = condition_plane()
+    owns = conferral_plane(rewrites=("owner", "_owner")).grant_for("ownership.transfer", None)
+
+    owner_hop = P.ControlClosure(edges=(_var_edge("owner"),))
+    assert FOLD._closure({KEY_C}, owner_hop, conditions, grant=owns)[0] == {KEY_C, KEY_V}
+
+    hook_hop = P.ControlClosure(edges=(_var_edge("hook"),))
+    seen, hops, _ = FOLD._closure({KEY_C}, hook_hop, conditions, grant=owns)
+    assert seen == {KEY_C}
+    assert hops[0]["reason"] == FOLD.HOP_REFUSED_CONFERRAL
+    assert hops[0]["conferral"] == P.CONFERRAL_VARIABLE_NOT_REWRITTEN
+    assert hops[0]["capability"] == "ownership.transfer"
+    # not_determined, never a proven negative: the hop is published, and code
+    # control still walks the same edge.
+    assert FOLD._closure({KEY_C}, hook_hop, conditions, grant=None)[0] == {KEY_C, KEY_V}
+
+
+def test_w4a_a_gate_whose_writes_were_never_extracted_confers_nothing():
+    """A coverage gap is not an empty answer and is not a licence.
+
+    A function whose ``state_writes`` never ran rewrites nothing anyone read,
+    which is a different fact from a function proven to rewrite nothing. Both
+    withhold, and the withheld hop says which one it was.
+    """
+    conditions = condition_plane()
+    plane = P.ConferralPlane()
+    grant = plane.grant_for("ownership.transfer", None)
+    assert not grant.writes_extracted
+
+    closure = P.ControlClosure(edges=(_var_edge("owner"),))
+    seen, hops, _ = FOLD._closure({KEY_C}, closure, conditions, grant=grant)
+    assert seen == {KEY_C}
+    assert hops[0]["conferral"] == P.CONFERRAL_WRITES_NOT_EXTRACTED
+    # A role hop asks the join, not state_writes, so it is unaffected by the gap.
+    roles = P.ControlClosure(edges=(_role_edge("roles 4"),))
+    licensing = P.ConferralPlane(role_functions={(KEY_V, 4): ("0xaaaaaaaa pull",)})
+    assert FOLD._closure({KEY_C}, roles, conditions, grant=licensing.grant_for("roles.grant", None))[0] == {
+        KEY_C,
+        KEY_V,
+    }
+
+
+def test_w4a_conferral_may_only_shrink_a_walk_never_grow_it():
+    """The monotone property, over every scope shape in one closure.
+
+    Conferral is a bound and bounds do not add reach. Whatever a gate confers,
+    its walk is a subset of the label-presence walk it replaced — which is the
+    walk code control still performs, since code control asks no scope question.
+    """
+    conditions = condition_plane()
+    closure = P.ControlClosure(
         edges=(
-            P.ControlEdge(
-                principal=KEY_C,
-                anchor=KEY_V,
-                relation="role_principal",
-                scope=P.parse_edge_scope("roles 77", "role_principal"),
-                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
-            ),
+            _var_edge("owner", anchor=KEY_V),
+            _var_edge("hook", anchor=KEY_PROXY),
+            _role_edge("roles 3", anchor=KEY_IMPL),
+            _role_edge("role principal", anchor=entity_key("ethereum", TIMELOCK)),
         )
     )
-    assert FOLD._closure({KEY_C}, labelled, conditions, code_control=False)[0] == {KEY_C, KEY_V}
+    unbounded = FOLD._closure({KEY_C}, closure, conditions, grant=None)[0]
+    for rewrites in ((), ("owner",), ("hook",), ("owner", "hook"), ("authority",)):
+        for roles in ({}, {(KEY_IMPL, 3): ("0xaaaaaaaa pull",)}, {(KEY_IMPL, 9): ("0xbbbbbbbb push",)}):
+            plane = conferral_plane(rewrites=rewrites, role_functions=roles)
+            walked = FOLD._closure({KEY_C}, closure, conditions, grant=plane.grant_for("ownership.transfer", None))[0]
+            assert walked <= unbounded, (rewrites, roles)
 
 
 def test_w3_case3_a_freeze_charges_no_sheet_and_keeps_its_finding(fold):
@@ -3388,4 +3548,81 @@ def test_w3_a_beacon_is_a_code_control_edge_with_its_own_witness():
     )
     closure = P.ControlClosure(edges=(edge,))
     conditions = condition_plane()
-    assert FOLD._closure({KEY_C}, closure, conditions, code_control=True)[0] == {KEY_C, KEY_PROXY}
+    assert FOLD._closure({KEY_C}, closure, conditions, grant=None)[0] == {KEY_C, KEY_PROXY}
+
+
+# --------------------------------------------------------------------------
+# W4a — the disclosure items that ride with the conferral test
+# --------------------------------------------------------------------------
+
+
+def test_w4a_the_citation_cap_shows_evidence_before_prose_and_counts_what_it_hid():
+    """The cap is a display bound; the order it evicts in must not be arbitrary.
+
+    A prose ``reading`` restating how to read a field is not something a reader
+    can check. Two transcript-bearing citations were evicted by one on a shipped
+    row. Evidence first, prose last, and the total says how many were not shown.
+    """
+    prose = [{"field": "reach_gate_state", "reading": "how to read it", "value": i} for i in range(8)]
+    evidence = [{"field": "claims[].witness", "transcript_ptr": "t", "verdict": "proven"}]
+    plain = [{"field": "gated_contract_backlink", "value": ["k"]}]
+    shown = FOLD._cited(prose[:4] + evidence + prose[4:] + plain)
+    assert len(shown) == FOLD.CITATION_CAP
+    assert shown[0] is evidence[0]
+    assert shown[1] is plain[0]
+    # Stable within a tier: the population order still decides among equals.
+    assert [c["value"] for c in shown[2:]] == [0, 1, 2, 3, 4, 5]
+    assert FOLD._cited(prose) == prose[: FOLD.CITATION_CAP]
+
+
+def test_w4a_a_walked_hop_says_whether_the_surface_was_read_in_full():
+    """ "No guard was found" over a surface read in part is not the same fact.
+
+    The old census collapsed both into walked_on_analysed_conditions, so a hop
+    resting on one extracted function out of twenty read as a checked hop.
+    """
+    fully = P.ConditionPlane()
+    fully.by_entity = {KEY_V: (P.DestinationFunction(1, "a", (), True), P.DestinationFunction(2, "b", (), True))}
+    assert fully.hop(KEY_C, KEY_V).coverage == P.WALKED_ON_ANALYSED_FULLY
+
+    partly = P.ConditionPlane()
+    partly.by_entity = {KEY_V: (P.DestinationFunction(1, "a", (), True), P.DestinationFunction(2, "b", (), False))}
+    assert partly.hop(KEY_C, KEY_V).coverage == P.WALKED_ON_ANALYSED_PARTLY
+
+    none = P.ConditionPlane()
+    none.by_entity = {KEY_V: (P.DestinationFunction(1, "a", (), False),)}
+    assert none.hop(KEY_C, KEY_V).coverage == P.WALKED_ON_UNANALYSED
+    assert P.ConditionPlane().hop(KEY_C, KEY_V).coverage == P.WALKED_NO_FUNCTION
+    assert set(P.WALKED_COVERAGE) == {
+        P.WALKED_ON_ANALYSED_FULLY,
+        P.WALKED_ON_ANALYSED_PARTLY,
+        P.WALKED_ON_UNANALYSED,
+        P.WALKED_NO_FUNCTION,
+    }
+
+
+def test_w4a_the_self_pin_recogniser_only_ever_withholds():
+    """Its breadth is safe in exactly one direction, and this is that direction.
+
+    Both comparators and every caller-named parameter are read as a pin, because
+    the stored description carries no polarity and the name is the whole
+    evidence. Every over-read moves a hop from walked to not_determined; nothing
+    here can mint a proven-clear. The whole-word guard keeps ``spender`` out.
+    """
+    pinned = [
+        "require(bool)(msg.sender != address(this))",
+        "initiator != address(this)",
+        "address(this) == _caller",
+        "_sender == address(this)",
+    ]
+    for text in pinned:
+        assert P._caller_self_pins([{"description": text}]) == (text,), text
+    for text in ("spender != address(this)", "amount != address(this)", "msg.sender != owner"):
+        assert P._caller_self_pins([{"description": text}]) == (), text
+
+    plane = P.ConditionPlane()
+    plane.by_entity = {KEY_V: (P.DestinationFunction(1, "solve", ("initiator != address(this)",), True),)}
+    hop = plane.hop(KEY_C, KEY_V)
+    # The strongest thing a pin can say is not_determined — never a proven no.
+    assert hop.state == P.HOP_NOT_DETERMINED
+    assert hop.state != "proven_no_reach"

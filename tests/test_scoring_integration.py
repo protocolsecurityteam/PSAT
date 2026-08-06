@@ -63,7 +63,7 @@ from services.scoring.persist import (
     persist_score_document,
 )
 from services.scoring.population import replace_contract_signals
-from services.scoring.schema import FunctionSignal, ScoreDocument, not_determined_signal_defaults
+from services.scoring.schema import FunctionSignal, ScoreDocument, entity_key, not_determined_signal_defaults
 from tests.conftest import DATABASE_URL
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
@@ -1084,3 +1084,101 @@ def test_an_unreadable_document_is_not_reported_as_an_absent_score(fx, api_clien
 
     response = api_client.get(f"/api/company/{fx.protocol.name}/score")
     assert response.status_code == 503, "a body that could not be read is not a missing score"
+
+
+# --------------------------------------------------------------------------
+# W4a — the two conferral joins, read off real rows
+# --------------------------------------------------------------------------
+
+
+def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(fx):
+    """The role -> selector join, against the columns it actually reads.
+
+    ``function_principals.details.trace[]`` says role N at target T licenses
+    selector S; ``effective_functions.selector`` says which function of T that
+    is. A step whose selector names no analysed function of the target licenses
+    something this document cannot name, so it is counted and credited nowhere —
+    otherwise a magnitude would later be attributed to four bytes.
+    """
+    from db.models import FunctionPrincipal
+    from services.scoring import planes as P
+
+    contract = fx.contract()
+    target = fx.function(contract, name="exit")
+    target.selector = "0x18457e61"
+    holder = fx.function(contract, name="setUserRole")
+    fx.session.add(
+        FunctionPrincipal(
+            function_id=holder.id,
+            address="0x" + "5" * 40,
+            principal_type="controller",
+            details={
+                "trace": [
+                    {
+                        "step": "solmate_roles_authority",
+                        "roles": [5, 9],
+                        "target": contract.address,
+                        "selector": "0x18457e61",
+                        "authority": "0x" + "7" * 40,
+                    },
+                    {
+                        "step": "solmate_roles_authority",
+                        "roles": [5],
+                        "target": contract.address,
+                        "selector": "0xdeadbeef",
+                        "authority": "0x" + "7" * 40,
+                    },
+                ]
+            },
+        )
+    )
+    fx.session.commit()
+
+    plane = P.load_conferral_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", contract.address)
+    # Both roles of a multi-role step license the function; the union is the scope.
+    assert plane.licensed_functions(key, (5,)) == ("0x18457e61 exit",)
+    assert plane.licensed_functions(key, (9,)) == ("0x18457e61 exit",)
+    assert plane.licensed_functions(key, (5, 9)) == ("0x18457e61 exit",)
+    # A role nobody witnessed licenses nothing that can be named.
+    assert plane.licensed_functions(key, (4,)) == ()
+    join = plane.provenance["role_selector_join"]
+    assert join["steps_whose_selector_names_no_analysed_function"] == 1
+    assert join["trace_steps_carrying_a_selector"] == 2
+
+
+def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
+    """Two functions of one capability confer differently, and the plane says so.
+
+    ``grant_for`` reads the SPECIFIC function's ``state_writes``; the class-wide
+    union is published beside it and used only by the census. Asking the class
+    for a walk would let one row's reach ride on another row's witness.
+    """
+    from services.scoring import planes as P
+
+    contract = fx.contract()
+    owns = fx.function(contract, name="transferOwnership")
+    owns.claims = [{"claim_id": "ownership.transfer", "tier": "standard_exact", "witness": {}}]
+    owns.state_writes = [{"var": "owner", "origin": "body"}, {"var": "_reentrancy", "origin": "guard"}]
+    other = fx.function(contract, name="transferOwnership2")
+    other.claims = [{"claim_id": "ownership.transfer", "tier": "standard_exact", "witness": {}}]
+    other.state_writes = [{"var": "_owner", "origin": "body"}]
+    fx.session.commit()
+
+    plane = P.load_conferral_plane(fx.session, fx.protocol.id)
+    # A guard-origin write is the modifier's bookkeeping, not what the gate does.
+    assert plane.grant_for("ownership.transfer", owns.id).rewrites == frozenset({"owner"})
+    assert plane.grant_for("ownership.transfer", other.id).rewrites == frozenset({"_owner"})
+    # The class-wide union is strictly wider than either, and is labelled as the
+    # census instrument it is.
+    assert plane.capability_grant("ownership.transfer").rewrites == frozenset({"owner", "_owner"})
+    scope = P.parse_edge_scope("_owner", "controller_value")
+    assert not plane.grant_for("ownership.transfer", owns.id).confers(scope, "ethereum::x").conferred
+    assert plane.grant_for("ownership.transfer", other.id).confers(scope, "ethereum::x").conferred
+    # A function with no extracted state_writes confers nothing and says which.
+    bare = fx.function(contract, name="renounceOwnership")
+    bare.state_writes = None
+    fx.session.commit()
+    grant = P.load_conferral_plane(fx.session, fx.protocol.id).grant_for("ownership.transfer", bare.id)
+    assert not grant.writes_extracted
+    assert grant.confers(scope, "ethereum::x").outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED

@@ -860,21 +860,38 @@ class EdgeScope:
         return self.kind != SCOPE_NOT_DETERMINED
 
 
+ROLE_SCOPED_RELATIONS = ("role_principal",)
+
+
 def parse_edge_scope(label: str | None, relation: str | None = None) -> EdgeScope:
-    """The scope an edge label proves, or ``not_determined``."""
+    """The scope an edge label proves, or ``not_determined``.
+
+    The relation decides which readings are AVAILABLE, not which one wins. On a
+    ``role_principal`` edge the only positive answer is a role set: the relation
+    is the assertion "this principal holds a role", so a label that names no role
+    has not named a state variable either, and reading a bare identifier there as
+    one fabricated a variable (``state_var="roles"`` on the literal label
+    ``roles``) that no source declares and no consumer could check.
+
+    There is deliberately NO relation-restatement branch. One existed to stop a
+    single-token label equal to its own relation ("controller_value" on a
+    ``controller_value`` edge) from being read as a variable of that name. It
+    decided nothing: DB-wide the only labels equal to their relation are the
+    multi-word "role principal" and "safe owner", which fail the identifier check
+    on their own, and no single-token case exists. What it did carry was an
+    inversion hazard — a relation named after a real getter (``authority``) would
+    have suppressed the 100 genuine ``authority`` state-var labels the same day
+    it was introduced, silently, with no count anywhere. A rule that decides
+    nothing and can invert is deleted rather than documented; the role case it
+    was covering is now decided by the relation gate above, structurally.
+    """
     text = str(label or "").strip()
     if not text:
         return EdgeScope(SCOPE_NOT_DETERMINED)
     match = _ROLES_LABEL.match(text)
     if match:
         return EdgeScope(SCOPE_ROLES, roles=tuple(sorted({int(n) for n in match.group(1).split(",")})), label=text)
-    # A label that only restates its own relation names nothing the relation did
-    # not already say. The multi-word restatements measured today ("role
-    # principal", "safe owner") would reach not_determined through the
-    # identifier check below anyway; this branch is what decides the SINGLE-TOKEN
-    # case, where "controller_value" on a controller_value edge would otherwise
-    # be read as a state variable of that name — a variable no source declares.
-    if relation and text.replace(" ", "_").lower() == relation.lower():
+    if relation in ROLE_SCOPED_RELATIONS:
         return EdgeScope(SCOPE_NOT_DETERMINED, label=text)
     if _IDENTIFIER.match(text):
         return EdgeScope(SCOPE_STATE_VAR, state_var=text, label=text)
@@ -1153,6 +1170,27 @@ HOP_NOT_DETERMINED = "not_determined"
 # parameters are the caller as the destination's own callee convention passes it
 # on (``initiator`` in a solver callback), which is the same question one frame
 # out.
+#
+# The recogniser is deliberately BROAD on two axes, and both are safe in exactly
+# one direction:
+#
+#   comparator  ``!=`` and ``==`` are both read as a pin. The stored
+#               ``description`` is a verbatim predicate with no polarity: the
+#               same text is a require-condition in one function and a
+#               revert-condition in another, so which comparator means "the
+#               caller must be the destination" is not recoverable from it.
+#   term        ``sender``/``caller``/``initiator`` (with or without a leading
+#               underscore) are read as the caller. A parameter so named is the
+#               caller under every callee convention this corpus uses, but the
+#               name is the whole evidence — a parameter named ``initiator`` that
+#               carried something else would be read as a caller pin here.
+#
+# Both over-reads land on the same side: a recognised pin only ever moves a hop
+# from walked to ``not_determined``. Nothing in this module can turn a pin into a
+# proven-clear, so breadth costs withheld reach and never mints reach. The
+# reverse error — a pin this regex misses — is the one that would over-claim, and
+# it is why the shape is not narrowed further. ``(?<![\w$])`` keeps the terms
+# whole, so ``spender``/``resender`` are not caller terms.
 _CALLER_TERM = r"(?:msg\.sender|_?sender|_?caller|_?initiator)"
 _SELF_PIN = re.compile(
     rf"(?<![\w$])(?:{_CALLER_TERM}\s*[!=]=\s*address\(this\)|address\(this\)\s*[!=]=\s*{_CALLER_TERM}(?![\w$]))"
@@ -1165,9 +1203,13 @@ SURFACE_NONE = "destination_functions_not_analysed"
 # On what a walked hop was walked. "No condition disproved the caller" is three
 # different facts, and only the first of them is a read of any condition:
 #
-#   ANALYSED       at least one function that permits the caller had its
-#                  conditions extracted, so a guard was there to find and was
-#                  not found.
+#   FULLY          every function consulted at the destination had its
+#                  conditions extracted, so the read is complete: a guard was
+#                  there to find on all of them and was found on none.
+#   PARTLY         at least one permitting function had its conditions
+#                  extracted and at least one consulted function did not. A
+#                  guard was found on none, but the surface the answer rests on
+#                  is not the surface that was consulted.
 #   UNANALYSED     every function that permits the caller has ``conditions``
 #                  NULL — the extraction never ran there, so "no guard" is a
 #                  coverage gap wearing the shape of a clean read.
@@ -1178,10 +1220,16 @@ SURFACE_NONE = "destination_functions_not_analysed"
 # gap overturn a proven authority relation), so the distinction is a DISCLOSURE
 # and not a bound — but a consumer cannot tell a checked hop from an unchecked
 # one unless the counts are published apart.
-WALKED_ON_ANALYSED = "walked_on_analysed_conditions"
+WALKED_ON_ANALYSED_FULLY = "walked_on_fully_analysed_conditions"
+WALKED_ON_ANALYSED_PARTLY = "walked_on_partly_analysed_conditions"
 WALKED_ON_UNANALYSED = "walked_on_unanalysed_conditions"
 WALKED_NO_FUNCTION = "walked_with_no_analysed_function"
-WALKED_COVERAGE = (WALKED_ON_ANALYSED, WALKED_ON_UNANALYSED, WALKED_NO_FUNCTION)
+WALKED_COVERAGE = (
+    WALKED_ON_ANALYSED_FULLY,
+    WALKED_ON_ANALYSED_PARTLY,
+    WALKED_ON_UNANALYSED,
+    WALKED_NO_FUNCTION,
+)
 
 
 @dataclass(frozen=True)
@@ -1269,15 +1317,20 @@ class ConditionPlane:
         permitted = [fn for fn in surface if not fn.caller_pinned_to_self]
         if permitted:
             analysed = [fn for fn in permitted if fn.analysed]
+            consulted_analysed = sum(1 for fn in surface if fn.analysed)
+            coverage = WALKED_ON_UNANALYSED
+            if analysed:
+                coverage = WALKED_ON_ANALYSED_FULLY if consulted_analysed == len(surface) else WALKED_ON_ANALYSED_PARTLY
             return HopConditions(
                 HOP_WALKED,
                 (
                     f"caller_condition_permits({len(permitted)} of {len(surface)} consulted "
-                    f"functions, {len(analysed)} of them with conditions extracted)"
+                    f"functions, {len(analysed)} of them with conditions extracted; "
+                    f"{consulted_analysed} of {len(surface)} consulted functions analysed)"
                 ),
                 surface_kind,
                 len(surface),
-                coverage=WALKED_ON_ANALYSED if analysed else WALKED_ON_UNANALYSED,
+                coverage=coverage,
             )
         return HopConditions(
             HOP_NOT_DETERMINED,
@@ -1380,16 +1433,375 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
             "already witnesses, and an unparsed business predicate is not evidence against a "
             "proven authority relation"
         ),
+        "recogniser_breadth": (
+            "BOTH comparators (!= and ==) count as a pin, because the stored description is a "
+            "verbatim predicate carrying no polarity — the same text is a require-condition in "
+            "one function and a revert-condition in another. msg.sender and whole-word "
+            "sender/caller/initiator (with or without a leading underscore) all count as the "
+            "caller, on the name alone. Both over-reads move a hop from walked to "
+            "not_determined and NOTHING here can mint a proven-clear, so the breadth costs "
+            "withheld reach and never reach"
+        ),
         "surface_rule": (
             "the functions of the destination on which the caller is a RESOLVED principal where "
             "such a witness exists, else the destination's whole analysed function set. A "
             "destination with no analysed function consults nothing and the hop stands on the "
             "edge rather than being converted into a refusal. The shortfall that produces is "
             "counted in provenance.reach_bounds.hop_census, which splits every walked hop into "
-            "walked_on_analysed_conditions, walked_on_unanalysed_conditions and "
-            "walked_with_no_analysed_function — the second and third are hops no condition was "
-            "ever read for, and they are walked on the edge alone"
+            "walked_on_fully_analysed_conditions, walked_on_partly_analysed_conditions, "
+            "walked_on_unanalysed_conditions and walked_with_no_analysed_function. Only the "
+            "first rests on a surface that was read in full; the second found a guard on none "
+            "of the functions it could read and could not read all of them; the last two are "
+            "hops no condition was ever read for, and they are walked on the edge alone"
         ),
+    }
+    return plane
+
+
+# --- what a gate CONFERS -----------------------------------------------------
+#
+# A control edge proves that an authority relation EXISTS. It does not prove
+# that the gate a finding seizes is the authority that relation runs on, and
+# until this plane there was nothing to ask: gate control walked every edge whose
+# label named a scope at all, which is a label-PRESENCE test wearing a conferral
+# test's name. Two witnesses answer it, one per scope kind.
+#
+#   roles N      The role -> selector join. ``function_principals.details.trace[]``
+#                records, per resolved principal, the step that admitted it —
+#                ``(step, authority, target, selector, roles)`` — so "role N at
+#                target T" resolves to the SELECTORS role N licenses at T. A
+#                selector is credited only where ``effective_functions.selector``
+#                names a function of T under it: four bytes nobody can name is
+#                not a licensed function, and the named function is what a
+#                magnitude can later be attributed to. A role that licenses no
+#                named function at the destination confers nothing anyone can
+#                point at, and the hop is not_determined.
+#
+#   state_var L  The capability's own ``effective_functions.state_writes``. The
+#                gate seizes an authority of some kind; the hop RUNS ON an
+#                authority of some kind; the seizure composes down the chain when
+#                the two are the same kind — an ownership chain, an
+#                authority-pointer chain — and the evidence that a capability
+#                seizes authority of kind L is that its own witnessed function
+#                is observed to write a variable named L. ownership.transfer is
+#                witnessed writing owner/_owner; authority.replace writing
+#                authority; roles.grant writing _roles. None of them is witnessed
+#                writing hook, vault, roleRegistry or endpoint, so a hop running
+#                on one of those is not conferred by them.
+#
+#                Where the kinds differ the hop is NOT disproved: whether the
+#                seized gate reaches the other authority depends on the
+#                intermediate node's own function surface, and nothing in this
+#                pipeline witnesses that. So it is not_determined — withheld and
+#                published, never walked and never counted as a proven negative.
+#
+# One residual, named rather than assumed away: the ROLE branch asks only what
+# the role licenses at the destination. It does not additionally require the
+# seizing capability to be one that governs role assignment, so an
+# ``authority.replace`` gate walks a ``roles N`` hop on the join's answer alone.
+# That is the same homogeneity question the state-variable branch answers with
+# state_writes, and there is no equivalent witness for it — the role edge names a
+# role, not the authority slot that grants it. The bound stated here is therefore
+# what the role LICENSES, which is the bound a compositional magnitude needs, and
+# it is an upper bound on what this gate can exercise.
+CONFERRAL_CONFERRED = "conferred"
+CONFERRAL_SCOPE_NOT_DETERMINED = "scope_not_determined"
+CONFERRAL_ROLE_NOT_LICENSED = "role_licenses_no_named_function_at_the_destination"
+CONFERRAL_VARIABLE_NOT_REWRITTEN = "capability_not_witnessed_rewriting_this_variable"
+CONFERRAL_WRITES_NOT_EXTRACTED = "capability_state_writes_not_extracted"
+CONFERRAL_OUTCOMES = (
+    CONFERRAL_CONFERRED,
+    CONFERRAL_SCOPE_NOT_DETERMINED,
+    CONFERRAL_ROLE_NOT_LICENSED,
+    CONFERRAL_VARIABLE_NOT_REWRITTEN,
+    CONFERRAL_WRITES_NOT_EXTRACTED,
+)
+
+# ``state_writes[].origin``: a write in the function BODY is the function doing
+# it. A write attributed to a guard is the modifier's bookkeeping (a reentrancy
+# latch, a namespaced-storage pointer read) and is not what the capability
+# rewrites, so it is not evidence of the authority the gate seizes.
+_WRITE_ORIGIN_BODY = "body"
+
+
+@dataclass(frozen=True)
+class ConferralVerdict:
+    """Whether one gate confers one hop, and what it confers there."""
+
+    outcome: str
+    licensed: tuple[str, ...] = ()
+    basis: str = ""
+
+    @property
+    def conferred(self) -> bool:
+        return self.outcome == CONFERRAL_CONFERRED
+
+
+@dataclass(frozen=True)
+class GateGrant:
+    """One gate-control capability instance, and what its witness says it seizes.
+
+    ``rewrites`` is read from the SPECIFIC function the signal was witnessed on,
+    not from the capability's class-wide behaviour: the claim being tested is
+    what THIS gate rewrites. ``writes_extracted`` keeps the coverage gap distinct
+    from an empty answer — a function whose ``state_writes`` never ran rewrites
+    nothing anyone read, which is not the same fact as a function proven to
+    rewrite nothing, and both are withheld rather than either being walked.
+    """
+
+    capability: str
+    rewrites: frozenset[str]
+    writes_extracted: bool
+    basis: str
+    plane: ConferralPlane = field(repr=False, compare=False)
+
+    def confers(self, scope: EdgeScope, destination: str) -> ConferralVerdict:
+        if not scope.is_determined:
+            return ConferralVerdict(
+                CONFERRAL_SCOPE_NOT_DETERMINED,
+                basis=(
+                    "the edge's label names no role and no state variable, so what this gate "
+                    "would confer here is not_determined"
+                ),
+            )
+        if scope.kind == SCOPE_ROLES:
+            licensed = self.plane.licensed_functions(destination, scope.roles)
+            if not licensed:
+                return ConferralVerdict(
+                    CONFERRAL_ROLE_NOT_LICENSED,
+                    basis=(
+                        f"no witnessed trace step licenses role(s) {list(scope.roles)} to a named "
+                        f"function of {destination}, so the hop confers nothing that can be named"
+                    ),
+                )
+            return ConferralVerdict(
+                CONFERRAL_CONFERRED,
+                licensed,
+                basis=(
+                    f"role(s) {list(scope.roles)} license {len(licensed)} named function(s) at "
+                    f"{destination} (function_principals.details.trace[].selector joined to "
+                    "effective_functions.selector)"
+                ),
+            )
+        if not self.writes_extracted:
+            return ConferralVerdict(CONFERRAL_WRITES_NOT_EXTRACTED, basis=self.basis)
+        if scope.state_var not in self.rewrites:
+            return ConferralVerdict(
+                CONFERRAL_VARIABLE_NOT_REWRITTEN,
+                basis=(
+                    f"{self.capability} is witnessed rewriting {sorted(self.rewrites)} here and "
+                    f"not '{scope.state_var}', so whether seizing it reaches an authority of that "
+                    "kind depends on a function surface nothing witnesses"
+                ),
+            )
+        return ConferralVerdict(
+            CONFERRAL_CONFERRED,
+            basis=f"{self.capability} is witnessed rewriting '{scope.state_var}' ({self.basis})",
+        )
+
+
+@dataclass
+class ConferralPlane:
+    """The two conferral witnesses, indexed for the walk.
+
+    ``role_functions`` is the role -> selector join, already narrowed to
+    selectors that name a function. ``writes_by_function`` is per-function and is
+    what the walk consults; ``writes_by_capability`` is the same evidence rolled
+    up to the class and is used ONLY by the census, which has no instance to ask.
+    The two are published side by side because the class-wide union is an upper
+    bound on the per-function answer, and a reader comparing a census count to a
+    finding's walk has to be able to see which one they are looking at.
+    """
+
+    role_functions: dict[tuple[str, int], tuple[str, ...]] = field(default_factory=dict)
+    writes_by_function: dict[int, frozenset[str]] = field(default_factory=dict)
+    writes_by_capability: dict[str, frozenset[str]] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def licensed_functions(self, destination: str, roles: tuple[int, ...]) -> tuple[str, ...]:
+        """The named functions the union of ``roles`` licenses at ``destination``.
+
+        The union is the honest read of a multi-role label: "roles 5,9" is one
+        principal holding both, and each licenses what it licenses.
+        """
+        out: set[str] = set()
+        for role in roles:
+            out.update(self.role_functions.get((destination, int(role)), ()))
+        return tuple(sorted(out))
+
+    def grant_for(self, capability: str, function_id: int | None) -> GateGrant:
+        writes = self.writes_by_function.get(function_id) if function_id is not None else None
+        if writes is None:
+            return GateGrant(
+                capability,
+                frozenset(),
+                False,
+                (
+                    "effective_functions.state_writes carries no extracted array for this "
+                    f"function (id {function_id}), so what this gate rewrites was never read"
+                ),
+                self,
+            )
+        return GateGrant(capability, writes, True, f"effective_functions.state_writes(function {function_id})", self)
+
+    def capability_grant(self, capability: str) -> GateGrant:
+        """The class-wide grant: the UNION of what every witness of ``capability``
+        rewrites anywhere in this protocol. Strictly wider than any one instance's
+        grant, so it is a census instrument and never a walk input.
+        """
+        writes = self.writes_by_capability.get(capability)
+        if writes is None:
+            return GateGrant(
+                capability,
+                frozenset(),
+                False,
+                f"no function carrying {capability} has extracted state_writes in this protocol",
+                self,
+            )
+        return GateGrant(
+            capability,
+            writes,
+            True,
+            f"union of effective_functions.state_writes over every {capability} witness in this protocol",
+            self,
+        )
+
+
+def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
+    """The role -> selector join and the capability -> rewritten-variable witness."""
+    from db.models import Contract, EffectiveFunction, FunctionPrincipal
+
+    named: dict[tuple[str, str], str] = {}
+    writes_by_function: dict[int, frozenset[str]] = {}
+    claims_by_function: dict[int, tuple[str, ...]] = {}
+    functions = (
+        session.query(
+            EffectiveFunction.id,
+            EffectiveFunction.function_name,
+            EffectiveFunction.selector,
+            EffectiveFunction.state_writes,
+            EffectiveFunction.claims,
+            EffectiveFunction.deployment_address,
+            Contract.address,
+            Contract.chain,
+        )
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(EffectiveFunction.id)
+        .all()
+    )
+    for function_id, name, selector, state_writes, claims, deployment, address, chain in functions:
+        key = entity_key(coalesce_chain(chain), deployment or address)
+        if selector:
+            named.setdefault((key, _lower(str(selector))), f"{_lower(str(selector))} {name}")
+        # An ARRAY is an extraction that ran; anything else never did, and the
+        # two must not reach the walk as the same empty answer.
+        if isinstance(state_writes, list):
+            writes_by_function[int(function_id)] = frozenset(
+                str(entry.get("var"))
+                for entry in state_writes
+                if isinstance(entry, dict) and entry.get("var") and entry.get("origin") == _WRITE_ORIGIN_BODY
+            )
+        if isinstance(claims, list):
+            claims_by_function[int(function_id)] = tuple(
+                str(entry.get("claim_id")) for entry in claims if isinstance(entry, dict) and entry.get("claim_id")
+            )
+
+    writes_by_capability: dict[str, set[str]] = defaultdict(set)
+    capability_functions: dict[str, int] = defaultdict(int)
+    capability_functions_extracted: dict[str, int] = defaultdict(int)
+    for function_id, claim_ids in claims_by_function.items():
+        for claim_id in set(claim_ids):
+            capability_functions[claim_id] += 1
+            writes = writes_by_function.get(function_id)
+            if writes is None:
+                continue
+            capability_functions_extracted[claim_id] += 1
+            writes_by_capability[claim_id].update(writes)
+
+    role_functions: dict[tuple[str, int], set[str]] = defaultdict(set)
+    role_authorities: dict[tuple[str, int], set[str]] = defaultdict(set)
+    steps = unnamed_selectors = 0
+    principals = (
+        session.query(FunctionPrincipal.details, Contract.chain)
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(FunctionPrincipal.id)
+        .all()
+    )
+    for details, chain in principals:
+        trace = (details or {}).get("trace") if isinstance(details, dict) else None
+        for step in trace or []:
+            if not isinstance(step, dict):
+                continue
+            selector, target, roles = step.get("selector"), step.get("target"), step.get("roles")
+            if not selector or not target or not isinstance(roles, list):
+                continue
+            steps += 1
+            key = entity_key(coalesce_chain(chain), str(target))
+            function = named.get((key, _lower(str(selector))))
+            if function is None:
+                # The step names a selector no analysed function of the target
+                # carries. It licenses something, but not something this document
+                # can name or later attribute a magnitude to, so it is counted
+                # and not credited.
+                unnamed_selectors += 1
+                continue
+            for role in roles:
+                try:
+                    number = int(role)
+                except (TypeError, ValueError):
+                    continue
+                role_functions[(key, number)].add(function)
+                if step.get("authority"):
+                    role_authorities[(key, number)].add(_lower(str(step["authority"])))
+
+    plane = ConferralPlane(
+        role_functions={key: tuple(sorted(rows)) for key, rows in sorted(role_functions.items())},
+        writes_by_function=writes_by_function,
+        writes_by_capability={key: frozenset(rows) for key, rows in sorted(writes_by_capability.items())},
+    )
+    plane.provenance = {
+        "role_selector_join": {
+            "trace_steps_carrying_a_selector": steps,
+            "steps_whose_selector_names_no_analysed_function": unnamed_selectors,
+            "role_scopes_resolved": len(plane.role_functions),
+            "destinations": len({key[0] for key in plane.role_functions}),
+            "role_scopes_resolved_by_more_than_one_authority": sum(
+                1 for holders in role_authorities.values() if len(holders) > 1
+            ),
+            "reading": (
+                "a (destination, role) pair resolves to the NAMED functions that role licenses "
+                "there: function_principals.details.trace[].selector joined to "
+                "effective_functions.selector at the same destination. A step whose selector "
+                "names no analysed function of the destination is counted above and credited "
+                "nowhere — it licenses something this document cannot name. Role numbers are "
+                "per-authority; the join is keyed on (destination, role) because the "
+                "destination pins which authority governs it, and the count of pairs resolved "
+                "through more than one authority is published so a reader can see whether that "
+                "pinning was ambiguous anywhere"
+            ),
+        },
+        "capability_rewrites": {
+            "functions_with_state_writes_extracted": len(writes_by_function),
+            "functions": len(functions),
+            "by_capability": {
+                capability: {
+                    "rewrites": sorted(writes_by_capability.get(capability, ())),
+                    "functions": capability_functions[capability],
+                    "functions_with_state_writes_extracted": capability_functions_extracted.get(capability, 0),
+                }
+                for capability in sorted(capability_functions)
+            },
+            "reading": (
+                "what each capability's own witnesses are observed to REWRITE, from "
+                "effective_functions.state_writes with origin=body — a guard-origin write is the "
+                "modifier's bookkeeping and not what the capability does. The walk consults the "
+                "witnessed function's OWN set, never this union; the union is published because "
+                "it is the upper bound the hop census is computed against"
+            ),
+        },
     }
     return plane
 
@@ -1845,6 +2257,12 @@ __all__ = [
     "ASSET_PRICED",
     "ASSET_PROVEN_ZERO",
     "ASSET_UNPRICED",
+    "CONFERRAL_CONFERRED",
+    "CONFERRAL_OUTCOMES",
+    "CONFERRAL_ROLE_NOT_LICENSED",
+    "CONFERRAL_SCOPE_NOT_DETERMINED",
+    "CONFERRAL_VARIABLE_NOT_REWRITTEN",
+    "CONFERRAL_WRITES_NOT_EXTRACTED",
     "CONTROL_RELATIONS",
     "EDGE_WITNESS_ADMIN_COLUMN",
     "EDGE_WITNESS_CONTROL_GRAPH",
@@ -1862,15 +2280,19 @@ __all__ = [
     "UNCONSUMED_REACH_REASONS",
     "ZERO_ADDRESS",
     "is_zero_key",
+    "ConferralPlane",
+    "ConferralVerdict",
     "ControlClosure",
     "ControlEdge",
     "EdgeScope",
+    "GateGrant",
     "PrincipalFacts",
     "RefusedEdge",
     "RenouncedAuthority",
     "ValuePlane",
     "load_audit_posture",
     "discovery_relation_entities",
+    "load_conferral_plane",
     "load_control_closure",
     "load_ledgers",
     "load_principal_plane",

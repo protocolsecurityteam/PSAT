@@ -188,6 +188,11 @@ class _RowValue:
     # magnitude witness at all.
     hops_not_determined: list[dict[str, Any]] = field(default_factory=list)
     magnitude_census: dict[str, int] = field(default_factory=dict)
+    # What the walked gate hops LICENSE at each destination: the named functions
+    # the role -> selector join resolved. Empty for a destination reached only
+    # through state-variable hops, where nothing named which functions the gate
+    # reaches — an absence, never an empty licence.
+    licensed_functions: dict[str, list[str]] = field(default_factory=dict)
 
 
 def compute_protocol_score(
@@ -218,6 +223,7 @@ def compute_protocol_score(
     value_plane = P.load_value_plane(session, protocol_id)
     closure = P.load_control_closure(session, protocol_id)
     conditions = P.load_condition_plane(session, protocol_id)
+    conferral = P.load_conferral_plane(session, protocol_id)
     role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
@@ -306,7 +312,7 @@ def compute_protocol_score(
             )
             _attach(row, signal, instance, extra_notes | set(notes))
 
-    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, conditions, units)
+    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, conditions, conferral, units)
     warnings.extend(value_warnings)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps, exposure_coverage = _grade(findings, value_plane)
@@ -363,19 +369,28 @@ def compute_protocol_score(
             "code_control_capabilities": sorted(K.CODE_CONTROL_CAPABILITIES),
             "gate_control_capabilities": sorted(K.GATE_CONTROL_CAPABILITIES),
             "caller_conditions": conditions.provenance,
-            "hop_census": _hop_census(closure, conditions),
+            "gate_conferral": conferral.provenance,
+            "hop_census": _hop_census(closure, conditions, conferral),
             "reading": (
                 "code control expands over the whole closure of the controlled node — owning "
                 "the code exercises everything the code is authorized to exercise. Gate control "
-                "expands only through edges whose label names a scope at all: a role number or "
-                "a state variable. That is a label-PRESENCE test. It is NOT the conferral test "
-                "the class distinction ultimately needs — walked_by_scope_kind.state_var counts "
-                "hops admitted on a label that names a getter, which licenses nothing anyone has "
-                "shown, and the role->selector join that would narrow a determined scope to what "
-                "the role actually confers is not applied here. So gate-control reach is an "
-                "UPPER BOUND that may only shrink when that join lands. Both classes are bounded "
-                "by the destination's own caller conditions. Every hop neither class could "
-                "establish is published per finding as reach_hops_not_determined, never dropped"
+                "expands only through edges the gate is WITNESSED TO CONFER, which is a "
+                "conferral test and no longer the label-presence test that walked any edge whose "
+                "label named a scope at all. Two witnesses answer it. A `roles N` edge is walked "
+                "where function_principals.details.trace[].selector, joined to "
+                "effective_functions.selector at the destination, names the functions role N "
+                "licenses there — and those named functions are published per finding as "
+                "reach_licensed_functions, which is what the reach is a reach TO DO. A state "
+                "variable edge is walked where the gate's own witnessed function is observed "
+                "(effective_functions.state_writes, origin=body) to rewrite a variable of that "
+                "name, so the seizure composes down a chain of the same authority kind; a label "
+                "naming a getter the gate is not witnessed to rewrite ('hook', 'vault', "
+                "'roleRegistry') no longer walks. A hop whose kinds differ is NOT disproved — "
+                "whether the seized gate reaches the other authority depends on the intermediate "
+                "node's function surface, which nothing here witnesses — so it is withheld as "
+                "not_determined. Both classes are bounded by the destination's own caller "
+                "conditions. Every hop neither class could establish is published per finding as "
+                "reach_hops_not_determined, never dropped"
             ),
         },
         "unpriced_positions": value_plane.unpriced_positions,
@@ -1095,6 +1110,7 @@ def _member_weakness(
     value_plane: P.ValuePlane,
     closure: P.ControlClosure,
     conditions: P.ConditionPlane,
+    conferral: P.ConferralPlane,
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
     """A merged unit's weakness, per REACHED ENTITY (inv. 5).
 
@@ -1133,7 +1149,7 @@ def _member_weakness(
         # value map: W2b's per-call magnitude cap scales what a member is charged
         # and can empty ``per_entity`` outright, but it moves no entity out of
         # what the member provably reaches.
-        reached = _row_value(probe, value_plane, closure, conditions).reach
+        reached = _row_value(probe, value_plane, closure, conditions, conferral).reach
         reach_by_member[address] = reached
 
     weakness_by_entity: dict[str, float] = {}
@@ -1157,11 +1173,40 @@ def _member_weakness(
     return weakness_by_entity, published, (label, kind, binding)
 
 
+CITATION_CAP = 8
+# A citation that points AT evidence: a transcript pointer, a verdict, the block
+# a reading was pinned to. Everything else is a field restatement, and a
+# ``reading`` key marks the ones that are prose about how to read a field rather
+# than a pointer to anything.
+_CITATION_EVIDENCE_KEYS = ("transcript_ptr", "verdict", "block_source")
+
+
+def _cited(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The row's citations, evidence first, capped for display.
+
+    The cap is a display bound and the eviction it causes is arbitrary, so the
+    order it evicts in must not be. A citation pointing at a transcript is the
+    one a reader can check; a prose ``reading`` restating how to read a field is
+    not, and it evicted two transcript pointers off a shipped row. Stable within
+    each tier, so the population order still decides among equals.
+    """
+
+    def rank(citation: dict[str, Any]) -> int:
+        if not isinstance(citation, dict):
+            return 1
+        if any(key in citation for key in _CITATION_EVIDENCE_KEYS):
+            return 0
+        return 2 if "reading" in citation else 1
+
+    return sorted(citations, key=rank)[:CITATION_CAP]
+
+
 def _aggregate(
     rows_by_key: dict[tuple[str, str, str], _Row],
     value_plane: P.ValuePlane,
     closure: P.ControlClosure,
     conditions: P.ConditionPlane,
+    conferral: P.ConferralPlane,
     units: _UnitResolver,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
@@ -1170,7 +1215,7 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        valued = _row_value(row, value_plane, closure, conditions)
+        valued = _row_value(row, value_plane, closure, conditions, conferral)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
         value_basis = valued.basis
         if row.zero_reach_stripped:
@@ -1181,7 +1226,9 @@ def _aggregate(
         # that answered is not the same fact as an entity that was answered.
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
         is_floor = bool(value_usd is not None and (undetermined or partially_priced))
-        weakness_by_entity, weakness, weakest = _member_weakness(row, per_entity, value_plane, closure, conditions)
+        weakness_by_entity, weakness, weakest = _member_weakness(
+            row, per_entity, value_plane, closure, conditions, conferral
+        )
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -1277,10 +1324,21 @@ def _aggregate(
                 # capability reaches them.
                 "host_entities": sorted(row.seeds),
                 "reach_entities": sorted(valued.reach),
+                # What the gate hops this row walked LICENSE at each destination
+                # — the role -> selector join's named functions. A reached entity
+                # absent from this map was reached through a hop that named no
+                # function, which is a reach whose "to do what" is unanswered and
+                # not a reach to nothing.
+                "reach_licensed_functions": valued.licensed_functions,
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
-                "citations": row.citations[:8],
+                "citations": _cited(row.citations),
+                # The slice above is a display cap, and a cap that is not counted
+                # reads as the whole population. Two witness citations were
+                # evicted by a reading-string on one shipped row before the
+                # ordering below existed; the total says how many were not shown.
+                "citations_total": len(row.citations),
                 "counterfactual": _counterfactual(weakest[1]),
             }
         )
@@ -1418,7 +1476,11 @@ def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> lis
 
 
 def _row_value(
-    row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure, conditions: P.ConditionPlane
+    row: _Row,
+    value_plane: P.ValuePlane,
+    closure: P.ControlClosure,
+    conditions: P.ConditionPlane,
+    conferral: P.ConferralPlane,
 ) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
@@ -1433,6 +1495,11 @@ def _row_value(
     over the whole closure of the controlled node, gate control only through
     edges whose scope the gate confers, and both only where the destination's
     own conditions do not pin their caller to the destination itself.
+
+    The conferral question is asked with the WITNESSED FUNCTION's own grant, per
+    instance: two ownership.transfer functions that rewrite different variables
+    confer different hops, and asking the capability class would walk one row's
+    reach on another row's witness.
     """
     per_entity: dict[str, float] = {}
     reached: set[str] = set()
@@ -1440,6 +1507,7 @@ def _row_value(
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
     hops: dict[tuple[str, str], dict[str, Any]] = {}
+    licensed: dict[str, set[str]] = defaultdict(set)
     census: dict[str, int] = dict.fromkeys(
         ("instances", "magnitude_witnessed", "magnitude_not_witnessed", "capped", "within_witnessed_bound"), 0
     )
@@ -1481,9 +1549,12 @@ def _row_value(
 
         keys = set(instance.entity_keys)
         if transitive:
-            keys, withheld = _closure(keys, closure, conditions, code_control=code_control)
+            grant = None if code_control else conferral.grant_for(instance.signal.claim_id, instance.signal.function_id)
+            keys, withheld, licensed_here = _closure(keys, closure, conditions, grant=grant)
             for hop in withheld:
                 hops.setdefault((hop["caller"], hop["destination"]), hop)
+            for destination, functions in licensed_here.items():
+                licensed[destination].update(functions)
         # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
         # the value map: an entity drops out of that map whenever its dollars
         # are not_determined — an unpriced sheet today, a refused magnitude once
@@ -1509,10 +1580,20 @@ def _row_value(
     hop_gaps = [hops[pair] for pair in sorted(hops) if value_plane.canonical(pair[1]) not in reached]
     census["hops_not_determined"] = len(hops)
     census["hops_not_determined_withholding_reach"] = len(hop_gaps)
+    licensed_out = {key: sorted(rows) for key, rows in sorted(licensed.items())}
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
         return _RowValue(
-            per_entity, None, basis, undetermined, proven_no_reach, reached, magnitude_caps, hop_gaps, census
+            per_entity,
+            None,
+            basis,
+            undetermined,
+            proven_no_reach,
+            reached,
+            magnitude_caps,
+            hop_gaps,
+            census,
+            licensed_out,
         )
     basis = (
         "witnessed reach magnitude over the "
@@ -1526,7 +1607,18 @@ def _row_value(
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
     total = round(sum(sorted(per_entity.values())), 6)
-    return _RowValue(per_entity, total, basis, undetermined, proven_no_reach, reached, magnitude_caps, hop_gaps, census)
+    return _RowValue(
+        per_entity,
+        total,
+        basis,
+        undetermined,
+        proven_no_reach,
+        reached,
+        magnitude_caps,
+        hop_gaps,
+        census,
+        licensed_out,
+    )
 
 
 def _instance_contributions(
@@ -1709,10 +1801,40 @@ def _entity_contribution(
 
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"
+HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"
 HOP_REFUSED_CONDITION = "caller_condition_not_satisfiable"
 
+# Every gate-control capability, each asking the conferral question with its own
+# witness. The census has no signal instance to ask, so it asks the class-wide
+# union — an upper bound on what any one instance's walk can confer, and labelled
+# as one wherever it is published.
+_CENSUS_GATE_CAPABILITIES = tuple(sorted(K.GATE_CONTROL_CAPABILITIES))
 
-def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane) -> dict[str, Any]:
+# Duplicate edge rows are real — 2,937 rows over 565 distinct pairs — and a pair
+# is walked when ANY of its edges licenses it, so the census counts pairs and has
+# to pick which of a pair's answers to report. Each ranking reports the answer
+# that got FURTHEST, so a pair is never filed under a shortfall one of its own
+# edges did not have. Ordering is by rank, ties impossible (the keys are total).
+_CONFERRAL_RANK = {
+    P.CONFERRAL_CONFERRED: 0,
+    # The gate was asked and the label was readable; these two are the real
+    # negative answers and rank alike.
+    P.CONFERRAL_ROLE_NOT_LICENSED: 1,
+    P.CONFERRAL_VARIABLE_NOT_REWRITTEN: 2,
+    # Coverage shortfalls: nothing about this gate or this label was read.
+    P.CONFERRAL_WRITES_NOT_EXTRACTED: 3,
+    P.CONFERRAL_SCOPE_NOT_DETERMINED: 4,
+}
+# A pair every edge of which was bound reports the SHARPEST bound it hit: being
+# disproved at the destination is a fact about the destination's own code, and
+# outranks "this gate does not confer it", which outranks "the label said
+# nothing".
+_REFUSAL_RANK = {HOP_REFUSED_CONDITION: 0, HOP_REFUSED_CONFERRAL: 1, HOP_REFUSED_SCOPE: 2}
+# Among the edges that DID walk a pair, the most specific scope reported it.
+_SCOPE_KIND_RANK = {P.SCOPE_ROLES: 0, P.SCOPE_STATE_VAR: 1, P.SCOPE_NOT_DETERMINED: 2}
+
+
+def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferral: P.ConferralPlane) -> dict[str, Any]:
     """Every hop in the graph, by what each class of capability can prove of it.
 
     Counted over DISTINCT ``(principal, anchor)`` pairs. ``control_graph_edges``
@@ -1722,56 +1844,128 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane) -> dict
 
     Published whether or not a bound ever bit: a rule with no fired count and a
     rule that was never wired read identically from the outside.
+
+    Gate control is now capability-dependent — ownership.transfer and
+    authority.replace confer different hops — so the class-level block is the
+    UNION over the five gate capabilities (a hop is counted walked there if ANY
+    of them confers it) and ``by_capability`` carries each one's own answer. The
+    union is an upper bound twice over: over the capabilities, and over the
+    instances, because each capability is asked with the union of what its
+    witnesses rewrite anywhere rather than with one function's own set.
     """
-    pairs: dict[tuple[str, str], P.ControlEdge] = {}
+    pairs: dict[tuple[str, str], list[P.ControlEdge]] = defaultdict(list)
     for edge in closure.edges:
-        pairs.setdefault((edge.principal, edge.anchor), edge)
+        pairs[(edge.principal, edge.anchor)].append(edge)
     census: dict[str, Any] = {"distinct_hops": len(pairs), "edges": len(closure.edges)}
-    for label, code_control in (("code_control", True), ("gate_control", False)):
-        counts: dict[str, int] = {"walked": 0, HOP_REFUSED_SCOPE: 0, HOP_REFUSED_CONDITION: 0}
+
+    def count(grant: P.GateGrant | None) -> dict[str, Any]:
+        counts: dict[str, int] = {"walked": 0, HOP_REFUSED_SCOPE: 0, HOP_REFUSED_CONFERRAL: 0, HOP_REFUSED_CONDITION: 0}
         counts.update(dict.fromkeys(P.WALKED_COVERAGE, 0))
         by_scope_kind = {P.SCOPE_ROLES: 0, P.SCOPE_STATE_VAR: 0, P.SCOPE_NOT_DETERMINED: 0}
-        for edge in pairs.values():
-            bound = _hop_bound(edge, conditions, code_control=code_control)
-            if bound is not None:
-                counts[bound["reason"]] += 1
+        conferral_outcomes: dict[str, int] = dict.fromkeys(P.CONFERRAL_OUTCOMES, 0)
+        for (principal, anchor), edges in pairs.items():
+            if grant is not None:
+                outcomes = [grant.confers(edge.scope, edge.anchor).outcome for edge in edges]
+                conferral_outcomes[min(outcomes, key=lambda o: _CONFERRAL_RANK[o])] += 1
+            bounds = [(_hop_bound(edge, conditions, grant=grant), edge) for edge in edges]
+            walked = [edge for bound, edge in bounds if bound is None]
+            if not walked:
+                refusals = [str(bound["reason"]) for bound, _ in bounds if bound is not None]
+                counts[min(refusals, key=lambda r: _REFUSAL_RANK[r])] += 1
                 continue
             counts["walked"] += 1
-            by_scope_kind[edge.scope.kind] += 1
-            counts[conditions.hop(edge.principal, edge.anchor).coverage or P.WALKED_NO_FUNCTION] += 1
-        # What the label the hop was admitted on actually said. For gate control
-        # every walked hop is here BECAUSE its label named something, so this is
-        # the size of the label-presence test — and state_var is where a getter
-        # name ("vault", "hook") stands in for a conferral nobody demonstrated.
-        counts_out: dict[str, Any] = dict(counts)
-        counts_out["walked_by_scope_kind"] = dict(sorted(by_scope_kind.items()))
-        census[label] = counts_out
+            by_scope_kind[min((edge.scope.kind for edge in walked), key=lambda k: _SCOPE_KIND_RANK[k])] += 1
+            counts[conditions.hop(principal, anchor).coverage or P.WALKED_NO_FUNCTION] += 1
+        out: dict[str, Any] = dict(counts)
+        out["walked_by_scope_kind"] = dict(sorted(by_scope_kind.items()))
+        if grant is not None:
+            out["conferral"] = dict(sorted(conferral_outcomes.items()))
+        return out
+
+    census["code_control"] = count(None)
+    by_capability: dict[str, Any] = {}
+    walked_by_any: set[tuple[str, str]] = set()
+    conferred_by_any: set[tuple[str, str]] = set()
+    for capability in _CENSUS_GATE_CAPABILITIES:
+        grant = conferral.capability_grant(capability)
+        by_capability[capability] = count(grant)
+        for pair, edges in pairs.items():
+            for edge in edges:
+                if grant.confers(edge.scope, edge.anchor).conferred:
+                    conferred_by_any.add(pair)
+                    if _hop_bound(edge, conditions, grant=grant) is None:
+                        walked_by_any.add(pair)
+    census["gate_control"] = {
+        "walked_by_at_least_one_gate_capability": len(walked_by_any),
+        "conferred_by_at_least_one_gate_capability": len(conferred_by_any),
+        "conferred_by_none": len(pairs) - len(conferred_by_any),
+        "reading": (
+            "the union over the five gate capabilities, each asked with the class-wide union of "
+            "what its witnesses rewrite. It is an upper bound on every real walk twice over — "
+            "over capabilities and over instances — and no finding walks it. by_capability is "
+            "the per-capability answer at the same class-wide width"
+        ),
+    }
+    census["gate_control_by_capability"] = by_capability
+    # The label-names-nothing population, counted three ways because a pair is
+    # not an edge and a pair carrying one unlabelled edge is not a pair a gate
+    # can be withheld on: the walk reaches a destination if ANY of the pair's
+    # edges confers it, so only pairs with no labelled edge at all can lose their
+    # hop to this rule. Publishing only the deduped number would report the 55
+    # unlabelled role edges as 9.
+    unlabelled_edges = [edge for edge in closure.edges if not edge.scope.is_determined]
+    unlabelled_pairs = {(edge.principal, edge.anchor) for edge in unlabelled_edges}
+    by_relation: dict[str, int] = defaultdict(int)
+    for edge in unlabelled_edges:
+        by_relation[str(edge.relation) if edge.relation else edge.witness] += 1
+    census["scope_not_determined"] = {
+        "edges": len(unlabelled_edges),
+        "pairs_carrying_one": len(unlabelled_pairs),
+        "pairs_with_no_labelled_edge": sum(
+            1 for pair in unlabelled_pairs if all(not edge.scope.is_determined for edge in pairs[pair])
+        ),
+        "edges_by_relation": dict(sorted(by_relation.items())),
+        "reading": (
+            "edges whose label names neither a role nor a state variable — the role_principal "
+            "rows that restate their own relation, and the column witnesses that carry no label "
+            "at all. Every one is published as not_determined for gate control and none is "
+            "dropped; code control does not ask the question"
+        ),
+    }
     census["reading"] = (
         "what each class could establish about every hop the closure holds, before any "
         "signal seeds it. A hop counted not_determined here is withheld from a finding "
         "only when that finding's walk actually needs it and no other path reaches the "
-        "destination; the per-finding lists carry that narrower population. The three "
-        "walked_* counts partition `walked` by what was READ to walk it: "
-        "walked_on_analysed_conditions had AT LEAST ONE permitting function whose conditions "
-        "were extracted, so a guard was there to find and was not found — the other two are "
-        "hops where no condition existed to read at all, walked on the edge "
-        "alone. walked_by_scope_kind partitions the same total by what the edge label "
-        "named, and for gate control it is the size of the label-presence test that stands "
-        "in for a conferral test until the role->selector join lands"
+        "destination; the per-finding lists carry that narrower population. The four "
+        "walked_* counts partition `walked` by what was READ to walk it: only "
+        "walked_on_fully_analysed_conditions rests on a surface read in full, "
+        "walked_on_partly_analysed_conditions found no guard on the functions it could read "
+        "and could not read all of them, and the last two are hops where no condition "
+        "existed to read at all, walked on the edge alone. walked_by_scope_kind partitions "
+        "the same total by what the edge label named. `conferral` partitions every hop by "
+        "the CONFERRAL test — whether the gate is witnessed to seize the authority the hop "
+        "runs on — which replaced the label-presence test that walked any labelled edge"
     )
     return census
 
 
-def _hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, code_control: bool) -> dict[str, Any] | None:
+def _hop_bound(
+    edge: P.ControlEdge, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
+) -> dict[str, Any] | None:
     """Why this hop is NOT walked as proven, or ``None`` when it is.
 
     Two bounds, in the order that costs least to decide. The SCOPE bound is
-    gate-control's alone: holding a gate over A gives the holder A's existing
-    functions, and whether one of them exercises A's authority over B is a
-    question the edge's LABEL cannot answer when the label names no scope at all
-    — 55 of the role edges restate their own relation and name no role. Code
-    control does not ask it, because controlling the code exercises everything
-    the code is authorized to exercise, whatever the label happened to record.
+    gate-control's alone — ``grant`` is the gate asking, and ``None`` is code
+    control, which does not ask: controlling the code exercises everything the
+    code is authorized to exercise, whatever the label happened to record.
+
+    For a gate the question is CONFERRAL, not label presence: a ``roles N`` edge
+    is walked where the role -> selector join names functions role N licenses at
+    the destination, and a ``state_var`` edge where the gate's own witness is
+    observed to rewrite a variable of that name. A label naming a scope the gate
+    is not witnessed to seize (`hook`, `vault`, `roleRegistry`) is no longer
+    enough, and neither is a label naming nothing at all — 55 of the role edges
+    restate their own relation and name no role.
 
     The CONDITION bound is shared: the destination's own guards may pin their
     caller to the destination itself, and no authority relation makes one
@@ -1780,19 +1974,26 @@ def _hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, code_contro
     A refused hop is a published ``not_determined``, never a silent drop and
     never a proven negative.
     """
-    if not code_control and not edge.scope.is_determined:
-        return {
-            "caller": edge.principal,
-            "destination": edge.anchor,
-            "reason": HOP_REFUSED_SCOPE,
-            "relation": edge.relation,
-            "witness": edge.witness,
-            "edge_label": edge.scope.label,
-            "basis": (
-                "a gate confers the functions it licenses; this edge's label names no role and "
-                "no state variable, so what the gate confers here is not_determined"
-            ),
-        }
+    if grant is not None:
+        verdict = grant.confers(edge.scope, edge.anchor)
+        if not verdict.conferred:
+            return {
+                "caller": edge.principal,
+                "destination": edge.anchor,
+                # The unlabelled edges keep their own reason: "the label named
+                # nothing" and "the label named something this gate does not
+                # seize" are different shortfalls and only the first is a
+                # pipeline gap.
+                "reason": (
+                    HOP_REFUSED_SCOPE if verdict.outcome == P.CONFERRAL_SCOPE_NOT_DETERMINED else HOP_REFUSED_CONFERRAL
+                ),
+                "conferral": verdict.outcome,
+                "capability": grant.capability,
+                "relation": edge.relation,
+                "witness": edge.witness,
+                "edge_label": edge.scope.label,
+                "basis": verdict.basis,
+            }
     hop = conditions.hop(edge.principal, edge.anchor)
     if hop.state == P.HOP_WALKED:
         return None
@@ -1811,9 +2012,18 @@ def _hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, code_contro
 
 
 def _closure(
-    seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, code_control: bool
-) -> tuple[set[str], list[dict[str, Any]]]:
-    """The reach the walk proves, and every hop it could not establish.
+    seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
+) -> tuple[set[str], list[dict[str, Any]], dict[str, list[str]]]:
+    """The reach the walk proves, every hop it could not establish, and what the
+    hops it did walk LICENSE at each destination.
+
+    ``grant`` is the gate doing the walking; ``None`` is code control, which asks
+    no conferral question. The third return value is the role -> selector join's
+    output, keyed by destination: the named functions a walked ``roles`` hop
+    licenses there. It is the reach's own answer to "to do *what*", and it is
+    what a compositional magnitude is later attributed to — a destination reached
+    only through state-variable hops has no entry, because nothing named which of
+    its functions the gate reaches.
 
     The burn sentinel is refused at every hop. ``load_control_closure`` already
     refuses ``0x0`` at both ends of an edge, so on the production path that guard
@@ -1832,6 +2042,7 @@ def _closure(
     """
     seen: set[str] = set()
     withheld: dict[tuple[str, str], dict[str, Any]] = {}
+    licensed: dict[str, set[str]] = defaultdict(set)
     stack = [key for key in sorted(seeds) if not P.is_zero_key(key)]
     while stack:
         key = stack.pop()
@@ -1841,8 +2052,10 @@ def _closure(
         for edge in closure.edges_from(key):
             if P.is_zero_key(edge.anchor):
                 continue
-            bound = _hop_bound(edge, conditions, code_control=code_control)
+            bound = _hop_bound(edge, conditions, grant=grant)
             if bound is None:
+                if grant is not None:
+                    licensed[edge.anchor].update(grant.confers(edge.scope, edge.anchor).licensed)
                 if edge.anchor not in seen:
                     stack.append(edge.anchor)
                 continue
@@ -1851,7 +2064,7 @@ def _closure(
     # reach either way, and reporting it as a gap would publish a shortfall the
     # walk does not have.
     gaps = [bound for pair, bound in sorted(withheld.items()) if pair[1] not in seen]
-    return seen, gaps
+    return seen, gaps, {key: sorted(rows) for key, rows in sorted(licensed.items()) if rows}
 
 
 def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[Any], partial: list[Any]) -> str:
