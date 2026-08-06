@@ -275,7 +275,7 @@ def compute_protocol_score(
     warnings.extend(value_warnings)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps = _grade(findings, value_plane)
-    confidence = _confidence(signals, value_plane, closure)
+    confidence = _confidence(signals, value_plane, closure, P.load_proven_eoa_entities(session, protocol_id))
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
     provenance: dict[str, Any] = {
@@ -1279,8 +1279,14 @@ def _grade(
     return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps
 
 
+_ZERO_ADDRESS = "0x" + "0" * 40
+
+
 def _confidence(
-    signals: list[FunctionSignal], value_plane: P.ValuePlane, closure: dict[str, set[str]]
+    signals: list[FunctionSignal],
+    value_plane: P.ValuePlane,
+    closure: dict[str, set[str]],
+    proven_eoas: set[str],
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
 
@@ -1293,23 +1299,49 @@ def _confidence(
     is what let LESS analysis publish MORE confidence. Three figures, and the
     headline is the MINIMUM — knowing who can call something, knowing what it
     does, and being able to price what it reaches are different questions.
+
+    Every key is admitted through ``value_plane.canonical``: an implementation
+    is the same entity as the proxy that deploys it, and admitting both hands
+    the impl a second copy of the proxy's value band that no signal can ever
+    answer (signals are distilled at the proxy address). The alias map comes
+    from the same discovery-fixed ``contracts`` rows as the base population, so
+    folding through it keeps the denominator independent of analysis. The zero
+    address is excluded outright — it is a burn sentinel, not an assessable
+    entity (``msg.sender != 0x0``). A perimeter entity proven codeless
+    (``resolved_type == 'eoa'``, earned from an empty ``eth_getCode``) has no
+    capability surface to leave unanswered: its reach and capability terms are
+    vacuously answered, while its pricing term is untouched — holding value is
+    a question code-lessness does not answer.
     """
+    zero_suffix = "::" + _ZERO_ADDRESS
     perimeter: dict[str, float] = {}
+    folded: set[str] = set()
+    zero_excluded: set[str] = set()
+
+    def admit(raw: str) -> None:
+        if raw.endswith(zero_suffix):
+            zero_excluded.add(raw)
+            return
+        key = value_plane.canonical(raw)
+        if key != raw:
+            folded.add(raw)
+        perimeter.setdefault(key, K.band(value_plane.total(key)))
+
     for key in sorted(value_plane.contract_entities):
-        perimeter[key] = K.band(value_plane.total(key))
+        admit(key)
     for key in sorted(value_plane.per_asset):
-        perimeter.setdefault(key, K.band(value_plane.total(key)))
+        admit(key)
     for key in sorted(closure):
-        perimeter.setdefault(key, K.band(value_plane.total(key)))
+        admit(key)
         for source in sorted(closure[key]):
-            perimeter.setdefault(source, K.band(value_plane.total(source)))
+            admit(source)
     denominator = round(sum(sorted(perimeter.values())), 6)
 
     reach: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     scored: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     priced: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for signal in signals:
-        key = entity_key(signal.chain, signal.deployment_address)
+        key = value_plane.canonical(entity_key(signal.chain, signal.deployment_address))
         answered = (
             signal.authority_openness == OPENNESS_OPEN
             or signal.principal_state == PRINCIPAL_STATE_ENUMERATED
@@ -1343,6 +1375,11 @@ def _confidence(
                 total += perimeter[key] * (answered / seen)
         return round(total, 6)
 
+    codeless_answered = sorted(key for key in perimeter if key in proven_eoas and not scored.get(key, [0, 0])[1])
+    for key in codeless_answered:
+        reach[key] = [1, 1]
+        scored[key] = [1, 1]
+
     outside = sorted({key for key in reach if key not in perimeter})
     reach_pct = round(100.0 * weighted(reach) / denominator, 1) if denominator else 0.0
     capability_pct = round(100.0 * weighted(scored) / denominator, 1) if denominator else 0.0
@@ -1361,10 +1398,16 @@ def _confidence(
         # list is a discovery gap, published rather than absorbed.
         "signal_entities_outside_perimeter": outside,
         "perimeter_value_weighted_denominator": denominator,
+        # Each admission rule, counted where it fired, so a consumer can see
+        # what the denominator folded or refused rather than inferring it.
+        "implementation_entities_folded": len(folded),
+        "zero_address_entities_excluded": len(zero_excluded),
+        "proven_codeless_answered": len(codeless_answered),
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (
             "the denominator is the protocol's contracts rows unioned with the value "
-            "plane and the control closure, and is built without reference to the "
+            "plane and the control closure, folded through the discovery-fixed "
+            "implementation alias map, and is built without reference to the "
             "signal population, so analysis work can only move value from unanswered "
             "to answered"
         ),

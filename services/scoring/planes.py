@@ -434,6 +434,24 @@ def load_control_closure(session: Session, protocol_id: int) -> dict[str, set[st
     return {key: set(value) for key, value in sorted(controls.items())}
 
 
+def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
+    """Entity keys proven codeless: ``resolved_type == 'eoa'`` is only ever
+    written after an empty ``eth_getCode`` (an RPC failure classifies as
+    ``contract`` and is not cached), so membership here is an earned witness,
+    never an inference from a name or a missing row.
+    """
+    from db.models import Contract, ControlGraphNode
+
+    rows = (
+        session.query(ControlGraphNode.address, Contract.chain)
+        .join(Contract, Contract.id == ControlGraphNode.contract_id)
+        .filter(Contract.protocol_id == protocol_id, ControlGraphNode.resolved_type == "eoa")
+        .order_by(ControlGraphNode.id)
+        .all()
+    )
+    return {entity_key(chain, address) for address, chain in rows}
+
+
 def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, Any]:
     """Edges that exist but are NOT walked as reach, and why. Provenance only.
 
@@ -777,6 +795,7 @@ __all__ = [
     "load_control_closure",
     "load_ledgers",
     "load_principal_plane",
+    "load_proven_eoa_entities",
     "load_role_holder_floors",
     "load_upgrade_provenance",
     "load_value_plane",
