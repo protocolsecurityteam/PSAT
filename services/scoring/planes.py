@@ -202,6 +202,22 @@ class ValuePlane:
 
 _EPOCH = datetime.min
 
+# Every counter the reduction publishes, so a rule that never fired reports a
+# named zero instead of an absence a consumer would have to read as either.
+_REDUCTION_COUNTERS = (
+    "buckets",
+    "single_reading_accounts",
+    "multi_observation_accounts",
+    "height_witnessed_accounts",
+    "write_order_accounts",
+    "write_order_decided_accounts",
+    "write_order_disagreeing_accounts",
+    "multi_account_buckets",
+    "unwitnessed_account_buckets",
+    "unpriced_supersession_accounts",
+    "stale_high_water_marks_dropped",
+)
+
 
 def _write_order(row: Any) -> tuple[bool, Any, int]:
     """Insert order, for observations whose READ height was never recorded."""
@@ -270,25 +286,49 @@ def _reduce_observations(
     sum is not licensed — summing over an unwitnessed identity is how the double
     count this reduction exists to remove gets back in — so those buckets fall
     back to MAX and are counted separately.
+
+    Every counter this returns is published whether or not it fired: a rule that
+    reports nothing where it never applied cannot be told apart from one that was
+    never wired up.
     """
     per_asset: dict[str, dict[str, float]] = defaultdict(dict)
     per_asset_state: dict[str, dict[str, str]] = defaultdict(dict)
-    counters: dict[str, int] = defaultdict(int)
+    counters: dict[str, int] = dict.fromkeys(_REDUCTION_COUNTERS, 0)
+    for state in (ASSET_PRICED, ASSET_BELOW_RESOLUTION, ASSET_PROVEN_ZERO, ASSET_UNPRICED):
+        counters[f"assets_{state}"] = 0
     stale_usd = 0.0
+    write_order_selected_usd = 0.0
+    write_order_spread_usd = 0.0
 
     for (key, asset), accounts in sorted(observations.items()):
         counters["buckets"] += 1
         readings: list[tuple[float | None, str]] = []
         for account in sorted(accounts):
             rows = accounts[account]
-            if len(rows) > 1:
-                counters["multi_observation_accounts"] += 1
+            competing = len(rows) > 1
+            counters["multi_observation_accounts" if competing else "single_reading_accounts"] += 1
             row, height_witnessed = _latest_observation(rows)
             counters["height_witnessed_accounts" if height_witnessed else "write_order_accounts"] += 1
             readings.append(_asset_reading(row))
-            priced = [_float(candidate.usd_value) for candidate in rows]
-            highest = max((value for value in priced if value is not None), default=None)
+            priced = [value for value in (_float(candidate.usd_value) for candidate in rows) if value is not None]
             current = _float(row.usd_value)
+            if competing and not height_witnessed:
+                # The fiat, sized: how many readings write order actually DECIDED,
+                # how many of those it decided between figures that differ, and
+                # how many dollars it selected. An account whose competing
+                # readings agree is not evidence of anything the ordering did.
+                counters["write_order_decided_accounts"] += 1
+                if len(set(priced)) > 1:
+                    counters["write_order_disagreeing_accounts"] += 1
+                    write_order_spread_usd += max(priced) - min(priced)
+                    if current is not None:
+                        write_order_selected_usd += current
+            if priced and current is None:
+                # The current reading answers no price while an earlier one did:
+                # a determined value disappears, and the sheet is not_determined
+                # by the same rule that would have published it.
+                counters["unpriced_supersession_accounts"] += 1
+            highest = max(priced, default=None)
             if highest is not None and current is not None and highest > current:
                 counters["stale_high_water_marks_dropped"] += 1
                 stale_usd += highest - current
@@ -317,6 +357,8 @@ def _reduce_observations(
 
     reduction: dict[str, Any] = dict(sorted(counters.items()))
     reduction["stale_high_water_usd_dropped"] = round(stale_usd, 2)
+    reduction["write_order_selected_usd"] = round(write_order_selected_usd, 2)
+    reduction["write_order_spread_usd"] = round(write_order_spread_usd, 2)
     return (
         {k: dict(sorted(v.items())) for k, v in sorted(per_asset.items())},
         {k: dict(sorted(v.items())) for k, v in sorted(per_asset_state.items())},
@@ -399,8 +441,9 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         plane.native_fact[key] = native_balance_fact(fetch.native_status, fetch.block_number)
 
     # The restaking plane is separate by construction and carries NO USD column,
-    # so its positions cannot enter the band arithmetic. They fold under the same
-    # MAX-per-entity rule as unpriced quantities and are published as such.
+    # so its positions cannot enter the band arithmetic. They keep a MAX-per-node
+    # fold of their own — this plane records no observation height to order by —
+    # and are published as unpriced quantities.
     positions = (
         session.query(RestakingPositionLatest)
         .filter(RestakingPositionLatest.protocol_id == protocol_id)
@@ -444,7 +487,12 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             }
         )
 
-    sheet_states: dict[str, int] = defaultdict(int)
+    # Every state, including the ones no entity is in: an omitted state and a
+    # state with no entities read the same way to a consumer, and only one of
+    # them is a fact about the protocol.
+    sheet_states: dict[str, int] = dict.fromkeys(
+        (SHEET_PRICED, SHEET_BELOW_RESOLUTION, SHEET_UNPRICED, SHEET_PROVEN_EMPTY, SHEET_NO_ROWS), 0
+    )
     for key in sorted(set(plane.per_asset) | set(plane.per_asset_state)):
         sheet_states[plane.sheet_state(key)] += 1
     if reduction.get(f"assets_{ASSET_BELOW_RESOLUTION}"):
@@ -478,7 +526,13 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             "are two holdings and the entity holds their sum. height_witnessed_accounts were "
             "ordered by block_number; write_order_accounts had no recorded read height (ERC-20 "
             "rows are never height-pinned by construction) and fell back to insert order, which "
-            "is a fact about this database and not about the chain"
+            "is a fact about this database and not about the chain. write_order_accounts counts "
+            "the ordering BASIS and includes single_reading_accounts, where nothing was ordered; "
+            "write_order_decided_accounts is the subset the fallback actually decided, of which "
+            "write_order_disagreeing_accounts decided between figures that DIFFER. "
+            "write_order_selected_usd is the dollars those decisions selected and "
+            "write_order_spread_usd the max-minus-min they were selected from — together the "
+            "size of the fiat, not a claim that the selected figure is wrong"
         ),
         "sheet_states": dict(sorted(sheet_states.items())),
         "sheet_states_reading": (
@@ -867,9 +921,18 @@ class ControlClosure:
         return dict(sorted(counts.items()))
 
     def renounced_counts(self) -> dict[str, int]:
-        """The earned negative, counted by edge and by the anchor it frees."""
+        """The earned negative, counted three ways because they differ.
+
+        ``control_graph_edges`` carries one row per witnessed read, so the same
+        ``owner`` slot on the same anchor appears many times; publishing the row
+        count as a slot count multiplies the earned negative by however often the
+        resolver looked. The slot is ``(anchor, label)`` — the anchor's named
+        authority — and the edge count is kept beside it rather than replaced,
+        since it is the citable population.
+        """
         return {
-            "authority_slots": len(self.renounced),
+            "edges": len(self.renounced),
+            "authority_slots": len({(row.anchor, row.scope.label) for row in self.renounced}),
             "anchors": len({row.anchor for row in self.renounced}),
         }
 
@@ -1131,10 +1194,12 @@ def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePla
     "how much of the protocol is audited" nor "how much of the money is": one
     contract reviewed by four audits is four rows and one contract, and the
     contracts that hold the value are a handful of the total. Both weightings
-    are computed here, over the same MAX-per-(entity, asset) reduction with the
-    implementation folded onto its proxy that the fold's exposure uses — a
-    consumer joining these counts to a value plane of its own would re-introduce
-    the double count that reduction exists to remove.
+    are computed here, over the same reduction the fold's exposure uses — the
+    latest observation per (entity, asset, observed account), implementation
+    folded onto its proxy — so a consumer joining these counts to a value plane
+    of its own would re-introduce the double count that reduction exists to
+    remove. An entity whose total is not a number contributes nothing and is
+    never read as $0.
     """
     from db.models import AuditContractCoverage, AuditReport, Contract
 

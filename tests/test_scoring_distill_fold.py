@@ -34,6 +34,7 @@ from services.scoring.planes import (
     REFUSAL_ZERO_ANCHOR,
     REFUSAL_ZERO_PRINCIPAL,
     SHEET_BELOW_RESOLUTION,
+    SHEET_PROVEN_EMPTY,
     UNCONSUMED_REASON_UNCLASSIFIED,
     load_audit_posture,
     load_control_closure,
@@ -1176,7 +1177,10 @@ def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_se
     # The perimeter is unpriced, so the tracked total is not_determined — never a
     # zero denominator standing in for "the protocol holds nothing".
     assert plane.provenance["tracked_total_usd"] is None
-    assert plane.provenance["sheet_states"] == {SHEET_BELOW_RESOLUTION: 1}
+    # Every state, including the four no entity is in.
+    assert plane.provenance["sheet_states"][SHEET_BELOW_RESOLUTION] == 1
+    assert sum(plane.provenance["sheet_states"].values()) == 1
+    assert plane.provenance["sheet_states"][SHEET_PROVEN_EMPTY] == 0
 
 
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):
@@ -1236,7 +1240,7 @@ def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(c
     db_session.commit()
 
     closure = load_control_closure(db_session, corpus.protocol.id)
-    assert closure.renounced_counts() == {"authority_slots": 1, "anchors": 1}
+    assert closure.renounced_counts() == {"edges": 1, "authority_slots": 1, "anchors": 1}
     renounced = closure.renounced[0]
     assert renounced.anchor == entity_key("ethereum", anchor.address)
     assert renounced.scope.state_var == "owner"

@@ -293,6 +293,27 @@ def compute_protocol_score(
         },
         "value": value_plane.provenance,
         "value_annotations": value_plane.annotations,
+        # Each closure admission rule, counted where it fired AND where it did
+        # not. A refusal and an earned negative are different facts about the
+        # same row: the first says what this scorer declined to walk, the second
+        # says the protocol has proven an authority slot empty, and only the
+        # second is evidence about the protocol.
+        "closure_admission": {
+            "refusals": closure.refusal_counts(),
+            "renounced": closure.renounced_counts(),
+            "reading": (
+                "refusals are EDGES this closure declined to admit, by rule: the zero address "
+                "is a burn sentinel and not an assessable entity, so it is refused as principal "
+                "and as anchor rather than becoming the largest control hub in the graph. "
+                "renounced counts controller_value edges pointing AT the zero address, which is "
+                "an authority slot proven EMPTY — renunciation for an ownership slot, an unset "
+                "reference for a configuration pointer, proven-absent authority either way. "
+                "edges is the citable row population; authority_slots is the distinct "
+                "(anchor, label) it resolves to, which is the number of facts — the edge table "
+                "carries one row per witnessed read, so the two differ by how often the "
+                "resolver looked and never by how much authority was renounced"
+            ),
+        },
         "unpriced_positions": value_plane.unpriced_positions,
         "exposure_gaps": exposure_gaps,
         "principal_units": units.published_units(),

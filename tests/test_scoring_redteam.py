@@ -1902,7 +1902,7 @@ def test_a_closure_publishes_a_zero_count_for_a_rule_that_never_fired():
     """An admission rule reports where it did NOT fire, or it discloses nothing."""
     closure = closure_of({KEY_C: {KEY_V}})
     assert closure.refusal_counts() == {P.REFUSAL_ZERO_ANCHOR: 0, P.REFUSAL_ZERO_PRINCIPAL: 0}
-    assert closure.renounced_counts() == {"authority_slots": 0, "anchors": 0}
+    assert closure.renounced_counts() == {"edges": 0, "authority_slots": 0, "anchors": 0}
 
 
 def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
@@ -1936,7 +1936,7 @@ def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
         ),
     )
     assert closure.refusal_counts()[P.REFUSAL_ZERO_PRINCIPAL] == 1
-    assert closure.renounced_counts() == {"authority_slots": 1, "anchors": 1}
+    assert closure.renounced_counts() == {"edges": 1, "authority_slots": 1, "anchors": 1}
     # The refused edge reaches nothing: it is not in the walked graph at all.
     assert closure.principals() == ()
     assert closure.controlled_by(zero) == ()
@@ -1955,3 +1955,97 @@ def test_a_single_token_label_restating_its_relation_names_no_state_variable():
     assert scope.label == "controller_value"
     # A real getter name on the same relation still earns the state-var reading.
     assert P.parse_edge_scope("owner", "controller_value").kind == P.SCOPE_STATE_VAR
+
+
+def test_an_unpriced_reading_superseding_a_priced_one_is_counted():
+    """A determined value that disappears must not disappear silently.
+
+    The current reading answers no price where an earlier one did: the honest
+    total is not_determined, and the rule that withheld it publishes where it
+    fired. Unexercised on the shipped corpus, so it is pinned here.
+    """
+    import datetime as _dt
+
+    early = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    late = _dt.datetime(2026, 2, 1, tzinfo=_dt.timezone.utc)
+    account = "0x" + "1" * 40
+    values, states, reduction = _reduce(
+        **{account: [_Row(900.0, fetched=early, rid=1), _Row(None, fetched=late, rid=2)]}
+    )
+    assert states["k"]["asset"] == P.ASSET_UNPRICED
+    assert "asset" not in values.get("k", {})
+    assert reduction["unpriced_supersession_accounts"] == 1
+
+
+def test_every_reduction_counter_is_published_even_where_it_never_fired():
+    """A rule that reports nothing where it never applied is unreadable.
+
+    An absent counter and a zero counter say different things, and only one of
+    them is a fact about the corpus.
+    """
+    _, _, reduction = _reduce(**{"0x" + "1" * 40: [_Row(1000.0, rid=1)]})
+    for counter in (
+        "multi_account_buckets",
+        "unwitnessed_account_buckets",
+        "unpriced_supersession_accounts",
+        "write_order_decided_accounts",
+        "write_order_disagreeing_accounts",
+        "stale_high_water_marks_dropped",
+        f"assets_{P.ASSET_PROVEN_ZERO}",
+        f"assets_{P.ASSET_BELOW_RESOLUTION}",
+    ):
+        assert reduction[counter] == 0, counter
+    assert reduction["write_order_selected_usd"] == 0.0
+    assert reduction["write_order_spread_usd"] == 0.0
+
+
+def test_the_write_order_fallback_sizes_itself_in_accounts_and_dollars():
+    """The disclosure has to answer "how much rests on this?", not just "did it".
+
+    An account whose competing readings AGREE was not decided by the ordering in
+    any meaningful sense, and an account with one reading was not ordered at all.
+    Only the disagreeing set sizes the fiat.
+    """
+    import datetime as _dt
+
+    early = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    late = _dt.datetime(2026, 2, 1, tzinfo=_dt.timezone.utc)
+    disagreeing = "0x" + "1" * 40
+    agreeing = "0x" + "2" * 40
+    reduction = P._reduce_observations(
+        {
+            ("k", "a"): {disagreeing: [_Row(100.0, fetched=early, rid=1), _Row(900.0, fetched=late, rid=2)]},
+            ("k", "b"): {agreeing: [_Row(50.0, fetched=early, rid=3), _Row(50.0, fetched=late, rid=4)]},
+            ("k", "c"): {agreeing: [_Row(7.0, fetched=late, rid=5)]},
+        }
+    )[2]
+    assert reduction["single_reading_accounts"] == 1
+    assert reduction["write_order_decided_accounts"] == 2
+    assert reduction["write_order_disagreeing_accounts"] == 1
+    # The dollars that rest on the ordering, and the range they were chosen from.
+    assert reduction["write_order_selected_usd"] == 900.0
+    assert reduction["write_order_spread_usd"] == 800.0
+
+
+def test_a_renounced_slot_is_counted_as_slots_and_as_the_edges_that_witness_it():
+    """One authority slot read four times is one renounced authority.
+
+    ``control_graph_edges`` carries a row per witnessed read, so publishing the
+    row count as a slot count multiplies the earned negative by how often the
+    resolver looked.
+    """
+    scope = P.parse_edge_scope("owner", "controller_value")
+    closure = P.ControlClosure(
+        edges=(),
+        renounced=tuple(
+            P.RenouncedAuthority(
+                anchor=anchor,
+                relation="controller_value",
+                scope=scope,
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+                edge_id=edge_id,
+            )
+            for anchor, edge_id in ((KEY_V, 1), (KEY_V, 2), (KEY_V, 3), (KEY_C, 4))
+        ),
+    )
+    assert closure.renounced_counts() == {"edges": 4, "authority_slots": 2, "anchors": 2}
