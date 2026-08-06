@@ -135,13 +135,32 @@ DELAY_DISCOUNT_FLOOR = 0.25
 DELAY_DISCOUNT_SATURATION_DAYS = 30.0
 
 # --- capability classes -----------------------------------------------------
-# Capabilities whose reach follows the control closure: replacing code or
-# authority at A reaches whatever A itself controls.
-TRANSITIVE_CAPABILITIES = frozenset(
+# Capabilities whose reach follows the control closure. Both classes expand
+# transitively (inv. 7 makes transitivity mandatory); they differ in WHAT BOUNDS
+# the expansion, which is the distinction one table conflated.
+#
+# CODE control replaces what the node DOES. Controlling A's code lets A be made
+# to exercise everything A is authorized to exercise, so the expansion is not
+# scoped to any one role's selectors — but it is still not unconditional: a
+# downstream hop is walked only where the destination's own conditions do not
+# pin their caller to the destination itself (see ``planes.ConditionPlane``).
+CODE_CONTROL_CAPABILITIES = frozenset(
     {
         "upgrade.implementation",
         "exec.arbitrary",
         "delegatecall.execute",
+    }
+)
+
+# GATE control replaces who MAY CALL the node. A's own code still bounds what
+# happens next: holding A's gate does not make A call B, it only lets the holder
+# use the functions A already has. So the expansion is bounded by what the gate
+# confers — at edge-label granularity, an edge whose scope is not determined
+# confers nothing anyone can name, and the hop is published as not_determined
+# rather than walked. The role -> selector join that narrows a DETERMINED scope
+# to the functions a role actually licenses is a separate refinement.
+GATE_CONTROL_CAPABILITIES = frozenset(
+    {
         "authority.replace",
         "ownership.transfer",
         "roles.grant",
@@ -149,6 +168,8 @@ TRANSITIVE_CAPABILITIES = frozenset(
         "authorized_caller.rotate",
     }
 )
+
+TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
 DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
 

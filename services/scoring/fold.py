@@ -183,6 +183,11 @@ class _RowValue:
     # dollars are not_determined is still an entity the row provably reaches.
     reach: set[str]
     magnitude_caps: list[dict[str, Any]]
+    # Hops the walk could not establish either way, deduped on the distinct
+    # (caller, destination) pair, and the census of which instances carried a
+    # magnitude witness at all.
+    hops_not_determined: list[dict[str, Any]] = field(default_factory=list)
+    magnitude_census: dict[str, int] = field(default_factory=dict)
 
 
 def compute_protocol_score(
@@ -212,6 +217,7 @@ def compute_protocol_score(
 
     value_plane = P.load_value_plane(session, protocol_id)
     closure = P.load_control_closure(session, protocol_id)
+    conditions = P.load_condition_plane(session, protocol_id)
     role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
@@ -300,7 +306,7 @@ def compute_protocol_score(
             )
             _attach(row, signal, instance, extra_notes | set(notes))
 
-    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, units)
+    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, conditions, units)
     warnings.extend(value_warnings)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps = _grade(findings, value_plane)
@@ -347,6 +353,24 @@ def compute_protocol_score(
                 "(anchor, label) it resolves to, which is the number of facts — the edge table "
                 "carries one row per witnessed read, so the two differ by how often the "
                 "resolver looked and never by how much authority was renounced"
+            ),
+        },
+        # What bounds a reach hop, and where the bound could not be established.
+        # A closure that walks every edge publishes reach it never proved; one
+        # that silently drops the edges it cannot establish publishes a smaller
+        # number with the same defect. Both classes' populations are counted.
+        "reach_bounds": {
+            "code_control_capabilities": sorted(K.CODE_CONTROL_CAPABILITIES),
+            "gate_control_capabilities": sorted(K.GATE_CONTROL_CAPABILITIES),
+            "caller_conditions": conditions.provenance,
+            "hop_census": _hop_census(closure, conditions),
+            "reading": (
+                "code control expands over the whole closure of the controlled node — owning "
+                "the code exercises everything the code is authorized to exercise — while gate "
+                "control expands only through edges whose scope the gate confers, because "
+                "holding a gate does not make the node act. Both are bounded by the "
+                "destination's own caller conditions. Every hop neither class could establish "
+                "is published per finding as reach_hops_not_determined, never dropped"
             ),
         },
         "unpriced_positions": value_plane.unpriced_positions,
@@ -1056,7 +1080,11 @@ def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[s
 
 
 def _member_weakness(
-    row: _Row, per_entity: dict[str, float], value_plane: P.ValuePlane, closure: P.ControlClosure
+    row: _Row,
+    per_entity: dict[str, float],
+    value_plane: P.ValuePlane,
+    closure: P.ControlClosure,
+    conditions: P.ConditionPlane,
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
     """A merged unit's weakness, per REACHED ENTITY (inv. 5).
 
@@ -1095,7 +1123,7 @@ def _member_weakness(
         # value map: W2b's per-call magnitude cap scales what a member is charged
         # and can empty ``per_entity`` outright, but it moves no entity out of
         # what the member provably reaches.
-        reached = _row_value(probe, value_plane, closure).reach
+        reached = _row_value(probe, value_plane, closure, conditions).reach
         reach_by_member[address] = reached
 
     weakness_by_entity: dict[str, float] = {}
@@ -1123,6 +1151,7 @@ def _aggregate(
     rows_by_key: dict[tuple[str, str, str], _Row],
     value_plane: P.ValuePlane,
     closure: P.ControlClosure,
+    conditions: P.ConditionPlane,
     units: _UnitResolver,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
@@ -1131,7 +1160,7 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        valued = _row_value(row, value_plane, closure)
+        valued = _row_value(row, value_plane, closure, conditions)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
         value_basis = valued.basis
         if row.zero_reach_stripped:
@@ -1142,7 +1171,7 @@ def _aggregate(
         # that answered is not the same fact as an entity that was answered.
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
         is_floor = bool(value_usd is not None and (undetermined or partially_priced))
-        weakness_by_entity, weakness, weakest = _member_weakness(row, per_entity, value_plane, closure)
+        weakness_by_entity, weakness, weakest = _member_weakness(row, per_entity, value_plane, closure, conditions)
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -1189,6 +1218,30 @@ def _aggregate(
                 "undetermined_instances": undetermined,
                 "proven_no_reach_instances": valued.proven_no_reach,
                 "witnessed_magnitude_caps": valued.magnitude_caps,
+                # ``witnessed_magnitude_caps`` lists only the calls a witness
+                # actually TRIMMED. Read alone it says nothing about the calls
+                # that carried no witness at all, which are the majority and
+                # which a reader would otherwise take for "checked and within
+                # bound". The census separates the three: capped, witnessed and
+                # within its bound, and never witnessed.
+                "magnitude_witness_census": {
+                    **valued.magnitude_census,
+                    "reading": (
+                        "magnitude_not_witnessed is the population whose dollar figure is "
+                        "not_determined and whose weight therefore sits at the unpriced band's "
+                        "floor: no witness proved how much this reach moves, so nothing is "
+                        "published as if one had. within_witnessed_bound means a witness exists "
+                        "and did not have to trim; it is not the same fact as no witness. "
+                        "hops_not_determined counts every hop this row could not establish, of "
+                        "which hops_not_determined_withholding_reach are the ones no other path "
+                        "reached anyway — the rest bound nothing and are listed nowhere"
+                    ),
+                },
+                # Hops the walk could establish neither way, deduped on the
+                # distinct (caller, destination) pair. Reach withheld is still
+                # reach this row does not claim — published so the bound is
+                # visible instead of the closure quietly getting smaller.
+                "reach_hops_not_determined": valued.hops_not_determined,
                 "zero_address_reach_keys_refused": row.zero_reach_keys_refused,
                 # Filled in after the sort, which is where a tie can be seen.
                 # Present on every row: null is the proven "nothing tied".
@@ -1354,21 +1407,34 @@ def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> lis
     return sorted(partial)
 
 
-def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) -> _RowValue:
+def _row_value(
+    row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure, conditions: P.ConditionPlane
+) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
-    Two functions reaching the same vault charge it once, and a witnessed
-    magnitude caps what the row may charge against an entity — the entity's whole
-    balance sheet is not what a bounded call can move. The magnitude is also one
-    number for the whole CALL, so it caps that call's sum across the keys it
-    reached rather than being re-charged at each of them.
+    Two functions reaching the same vault charge it once, and the only dollar
+    figure this function will publish against an entity is one a magnitude
+    WITNESS proved — the entity's whole balance sheet answers "what is there",
+    never "what this reach can move". The magnitude is also one number for the
+    whole CALL, so it caps that call's sum across the keys it reached rather than
+    being re-charged at each of them.
+
+    The reach itself is bounded by the capability's class: code control expands
+    over the whole closure of the controlled node, gate control only through
+    edges whose scope the gate confers, and both only where the destination's
+    own conditions do not pin their caller to the destination itself.
     """
     per_entity: dict[str, float] = {}
     reached: set[str] = set()
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
-    transitive = row.capability in K.TRANSITIVE_CAPABILITIES
+    hops: dict[tuple[str, str], dict[str, Any]] = {}
+    census: dict[str, int] = dict.fromkeys(
+        ("instances", "magnitude_witnessed", "magnitude_not_witnessed", "capped", "within_witnessed_bound"), 0
+    )
+    code_control = row.capability in K.CODE_CONTROL_CAPABILITIES
+    transitive = code_control or row.capability in K.GATE_CONTROL_CAPABILITIES
 
     for instance in sorted(row.instances, key=lambda i: (i.signal.deployment_address, i.signal.function_name)):
         entity = entity_key(instance.signal.chain, instance.signal.deployment_address)
@@ -1405,7 +1471,9 @@ def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) 
 
         keys = set(instance.entity_keys)
         if transitive:
-            keys = _closure(keys, closure)
+            keys, withheld = _closure(keys, closure, conditions, code_control=code_control)
+            for hop in withheld:
+                hops.setdefault((hop["caller"], hop["destination"]), hop)
         # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
         # the value map: an entity drops out of that map whenever its dollars
         # are not_determined — an unpriced sheet today, a refused magnitude once
@@ -1414,6 +1482,12 @@ def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) 
         # for. Priced or not, the row reaches these entities.
         reached.update(value_plane.canonical(key) for key in keys)
         contributions, gaps, cap = _instance_contributions(instance, keys, value_plane, transitive=transitive)
+        census["instances"] += 1
+        if _witnessed_magnitude(instance) is None:
+            census["magnitude_not_witnessed"] += 1
+        else:
+            census["magnitude_witnessed"] += 1
+            census["capped" if cap is not None else "within_witnessed_bound"] += 1
         undetermined.extend(gaps)
         if cap is not None:
             magnitude_caps.append(cap)
@@ -1422,11 +1496,18 @@ def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) 
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
 
+    hop_gaps = [hops[pair] for pair in sorted(hops) if value_plane.canonical(pair[1]) not in reached]
+    census["hops_not_determined"] = len(hops)
+    census["hops_not_determined_withholding_reach"] = len(hop_gaps)
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
-        return _RowValue(per_entity, None, basis, undetermined, proven_no_reach, reached, magnitude_caps)
+        return _RowValue(
+            per_entity, None, basis, undetermined, proven_no_reach, reached, magnitude_caps, hop_gaps, census
+        )
     basis = (
-        "transitive control closure, MAX per entity over latest-observation sheets"
+        "witnessed reach magnitude over the "
+        + ("code-control" if code_control else "gate-control")
+        + " closure, MAX per entity"
         if transitive
         else "per-instance witnessed value, MAX per entity over latest-observation sheets"
     )
@@ -1435,7 +1516,7 @@ def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) 
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
     total = round(sum(sorted(per_entity.values())), 6)
-    return _RowValue(per_entity, total, basis, undetermined, proven_no_reach, reached, magnitude_caps)
+    return _RowValue(per_entity, total, basis, undetermined, proven_no_reach, reached, magnitude_caps, hop_gaps, census)
 
 
 def _instance_contributions(
@@ -1594,18 +1675,110 @@ def _entity_contribution(
     return held, basis
 
 
-def _closure(seeds: set[str], closure: P.ControlClosure) -> set[str]:
-    """The reach the walk proves, with the burn sentinel refused at every hop.
+HOP_REFUSED_SCOPE = "gate_scope_not_determined"
+HOP_REFUSED_CONDITION = "caller_condition_not_satisfiable"
 
-    ``load_control_closure`` already refuses ``0x0`` at both ends of an edge, so
-    on the production path this guard never fires. It is here because the fold's
-    guarantee must not be a property of how the closure was BUILT: the sentinel
-    is the single largest fan-out in the graph, and one edge into it — from a
-    repoint witness, a hand-built closure, or a future loader — would otherwise
-    hand a row everything behind ``msg.sender != 0x0``. Refusing reach is always
-    monotone, so the second line of defence costs nothing.
+
+def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane) -> dict[str, Any]:
+    """Every hop in the graph, by what each class of capability can prove of it.
+
+    Counted over DISTINCT ``(principal, anchor)`` pairs. ``control_graph_edges``
+    holds one row per witnessed read — several times the pair count — so an
+    edge-keyed census would report the same hop as many findings as the resolver
+    happened to look.
+
+    Published whether or not a bound ever bit: a rule with no fired count and a
+    rule that was never wired read identically from the outside.
+    """
+    pairs: dict[tuple[str, str], P.ControlEdge] = {}
+    for edge in closure.edges:
+        pairs.setdefault((edge.principal, edge.anchor), edge)
+    census: dict[str, Any] = {"distinct_hops": len(pairs), "edges": len(closure.edges)}
+    for label, code_control in (("code_control", True), ("gate_control", False)):
+        counts = {"walked": 0, HOP_REFUSED_SCOPE: 0, HOP_REFUSED_CONDITION: 0}
+        for edge in pairs.values():
+            bound = _hop_bound(edge, conditions, code_control=code_control)
+            counts["walked" if bound is None else bound["reason"]] += 1
+        census[label] = counts
+    census["reading"] = (
+        "what each class could establish about every hop the closure holds, before any "
+        "signal seeds it. A hop counted not_determined here is withheld from a finding "
+        "only when that finding's walk actually needs it and no other path reaches the "
+        "destination; the per-finding lists carry that narrower population"
+    )
+    return census
+
+
+def _hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, code_control: bool) -> dict[str, Any] | None:
+    """Why this hop is NOT walked as proven, or ``None`` when it is.
+
+    Two bounds, in the order that costs least to decide. The SCOPE bound is
+    gate-control's alone: holding a gate over A gives the holder A's existing
+    functions, and whether one of them exercises A's authority over B is a
+    question the edge's LABEL cannot answer when the label names no scope at all
+    — 55 of the role edges restate their own relation and name no role. Code
+    control does not ask it, because controlling the code exercises everything
+    the code is authorized to exercise, whatever the label happened to record.
+
+    The CONDITION bound is shared: the destination's own guards may pin their
+    caller to the destination itself, and no authority relation makes one
+    address another.
+
+    A refused hop is a published ``not_determined``, never a silent drop and
+    never a proven negative.
+    """
+    if not code_control and not edge.scope.is_determined:
+        return {
+            "caller": edge.principal,
+            "destination": edge.anchor,
+            "reason": HOP_REFUSED_SCOPE,
+            "relation": edge.relation,
+            "witness": edge.witness,
+            "edge_label": edge.scope.label,
+            "basis": (
+                "a gate confers the functions it licenses; this edge's label names no role and "
+                "no state variable, so what the gate confers here is not_determined"
+            ),
+        }
+    hop = conditions.hop(edge.principal, edge.anchor)
+    if hop.state == P.HOP_WALKED:
+        return None
+    return {
+        "caller": edge.principal,
+        "destination": edge.anchor,
+        "reason": HOP_REFUSED_CONDITION,
+        "relation": edge.relation,
+        "witness": edge.witness,
+        "edge_label": edge.scope.label,
+        "basis": hop.basis,
+        "surface": hop.surface,
+        "functions_consulted": hop.functions_consulted,
+        "disproving_conditions": list(hop.disproving),
+    }
+
+
+def _closure(
+    seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, code_control: bool
+) -> tuple[set[str], list[dict[str, Any]]]:
+    """The reach the walk proves, and every hop it could not establish.
+
+    The burn sentinel is refused at every hop. ``load_control_closure`` already
+    refuses ``0x0`` at both ends of an edge, so on the production path that guard
+    never fires. It is here because the fold's guarantee must not be a property
+    of how the closure was BUILT: the sentinel is the single largest fan-out in
+    the graph, and one edge into it — from a repoint witness, a hand-built
+    closure, or a future loader — would otherwise hand a row everything behind
+    ``msg.sender != 0x0``. Refusing reach is always monotone, so the second line
+    of defence costs nothing.
+
+    The second return value is the hops this walk did not walk AS PROVEN, keyed
+    on the distinct ``(caller, destination)`` pair. The edge table carries one
+    row per witnessed read — 2,937 rows over 565 pairs on the reference corpus —
+    so counting refusals per EDGE would report the same withheld hop five times
+    and read as five findings.
     """
     seen: set[str] = set()
+    withheld: dict[tuple[str, str], dict[str, Any]] = {}
     stack = [key for key in sorted(seeds) if not P.is_zero_key(key)]
     while stack:
         key = stack.pop()
@@ -1613,9 +1786,19 @@ def _closure(seeds: set[str], closure: P.ControlClosure) -> set[str]:
             continue
         seen.add(key)
         for edge in closure.edges_from(key):
-            if edge.anchor not in seen and not P.is_zero_key(edge.anchor):
-                stack.append(edge.anchor)
-    return seen
+            if P.is_zero_key(edge.anchor):
+                continue
+            bound = _hop_bound(edge, conditions, code_control=code_control)
+            if bound is None:
+                if edge.anchor not in seen:
+                    stack.append(edge.anchor)
+                continue
+            withheld.setdefault((edge.principal, edge.anchor), bound)
+    # A hop another path reached anyway withheld nothing: the destination is in
+    # reach either way, and reporting it as a gap would publish a shortfall the
+    # walk does not have.
+    gaps = [bound for pair, bound in sorted(withheld.items()) if pair[1] not in seen]
+    return seen, gaps
 
 
 def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[Any], partial: list[Any]) -> str:

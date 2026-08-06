@@ -196,15 +196,52 @@ def closure_of(
     )
 
 
+def condition_plane(
+    *,
+    licensed: dict[tuple[str, str], tuple[tuple[str, int, tuple[str, ...]], ...]] | None = None,
+    by_entity: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] | None = None,
+) -> P.ConditionPlane:
+    """A ``ConditionPlane`` from ``{key: ((name, id, conditions), ...)}``.
+
+    Empty by default, which is the "no destination function was analysed" state:
+    the walk consults nothing, no caller condition is witnessed, and every hop
+    stands on its edge — the behaviour every test written before the plane
+    existed asserts.
+    """
+
+    def rows(spec):
+        return {
+            key: tuple(P.DestinationFunction(fid, name, conds) for name, fid, conds in entries)
+            for key, entries in (spec or {}).items()
+        }
+
+    plane = P.ConditionPlane()
+    plane.by_entity = rows(by_entity)
+    plane.licensed = rows(licensed)
+    plane.provenance = {"stub": True}
+    return plane
+
+
 @pytest.fixture()
 def fold(monkeypatch):
     """Drive the fold with stubbed planes: no database, no network."""
 
-    def _run(signals, *, value=None, closure=None, principals=None, role_floors=None, eoas=None, discovery=None):
+    def _run(
+        signals,
+        *,
+        value=None,
+        closure=None,
+        principals=None,
+        role_floors=None,
+        eoas=None,
+        discovery=None,
+        conditions=None,
+    ):
         """``signals=None`` drives the PERSISTED path, through the population read."""
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
+        monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -2864,3 +2901,75 @@ def test_w3_a_repoint_never_upgrades_an_unscored_capability():
     )
     assert reach.state != VALUE_STATE_PROVEN_REACH
     assert reach.basis == "capability_not_scored(not_determined)"
+
+
+# --------------------------------------------------------------------------
+# W3: the gate/code split, condition-bounded reach, and the magnitude rule
+
+# --------------------------------------------------------------------------
+
+
+SOLVER = "0x" + "4" * 40
+
+KEY_SOLVER = entity_key("ethereum", SOLVER)
+
+INITIATOR_GUARD = "initiator != address(this)"
+
+
+def _queue_signal(claim: str, **over: Any) -> FunctionSignal:
+    """One principal over the queue: the shape of the AtomicQueue finding."""
+    return sig(
+        claim_id=claim,
+        function_name="setAuthority",
+        deployment_address=C,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+        **over,
+    )
+
+
+def test_w3_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
+    """The scope bound, and the class split that makes it apply to one side only.
+
+    Holding a gate over A gives its holder A's existing functions; whether one of
+    them exercises A's authority over B is a question an edge label that names no
+    role and no state variable cannot answer. Controlling A's CODE does not ask
+    it — the code exercises whatever the code is authorized to exercise.
+    """
+    unlabelled = P.ControlClosure(
+        edges=(
+            P.ControlEdge(
+                principal=KEY_C,
+                anchor=KEY_V,
+                relation="role_principal",
+                scope=P.parse_edge_scope("role principal", "role_principal"),
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+            ),
+        )
+    )
+    assert not unlabelled.edges[0].scope.is_determined
+    conditions = condition_plane()
+
+    gate, gate_hops = FOLD._closure({KEY_C}, unlabelled, conditions, code_control=False)
+    code, code_hops = FOLD._closure({KEY_C}, unlabelled, conditions, code_control=True)
+    assert gate == {KEY_C} and code == {KEY_C, KEY_V}
+    assert gate_hops[0]["reason"] == FOLD.HOP_REFUSED_SCOPE
+    assert code_hops == []
+    # A determined scope is walked by both at this stage: narrowing it to the
+    # selectors a role actually confers is a later refinement, and it may only
+    # shrink this set.
+    labelled = P.ControlClosure(
+        edges=(
+            P.ControlEdge(
+                principal=KEY_C,
+                anchor=KEY_V,
+                relation="role_principal",
+                scope=P.parse_edge_scope("roles 77", "role_principal"),
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+            ),
+        )
+    )
+    assert FOLD._closure({KEY_C}, labelled, conditions, code_control=False)[0] == {KEY_C, KEY_V}

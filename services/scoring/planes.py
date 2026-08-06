@@ -1032,6 +1032,206 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     return ControlClosure(edges=tuple(edges), refusals=tuple(refusals), renounced=tuple(renounced))
 
 
+# --- what a destination's own conditions say about who may call it -----------
+#
+# A control edge proves AUTHORITY over an entity. It does not prove that the
+# entity's own code will accept the controlled node as caller: a destination may
+# pin its caller to itself, and no authority relation makes one address another.
+# ``effective_functions.conditions`` carries those guards verbatim; the fold read
+# none of them, so every hop walked as if the destination had no opinion.
+#
+# Only ONE shape is recognised as a proven disproof, and it is recognised from
+# the verbatim text: a caller-or-initiator identity compared against
+# ``address(this)``. Everything else — a balance check, a business predicate, an
+# authorization call whose passing is exactly what the control edge witnesses —
+# bears on the caller not at all and is not read as one. A recogniser that
+# guessed more would turn every unparsed predicate into a refusal and delete a
+# proven authority relation on the strength of a string nobody analysed.
+HOP_WALKED = "walked"
+HOP_NOT_DETERMINED = "not_determined"
+
+# Whose identity the guard pins. ``msg.sender`` is the caller itself; the named
+# parameters are the caller as the destination's own callee convention passes it
+# on (``initiator`` in a solver callback), which is the same question one frame
+# out.
+_CALLER_TERM = r"(?:msg\.sender|_?sender|_?caller|_?initiator)"
+_SELF_PIN = re.compile(
+    rf"(?<![\w$])(?:{_CALLER_TERM}\s*[!=]=\s*address\(this\)|address\(this\)\s*[!=]=\s*{_CALLER_TERM}(?![\w$]))"
+)
+
+SURFACE_FUNCTION_PRINCIPAL = "function_principal_witness"
+SURFACE_DESTINATION_FUNCTIONS = "destination_functions"
+SURFACE_NONE = "destination_functions_not_analysed"
+
+
+@dataclass(frozen=True)
+class DestinationFunction:
+    """One function of a destination entity, and the caller guards it carries."""
+
+    function_id: int
+    name: str
+    caller_pinned_to_self: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HopConditions:
+    """What the destination's conditions say about one caller reaching it."""
+
+    state: str
+    basis: str
+    surface: str
+    functions_consulted: int
+    disproving: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass
+class ConditionPlane:
+    """``effective_functions.conditions``, indexed for the closure walk.
+
+    ``by_entity`` is every analysed function of an entity. ``licensed`` is the
+    narrower and better-evidenced surface: the functions of that entity on which
+    a given address is a RESOLVED principal, which is the only positive witness
+    this plane has of what one caller may do at one destination.
+    """
+
+    by_entity: dict[str, tuple[DestinationFunction, ...]] = field(default_factory=dict)
+    licensed: dict[tuple[str, str], tuple[DestinationFunction, ...]] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def hop(self, caller: str, destination: str) -> HopConditions:
+        """Whether ``destination``'s own guards permit ``caller`` to act there.
+
+        The consulted surface is the function-level witness where one exists and
+        the destination's whole analysed function set otherwise. A hop is walked
+        when at least one consulted function carries no guard pinning its caller
+        to the destination itself; it is ``not_determined`` when every consulted
+        function does. It is never published as a proven negative: the principal
+        enumeration behind the licensed surface is a documented LOWER bound, so
+        "no function we witnessed is callable" is not "no function is".
+
+        A destination with no analysed function at all consults nothing, and
+        nothing is not a disproof — the edge remains the witness and the
+        shortfall is counted rather than converted into a refusal.
+        """
+        if caller == destination:
+            return HopConditions(HOP_WALKED, "caller_is_the_destination", SURFACE_NONE, 0)
+        surface = self.licensed.get((destination, caller))
+        surface_kind = SURFACE_FUNCTION_PRINCIPAL
+        if not surface:
+            surface = self.by_entity.get(destination) or ()
+            surface_kind = SURFACE_DESTINATION_FUNCTIONS if surface else SURFACE_NONE
+        if not surface:
+            return HopConditions(
+                HOP_WALKED,
+                "destination_functions_not_analysed(no caller condition witnessed)",
+                SURFACE_NONE,
+                0,
+            )
+        permitted = [fn for fn in surface if not fn.caller_pinned_to_self]
+        if permitted:
+            return HopConditions(
+                HOP_WALKED,
+                f"caller_condition_permits({len(permitted)} of {len(surface)} consulted functions)",
+                surface_kind,
+                len(surface),
+            )
+        return HopConditions(
+            HOP_NOT_DETERMINED,
+            "caller_pinned_to_the_destination_itself_on_every_consulted_function",
+            surface_kind,
+            len(surface),
+            tuple(
+                {"function": fn.name, "function_id": fn.function_id, "conditions": list(fn.caller_pinned_to_self)}
+                for fn in surface
+            ),
+        )
+
+
+def _caller_self_pins(conditions: Any) -> tuple[str, ...]:
+    """The verbatim conditions that pin this function's caller to itself."""
+    if not isinstance(conditions, list):
+        return ()
+    out: list[str] = []
+    for entry in conditions:
+        text = entry.get("description") if isinstance(entry, dict) else None
+        if isinstance(text, str) and _SELF_PIN.search(text):
+            out.append(text)
+    return tuple(out)
+
+
+def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
+    """The destination-side caller guards the closure walk is bounded by."""
+    from db.models import Contract, EffectiveFunction, FunctionPrincipal
+
+    plane = ConditionPlane()
+    by_entity: dict[str, list[DestinationFunction]] = defaultdict(list)
+    entity_of: dict[int, tuple[str, str]] = {}
+    functions = (
+        session.query(
+            EffectiveFunction.id,
+            EffectiveFunction.function_name,
+            EffectiveFunction.conditions,
+            EffectiveFunction.deployment_address,
+            Contract.address,
+            Contract.chain,
+        )
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(EffectiveFunction.id)
+        .all()
+    )
+    pinned_functions = 0
+    for function_id, name, conditions, deployment, address, chain in functions:
+        chain_name = coalesce_chain(chain)
+        key = entity_key(chain_name, deployment or address)
+        pins = _caller_self_pins(conditions)
+        pinned_functions += 1 if pins else 0
+        by_entity[key].append(DestinationFunction(int(function_id), str(name), pins))
+        entity_of[int(function_id)] = (key, chain_name)
+    plane.by_entity = {key: tuple(rows) for key, rows in sorted(by_entity.items())}
+
+    licensed: dict[tuple[str, str], list[DestinationFunction]] = defaultdict(list)
+    rows = (
+        session.query(FunctionPrincipal.function_id, FunctionPrincipal.address)
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(FunctionPrincipal.id)
+        .all()
+    )
+    by_id = {fn.function_id: fn for rows_ in plane.by_entity.values() for fn in rows_}
+    for function_id, address in rows:
+        located = entity_of.get(int(function_id))
+        if located is None:
+            continue
+        destination, chain_name = located
+        function = by_id.get(int(function_id))
+        if function is None:
+            continue
+        licensed[(destination, entity_key(chain_name, address))].append(function)
+    plane.licensed = {key: tuple(rows_) for key, rows_ in sorted(licensed.items())}
+    plane.provenance = {
+        "functions": len(functions),
+        "entities_with_analysed_functions": len(plane.by_entity),
+        "functions_pinning_caller_to_self": pinned_functions,
+        "caller_licensed_pairs": len(plane.licensed),
+        "recognised_shape": (
+            "a caller-or-initiator identity compared against address(this), read verbatim from "
+            "effective_functions.conditions[].description. No other predicate is read as a "
+            "statement about the caller: an authorization call is the gate the control edge "
+            "already witnesses, and an unparsed business predicate is not evidence against a "
+            "proven authority relation"
+        ),
+        "surface_rule": (
+            "the functions of the destination on which the caller is a RESOLVED principal where "
+            "such a witness exists, else the destination's whole analysed function set. A "
+            "destination with no analysed function consults nothing and the hop stands on the "
+            "edge, counted as a coverage shortfall rather than converted into a refusal"
+        ),
+    }
+    return plane
+
+
 def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
     """Entity keys proven codeless: ``resolved_type == 'eoa'`` is only ever
     written after an empty ``eth_getCode`` (an RPC failure classifies as
