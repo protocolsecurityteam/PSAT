@@ -44,10 +44,13 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
 
   it("prices 1.1.0 λ on 1.0.1's cut points, and says what that moved", () => {
     // The reasoned carry-forward: same cuts, so the same λ reads the same
-    // letter, and the etherfi λ movement (55.009 -> 84.017) is published as a
-    // C+ -> A− migration rather than absorbed by re-cutting the table.
+    // letter, and the etherfi λ movement (55.009 -> 73.251) is published as a
+    // C+ -> B+ migration rather than absorbed by re-cutting the table. 84.017
+    // is the intermediate — magnitudes floored, none composed back yet — and it
+    // reads A−, which is why the two halves are pinned separately.
     expect(letterFor("1.1.0-provisional", 55.009).letter).toBe("C+");
     expect(letterFor("1.1.0-provisional", 84.017).letter).toBe("A−");
+    expect(letterFor("1.1.0-provisional", 73.251).letter).toBe("B+");
     expect(bandsFor("1.1.0-provisional")).toEqual(bandsFor(MODEL));
   });
 

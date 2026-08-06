@@ -23,24 +23,29 @@ const LETTER_CUTS = [
 // What moved. 1.1.0 stops charging a finding the reached entity's whole balance
 // sheet when no witness proved how much the reach moves: those rows drop from a
 // value band of 0.5–1.0 to the unpriced floor of 0.15, so λ RISES without any
-// protocol becoming safer. Measured across the VERSION BOUNDARY — the last
-// published 1.0.1 document against the first 1.1.0 one, on the only local
-// protocol (etherfi, protocol 1):
+// protocol becoming safer. Its composition pass then gives part of that class a
+// WITNESSED magnitude back — the destination function's own flow.out figure,
+// reached along a path every hop of which carries an act-as witness — and λ
+// falls again on witnesses rather than on sheets. Measured across the VERSION
+// BOUNDARY — the last published 1.0.1 document against the first 1.1.0 one, on
+// the only local protocol (etherfi, protocol 1), with the intermediate figure
+// shown because the two halves move λ in opposite directions:
 //
-//     λ           54.1614 → 84.0166      letter C+ → A−
+//     λ           54.1614 → 84.0166 (floored) → 73.2508    letter C+ → B+
 //     confidence     29.0 → 18.6
-//     exposure_usd  $1,227,107,593.64 → $76.07
+//     exposure_usd  $1,227,107,593.64 → $76.07 → $18,059,003.86
 //
 // Three facts a reader needs before treating that confidence drop as the price
 // paid for the letter, because it is not:
 //   (a) the reach-magnitude term does NOT bind the headline here. min() is
-//       taken on value_priced_pct 18.6; the magnitude term sits at 34.2, a
-//       clear 15.6pp above it. The new term is real but it is not what the
+//       taken on value_priced_pct 18.6; the magnitude term sits at 37.6, a
+//       clear 19.0pp above it. The new term is real but it is not what the
 //       published confidence is reporting.
 //   (b) the strictest figure this model publishes about magnitude —
-//       reach_magnitude_witnessed_of_reaching_pct, 15.3 — WOULD bind if it were
-//       the term, and 1.1.0 does not move it at all: flooring an unwitnessed
-//       magnitude mints no witness. The composition pass is what moves it.
+//       reach_magnitude_witnessed_of_reaching_pct — WOULD bind if it were the
+//       term, and composition is the only thing that moves it: flooring an
+//       unwitnessed magnitude mints no witness. It went 15.3 → 25.6, on the 40
+//       signals composition answered and on nothing else.
 //   (c) the 29.0 → 18.6 fall happened WITHIN 1.0.1, from the same-version
 //       reach-magnitude term and perimeter widening, not from this change. The
 //       letter improvement and the confidence fall are both real and both
@@ -50,12 +55,14 @@ const LETTER_CUTS = [
 //   1. Moving them would fit the table to ONE protocol's λ. That is the same
 //      objection that keeps every constant in this model marked provisional, and
 //      a nine-band table fitted to a single point is not a calibration.
-//   2. The λ shift is transient BY DESIGN. It is the conservative half of a
-//      matched pair: this version floors an unwitnessed magnitude, and the
-//      composition pass that follows restores a WITNESSED magnitude to the
-//      gate-control class and pushes λ back down. Cut points fitted to the gap
-//      between them would be recalibrated again immediately, and in the interim
-//      they would hide the very movement they were fitted to.
+//   2. The λ shift is a matched pair and only one half of it has settled. This
+//      version floors an unwitnessed magnitude (λ 84.0166) and its composition
+//      pass restores a witnessed one (λ 73.2508) — but composition recovers
+//      only where all three witnesses exist, and on this corpus that is 13
+//      entities out of a gate-control class of dozens. Every act-as witness the
+//      pipeline learns to produce moves λ down again from here. Cut points
+//      fitted to a mid-recovery λ would be recalibrated on the next one, and in
+//      the interim they would hide the very movement they were fitted to.
 //   3. The letter is not the only published number, and the grade's own
 //      coverage travels beside it: provenance.exposure_coverage says how many
 //      findings the exposure ratio was measured over, so an A− standing on a

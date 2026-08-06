@@ -185,8 +185,8 @@ class _ComposedMagnitude:
 
     ``chain`` is every act-as step from the seized node to the destination, in
     order. ``usd`` is the destination witness's figure after the R4 bound against
-    the destination's own sheet; ``bounded_by_sheet`` records which of the two
-    bound it, and ``sheet_not_determined`` marks the case where no sheet was
+    the destination's own sheet; the published ``bounded_by`` says which of the
+    two bound it, and ``sheet_not_determined`` marks the case where no sheet was
     available to bound it with at all.
     """
 
@@ -387,6 +387,7 @@ def compute_protocol_score(
             _attach(row, signal, instance, extra_notes | set(notes))
 
     composed_signals: set[tuple[Any, ...]] = set()
+    composition_census: dict[str, Any] = {}
     findings, subsumed, value_warnings = _aggregate(
         rows_by_key,
         value_plane,
@@ -399,6 +400,7 @@ def compute_protocol_score(
         composed_signals,
     )
     warnings.extend(value_warnings)
+    composition_census = _composition_totals(findings, subsumed)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps, exposure_coverage = _grade(findings, value_plane)
     confidence = _confidence(
@@ -456,6 +458,7 @@ def compute_protocol_score(
             "gate_control_capabilities": sorted(K.GATE_CONTROL_CAPABILITIES),
             "caller_conditions": conditions.provenance,
             "gate_conferral": conferral.provenance,
+            "act_as_composition": {**act_as.provenance, "census": composition_census},
             "hop_census": _hop_census(closure, conditions, conferral),
             "reading": (
                 "code control expands over the whole closure of the controlled node — owning "
@@ -483,7 +486,12 @@ def compute_protocol_score(
                 "node's own functions against its outbound targets "
                 "(effective_functions.sinks/effect_targets and the external_call_target edges "
                 "CONTROL_RELATIONS excludes). Until it runs the hop is withheld as "
-                "not_determined. Both classes are bounded by the destination's own caller "
+                "not_determined. That join NOW RUNS, under act_as_composition, and it is worth "
+                "being exact about what it decides: it bounds the MAGNITUDE of a licensed hop, "
+                "not the membership of the walk. A hop with no act-as witness is still walked as "
+                "reach — the licence witnessed it — and simply carries no composed dollars. "
+                "Widening the reach on the same join is a separate change nobody has argued for "
+                "here. Both classes are bounded by the destination's own caller "
                 "conditions. Every hop neither class could establish is published per finding as "
                 "reach_hops_not_determined, never dropped, and reach_withheld_behind_hops sizes "
                 "the subtree each withheld frontier hop hides"
@@ -1402,7 +1410,10 @@ def _aggregate(
                         "magnitude_not_witnessed is the population whose dollar figure is "
                         "not_determined and whose weight therefore sits at the unpriced band's "
                         "floor: no witness proved how much this reach moves, so nothing is "
-                        "published as if one had. within_witnessed_bound means a witness exists "
+                        "published as if one had. magnitude_composed is counted apart from both "
+                        "— those calls carry no witness of their own and were priced on the "
+                        "DESTINATION function's, itemised under reach_composed_magnitudes. "
+                        "within_witnessed_bound means a witness exists "
                         "and did not have to trim; it is not the same fact as no witness. "
                         "hops_not_determined counts every hop this row could not establish, of "
                         "which hops_not_determined_withholding_reach are the ones no other path "
@@ -1619,6 +1630,12 @@ def _row_value(
     edges whose scope the gate confers, and both only where the destination's
     own conditions do not pin their caller to the destination itself.
 
+    Where a gate's own call carries no magnitude witness, the DESTINATION
+    function's may supply one (:func:`_compose`, Phase 6). That is a reuse of an
+    existing witness and never a second source of dollars: it applies only where
+    the instance proved no magnitude itself, and each composed figure is capped
+    at the destination's own witness and at the destination's own sheet.
+
     The conferral question is asked with the WITNESSED FUNCTION's own grant, per
     instance: two ownership.transfer functions that rewrite different variables
     confer different hops, and asking the capability class would walk one row's
@@ -1802,6 +1819,67 @@ def _row_value(
         composition_report,
         frozenset(composed_signals),
     )
+
+
+def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every row's composition census, summed to the protocol.
+
+    Findings and subsumed rows are rolled up SEPARATELY: a subsumed row is
+    usually the same walk seen through a weaker capability, so adding the two
+    would count one composition twice and publish twice the recovery. Only the
+    findings' dollars enter the grade.
+
+    Entities are counted DISTINCT within each population — two findings composing
+    the same vault composed one entity — while the dollars are summed per row,
+    because that is how they enter the grade: each row is charged what it reaches
+    and the exposure budget, not this figure, is what keeps one entity from being
+    paid for twice.
+    """
+
+    def roll(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        totals: dict[str, int] = defaultdict(int)
+        refused: dict[str, int] = defaultdict(int)
+        entities: set[str] = set()
+        usd = 0.0
+        for row in rows:
+            census = row.get("reach_composition_census") or {}
+            for key, value in census.items():
+                if key in ("reading", "act_as_refused", "composed", "composed_usd"):
+                    continue
+                totals[key] += int(value)
+            for reason, hits in (census.get("act_as_refused") or {}).items():
+                refused[reason] += int(hits)
+            for entry in row.get("reach_composed_magnitudes") or []:
+                entities.add(str(entry["entity"]))
+                usd += float(entry["published_usd"])
+        return {
+            **dict(sorted(totals.items())),
+            "act_as_refused": dict(sorted(refused.items())),
+            "rows_composing": sum(1 for row in rows if row.get("reach_composed_magnitudes")),
+            "entities_composed": len(entities),
+            "composed_usd_summed_over_rows": round(usd, 2),
+        }
+
+    return {
+        "findings": roll(findings),
+        "subsumed_rows": roll(subsumed),
+        "reading": (
+            "the composition pass rolled up to the protocol, findings and subsumed rows kept "
+            "APART because only the findings' dollars enter the grade and a subsumed row is "
+            "usually the same walk under a weaker capability — summing the two would double "
+            "one composition and read as twice the recovery. licensed_selectors is every "
+            "(hop, licensed function) pair a gate-control walk offered; act_as_witnessed is "
+            "the subset where the caller is witnessed able to make that call at that "
+            "destination; the pairs under act_as_refused are the ones whose magnitude stayed "
+            "not_determined and went to confidence instead of the grade. composed_usd is "
+            "summed over ROWS and entities are counted distinct, so the two disagree wherever "
+            "two rows compose the same entity; the exposure budget, not this figure, is what "
+            "stops that entity being paid for twice. A large act_as_refused beside a small "
+            "entities_composed is the honest shape of this corpus, not a shortfall in the "
+            "pass: most licensed hops have no witness that the licensed party can be made to "
+            "use the licence"
+        ),
+    }
 
 
 def _signal_identity(signal: FunctionSignal) -> tuple[Any, ...]:

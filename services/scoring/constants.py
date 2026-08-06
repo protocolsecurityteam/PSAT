@@ -472,27 +472,47 @@ def model_parameters() -> dict[str, Any]:
         "model_version_migration": {
             "from": "1.0.1-provisional",
             "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
-            "grade_lambda": [54.1614, 84.0166],
-            "letter": ["C+", "A−"],
+            "grade_lambda": [54.1614, 73.2508],
+            "letter": ["C+", "B+"],
             "confidence_pct": [29.0, 18.6],
-            "exposure_usd": [1227107593.64, 76.07],
+            "exposure_usd": [1227107593.64, 18059003.86],
             "what_moved": (
                 "a reach whose MAGNITUDE no witness proved stops charging the reached entity's "
                 "balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced "
                 "floor of 0.15, so lambda RISES and exposure collapses without any protocol "
-                "becoming safer. The band table carries 1.0.1's cut points forward unchanged, so "
-                "the letter delta is published rather than absorbed by a recut nobody calibrated"
+                "becoming safer. The composition pass then gives part of that class a WITNESSED "
+                "magnitude back - the destination function's own flow.out figure, reached along "
+                "a path every hop of which carries an act-as witness - which pushes lambda back "
+                "down from 84.0166 to 73.2508 and exposure back up from $76.07 to $18,059,003.86 "
+                "on witnesses, not on sheets. The band table carries 1.0.1's cut points forward "
+                "unchanged, so the letter delta is published rather than absorbed by a recut "
+                "nobody calibrated"
             ),
             "read_the_confidence_fall_correctly": (
                 "(a) the reach-magnitude term does NOT bind the headline on this corpus - the "
-                "min() is value_priced_pct 18.6 and the magnitude term sits 15.6pp clear at 34.2; "
+                "min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; "
                 "(b) the strictest magnitude figure published, "
-                "reach_magnitude_witnessed_of_reaching_pct 15.3, WOULD bind if it were the term "
-                "and this version does not move it at all, because flooring an unwitnessed "
-                "magnitude mints no witness - only composing one does; (c) the 29.0 -> 18.6 fall "
+                "reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and "
+                "composition is the only thing in this version that moves it: flooring an "
+                "unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the "
+                "40 signals composition answered and on nothing else; (c) the 29.0 -> 18.6 fall "
                 "happened WITHIN 1.0.1, from that version's own reach-magnitude term and "
                 "perimeter widening. The letter improvement here was NOT paid for by a "
                 "confidence fall in this change; both are real, and neither is the other's price"
+            ),
+            "what_composition_did_not_recover": (
+                "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities "
+                "carrying a flow.out magnitude covering 100% of reached priced value - is "
+                "PARTIALLY REFUTED on this corpus, because it counted the destination witness "
+                "and never the act-as step. Of 64 (hop, licensed selector) pairs the walk "
+                "offered, 27 carry an act-as witness and 19 of those also have a destination "
+                "flow.out witness, composing 13 entities and $46,164,146.29 across two findings. "
+                "The rest stay not_determined and are charged to confidence. The single largest "
+                "refusal class is a call site whose receiver is a PARAMETER, which is the whole "
+                "AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER "
+                "admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not "
+                "regain a witnessed magnitude, it and the two EOAs the shipped document "
+                "over-charged all sit at not_determined together"
             ),
             "operational_hazard_the_gate_conferral_test_introduces": (
                 "the state-variable branch reads the gate's OWN function through "
