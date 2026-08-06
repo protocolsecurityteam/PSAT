@@ -192,7 +192,11 @@ class _RowValue:
     # the role -> selector join resolved. Empty for a destination reached only
     # through state-variable hops, where nothing named which functions the gate
     # reaches — an absence, never an empty licence.
-    licensed_functions: dict[str, list[str]] = field(default_factory=dict)
+    licensed_functions: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    # How much of the graph the withheld hops hide. A frontier hop published as
+    # not_determined names ONE destination; everything the closure places behind
+    # it is withheld too and appears nowhere on the row.
+    withheld_behind_hops: dict[str, Any] = field(default_factory=dict)
 
 
 def compute_protocol_score(
@@ -374,23 +378,33 @@ def compute_protocol_score(
             "reading": (
                 "code control expands over the whole closure of the controlled node — owning "
                 "the code exercises everything the code is authorized to exercise. Gate control "
-                "expands only through edges the gate is WITNESSED TO CONFER, which is a "
-                "conferral test and no longer the label-presence test that walked any edge whose "
-                "label named a scope at all. Two witnesses answer it. A `roles N` edge is walked "
-                "where function_principals.details.trace[].selector, joined to "
-                "effective_functions.selector at the destination, names the functions role N "
-                "licenses there — and those named functions are published per finding as "
-                "reach_licensed_functions, which is what the reach is a reach TO DO. A state "
-                "variable edge is walked where the gate's own witnessed function is observed "
-                "(effective_functions.state_writes, origin=body) to rewrite a variable of that "
-                "name, so the seizure composes down a chain of the same authority kind; a label "
-                "naming a getter the gate is not witnessed to rewrite ('hook', 'vault', "
-                "'roleRegistry') no longer walks. A hop whose kinds differ is NOT disproved — "
-                "whether the seized gate reaches the other authority depends on the intermediate "
-                "node's function surface, which nothing here witnesses — so it is withheld as "
+                "expands only through edges it passes a test on, and the test is no longer the "
+                "label-presence test that walked any edge whose label named a scope at all. The "
+                "two scope kinds are tested differently and the two tests are not equally strong. "
+                "A `roles N` edge is walked where function_principals.details.trace[].selector, "
+                "joined to effective_functions.selector at the destination, names the functions "
+                "role N licenses there — a positive witness of what the hop delivers, published "
+                "per finding as reach_licensed_functions. A state-variable edge is tested by a "
+                "SAME-KIND BOUND, which is weaker and is not a conferral witness: the gate's own "
+                "function is observed (effective_functions.state_writes, origin=body) to rewrite "
+                "a variable of that name on ITS contract, while the edge's label names the "
+                "authority slot on the DESTINATION's, so the match is a name match across two "
+                "contracts' storage and witnesses no composition step. What it does is REFUSE "
+                "hops whose authority is of a different kind from the one the gate seizes "
+                "('hook', 'vault', 'roleRegistry'); the same-kind hops that survive it walk on no "
+                "more evidence than the label-presence test gave them. A refused hop is NOT "
+                "disproved: whether it composes anyway turns on the intermediate node's own "
+                "function surface, and this plane DOES NOT CONSULT IT — that surface usually "
+                "exists (0x4df6b733's setUserRole/setRoleCapability/transferOwnership are "
+                "analysed effective_functions rows), so this is a join not performed and not a "
+                "witness that is missing. The join that would decide it is the intermediate "
+                "node's own functions against its outbound targets "
+                "(effective_functions.sinks/effect_targets and the external_call_target edges "
+                "CONTROL_RELATIONS excludes). Until it runs the hop is withheld as "
                 "not_determined. Both classes are bounded by the destination's own caller "
                 "conditions. Every hop neither class could establish is published per finding as "
-                "reach_hops_not_determined, never dropped"
+                "reach_hops_not_determined, never dropped, and reach_withheld_behind_hops sizes "
+                "the subtree each withheld frontier hop hides"
             ),
         },
         "unpriced_positions": value_plane.unpriced_positions,
@@ -1325,11 +1339,17 @@ def _aggregate(
                 "host_entities": sorted(row.seeds),
                 "reach_entities": sorted(valued.reach),
                 # What the gate hops this row walked LICENSE at each destination
-                # — the role -> selector join's named functions. A reached entity
-                # absent from this map was reached through a hop that named no
-                # function, which is a reach whose "to do what" is unanswered and
-                # not a reach to nothing.
+                # — the role -> selector join's named functions, keyed on the
+                # canonical entity the reach set uses, as {selector, name}
+                # objects rather than a string a consumer would have to re-parse.
+                # A reached entity absent from this map was reached through a hop
+                # that named no function, which is a reach whose "to do what" is
+                # unanswered and not a reach to nothing.
                 "reach_licensed_functions": valued.licensed_functions,
+                # The size of what the withheld hops hide. Two published hops can
+                # withhold twenty-two entities; without this the other twenty
+                # appear nowhere in the document.
+                "reach_withheld_behind_hops": valued.withheld_behind_hops,
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
@@ -1507,7 +1527,7 @@ def _row_value(
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
     hops: dict[tuple[str, str], dict[str, Any]] = {}
-    licensed: dict[str, set[str]] = defaultdict(set)
+    licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
     census: dict[str, int] = dict.fromkeys(
         ("instances", "magnitude_witnessed", "magnitude_not_witnessed", "capped", "within_witnessed_bound"), 0
     )
@@ -1549,12 +1569,26 @@ def _row_value(
 
         keys = set(instance.entity_keys)
         if transitive:
-            grant = None if code_control else conferral.grant_for(instance.signal.claim_id, instance.signal.function_id)
+            grant = (
+                None
+                if code_control
+                else conferral.grant_for(
+                    instance.signal.claim_id,
+                    instance.signal.function_id,
+                    entity=entity,
+                    selector=instance.signal.selector,
+                )
+            )
             keys, withheld, licensed_here = _closure(keys, closure, conditions, grant=grant)
             for hop in withheld:
                 hops.setdefault((hop["caller"], hop["destination"]), hop)
+            # Keyed on the CANONICAL entity, the same key ``reached`` uses. The
+            # walk speaks in raw edge anchors and an implementation folded onto
+            # its proxy is one entity under two of them, so a consumer joining
+            # the licensed functions to the reach set would silently miss every
+            # destination that folds.
             for destination, functions in licensed_here.items():
-                licensed[destination].update(functions)
+                licensed[value_plane.canonical(destination)].update(functions)
         # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
         # the value map: an entity drops out of that map whenever its dollars
         # are not_determined — an unpriced sheet today, a refused magnitude once
@@ -1580,7 +1614,8 @@ def _row_value(
     hop_gaps = [hops[pair] for pair in sorted(hops) if value_plane.canonical(pair[1]) not in reached]
     census["hops_not_determined"] = len(hops)
     census["hops_not_determined_withholding_reach"] = len(hop_gaps)
-    licensed_out = {key: sorted(rows) for key, rows in sorted(licensed.items())}
+    withheld_behind = _behind_the_frontier(hop_gaps, closure, conditions, value_plane, reached)
+    licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
         return _RowValue(
@@ -1594,6 +1629,7 @@ def _row_value(
             hop_gaps,
             census,
             licensed_out,
+            withheld_behind,
         )
     basis = (
         "witnessed reach magnitude over the "
@@ -1618,6 +1654,7 @@ def _row_value(
         hop_gaps,
         census,
         licensed_out,
+        withheld_behind,
     )
 
 
@@ -2011,16 +2048,59 @@ def _hop_bound(
     }
 
 
+def _behind_the_frontier(
+    gaps: list[dict[str, Any]],
+    closure: P.ControlClosure,
+    conditions: P.ConditionPlane,
+    value_plane: P.ValuePlane,
+    reached: set[str],
+) -> dict[str, Any]:
+    """The entities a row's withheld hops hide, counted rather than left implicit.
+
+    A hop published as ``not_determined`` names one destination. The closure
+    places a whole subtree behind that destination, and none of it appears on the
+    row: two published hops can withhold twenty-two entities, twenty of which are
+    named nowhere in the document. The withheld population is therefore SIZED
+    here, by walking the closure from the withheld destinations with no scope
+    bound at all — the widest walk this fold performs, which is code control's —
+    and subtracting what the row reached anyway.
+
+    This is the size of what was withheld and NOT a claim of reach: the row does
+    not reach these entities, that is the whole point. The number is an upper
+    bound on the subtree for the same reason the code-control walk is an upper
+    bound on any gate's, and it is published as one.
+    """
+    if not gaps:
+        return {"hops": 0, "entities": 0, "entity_keys": [], "reading": "no hop was withheld"}
+    frontier = {str(gap["destination"]) for gap in gaps}
+    seen, _, _ = _closure(frontier, closure, conditions, grant=None)
+    behind = sorted({value_plane.canonical(key) for key in seen} - reached)
+    return {
+        "hops": len(gaps),
+        "entities": len(behind),
+        "entity_keys": behind,
+        "reading": (
+            "entities the closure places behind the hops this row could not establish, and which "
+            "the row therefore does NOT reach. Sized by walking from the withheld destinations "
+            "with no scope bound — the widest walk this fold performs — so it is an upper bound "
+            "on the withheld subtree, published because a withheld frontier hop otherwise hides "
+            "everything behind it with no trace in the document"
+        ),
+    }
+
+
 def _closure(
     seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
-) -> tuple[set[str], list[dict[str, Any]], dict[str, list[str]]]:
+) -> tuple[set[str], list[dict[str, Any]], dict[str, set[P.LicensedFunction]]]:
     """The reach the walk proves, every hop it could not establish, and what the
     hops it did walk LICENSE at each destination.
 
     ``grant`` is the gate doing the walking; ``None`` is code control, which asks
     no conferral question. The third return value is the role -> selector join's
-    output, keyed by destination: the named functions a walked ``roles`` hop
-    licenses there. It is the reach's own answer to "to do *what*", and it is
+    output, keyed by the RAW anchor: the named functions a walked ``roles`` hop
+    licenses there. Callers that publish it re-key onto the canonical entity,
+    which is what the reach set is keyed on and what a consumer joins against.
+    It is the reach's own answer to "to do *what*", and it is
     what a compositional magnitude is later attributed to — a destination reached
     only through state-variable hops has no entry, because nothing named which of
     its functions the gate reaches.
@@ -2042,7 +2122,7 @@ def _closure(
     """
     seen: set[str] = set()
     withheld: dict[tuple[str, str], dict[str, Any]] = {}
-    licensed: dict[str, set[str]] = defaultdict(set)
+    licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
     stack = [key for key in sorted(seeds) if not P.is_zero_key(key)]
     while stack:
         key = stack.pop()
@@ -2064,7 +2144,7 @@ def _closure(
     # reach either way, and reporting it as a gap would publish a shortfall the
     # walk does not have.
     gaps = [bound for pair, bound in sorted(withheld.items()) if pair[1] not in seen]
-    return seen, gaps, {key: sorted(rows) for key, rows in sorted(licensed.items()) if rows}
+    return seen, gaps, {key: set(rows) for key, rows in sorted(licensed.items()) if rows}
 
 
 def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[Any], partial: list[Any]) -> str:

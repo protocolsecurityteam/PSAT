@@ -1136,10 +1136,14 @@ def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(f
 
     plane = P.load_conferral_plane(fx.session, fx.protocol.id)
     key = entity_key("ethereum", contract.address)
+    exit_fn = P.LicensedFunction("0x18457e61", "exit")
+    # Structured, not a formatted string: the selector is the join key back into
+    # effective_functions and a name containing a space breaks no parse.
+    assert exit_fn.as_json() == {"selector": "0x18457e61", "name": "exit"}
     # Both roles of a multi-role step license the function; the union is the scope.
-    assert plane.licensed_functions(key, (5,)) == ("0x18457e61 exit",)
-    assert plane.licensed_functions(key, (9,)) == ("0x18457e61 exit",)
-    assert plane.licensed_functions(key, (5, 9)) == ("0x18457e61 exit",)
+    assert plane.licensed_functions(key, (5,)) == (exit_fn,)
+    assert plane.licensed_functions(key, (9,)) == (exit_fn,)
+    assert plane.licensed_functions(key, (5, 9)) == (exit_fn,)
     # A role nobody witnessed licenses nothing that can be named.
     assert plane.licensed_functions(key, (4,)) == ()
     join = plane.provenance["role_selector_join"]

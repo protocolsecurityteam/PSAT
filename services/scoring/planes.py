@@ -1477,22 +1477,39 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
 #                named function at the destination confers nothing anyone can
 #                point at, and the hop is not_determined.
 #
-#   state_var L  The capability's own ``effective_functions.state_writes``. The
-#                gate seizes an authority of some kind; the hop RUNS ON an
-#                authority of some kind; the seizure composes down the chain when
-#                the two are the same kind — an ownership chain, an
-#                authority-pointer chain — and the evidence that a capability
-#                seizes authority of kind L is that its own witnessed function
-#                is observed to write a variable named L. ownership.transfer is
-#                witnessed writing owner/_owner; authority.replace writing
-#                authority; roles.grant writing _roles. None of them is witnessed
-#                writing hook, vault, roleRegistry or endpoint, so a hop running
-#                on one of those is not conferred by them.
+#   state_var L  A SAME-KIND BOUND, not a conferral witness. Read exactly:
+#                the gate's own ``effective_functions.state_writes`` names the
+#                variable IT rewrites, on ITS contract; the edge's label names
+#                the authority slot on the DESTINATION's contract. Requiring the
+#                two names to match is a name match across two different
+#                contracts' storage, and it witnesses no composition step — no
+#                row anywhere says that seizing A's ``owner`` lets its holder
+#                exercise A's ownership of B. What the match does is REFUSE
+#                every hop whose authority is of a different kind from the one
+#                the gate is witnessed to seize, which is a bound, and a bound
+#                is all it is published as. ownership.transfer is witnessed
+#                writing owner/_owner; authority.replace writing authority;
+#                roles.grant writing _roles. None is witnessed writing hook,
+#                vault, roleRegistry or endpoint, so hops running on those are
+#                refused. A same-kind hop is walked as the label-presence test
+#                already walked it — this bound removes hops, it adds no
+#                evidence to the ones that survive.
 #
-#                Where the kinds differ the hop is NOT disproved: whether the
-#                seized gate reaches the other authority depends on the
-#                intermediate node's own function surface, and nothing in this
-#                pipeline witnesses that. So it is not_determined — withheld and
+#                Where the kinds differ the hop is NOT disproved and the row is
+#                not the only thing missing: whether the seized gate reaches the
+#                other authority turns on the intermediate node's own function
+#                surface, and THIS PLANE DOES NOT CONSULT IT. The surface often
+#                exists — 0x4df6b733's setUserRole, setRoleCapability and
+#                transferOwnership are analysed ``effective_functions`` rows on
+#                the reference corpus — so this is a join not performed, not a
+#                witness that is missing. The join that would decide it is the
+#                intermediate node's own functions (``effective_functions``
+#                at A, gated by the authority the capability seizes) against its
+#                outbound targets (``effective_functions.sinks`` /
+#                ``effect_targets``, and the ``external_call_target`` edges
+#                CONTROL_RELATIONS excludes): does a function of A that the
+#                seized gate lets its holder call exercise A's authority over B.
+#                Until that runs, the hop is not_determined — withheld and
 #                published, never walked and never counted as a proven negative.
 #
 # One residual, named rather than assumed away: the ROLE branch asks only what
@@ -1524,12 +1541,30 @@ CONFERRAL_OUTCOMES = (
 _WRITE_ORIGIN_BODY = "body"
 
 
+@dataclass(frozen=True, order=True)
+class LicensedFunction:
+    """One named function a role licenses at a destination.
+
+    Structured, not a formatted string: the selector is the join key back into
+    ``effective_functions`` and the name is for the reader. Publishing
+    ``"0x39d6ba32 enter"`` made every consumer re-parse a string this plane had
+    already taken apart, and a function name containing a space would have
+    broken the parse silently.
+    """
+
+    selector: str
+    name: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"selector": self.selector, "name": self.name}
+
+
 @dataclass(frozen=True)
 class ConferralVerdict:
     """Whether one gate confers one hop, and what it confers there."""
 
     outcome: str
-    licensed: tuple[str, ...] = ()
+    licensed: tuple[LicensedFunction, ...] = ()
     basis: str = ""
 
     @property
@@ -1589,14 +1624,23 @@ class GateGrant:
             return ConferralVerdict(
                 CONFERRAL_VARIABLE_NOT_REWRITTEN,
                 basis=(
-                    f"{self.capability} is witnessed rewriting {sorted(self.rewrites)} here and "
-                    f"not '{scope.state_var}', so whether seizing it reaches an authority of that "
-                    "kind depends on a function surface nothing witnesses"
+                    f"{self.capability} is witnessed rewriting {sorted(self.rewrites)} on its own "
+                    f"contract and not '{scope.state_var}', so this hop runs on an authority of a "
+                    "different kind from the one the gate seizes. Refused as a same-kind bound; "
+                    "whether it composes anyway turns on the intermediate node's function surface, "
+                    "which this plane does not consult"
                 ),
             )
         return ConferralVerdict(
             CONFERRAL_CONFERRED,
-            basis=f"{self.capability} is witnessed rewriting '{scope.state_var}' ({self.basis})",
+            basis=(
+                f"same-kind: {self.capability} is witnessed rewriting a variable named "
+                f"'{scope.state_var}' on its own contract, which is the name the hop's authority "
+                f"slot carries on the destination's ({self.basis}). A NAME MATCH ACROSS TWO "
+                "CONTRACTS' STORAGE, not a witness that seizing one exercises the other — the "
+                "composition step is unwitnessed and this bound only removes hops of a different "
+                "kind"
+            ),
         )
 
 
@@ -1613,36 +1657,76 @@ class ConferralPlane:
     finding's walk has to be able to see which one they are looking at.
     """
 
-    role_functions: dict[tuple[str, int], tuple[str, ...]] = field(default_factory=dict)
+    role_functions: dict[tuple[str, int], tuple[LicensedFunction, ...]] = field(default_factory=dict)
     writes_by_function: dict[int, frozenset[str]] = field(default_factory=dict)
     writes_by_capability: dict[str, frozenset[str]] = field(default_factory=dict)
+    # The recovery key for a signal whose ``function_id`` no longer resolves.
+    # Populated only where every function under the key agrees on what it
+    # rewrites; a key two functions disagree under is left out, because a
+    # recovered answer nobody can attribute to one row is a guess.
+    writes_by_deployment_selector: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
 
-    def licensed_functions(self, destination: str, roles: tuple[int, ...]) -> tuple[str, ...]:
+    def licensed_functions(self, destination: str, roles: tuple[int, ...]) -> tuple[LicensedFunction, ...]:
         """The named functions the union of ``roles`` licenses at ``destination``.
 
         The union is the honest read of a multi-role label: "roles 5,9" is one
         principal holding both, and each licenses what it licenses.
         """
-        out: set[str] = set()
+        out: set[LicensedFunction] = set()
         for role in roles:
             out.update(self.role_functions.get((destination, int(role)), ()))
         return tuple(sorted(out))
 
-    def grant_for(self, capability: str, function_id: int | None) -> GateGrant:
+    def grant_for(
+        self, capability: str, function_id: int | None, *, entity: str | None = None, selector: str | None = None
+    ) -> GateGrant:
+        """What one gate seizes, by its own function where that still resolves.
+
+        ``function_score_signals.function_id`` is ``ON DELETE SET NULL`` against
+        ``effective_functions``, and a re-analysis DELETES and reinserts a
+        contract's rows — so a persisted signal that outlives one re-analysis
+        points at nothing, and this lookup would report every gate as
+        "state_writes not extracted" and quietly stop walking hops it walked
+        yesterday. The withhold would be counted and its CAUSE would be a stale
+        foreign key, indistinguishable from an extraction that never ran.
+
+        So a dangling reference falls back to the signal's own
+        ``(deployment entity, selector)`` — the identity the signal carries in
+        its own columns and the re-analysis preserves. The fallback is admitted
+        only where every function under that key agrees on what it rewrites; a
+        key two functions disagree under resolves to nothing, and the grant
+        stays unextracted rather than picking one.
+        """
         writes = self.writes_by_function.get(function_id) if function_id is not None else None
-        if writes is None:
+        if writes is not None:
+            return GateGrant(
+                capability, writes, True, f"effective_functions.state_writes(function {function_id})", self
+            )
+        key = (str(entity), _lower(str(selector))) if entity and selector else None
+        recovered = self.writes_by_deployment_selector.get(key) if key else None
+        if recovered is not None:
             return GateGrant(
                 capability,
-                frozenset(),
-                False,
+                recovered,
+                True,
                 (
-                    "effective_functions.state_writes carries no extracted array for this "
-                    f"function (id {function_id}), so what this gate rewrites was never read"
+                    f"effective_functions.state_writes recovered on (deployment, selector) {key} — "
+                    f"function_id {function_id} does not resolve"
                 ),
                 self,
             )
-        return GateGrant(capability, writes, True, f"effective_functions.state_writes(function {function_id})", self)
+        return GateGrant(
+            capability,
+            frozenset(),
+            False,
+            (
+                "effective_functions.state_writes carries no extracted array for this gate: "
+                f"function_id {function_id} does not resolve and (deployment, selector) {key} "
+                "recovers no single agreed answer, so what this gate rewrites was never read"
+            ),
+            self,
+        )
 
     def capability_grant(self, capability: str) -> GateGrant:
         """The class-wide grant: the UNION of what every witness of ``capability``
@@ -1671,8 +1755,9 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
     """The role -> selector join and the capability -> rewritten-variable witness."""
     from db.models import Contract, EffectiveFunction, FunctionPrincipal
 
-    named: dict[tuple[str, str], str] = {}
+    named: dict[tuple[str, str], LicensedFunction] = {}
     writes_by_function: dict[int, frozenset[str]] = {}
+    writes_by_key: dict[tuple[str, str], set[frozenset[str]]] = defaultdict(set)
     claims_by_function: dict[int, tuple[str, ...]] = {}
     functions = (
         session.query(
@@ -1692,16 +1777,20 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
     )
     for function_id, name, selector, state_writes, claims, deployment, address, chain in functions:
         key = entity_key(coalesce_chain(chain), deployment or address)
-        if selector:
-            named.setdefault((key, _lower(str(selector))), f"{_lower(str(selector))} {name}")
+        token = _lower(str(selector)) if selector else None
+        if token:
+            named.setdefault((key, token), LicensedFunction(token, str(name)))
         # An ARRAY is an extraction that ran; anything else never did, and the
         # two must not reach the walk as the same empty answer.
         if isinstance(state_writes, list):
-            writes_by_function[int(function_id)] = frozenset(
+            written = frozenset(
                 str(entry.get("var"))
                 for entry in state_writes
                 if isinstance(entry, dict) and entry.get("var") and entry.get("origin") == _WRITE_ORIGIN_BODY
             )
+            writes_by_function[int(function_id)] = written
+            if token:
+                writes_by_key[(key, token)].add(written)
         if isinstance(claims, list):
             claims_by_function[int(function_id)] = tuple(
                 str(entry.get("claim_id")) for entry in claims if isinstance(entry, dict) and entry.get("claim_id")
@@ -1719,7 +1808,7 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
             capability_functions_extracted[claim_id] += 1
             writes_by_capability[claim_id].update(writes)
 
-    role_functions: dict[tuple[str, int], set[str]] = defaultdict(set)
+    role_functions: dict[tuple[str, int], set[LicensedFunction]] = defaultdict(set)
     role_authorities: dict[tuple[str, int], set[str]] = defaultdict(set)
     steps = unnamed_selectors = 0
     principals = (
@@ -1757,10 +1846,12 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
                 if step.get("authority"):
                     role_authorities[(key, number)].add(_lower(str(step["authority"])))
 
+    recovery = {key: next(iter(rows)) for key, rows in sorted(writes_by_key.items()) if len(rows) == 1}
     plane = ConferralPlane(
         role_functions={key: tuple(sorted(rows)) for key, rows in sorted(role_functions.items())},
         writes_by_function=writes_by_function,
         writes_by_capability={key: frozenset(rows) for key, rows in sorted(writes_by_capability.items())},
+        writes_by_deployment_selector=recovery,
     )
     plane.provenance = {
         "role_selector_join": {
@@ -1799,7 +1890,25 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
                 "effective_functions.state_writes with origin=body — a guard-origin write is the "
                 "modifier's bookkeeping and not what the capability does. The walk consults the "
                 "witnessed function's OWN set, never this union; the union is published because "
-                "it is the upper bound the hop census is computed against"
+                "it is the upper bound the hop census is computed against. This is a SAME-KIND "
+                "BOUND and not a conferral witness: the gate's variable is named on its own "
+                "contract and the hop's authority slot on the destination's, so requiring the "
+                "names to match refuses hops of a different kind and witnesses no composition "
+                "step for the ones that survive"
+            ),
+        },
+        "stale_function_reference_recovery": {
+            "keys": len(recovery),
+            "keys_two_functions_disagree_under": sum(1 for rows in writes_by_key.values() if len(rows) > 1),
+            "reading": (
+                "function_score_signals.function_id is ON DELETE SET NULL against "
+                "effective_functions, and a re-analysis deletes and reinserts a contract's rows, "
+                "so a persisted signal that outlives one re-analysis points at nothing. Left "
+                "alone that reports every gate as state_writes-not-extracted and silently stops "
+                "walking hops it walked yesterday — a withhold that is counted and whose cause is "
+                "a stale foreign key. A dangling reference falls back to the signal's own "
+                "(deployment entity, selector), which the re-analysis preserves, and only where "
+                "every function under that key agrees on what it rewrites"
             ),
         },
     }
@@ -2286,6 +2395,7 @@ __all__ = [
     "ControlEdge",
     "EdgeScope",
     "GateGrant",
+    "LicensedFunction",
     "PrincipalFacts",
     "RefusedEdge",
     "RenouncedAuthority",

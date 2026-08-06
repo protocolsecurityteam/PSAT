@@ -186,7 +186,7 @@ def value_plane(
 
 
 def closure_of(
-    adjacency: dict[str, set[str]] | None,
+    adjacency: dict[str, set[str]] | P.ControlClosure | None,
     *,
     relation: str = "controller_value",
     label: str | None = "owner",
@@ -195,8 +195,11 @@ def closure_of(
 
     The relation and label are stub witness detail — these tests assert on reach
     membership, which is the whole of what the closure carried before it carried
-    scope. A test that means to exercise a scope passes its own.
+    scope. A test that means to exercise a scope builds its own closure and
+    passes it here, where it goes straight through.
     """
+    if isinstance(adjacency, P.ControlClosure):
+        return adjacency
     return P.ControlClosure(
         edges=tuple(
             P.ControlEdge(
@@ -253,7 +256,7 @@ class _StubConferral(P.ConferralPlane):
         super().__init__(role_functions=dict(role_functions or {}))
         self._rewrites = frozenset(rewrites)
 
-    def grant_for(self, capability, function_id):
+    def grant_for(self, capability, function_id, *, entity=None, selector=None):
         return P.GateGrant(capability, self._rewrites, True, "stub(test)", self)
 
     def capability_grant(self, capability):
@@ -3158,14 +3161,14 @@ def test_w4a_a_role_confers_only_where_the_join_names_a_function_there(fold):
     closure = P.ControlClosure(edges=(_role_edge("roles 77"),))
     conditions = condition_plane()
 
-    licensing = conferral_plane(role_functions={(KEY_V, 77): ("0xdeadbeef exit",)})
+    licensing = conferral_plane(role_functions={(KEY_V, 77): (P.LicensedFunction("0xdeadbeef", "exit"),)})
     seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=licensing.grant_for("roles.grant", None))
     assert seen == {KEY_C, KEY_V}
     assert hops == []
-    assert licensed == {KEY_V: ["0xdeadbeef exit"]}
+    assert licensed == {KEY_V: {P.LicensedFunction("0xdeadbeef", "exit")}}
 
     # Same edge, same label, no witness of what the role licenses there.
-    silent = conferral_plane(role_functions={(KEY_V, 78): ("0xdeadbeef exit",)})
+    silent = conferral_plane(role_functions={(KEY_V, 78): (P.LicensedFunction("0xdeadbeef", "exit"),)})
     seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=silent.grant_for("roles.grant", None))
     assert seen == {KEY_C}
     assert licensed == {}
@@ -3220,7 +3223,7 @@ def test_w4a_a_gate_whose_writes_were_never_extracted_confers_nothing():
     assert hops[0]["conferral"] == P.CONFERRAL_WRITES_NOT_EXTRACTED
     # A role hop asks the join, not state_writes, so it is unaffected by the gap.
     roles = P.ControlClosure(edges=(_role_edge("roles 4"),))
-    licensing = P.ConferralPlane(role_functions={(KEY_V, 4): ("0xaaaaaaaa pull",)})
+    licensing = P.ConferralPlane(role_functions={(KEY_V, 4): (P.LicensedFunction("0xaaaaaaaa", "pull"),)})
     assert FOLD._closure({KEY_C}, roles, conditions, grant=licensing.grant_for("roles.grant", None))[0] == {
         KEY_C,
         KEY_V,
@@ -3245,7 +3248,11 @@ def test_w4a_conferral_may_only_shrink_a_walk_never_grow_it():
     )
     unbounded = FOLD._closure({KEY_C}, closure, conditions, grant=None)[0]
     for rewrites in ((), ("owner",), ("hook",), ("owner", "hook"), ("authority",)):
-        for roles in ({}, {(KEY_IMPL, 3): ("0xaaaaaaaa pull",)}, {(KEY_IMPL, 9): ("0xbbbbbbbb push",)}):
+        for roles in (
+            {},
+            {(KEY_IMPL, 3): (P.LicensedFunction("0xaaaaaaaa", "pull"),)},
+            {(KEY_IMPL, 9): (P.LicensedFunction("0xbbbbbbbb", "push"),)},
+        ):
             plane = conferral_plane(rewrites=rewrites, role_functions=roles)
             walked = FOLD._closure({KEY_C}, closure, conditions, grant=plane.grant_for("ownership.transfer", None))[0]
             assert walked <= unbounded, (rewrites, roles)
@@ -3626,3 +3633,91 @@ def test_w4a_the_self_pin_recogniser_only_ever_withholds():
     # The strongest thing a pin can say is not_determined — never a proven no.
     assert hop.state == P.HOP_NOT_DETERMINED
     assert hop.state != "proven_no_reach"
+
+
+def test_w4a_licensed_functions_are_keyed_on_the_entity_the_reach_set_uses(fold):
+    """The join key a consumer joins on, not the raw anchor the walk speaks in.
+
+    ``reach_entities`` is canonical — an implementation folded onto its proxy is
+    one entity under two raw keys — while the walk names anchors. Publishing the
+    licensed functions under the raw anchor would leave every folded destination
+    unjoinable, silently, on the field the composition pass consumes.
+    """
+    closure = P.ControlClosure(edges=(_role_edge("roles 3", principal=KEY_C, anchor=KEY_IMPL),))
+    plane = conferral_plane(role_functions={(KEY_IMPL, 3): (P.LicensedFunction("0xaaaaaaaa", "pull"),)})
+    doc = fold(
+        [_queue_signal("authority.replace")],
+        value=value_plane(per_asset={KEY_PROXY: {"usdc": 100.0}}, alias={KEY_IMPL: KEY_PROXY}),
+        closure=closure,
+        conferral=plane,
+        principals={1: facts(1, EOA, "eoa")},
+    )
+    row = doc.findings[0]
+    licensed = row["reach_licensed_functions"]
+    assert KEY_PROXY in row["reach_entities"], "the implementation folds onto its proxy"
+    assert set(licensed) <= set(row["reach_entities"]), "every licensed key must be a reach key"
+    # Structured at the source: the consumer joins on the selector rather than
+    # splitting a string on a space a function name is allowed to contain.
+    assert licensed == {KEY_PROXY: [{"selector": "0xaaaaaaaa", "name": "pull"}]}
+    assert KEY_IMPL not in licensed
+
+
+def test_w4a_a_withheld_frontier_hop_sizes_the_subtree_it_hides(fold):
+    """One published hop can withhold a whole graph, and did.
+
+    A row losing 22 entities behind 2 published hops named 2 destinations and
+    said nothing about the other 20. The withheld population is sized against
+    the widest walk this fold performs, and it is a size, never a claim.
+    """
+    a, b, c = KEY_V, KEY_PROXY, KEY_IMPL
+    closure = P.ControlClosure(
+        edges=(
+            _var_edge("hook", principal=KEY_C, anchor=a),
+            _var_edge("owner", principal=a, anchor=b),
+            _var_edge("owner", principal=b, anchor=c),
+        )
+    )
+    doc = fold(
+        [_queue_signal("ownership.transfer")],
+        closure=closure,
+        conferral=conferral_plane(rewrites=("owner",)),
+        principals={1: facts(1, EOA, "eoa")},
+    )
+    row = doc.findings[0]
+    assert row["reach_entities"] == [KEY_C], "the frontier hop runs on an authority of another kind"
+    assert len(row["reach_hops_not_determined"]) == 1, "one hop is published"
+    behind = row["reach_withheld_behind_hops"]
+    # …and it hides three entities, two of which the hop list never names.
+    assert (behind["hops"], behind["entities"]) == (1, 3)
+    assert behind["entity_keys"] == sorted([a, b, c])
+    assert b not in {hop["destination"] for hop in row["reach_hops_not_determined"]}
+
+
+def test_w4a_a_dangling_function_reference_recovers_on_deployment_and_selector():
+    """A stale foreign key must not read as an extraction that never ran.
+
+    ``function_score_signals.function_id`` is ON DELETE SET NULL and a
+    re-analysis deletes and reinserts a contract's functions, so a signal that
+    outlives one re-analysis points at nothing — and every state-variable hop it
+    gates would degrade to writes-not-extracted, losing reach with a counted but
+    causeless withhold. The signal's own (deployment, selector) survives that.
+    """
+    plane = P.ConferralPlane(
+        writes_by_function={7: frozenset({"owner"})},
+        writes_by_deployment_selector={(KEY_C, "0xabcdef12"): frozenset({"owner"})},
+    )
+    scope = P.parse_edge_scope("owner", "controller_value")
+
+    live = plane.grant_for("ownership.transfer", 7, entity=KEY_C, selector="0xabcdef12")
+    assert live.writes_extracted and "function 7" in live.basis
+
+    recovered = plane.grant_for("ownership.transfer", None, entity=KEY_C, selector="0xABCDEF12")
+    assert recovered.writes_extracted, "the selector is matched case-insensitively"
+    assert recovered.confers(scope, KEY_V).conferred
+    assert "recovered" in recovered.basis and "does not resolve" in recovered.basis
+
+    # A key the recovery index does not carry stays unextracted rather than
+    # guessing — the index only holds keys every function agrees under.
+    lost = plane.grant_for("ownership.transfer", None, entity=KEY_V, selector="0xabcdef12")
+    assert not lost.writes_extracted
+    assert lost.confers(scope, KEY_V).outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED
