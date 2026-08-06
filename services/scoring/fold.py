@@ -156,6 +156,21 @@ class _Row:
     citations: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class _RowValue:
+    """What one row's instances proved about value, and what they did not."""
+
+    per_entity: dict[str, float]
+    total_usd: float | None
+    basis: str
+    undetermined: list[dict[str, Any]]
+    proven_no_reach: list[dict[str, Any]]
+    # Witnessed membership, NOT the keys of ``per_entity``: an entity whose
+    # dollars are not_determined is still an entity the row provably reaches.
+    reach: set[str]
+    magnitude_caps: list[dict[str, Any]]
+
+
 def compute_protocol_score(
     session: Session,
     protocol_id: int,
@@ -952,7 +967,13 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        per_entity, value_usd, value_basis, undetermined, proven_no_reach, reach = _row_value(row, value_plane, closure)
+        valued = _row_value(row, value_plane, closure)
+        per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
+        # A priced total over an entity that also holds assets the priced sheet
+        # never covered is a FLOOR over that entity, not its value: an instance
+        # that answered is not the same fact as an entity that was answered.
+        partially_priced = _partially_priced_entities(value_plane, valued.reach)
+        is_floor = bool(value_usd is not None and (undetermined or partially_priced))
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -986,15 +1007,22 @@ def _aggregate(
                 "value_at_stake_usd": (round(value_usd, 2) if value_usd is not None else None),
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
                 "value_by_entity": {k: round(v, 2) for k, v in sorted(per_entity.items())},
-                "value_at_stake_basis": value_basis,
-                "value_at_stake_is_floor": bool(value_usd is not None and undetermined),
+                "value_at_stake_basis": valued.basis,
+                "value_at_stake_is_floor": is_floor,
+                # The entities behind the floor flag, named rather than left to
+                # be inferred from the flag alone.
+                "entities_holding_unpriced_assets": partially_priced,
                 "value_band": (
-                    ((">= " + K.band_label(value_usd)) if undetermined else K.band_label(value_usd))
+                    ((">= " + K.band_label(value_usd)) if is_floor else K.band_label(value_usd))
                     if value_usd is not None
                     else NOT_DETERMINED
                 ),
                 "undetermined_instances": undetermined,
-                "proven_no_reach_instances": proven_no_reach,
+                "proven_no_reach_instances": valued.proven_no_reach,
+                "witnessed_magnitude_caps": valued.magnitude_caps,
+                # Filled in after the sort, which is where a tie can be seen.
+                # Present on every row: null is the proven "nothing tied".
+                "exposure_order_tie": None,
                 "severity_proven": round(severity, 4),
                 "severity_basis": sorted({b for instance in row.instances for b in instance.severity_basis}),
                 "weakness": round(row.weakness, 4),
@@ -1004,9 +1032,13 @@ def _aggregate(
                 "n_entities": len(row.seeds),
                 # The deployment entities the row's instances were witnessed ON
                 # — the direct targets — as distinct from reach_entities, the
-                # priced closure the capability reaches through control edges.
+                # closure the capability reaches through control edges. That
+                # closure is MEMBERSHIP and is not filtered by pricing: the
+                # entities in it whose dollars are undetermined are named in
+                # the row's exposure gap, not dropped from the fact that this
+                # capability reaches them.
                 "host_entities": sorted(row.seeds),
-                "reach_entities": sorted(reach),
+                "reach_entities": sorted(valued.reach),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
@@ -1066,21 +1098,100 @@ def _aggregate(
         subsumed.extend(rest)
     findings.sort(key=lambda r: (-r["raw_points"], r["capability"], r["principal_unit"]))
     subsumed.sort(key=lambda r: (-r["raw_points"], r["capability"], r["principal_unit"]))
+    _disclose_order_ties(findings)
     return findings, subsumed, warnings
 
 
-def _row_value(
-    row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure
-) -> tuple[dict[str, float], float | None, str, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
+    """Where rows tie on the sort key, say so: the order decides, and it is a string.
+
+    Two rows with equal points and capability are separated by the unit address
+    alone, and that order is spent twice — on the λ position, which discounts by
+    index, and on the exposure budget, which the earlier row consumes first and
+    the later row gets the remainder of. Splitting the shared entity correctly
+    needs evidence this fold does not have, so the order stays fixed (inv. 8) and
+    what it decided is published instead of read as an attribution.
+
+    Findings only. A subsumed row has no λ position and spends no exposure
+    budget — the order decides nothing for it — so its ``exposure_order_tie``
+    stays ``None``, which here is the proven "nothing was decided by order",
+    not an unasked question.
+    """
+    groups: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
+    for finding in findings:
+        groups[(finding["raw_points"], finding["capability"])].append(finding)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        units = [f["principal_unit"] for f in group]
+        for position, finding in enumerate(group):
+            others = {key for other in group if other is not finding for key in other["value_by_entity"]}
+            finding["exposure_order_tie"] = {
+                "tied_with": [unit for unit in units if unit != finding["principal_unit"]],
+                "shared_entities": sorted(set(finding["value_by_entity"]) & others),
+                "position_in_tie": position,
+                "basis": "equal raw_points and capability; the remaining order is the principal_unit string",
+                "reading": (
+                    "this row's λ position and its share of any entity it holds in common with "
+                    "the tied rows are decided by that string, not by evidence; the split among "
+                    "them is order-determined and is not a measurement of who reaches what"
+                ),
+            }
+
+
+# Every published dollar is rounded to the cent, so a share below half a cent
+# reaches a consumer as $0.00 whatever it really was.
+_PUBLISHED_CENT = 0.005
+
+_UNPRICED_ASSET_STATES = frozenset({P.ASSET_UNPRICED, P.ASSET_BELOW_RESOLUTION})
+
+
+def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> list[str]:
+    """Reached entities whose priced sheet does not cover everything they hold.
+
+    Whole-entity unpricedness already lands in ``undetermined_instances``; this
+    is the case one level in, where the entity IS priced but only partly — ten
+    priced rows beside a hundred unpriced ones answer ten questions, and a total
+    over them is a floor, not the entity's value.
+
+    Two sources, ORed, and the per-ASSET map is read rather than the sheet
+    state: the sheet state collapses a mixed entity to whichever fact ranks
+    highest, so an entity with one priced asset and a hundred unanswered ones
+    reads as ``priced`` there and the shortfall disappears. ``below_resolution``
+    counts as unpriced here — an asset whose price landed on the storage floor
+    is a holding of at most half a cent that the total does not carry, which is
+    the same shortfall as one nobody priced. The restaking plane is the second
+    source: it has no USD column at all, so a position there is unpriced by
+    construction.
+    """
+    partial: set[str] = set()
+    for key in keys:
+        canonical = value_plane.canonical(key)
+        if value_plane.total(canonical) is None:
+            # Nothing determined at all: an undetermined entity, not a floor.
+            continue
+        states = value_plane.per_asset_state.get(canonical) or {}
+        if any(state in _UNPRICED_ASSET_STATES for state in states.values()):
+            partial.add(canonical)
+        elif value_plane.unpriced_positions.get(canonical):
+            partial.add(canonical)
+    return sorted(partial)
+
+
+def _row_value(row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
     Two functions reaching the same vault charge it once, and a witnessed
     magnitude caps what the row may charge against an entity — the entity's whole
-    balance sheet is not what a bounded call can move.
+    balance sheet is not what a bounded call can move. The magnitude is also one
+    number for the whole CALL, so it caps that call's sum across the keys it
+    reached rather than being re-charged at each of them.
     """
     per_entity: dict[str, float] = {}
+    reached: set[str] = set()
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
+    magnitude_caps: list[dict[str, Any]] = []
     transitive = row.capability in K.TRANSITIVE_CAPABILITIES
 
     for instance in sorted(row.instances, key=lambda i: (i.signal.deployment_address, i.signal.function_name)):
@@ -1119,35 +1230,163 @@ def _row_value(
         keys = set(instance.entity_keys)
         if transitive:
             keys = _closure(keys, closure)
-        for key in sorted(keys):
-            contribution, why = _entity_contribution(instance, key, value_plane, transitive=transitive)
-            if contribution is None:
-                undetermined.append({"function": instance.signal.function_name, "entity": key, "why": why})
-                continue
-            # An implementation and the proxy that deploys it are ONE priced
-            # entity: the plane already folded the balance onto the proxy, so a
-            # row reaching both keys would charge that one balance twice — once
-            # in this sum and again in the exposure budget, which is keyed on
-            # these same entities.
-            canonical = value_plane.canonical(key)
+        # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
+        # the value map: an entity drops out of that map whenever its dollars
+        # are not_determined — an unpriced sheet today, a refused magnitude once
+        # the magnitude discipline lands — and deleting a proven fact because an
+        # unproven one is missing is the whole error this fold is being repaired
+        # for. Priced or not, the row reaches these entities.
+        reached.update(value_plane.canonical(key) for key in keys)
+        contributions, gaps, cap = _instance_contributions(instance, keys, value_plane, transitive=transitive)
+        undetermined.extend(gaps)
+        if cap is not None:
+            magnitude_caps.append(cap)
+        for canonical, contribution in contributions.items():
             previous = per_entity.get(canonical)
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
 
-    reach = set(per_entity)
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
-        return per_entity, None, basis, undetermined, proven_no_reach, reach
+        return _RowValue(per_entity, None, basis, undetermined, proven_no_reach, reached, magnitude_caps)
     basis = (
-        "transitive control closure, MAX per (entity, asset)"
+        "transitive control closure, MAX per entity over latest-observation sheets"
         if transitive
-        else "per-instance witnessed value, MAX per (entity, asset)"
+        else "per-instance witnessed value, MAX per entity over latest-observation sheets"
     )
     if undetermined:
         basis = f">= proven floor over {len(per_entity)} entity(ies); {len(undetermined)} instance(s) not_determined"
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
-    return per_entity, round(sum(sorted(per_entity.values())), 6), basis, undetermined, proven_no_reach, reach
+    total = round(sum(sorted(per_entity.values())), 6)
+    return _RowValue(per_entity, total, basis, undetermined, proven_no_reach, reached, magnitude_caps)
+
+
+def _instance_contributions(
+    instance: _Instance, keys: set[str], value_plane: P.ValuePlane, *, transitive: bool
+) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any] | None]:
+    """One call's per-entity contributions, bounded by the one magnitude it proved.
+
+    A witnessed magnitude is a per-CALL quantity: ``withdraw`` proven to move
+    $28.1M moves $28.1M whichever of the keys it reached holds it. Charging it
+    once per key multiplies a single proven number by the size of the reach set,
+    which is the balance-sheet-as-a-reach error one level up from the one
+    :func:`_entity_contribution` already refuses.
+
+    An ``exact`` witness bounds the whole call, so its keys consume it as a
+    budget: the trim falls on whichever key the deterministic order reaches
+    last, an arbitrary basis that is published rather than absorbed. A key left
+    with no room is ``not_determined``, never a published ``$0.00`` — an
+    exhausted budget is not a measurement that the entity holds nothing.
+
+    A ``floor`` witness bounds nothing above: it proves the call moves *at
+    least* that much and says nothing about how the amount divides between two
+    holders, so over more than one key the call's magnitude is
+    ``not_determined`` rather than the floor charged once per key. At one key
+    both rules leave the witness exactly as proven.
+    """
+    per_key: dict[str, float] = {}
+    gaps: list[dict[str, Any]] = []
+    for key in sorted(keys):
+        contribution, why = _entity_contribution(instance, key, value_plane, transitive=transitive)
+        if contribution is None:
+            # The RAW key the walk reached, not its canonical fold — pre-existing
+            # and kept, because this row names where the walk landed and folding
+            # it would report a proxy the closure never visited. The keys this
+            # unit adds below are canonical, matching ``value_by_entity``.
+            gaps.append({"function": instance.signal.function_name, "entity": key, "why": why})
+            continue
+        # An implementation and the proxy that deploys it are ONE priced entity:
+        # the plane already folded the balance onto the proxy, so a row reaching
+        # both keys would charge that one balance twice — once in this sum and
+        # again in the exposure budget, which is keyed on these same entities.
+        canonical = value_plane.canonical(key)
+        previous = per_key.get(canonical)
+        if previous is None or contribution > previous:
+            per_key[canonical] = contribution
+
+    magnitude = _witnessed_magnitude(instance)
+    if magnitude is None or len(per_key) < 2:
+        return per_key, gaps, None
+
+    uncapped = round(sum(sorted(per_key.values())), 6)
+    if instance.magnitude.state != "proven_exact":
+        for key in sorted(per_key):
+            gaps.append(
+                {
+                    "function": instance.signal.function_name,
+                    "entity": key,
+                    "why": "floor_magnitude_over_multiple_keys_without_apportionment_witness(not_determined)",
+                }
+            )
+        return (
+            {},
+            gaps,
+            {
+                "function": instance.signal.function_name,
+                "capability": instance.signal.claim_id,
+                "witness_state": instance.magnitude.state,
+                "witnessed_usd": magnitude,
+                "entities": sorted(per_key),
+                "uncapped_sum_usd": uncapped,
+                "published_sum_usd": None,
+                "reading": (
+                    "a floor proves the call moves at least this much, never how it divides "
+                    "between holders; with no apportionment witness the magnitude of this call "
+                    "is not_determined rather than the floor charged once per entity"
+                ),
+            },
+        )
+    if uncapped <= magnitude:
+        return per_key, gaps, None
+
+    capped: dict[str, float] = {}
+    exhausted: list[str] = []
+    remaining = magnitude
+    for key in sorted(per_key):
+        take = round(min(per_key[key], remaining), 6)
+        remaining = round(remaining - take, 6)
+        # A residual under half a cent publishes as $0.00 at the row's rounding,
+        # which is the phantom proven-zero this branch exists to refuse — the
+        # threshold is the published resolution, not exact equality with zero.
+        if take < _PUBLISHED_CENT:
+            exhausted.append(key)
+            gaps.append(
+                {
+                    "function": instance.signal.function_name,
+                    "entity": key,
+                    "why": "call_magnitude_consumed_by_earlier_keys(share_not_determined)",
+                }
+            )
+            continue
+        capped[key] = take
+    return (
+        capped,
+        gaps,
+        {
+            "function": instance.signal.function_name,
+            "capability": instance.signal.claim_id,
+            "witness_state": instance.magnitude.state,
+            "witnessed_usd": magnitude,
+            "entities": sorted(per_key),
+            "entities_left_not_determined": exhausted,
+            "uncapped_sum_usd": uncapped,
+            "published_sum_usd": round(sum(sorted(capped.values())), 6),
+            "reading": (
+                "the witness bounds one call, so its keys consume it as a budget; which key "
+                "the trim falls on is decided by the deterministic key order, not by evidence, "
+                "and no witness apportions this magnitude between the entities"
+            ),
+        },
+    )
+
+
+def _witnessed_magnitude(instance: _Instance) -> float | None:
+    """The one dollar figure this call's witness proved, if it proved one."""
+    raw = instance.magnitude.value
+    if instance.magnitude.is_determined and _is_number(raw):
+        return float(raw)  # type: ignore[arg-type]  # _is_number narrows it
+    return None
 
 
 def _entity_contribution(
@@ -1166,9 +1405,8 @@ def _entity_contribution(
         held = value_plane.total(key)
         basis = "entity_holdings"
 
-    raw_magnitude = instance.magnitude.value
-    if instance.magnitude.is_determined and _is_number(raw_magnitude):
-        magnitude = float(raw_magnitude)  # type: ignore[arg-type]  # _is_number narrows it
+    magnitude = _witnessed_magnitude(instance)
+    if magnitude is not None:
         if instance.magnitude.state == "proven_exact":
             # The witness bounds what this call moves; the entity's sheet bounds
             # what is there to move. Neither alone is the answer, and the sheet
@@ -1194,6 +1432,42 @@ def _closure(seeds: set[str], closure: P.ControlClosure) -> set[str]:
     return seen
 
 
+def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[Any], partial: list[Any]) -> str:
+    """How to read one gap entry, assembled from the reasons that actually fired.
+
+    A null exposure and a published one are opposite cases and cannot share a
+    sentence: the first measured nothing, the second measured a MARGINAL share
+    and understates by an amount this accounting can name.
+    """
+    parts = [
+        (
+            "not counted and not read as zero; where the exposure is null nothing "
+            "about this finding's dollar exposure was measured"
+        )
+        if exposure is None
+        else (
+            "the published figure is this row's MARGINAL share of what it reaches, so it is "
+            "a floor on this finding's exposure and not a measurement of it"
+        )
+    ]
+    if unpriced:
+        parts.append(
+            "the unpriced entities are absent from it rather than counted as zero, so nothing "
+            "here says they hold nothing"
+        )
+    if exhausted:
+        parts.append(
+            "the entities under budget_exhausted_entities were charged in full by the findings "
+            "listed against them, so this row's share of those entities is unmeasured, not zero"
+        )
+    if partial:
+        parts.append(
+            "the entities under budget_partially_exhausted_entities were charged at less than "
+            "this row's own fraction, and the difference is missing from the figure"
+        )
+    return "; ".join(parts)
+
+
 def _grade(
     findings: list[dict[str, Any]], value_plane: P.ValuePlane
 ) -> tuple[float | None, float | None, float | None, list[dict[str, Any]]]:
@@ -1205,13 +1479,21 @@ def _grade(
     grade_lambda = round(100.0 - min(cumulative, 100.0), 4)
 
     claimed: dict[str, float] = defaultdict(float)
+    # Which findings spent each entity's budget, so a later row that finds it
+    # empty can name them instead of publishing the emptiness as a measurement.
+    claimed_by: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exposure = 0.0
     gaps: list[dict[str, Any]] = []
     any_priced = False
     for finding in findings:
         fraction = finding["severity_proven"] * finding["weakness"]
         mine = 0.0
-        priced_entities = 0
+        # Entities this row could actually measure a share of. An entity whose
+        # budget earlier rows already spent is priced and still unmeasurable,
+        # so counting it here is what published the exhaustion as a zero.
+        measured_entities = 0
+        exhausted: list[dict[str, Any]] = []
+        partial: list[dict[str, Any]] = []
         unpriced: list[str] = []
         exclusive = finding.get("subsumed_exclusive_value_by_entity") or {}
         charged_entities = list(finding["reach_entities"]) + [
@@ -1234,38 +1516,70 @@ def _grade(
                 # price lookup that never answered.
                 unpriced.append(key)
                 continue
-            priced_entities += 1
             room = max(0.0, 1.0 - claimed[key])
+            if room <= 0.0:
+                # Earlier findings spent this entity's whole budget. The
+                # remainder is not a measured $0.00 — it is a share this
+                # accounting cannot separate from theirs, so it is disclosed
+                # with the rows that took it rather than summed as a zero.
+                exhausted.append({"entity": key, "claimed_by": list(claimed_by[key])})
+                continue
+            measured_entities += 1
             take = min(key_fraction, room)
+            if room < key_fraction:
+                # A partial charge understates by exactly the difference, and it
+                # does so silently: the published figure is this row's MARGINAL
+                # share, not its exposure to the entity. Which row was marginal
+                # is a function of the sort order, not of what anyone reaches.
+                partial.append(
+                    {
+                        "entity": key,
+                        "fraction_wanted": round(key_fraction, 6),
+                        "fraction_taken": round(take, 6),
+                        "claimed_by": list(claimed_by[key]),
+                    }
+                )
             if take > 0:
                 claimed[key] += take
+                claimed_by[key].append(
+                    {
+                        "principal_unit": finding["principal_unit"],
+                        "capability": finding["capability"],
+                        "fraction_taken": round(take, 6),
+                    }
+                )
                 mine += take * held
         finding["exposure_entities_charged"] = sorted(
             key for key in charged_entities if finding["value_by_entity"].get(key) is not None or key in exclusive
         )
-        if priced_entities:
+        if measured_entities:
             any_priced = True
             finding["exposure_usd"] = round(mine, 2)
         else:
-            # No priced entity in reach: the exposure of this finding is a
-            # quantity nobody measured, and null is the only honest answer.
+            # Either no priced entity in reach, or every priced one's budget was
+            # already spent: the exposure of this finding is a quantity nobody
+            # measured, and null is the only honest answer.
             finding["exposure_usd"] = None
-        if unpriced or finding["exposure_usd"] is None:
+        if unpriced or exhausted or partial or finding["exposure_usd"] is None:
+            # One gap per finding, never two: a row with an unpriced entity AND
+            # a spent budget has one set of reasons, not one entry per reason.
+            # Every key is present on every entry — an empty list is the proven
+            # negative "this did not happen", which is not the same published
+            # fact as a key that is missing.
+            #
+            # S5: repopulated from the row's own undetermined instances, which
+            # is where an unpriced entity actually lands.
+            unpriced_entities = sorted(set(unpriced) | {row["entity"] for row in finding["undetermined_instances"]})
             gaps.append(
                 {
                     "principal_unit": finding["principal_unit"],
                     "capability": finding["capability"],
-                    # S5: repopulated from the row's own undetermined instances,
-                    # which is where an unpriced entity actually lands.
-                    "unpriced_entities": sorted(
-                        set(unpriced) | {row["entity"] for row in finding["undetermined_instances"]}
-                    ),
+                    "unpriced_entities": unpriced_entities,
                     "undetermined_instances": finding["undetermined_instances"],
+                    "budget_exhausted_entities": exhausted,
+                    "budget_partially_exhausted_entities": partial,
                     "exposure_usd": finding["exposure_usd"],
-                    "reading": (
-                        "not counted and not read as zero; where the exposure is null nothing "
-                        "about this finding's dollar exposure was measured"
-                    ),
+                    "reading": _gap_reading(finding["exposure_usd"], unpriced_entities, exhausted, partial),
                 }
             )
         # A finding whose exposure is not_determined contributes nothing to the
@@ -1280,6 +1594,34 @@ def _grade(
 
 
 _ZERO_ADDRESS = "0x" + "0" * 40
+
+
+def _entities_outside_perimeter(
+    signals: list[FunctionSignal],
+    answered: dict[str, list[int]],
+    perimeter: dict[str, float],
+    value_plane: P.ValuePlane,
+) -> list[str]:
+    """Deployment AND reach keys the confidence denominator never asked about.
+
+    A signal answers questions about the entity it was distilled on, and it
+    charges value against the entities it REACHES. Checking only the first left
+    a reach key that no denominator accounts for invisible to the disclosure
+    that exists to name it — value carried into a finding by an entity whose
+    unanswered weight is nowhere. The keys the closure walk ADDS to a reach are
+    admitted to the perimeter by construction (every principal and everything it
+    controls), so the witnessed keys are the ones that can fall outside. The zero
+    address is refused by an admission rule with its own published count, so its
+    absence is a decision rather than a gap and it is not reported here.
+    """
+    zero_suffix = "::" + _ZERO_ADDRESS
+    outside = {key for key in answered if key not in perimeter}
+    for signal in signals:
+        for raw in signal.value_entity_keys:
+            key = value_plane.canonical(raw)
+            if key not in perimeter and not key.endswith(zero_suffix):
+                outside.add(key)
+    return sorted(outside)
 
 
 def _confidence(
@@ -1380,7 +1722,7 @@ def _confidence(
         reach[key] = [1, 1]
         scored[key] = [1, 1]
 
-    outside = sorted({key for key in reach if key not in perimeter})
+    outside = _entities_outside_perimeter(signals, reach, perimeter, value_plane)
     reach_pct = round(100.0 * weighted(reach) / denominator, 1) if denominator else 0.0
     capability_pct = round(100.0 * weighted(scored) / denominator, 1) if denominator else 0.0
     priced_weight = sum(perimeter[k] for k in sorted(perimeter) if value_plane.total(k) is not None)
@@ -1392,10 +1734,12 @@ def _confidence(
         "value_priced_pct": priced_pct,
         "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
         "perimeter_entities": len(perimeter),
-        # Signals whose entity is not in the perimeter answer a question the
-        # denominator never asked, so their work is invisible to this figure.
-        # With the contracts base population this should be empty; a non-empty
-        # list is a discovery gap, published rather than absorbed.
+        # Entities a signal answers FOR or reaches INTO that the denominator
+        # never asked about, so the work is invisible to this figure and, for a
+        # reach key, the value is charged into a finding while its own
+        # unanswered weight sits in no denominator. With the contracts base
+        # population this should be empty; a non-empty list is a discovery gap,
+        # published rather than absorbed.
         "signal_entities_outside_perimeter": outside,
         "perimeter_value_weighted_denominator": denominator,
         # Each admission rule, counted where it fired, so a consumer can see
