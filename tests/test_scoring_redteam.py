@@ -19,6 +19,8 @@ from services.scoring.constants import (
     FREEZE_CAPABILITY_PROVEN,
     FREEZE_KEYSET_RECOVERABLE,
     FREEZE_SUSTAINABLE,
+    WEAKNESS_SAFE_MAJORITY,
+    WEAKNESS_SAFE_MINORITY,
     WEAKNESS_SAFE_SINGLE_SIGNER,
     WEAKNESS_SAFE_SUPERMAJORITY,
     WEAKNESS_SAFE_UNCREDITED,
@@ -101,6 +103,15 @@ def pause_sig(**over: Any) -> FunctionSignal:
         **over.pop("gates", {}),
     }
     return sig(claim_id="pause.set", gates=gates, **over)
+
+
+def magnitude(usd: float) -> dict[str, Any]:
+    """A witnessed reach magnitude, so the reach-magnitude term is not the minimum.
+
+    A perimeter test asserts on the perimeter; leaving the magnitude unwitnessed
+    would make every one of them a test of the reach-magnitude term instead.
+    """
+    return {"reach_magnitude_usd": Tri.proven("proven_floor", usd).to_json()}
 
 
 def proven(severity: float, basis: tuple[str, ...] = ("capability_class_base",)) -> dict[str, Any]:
@@ -189,8 +200,9 @@ def closure_of(
 def fold(monkeypatch):
     """Drive the fold with stubbed planes: no database, no network."""
 
-    def _run(signals, *, value=None, closure=None, principals=None, role_floors=None, eoas=None):
+    def _run(signals, *, value=None, closure=None, principals=None, role_floors=None, eoas=None, discovery=None):
         """``signals=None`` drives the PERSISTED path, through the population read."""
+        monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
@@ -1377,8 +1389,12 @@ def test_b4_an_unpriced_contract_is_in_its_own_denominator(fold):
     principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2)}
     narrow_doc = fold([vault], principals=principals, value=bare)
     wide_doc = fold([vault], principals=principals, value=wide)
-    assert narrow_doc.confidence_pct is not None and wide_doc.confidence_pct is not None
-    assert wide_doc.confidence_pct < narrow_doc.confidence_pct
+    narrow = narrow_doc.model_parameters["confidence_detail"]
+    wide = wide_doc.model_parameters["confidence_detail"]
+    assert wide["perimeter_entities"] > narrow["perimeter_entities"]
+    assert wide["reachability_answered_pct"] < narrow["reachability_answered_pct"]
+    assert wide["capability_scored_pct"] < narrow["capability_scored_pct"]
+    assert wide["pct"] <= narrow["pct"]
 
 
 def test_s8_a_proven_no_reach_instance_is_not_counted_as_undetermined(fold):
@@ -1583,6 +1599,7 @@ def test_perimeter_folds_an_implementation_onto_its_proxy(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=magnitude(1_000_000_000.0),
         **proven(1.0),
         **reaches(KEY_PROXY),
     )
@@ -1600,6 +1617,7 @@ def test_perimeter_folds_an_implementation_onto_its_proxy(fold):
     assert detail["perimeter_entities"] == 1
     assert detail["reachability_answered_pct"] == 100.0
     assert detail["capability_scored_pct"] == 100.0
+    assert detail["value_priced_pct"] == 100.0
     assert document.confidence_pct == 100.0
 
 
@@ -1610,6 +1628,7 @@ def test_zero_address_is_not_a_perimeter_entity(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=magnitude(50_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -1634,6 +1653,7 @@ def test_a_proven_codeless_eoa_answers_vacuously(fold):
         authority_openness="restricted",
         principal_state="enumerated",
         principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
+        gates=magnitude(50_000_000.0),
         **proven(1.0),
         **reaches(KEY_C),
     )
@@ -2050,6 +2070,7 @@ def test_a_renounced_slot_is_counted_as_slots_and_as_the_edges_that_witness_it()
     )
     assert closure.renounced_counts() == {"edges": 4, "authority_slots": 2, "anchors": 2}
 
+
 # --------------------------------------------------------------------------
 # W2b: per-call magnitude, budget honesty, order disclosure, floor flag
 # --------------------------------------------------------------------------
@@ -2432,3 +2453,359 @@ def test_r21_a_reach_key_outside_the_perimeter_is_disclosed(fold):
     )
     detail = document.document()["model_parameters"]["confidence_detail"]
     assert detail["signal_entities_outside_perimeter"] == [KEY_V]
+
+
+# --------------------------------------------------------------------------
+# Merged-unit weakness, the burn sentinel, and confidence completeness (W2c)
+# --------------------------------------------------------------------------
+
+MERGE_SHARED = tuple("0x" + c * 40 for c in "1234")
+SAFE_MINORITY = "0x" + "e" * 40
+SAFE_MAJORITY = "0x" + "d" * 40
+KEY_ZERO = entity_key("ethereum", "0x" + "0" * 40)
+OUTSIDER = "0x" + "8" * 40
+KEY_OUTSIDER = entity_key("ethereum", OUTSIDER)
+
+
+def _merged_unit_signals(claim: str = "upgrade.implementation"):
+    """Two upgrade witnesses on two entities, one per member of a merged Safe unit."""
+    return [
+        sig(
+            function_name=f"upgradeTo{index}",
+            deployment_address=address,
+            contract_id=index + 1,
+            selector=f"0x0000000{index}",
+            claim_id=claim,
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(index + 1, "ethereum", safe),),
+            **proven(1.0),
+            **reaches(entity_key("ethereum", address)),
+        )
+        for index, (safe, address) in enumerate(((SAFE_MINORITY, C), (SAFE_MAJORITY, VAULT)))
+    ]
+
+
+def _merged_unit_principals(strong_threshold: int = 4):
+    return {
+        1: facts(
+            1,
+            SAFE_MINORITY,
+            "safe",
+            owners=MERGE_SHARED + tuple("0x" + c * 40 for c in "567"),
+            threshold=3,
+        ),
+        2: facts(
+            2,
+            SAFE_MAJORITY,
+            "safe",
+            owners=MERGE_SHARED + tuple("0x" + c * 40 for c in "9abc"),
+            threshold=strong_threshold,
+        ),
+    }
+
+
+def test_r9_a_merged_units_weakness_is_per_reached_entity(fold):
+    """Value only the 4/8 member reaches is not priced at the 3/7 member's rung.
+
+    ``_row_for`` keeps the max weakness over the unit's members while the row
+    folds the UNION of their reach. inv. 5's weakest path is the weakest path TO
+    THAT ENTITY, and the published union — which no single member reaches — is
+    priced at the coalition able to act as every contributing member.
+    """
+    document = fold(
+        _merged_unit_signals(),
+        principals=_merged_unit_principals(),
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}, KEY_V: {"usdc": 5_000_000.0}}),
+    )
+    assert document.provenance["safe_keyset_overlaps"][0]["merged"] is True
+    assert document.provenance["safe_keyset_overlaps"][0]["min_coalition_to_act_as_both"] == 4
+    finding = document.findings[0]
+    assert finding["weakness_by_entity"] == {KEY_C: WEAKNESS_SAFE_MINORITY, KEY_V: WEAKNESS_SAFE_MAJORITY}
+    # The union is priced at the HARDEST rung among the contributing members —
+    # no union is charged at a rung some contributing member never has to clear —
+    # and the published principal is the member that sets that rung.
+    assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
+    assert finding["weakest_gate"] == "Safe 4/8"
+    assert SAFE_MAJORITY in finding["principal"]
+    # Exposure charges each entity at ITS rung, not the unit's weakest member.
+    assert finding["exposure_usd"] == pytest.approx(
+        WEAKNESS_SAFE_MINORITY * 1_000_000.0 + WEAKNESS_SAFE_MAJORITY * 5_000_000.0
+    )
+
+
+def test_r9_members_at_one_rung_leave_the_row_untouched(fold):
+    """The re-attribution fires on a DISAGREEMENT, never as a blanket rewrite."""
+    document = fold(
+        _merged_unit_signals(),
+        # Both members 4/8-equivalent: 4/8 and 3/7 disagree, 4/8 and 4/8 do not.
+        principals={
+            1: facts(1, SAFE_MINORITY, "safe", owners=MERGE_SHARED + tuple("0x" + c * 40 for c in "567"), threshold=4),
+            2: facts(2, SAFE_MAJORITY, "safe", owners=MERGE_SHARED + tuple("0x" + c * 40 for c in "9abc"), threshold=4),
+        },
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}, KEY_V: {"usdc": 5_000_000.0}}),
+    )
+    finding = document.findings[0]
+    assert finding["weakness_by_entity"] == {}
+    assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
+    assert finding["exposure_usd"] == pytest.approx(WEAKNESS_SAFE_MAJORITY * 6_000_000.0)
+
+
+def test_r10_the_burn_sentinel_is_never_charged_a_sheet(fold):
+    """A witness that names ``0x0`` has proved no reach, and routes none.
+
+    Ownership renounced to the zero address makes it the single largest fan-out
+    in the graph; a repoint witness naming it would otherwise hand one finding
+    everything the sentinel "controls". The perimeter refuses it as an entity and
+    the fold refuses it as a reach key, so nothing behind it is reachable.
+    """
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C, KEY_ZERO),
+    )
+    document = fold(
+        [signal],
+        principals={1: facts(1, EOA, "eoa")},
+        # The sentinel as a live control hub: refusing it must also refuse
+        # everything only it reaches.
+        closure={KEY_ZERO: {KEY_V}},
+        value=value_plane(
+            {
+                KEY_C: {"usdc": 1_000.0},
+                KEY_ZERO: {"usdc": 4_000_000_000.0},
+                KEY_V: {"usdc": 900_000_000.0},
+            }
+        ),
+    )
+    finding = document.findings[0]
+    assert finding["reach_entities"] == [KEY_C]
+    assert KEY_ZERO not in finding["value_by_entity"] and KEY_V not in finding["value_by_entity"]
+    assert finding["value_at_stake_usd"] == 1_000.0
+    assert "zero_address_reach_key_refused" in finding["witness_notes"]
+    detail = document.model_parameters["confidence_detail"]
+    assert detail["zero_address_entities_excluded"] >= 1
+    assert not any(key.endswith("::" + "0x" + "0" * 40) for key in detail["signal_entities_outside_perimeter"])
+
+
+def _magnitude_document(fold, *, witnessed: bool):
+    gates = (
+        {"reach_magnitude_usd": Tri.proven("proven_exact", 250_000.0).to_json()}
+        if witnessed
+        else {"reach_magnitude_usd": Tri.not_determined().to_json()}
+    )
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=gates,
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    return fold(
+        [signal],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
+    )
+
+
+def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
+    """The confidence axis grows the term the unknown magnitude belongs in.
+
+    Without it a gate-control reach counts as fully answered, fully scored and
+    priced, so "we could not prove how much this moves" had nowhere to land but
+    the grade.
+    """
+    unwitnessed = _magnitude_document(fold, witnessed=False).model_parameters["confidence_detail"]
+    witnessed = _magnitude_document(fold, witnessed=True).model_parameters["confidence_detail"]
+    assert unwitnessed["reach_magnitude_witnessed_pct"] == 0.0
+    assert witnessed["reach_magnitude_witnessed_pct"] == 100.0
+    # The term is a real term: it drives the headline where it is the minimum.
+    assert unwitnessed["pct"] == 0.0
+    assert unwitnessed["pct"] < witnessed["pct"]
+    assert unwitnessed["reach_magnitude_signals"]["proven_reach_in_denominator"] == 1
+    assert unwitnessed["reach_magnitude_signals"]["magnitude_witnessed"] == 0
+    # Answering the magnitude may only RAISE the term (inv. 6).
+    assert witnessed["reach_magnitude_witnessed_pct"] >= unwitnessed["reach_magnitude_witnessed_pct"]
+
+
+def test_r11_every_proven_reach_capability_is_in_the_denominator(fold):
+    """No capability buys its way out of "how much does this move?".
+
+    A per-capability exclusion list reads as relief for a reach with no magnitude
+    concept, but its only live effect is on an entity carrying BOTH an excluded
+    and an admitted signal: dropping the excluded one RAISES the term by
+    discarding a real unanswered question. Here one witnessed ``flow.out`` and one
+    unwitnessed ``timelock.set_delay`` share an entity — the honest answer is 50%,
+    and an exclusion list would publish 100%.
+    """
+    signals = [
+        flow_sig(
+            function_name="withdraw",
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+            gates=magnitude(1_000_000.0),
+            **proven(1.0),
+            **reaches(KEY_C),
+        ),
+        sig(
+            function_name="setDelay",
+            selector="0x00000001",
+            claim_id="timelock.set_delay",
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+            **proven(1.0),
+            **reaches(KEY_C),
+        ),
+    ]
+    detail = fold(
+        signals,
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
+    ).model_parameters["confidence_detail"]
+    census = detail["reach_magnitude_signals"]
+    assert census["proven_reach_in_denominator"] == 2
+    assert census["magnitude_witnessed"] == 1
+    assert census["by_capability"]["timelock.set_delay"] == [0, 1]
+    # 50, not 100: the unwitnessed half is not excused by its capability name.
+    assert detail["reach_magnitude_witnessed_pct"] == 50.0
+    assert detail["reach_magnitude_witnessed_of_reaching_pct"] == 50.0
+    assert detail["reach_magnitude_vacuous_credit_pct"] == 0.0
+
+
+def _perimeter_signal():
+    return sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+
+
+def test_r12_consuming_a_relation_may_not_raise_confidence(fold):
+    """Monotonicity: declining to walk a relation CHARGES confidence, never frees it.
+
+    The perimeter was seeded from the relations the scorer consumed, so entities
+    a declined relation proved are principals of gated functions never entered
+    the denominator — and the published figure was HIGHER for walking less.
+    """
+    discovery = {"capability_principal": {KEY_OUTSIDER, KEY_C}}
+    shared = dict(
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
+        discovery=discovery,
+    )
+    declined = fold([_perimeter_signal()], **shared).model_parameters["confidence_detail"]
+    consumed = fold(
+        [_perimeter_signal()],
+        closure={KEY_OUTSIDER: {KEY_C}},
+        **shared,
+    ).model_parameters["confidence_detail"]
+    # The entity the declined relation names is in the denominator EITHER WAY.
+    assert KEY_OUTSIDER not in declined["signal_entities_outside_perimeter"]
+    assert declined["perimeter_entities"] == consumed["perimeter_entities"]
+    assert declined["perimeter_value_weighted_denominator"] == consumed["perimeter_value_weighted_denominator"]
+    assert consumed["pct"] <= declined["pct"]
+    assert declined["discovery_relation_entities_admitted"]["capability_principal"] == 1
+
+
+def test_r12_a_declined_relations_entities_lower_confidence(fold):
+    """The charge is real: the same analysis over a wider proven graph scores lower."""
+    shared = dict(
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
+    )
+    blind = fold([_perimeter_signal()], **shared).model_parameters["confidence_detail"]
+    seeing = fold(
+        [_perimeter_signal()],
+        discovery={"capability_principal": {KEY_OUTSIDER}},
+        **shared,
+    ).model_parameters["confidence_detail"]
+    assert seeing["perimeter_entities"] == blind["perimeter_entities"] + 1
+    assert seeing["reachability_answered_pct"] < blind["reachability_answered_pct"]
+
+
+def test_r17_contradictory_owner_sets_are_disclosed_not_silently_arbitrated(fold):
+    """Two ``exact`` owner witnesses for one Safe: the disagreement is published."""
+    document = fold(
+        [_merged_unit_signals()[0]],
+        principals={
+            1: facts(1, SAFE_MINORITY, "safe", owners=MERGE_SHARED, threshold=2),
+            2: facts(2, SAFE_MINORITY, "safe", owners=MERGE_SHARED + ("0x" + "9" * 40,), threshold=4),
+        },
+        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
+    )
+    contradictions = document.provenance["principal_units"]["owner_set_contradictions"]
+    assert [row["safe"] for row in contradictions] == [entity_key("ethereum", SAFE_MINORITY)]
+    assert len(contradictions[0]["witnesses"]) == 2
+    assert contradictions[0]["adopted_k_of_n"] in ("2/4", "4/5")
+
+
+def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
+    """W2b's per-call cap scales what a member is charged, never what it reaches.
+
+    ``_member_weakness`` re-folds each member's own instances to ask which
+    entities that member is proven to reach. That re-fold runs through the same
+    ``_row_value`` the cap lives in, so a cap that removed an entity from a
+    member's reach would silently drop the member from that entity's rung and
+    fall back to the unit-level weakness. Reach is read off witnessed membership
+    for exactly this reason, and the invariant is pinned here.
+    """
+    signals = [
+        sig(
+            function_name="upgradeA",
+            deployment_address=C,
+            contract_id=1,
+            selector="0x00000001",
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(1, "ethereum", SAFE_MINORITY),),
+            **proven(1.0),
+            **reaches(KEY_C),
+        ),
+        sig(
+            function_name="upgradeB",
+            deployment_address=VAULT,
+            contract_id=2,
+            selector="0x00000002",
+            authority_openness="restricted",
+            principal_state="enumerated",
+            principal_refs=(PrincipalRef(2, "ethereum", SAFE_MAJORITY),),
+            # One call, two keys, and a witness that bounds the CALL: the cap
+            # fires and trims the published dollars.
+            gates={"reach_magnitude_usd": Tri.proven("proven_exact", 5_000_000.0).to_json()},
+            **proven(1.0),
+            **reaches(KEY_V, KEY_PROXY),
+        ),
+    ]
+    finding = fold(
+        signals,
+        principals=_merged_unit_principals(),
+        value=value_plane(
+            {
+                KEY_C: {"usdc": 1_000_000.0},
+                KEY_V: {"usdc": 5_000_000.0},
+                KEY_PROXY: {"usdc": 3_000_000.0},
+            }
+        ),
+    ).findings[0]
+
+    # The cap really fired: the uncapped sum exceeded the one witnessed number.
+    caps = finding["witnessed_magnitude_caps"]
+    assert caps and caps[0]["uncapped_sum_usd"] > caps[0]["witnessed_usd"]
+    # Membership is untouched by it — every reached entity survives the cap.
+    assert set(finding["reach_entities"]) == {KEY_C, KEY_V, KEY_PROXY}
+    # And the per-member attribution still resolves: the 4/8 member is found as
+    # the holder of both of its capped entities, so the safe-fail never fires and
+    # they are priced at ITS rung, not at the unit's weakest member's.
+    assert finding["weakness_by_entity"] == {
+        KEY_C: WEAKNESS_SAFE_MINORITY,
+        KEY_PROXY: WEAKNESS_SAFE_MAJORITY,
+        KEY_V: WEAKNESS_SAFE_MAJORITY,
+    }
+    assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY

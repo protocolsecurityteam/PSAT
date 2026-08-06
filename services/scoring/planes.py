@@ -937,7 +937,13 @@ class ControlClosure:
         }
 
 
-def _is_zero_key(key: str) -> bool:
+def is_zero_key(key: str) -> bool:
+    """The burn sentinel, at either end of an edge or as a reach key.
+
+    One helper for every refusal of it — the closure loader here, the reach keys
+    and the walk in ``fold`` — so the rule cannot drift between the plane that
+    builds the graph and the fold that walks it.
+    """
     return key.endswith("::" + ZERO_ADDRESS)
 
 
@@ -962,7 +968,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     renounced: list[RenouncedAuthority] = []
 
     def admit(candidate: ControlEdge) -> None:
-        zero_principal = _is_zero_key(candidate.principal)
+        zero_principal = is_zero_key(candidate.principal)
         if zero_principal and candidate.relation == "controller_value":
             renounced.append(
                 RenouncedAuthority(
@@ -973,7 +979,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                     edge_id=candidate.edge_id,
                 )
             )
-        if zero_principal or _is_zero_key(candidate.anchor):
+        if zero_principal or is_zero_key(candidate.anchor):
             refusals.append(
                 RefusedEdge(
                     rule=REFUSAL_ZERO_PRINCIPAL if zero_principal else REFUSAL_ZERO_ANCHOR,
@@ -1094,6 +1100,41 @@ def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, 
             "earns it"
         ),
     }
+
+
+def discovery_relation_entities(session: Session, protocol_id: int) -> dict[str, set[str]]:
+    """Every endpoint of every AUTHORITY relation discovery recorded, per relation.
+
+    ``CONTROL_EDGE_RELATIONS`` is the database's own vocabulary for a relation
+    that carries authority; this scorer walks three of its seven. The four it
+    declines are still work discovery did, and the entities they name are still
+    entities this document must answer for — so they enter the confidence
+    perimeter whether or not the walk consumes them. Relations outside that set
+    (``external_call_target``, ``controller_value_unattributed``) assert no
+    authority by their own register entries and are not admitted here.
+
+    Sibling of :func:`unconsumed_reach_relations`, which counts the same excluded
+    edges: that one publishes how much reach is not being claimed, this one puts
+    the entities behind it into the denominator that has to account for them.
+    """
+    from db.models import CONTROL_EDGE_RELATIONS, Contract, ControlGraphEdge
+
+    out: dict[str, set[str]] = {relation: set() for relation in sorted(CONTROL_EDGE_RELATIONS)}
+    rows = (
+        session.query(
+            ControlGraphEdge.relation, ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id, Contract.chain
+        )
+        .join(Contract, Contract.id == ControlGraphEdge.contract_id)
+        .filter(Contract.protocol_id == protocol_id, ControlGraphEdge.relation.in_(sorted(CONTROL_EDGE_RELATIONS)))
+        .order_by(ControlGraphEdge.id)
+        .all()
+    )
+    for relation, source, target, chain in rows:
+        for raw in (source, target):
+            address = str(raw or "").replace("address:", "").lower()
+            if address:
+                out[str(relation)].add(entity_key(chain, address))
+    return out
 
 
 def load_upgrade_provenance(session: Session, protocol_id: int) -> dict[str, Any]:
@@ -1424,6 +1465,7 @@ __all__ = [
     "SHEET_UNPRICED",
     "UNCONSUMED_REACH_REASONS",
     "ZERO_ADDRESS",
+    "is_zero_key",
     "ControlClosure",
     "ControlEdge",
     "EdgeScope",
@@ -1432,6 +1474,7 @@ __all__ = [
     "RenouncedAuthority",
     "ValuePlane",
     "load_audit_posture",
+    "discovery_relation_entities",
     "load_control_closure",
     "load_ledgers",
     "load_principal_plane",

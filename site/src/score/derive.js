@@ -588,11 +588,18 @@ export const CONFIDENCE_CHANNELS = [
     name: "Value priced",
     desc: "Value-weighted share of the protocol's contracts holding any priced balance at all.",
   },
+  {
+    id: "reach_magnitude_witnessed_pct",
+    name: "Reach magnitude witnessed",
+    desc: "Value-weighted share of the perimeter where the magnitude question is answered or vacuous (an entity proven codeless has none).",
+  },
 ];
 
-// The headline is the MINIMUM of the three; the MIN tag goes on whichever
+// The headline is the MINIMUM of the channels; the MIN tag goes on whichever
 // channel actually is the minimum, so a re-ordering of the channels or a shift
-// in the data can never leave the tag pointing at the wrong one.
+// in the data can never leave the tag pointing at the wrong one. This list must
+// carry EVERY term the producer minimises over, or the tagged minimum and the
+// published confidence_pct can disagree.
 export function confidenceChannels(doc) {
   const detail = doc?.model_parameters?.confidence_detail || {};
   const channels = CONFIDENCE_CHANNELS.map((channel) => {

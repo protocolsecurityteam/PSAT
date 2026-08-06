@@ -137,6 +137,11 @@ class _Instance:
     pricing_blocked: str | None
     native_only: bool
     asset_identity_undecidable: bool
+    # The principal this instance was witnessed under. A merged unit's row folds
+    # instances from several members, and without this the row cannot say WHICH
+    # member is proven to reach a given entity (inv.5 is the weakest path to that
+    # entity, not the weakest member of the unit).
+    principal_address: str = ""
 
 
 @dataclass
@@ -149,6 +154,15 @@ class _Row:
     principal_kind: str = ""
     weakest_address: str = ""
     principal_addresses: set[str] = field(default_factory=set)
+    # Per contributing member address, the ``(weakness, label, kind)`` IT earned.
+    # The row-level ``weakness`` is the max over these, which is only the right
+    # price for an entity every member reaches; ``_aggregate`` re-attributes the
+    # rest from this map.
+    member_gate: dict[str, tuple[float, str, str]] = field(default_factory=dict)
+    # The burn-sentinel admission rule's own count, and the instances it emptied
+    # outright — an admission rule publishes what it refused (§3.1 pt 5).
+    zero_reach_keys_refused: int = 0
+    zero_reach_stripped: list[dict[str, Any]] = field(default_factory=list)
     instances: list[_Instance] = field(default_factory=list)
     seeds: set[str] = field(default_factory=set)
     tiers: set[str] = field(default_factory=set)
@@ -236,7 +250,7 @@ def compute_protocol_score(
 
         if signal.authority_openness == OPENNESS_OPEN:
             severity, severity_basis, extra_notes = _fold_severity(signal, None, principal_facts, warnings)
-            instance = _instance(signal, severity, severity_basis)
+            instance = _instance(signal, severity, severity_basis, ANYONE)
             unit = entity_key(signal.chain, ANYONE)
             row = _row_for(rows_by_key, unit, signal.claim_id, "direct", K.WEAKNESS_ANYONE, "ANYONE", ANYONE, ANYONE)
             _attach(row, signal, instance, extra_notes)
@@ -258,7 +272,7 @@ def compute_protocol_score(
                 warnings.append(_warning("principal_row_missing", signal, f"principal {ref.address} not readable"))
                 continue
             severity, severity_basis, extra_notes = _fold_severity(signal, facts, principal_facts, warnings)
-            instance = _instance(signal, severity, severity_basis)
+            instance = _instance(signal, severity, severity_basis, facts.address)
             weakness, label, kind, notes = units.weakness_for(
                 facts,
                 recovery_proven_independent=any(n.startswith("keyset_independent") for n in extra_notes),
@@ -290,7 +304,13 @@ def compute_protocol_score(
     warnings.extend(value_warnings)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps = _grade(findings, value_plane)
-    confidence = _confidence(signals, value_plane, closure, P.load_proven_eoa_entities(session, protocol_id))
+    confidence = _confidence(
+        signals,
+        value_plane,
+        closure,
+        P.load_proven_eoa_entities(session, protocol_id),
+        P.discovery_relation_entities(session, protocol_id),
+    )
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
     provenance: dict[str, Any] = {
@@ -433,6 +453,12 @@ def _row_for(
         row.principal_kind = kind
         row.weakest_address = address
     row.principal_addresses.add(address)
+    # The member's OWN rung, kept beside the unit's weakest: a merged Safe unit
+    # publishes one reach union, and pricing an entity only the 4/8 member
+    # reaches at the 3/7 member's rung charges a coalition nobody proved.
+    previous = row.member_gate.get(address)
+    if previous is None or weakness > previous[0]:
+        row.member_gate[address] = (weakness, label, kind)
     return row
 
 
@@ -550,11 +576,40 @@ class _UnitResolver:
     ) -> None:
         self._facts = principal_facts
         self._role_floors = role_floors
-        self._safe_by_key = {
-            facts.key: facts
-            for facts in sorted(principal_facts.values(), key=lambda f: f.key)
-            if facts.resolved_type == "safe" and facts.owners
-        }
+        by_key: dict[str, list[P.PrincipalFacts]] = defaultdict(list)
+        for facts in sorted(principal_facts.values(), key=lambda f: f.key):
+            if facts.resolved_type == "safe" and facts.owners:
+                by_key[facts.key].append(facts)
+        # Last row wins, exactly as before: which contradictory owner set to adopt
+        # is an open ruling (R17), and this fold does not arbitrate it. What it
+        # will not do is arbitrate SILENTLY — a Safe whose witnesses disagree
+        # publishes the disagreement beside the set the merge decision used.
+        self._safe_by_key = {key: rows[-1] for key, rows in by_key.items()}
+        self.owner_set_contradictions = [
+            {
+                "safe": key,
+                "adopted_owner_set": sorted(rows[-1].owners),
+                "adopted_k_of_n": (
+                    f"{rows[-1].threshold}/{len(rows[-1].owners)}"
+                    if rows[-1].threshold is not None
+                    else f"k not_determined/{len(rows[-1].owners)}"
+                ),
+                "witnesses": [
+                    {
+                        "function_principal_id": row.function_principal_id,
+                        "owners": sorted(row.owners),
+                        "threshold": row.threshold,
+                    }
+                    for row in sorted(rows, key=lambda r: r.function_principal_id)
+                ],
+                "basis": (
+                    "function_principals rows disagree on this Safe's owner set; the adopted "
+                    "row is the one this fold read, NOT an adjudication that the others are wrong"
+                ),
+            }
+            for key, rows in sorted(by_key.items())
+            if len({frozenset(row.owners) for row in rows}) > 1
+        ]
         self._parent = {key: key for key in self._safe_by_key}
         self.overlaps: list[dict[str, Any]] = []
         self._union_overlapping_safes()
@@ -696,6 +751,7 @@ class _UnitResolver:
                 }
                 for timelock, entry in sorted(self._proposers.items())
             },
+            "owner_set_contradictions": self.owner_set_contradictions,
         }
 
     def proposer_for(self, facts: P.PrincipalFacts) -> dict[str, Any] | None:
@@ -934,7 +990,9 @@ def _keyset_independence(
 # ---------------------------------------------------------------- value fold
 
 
-def _instance(signal: FunctionSignal, severity: float, basis: tuple[str, ...]) -> _Instance:
+def _instance(
+    signal: FunctionSignal, severity: float, basis: tuple[str, ...], principal_address: str = ""
+) -> _Instance:
     magnitude = _gate(signal, "reach_magnitude_usd")
     pricing_blocked = None
     native_only = False
@@ -964,16 +1022,101 @@ def _instance(signal: FunctionSignal, severity: float, basis: tuple[str, ...]) -
         pricing_blocked=pricing_blocked,
         native_only=native_only,
         asset_identity_undecidable=asset_identity_undecidable,
+        principal_address=principal_address,
     )
 
 
 def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[str]) -> None:
+    # The burn sentinel is refused as a REACH key here, one admission short of the
+    # walk: ``msg.sender != 0x0``, so nothing routes value through it and a
+    # repoint witness that names it has proved no reach. The confidence perimeter
+    # refuses it on the same rule; this is the value side of that discipline.
+    kept = tuple(key for key in instance.entity_keys if not P.is_zero_key(key))
+    if len(kept) != len(instance.entity_keys):
+        row.zero_reach_keys_refused += len(instance.entity_keys) - len(kept)
+        row.notes.add("zero_address_reach_key_refused")
+        if not kept:
+            # Every reach key this instance carried was the sentinel, so it now
+            # witnesses nothing. Dropping it silently would read as "this call
+            # reaches no priced entity" — an earned negative it never earned.
+            row.zero_reach_stripped.append(
+                {
+                    "function": signal.function_name,
+                    "entity": entity_key(signal.chain, signal.deployment_address),
+                    "why": "every_reach_key_was_the_zero_address(refused; reach not_determined)",
+                }
+            )
+        instance.entity_keys = kept
     row.instances.append(instance)
     row.seeds.add(entity_key(signal.chain, signal.deployment_address))
     row.tiers.add(signal.witness_tier)
     row.notes.update(signal.witness_notes)
     row.notes.update(notes)
     row.citations.extend(signal.citations)
+
+
+def _member_weakness(
+    row: _Row, per_entity: dict[str, float], value_plane: P.ValuePlane, closure: P.ControlClosure
+) -> tuple[dict[str, float], float, tuple[str, str, str]]:
+    """A merged unit's weakness, per REACHED ENTITY (inv. 5).
+
+    ``_row_for`` keeps the max weakness over a merged Safe unit's members while
+    the row folds the UNION of their reach, with no tie between a member's rung
+    and the entities that member reaches — so value only the 4/8 member can move
+    is published at the 3/7 member's rung, a coalition nobody proved.
+
+    inv. 5's weakest path is the weakest path TO THAT ENTITY: entity ``e`` is
+    priced at the max over ONLY the members proven to reach ``e``. The row still
+    publishes a single weakness against a union no single member reaches, so that
+    union is priced at **the hardest rung among the contributing members** — the
+    ``min`` over the per-entity rungs. That is NOT the overlap record's
+    ``min_coalition_to_act_as_both``: that field is ``max(k)``, and weakness is
+    keyed on ``k/n``, so a 3/4 member (0.20) and a 5/20 member (0.55) put the
+    coalition size on the 5/20 Safe while this rung is the 3/4's 0.20. The
+    hardest rung is the deliberate under-claim — inv. 5 forbids pricing a union
+    at a rung no contributing member has to clear. Naming a member's reach needs
+    the member's own witness, so a row whose instances cannot be attributed to a
+    member keeps the unit-level rung rather than inventing an attribution.
+    """
+    unchanged = ({}, row.weakness, (row.weakest_label, row.principal_kind, row.weakest_address))
+    if len(row.member_gate) < 2 or not per_entity:
+        return unchanged
+    by_member: dict[str, list[_Instance]] = defaultdict(list)
+    for instance in row.instances:
+        if instance.principal_address not in row.member_gate:
+            return unchanged
+        by_member[instance.principal_address].append(instance)
+
+    reach_by_member: dict[str, set[str]] = {}
+    for address, instances in by_member.items():
+        probe = _Row(unit=row.unit, capability=row.capability, path=row.path)
+        probe.instances = instances
+        # Reach is MEMBERSHIP, so it is read off ``.reach`` and never off the
+        # value map: W2b's per-call magnitude cap scales what a member is charged
+        # and can empty ``per_entity`` outright, but it moves no entity out of
+        # what the member provably reaches.
+        reached = _row_value(probe, value_plane, closure).reach
+        reach_by_member[address] = reached
+
+    weakness_by_entity: dict[str, float] = {}
+    holders_by_entity: dict[str, list[str]] = {}
+    for key in sorted(per_entity):
+        holders = sorted(a for a, reached in reach_by_member.items() if key in reached)
+        if not holders:
+            # The union carries an entity no single member's fold reproduces.
+            # That is an attribution this function cannot witness, so the row
+            # keeps the unit rung rather than pricing it at a guess.
+            return unchanged
+        holders_by_entity[key] = holders
+        weakness_by_entity[key] = max(row.member_gate[a][0] for a in holders)
+
+    if len({*weakness_by_entity.values(), row.weakness}) == 1:
+        return unchanged
+    binding_key = min(weakness_by_entity, key=lambda k: (weakness_by_entity[k], k))
+    published = weakness_by_entity[binding_key]
+    binding = max(holders_by_entity[binding_key], key=lambda a: (row.member_gate[a][0], a))
+    _, label, kind = row.member_gate[binding]
+    return weakness_by_entity, published, (label, kind, binding)
 
 
 def _aggregate(
@@ -990,11 +1133,16 @@ def _aggregate(
             continue
         valued = _row_value(row, value_plane, closure)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
+        value_basis = valued.basis
+        if row.zero_reach_stripped:
+            undetermined = undetermined + row.zero_reach_stripped
+            value_basis += f"; {len(row.zero_reach_stripped)} instance(s) reached only the refused zero address"
         # A priced total over an entity that also holds assets the priced sheet
         # never covered is a FLOOR over that entity, not its value: an instance
         # that answered is not the same fact as an entity that was answered.
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
         is_floor = bool(value_usd is not None and (undetermined or partially_priced))
+        weakness_by_entity, weakness, weakest = _member_weakness(row, per_entity, value_plane, closure)
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
         if value_usd is None or value_usd < 100_000:
@@ -1019,16 +1167,16 @@ def _aggregate(
                 "unit_members": sorted(units.published_units()["members"].get(row.unit, [row.unit])),
                 # The published principal IS the one that set the weakness, not
                 # whichever row was folded last.
-                "principal": f"{row.weakest_label} {row.weakest_address}",
+                "principal": f"{weakest[0]} {weakest[2]}",
                 "access_path": row.path,
                 "principal_addresses": sorted(row.principal_addresses),
-                "principal_kind": row.principal_kind,
+                "principal_kind": weakest[1],
                 "capability": row.capability,
                 "chain": row.unit.split("::", 1)[0],
                 "value_at_stake_usd": (round(value_usd, 2) if value_usd is not None else None),
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
                 "value_by_entity": {k: round(v, 2) for k, v in sorted(per_entity.items())},
-                "value_at_stake_basis": valued.basis,
+                "value_at_stake_basis": value_basis,
                 "value_at_stake_is_floor": is_floor,
                 # The entities behind the floor flag, named rather than left to
                 # be inferred from the flag alone.
@@ -1041,14 +1189,20 @@ def _aggregate(
                 "undetermined_instances": undetermined,
                 "proven_no_reach_instances": valued.proven_no_reach,
                 "witnessed_magnitude_caps": valued.magnitude_caps,
+                "zero_address_reach_keys_refused": row.zero_reach_keys_refused,
                 # Filled in after the sort, which is where a tie can be seen.
                 # Present on every row: null is the proven "nothing tied".
                 "exposure_order_tie": None,
                 "severity_proven": round(severity, 4),
                 "severity_basis": sorted({b for instance in row.instances for b in instance.severity_basis}),
-                "weakness": round(row.weakness, 4),
-                "weakest_gate": row.weakest_label,
-                "raw_points": round(K.SEV_SCALE * severity * row.weakness * band, 4),
+                "weakness": round(weakness, 4),
+                "weakest_gate": weakest[0],
+                # inv.5 read as the weakest path TO AN ENTITY: present only where a
+                # merged unit's members reach different entities at different rungs,
+                # and then the union is priced at the hardest rung among the
+                # contributing members. Absent means one rung priced the whole union.
+                "weakness_by_entity": {k: round(v, 4) for k, v in sorted(weakness_by_entity.items())},
+                "raw_points": round(K.SEV_SCALE * severity * weakness * band, 4),
                 "n_functions": len({(i.signal.deployment_address, i.signal.selector) for i in row.instances}),
                 "n_entities": len(row.seeds),
                 # The deployment entities the row's instances were witnessed ON
@@ -1064,7 +1218,7 @@ def _aggregate(
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
                 "citations": row.citations[:8],
-                "counterfactual": _counterfactual(row.principal_kind),
+                "counterfactual": _counterfactual(weakest[1]),
             }
         )
 
@@ -1102,10 +1256,11 @@ def _aggregate(
         # exposure term exactly what keying rows by access path separated.
         exclusive: dict[str, dict[str, float]] = {}
         for row in rest:
-            fraction = row["severity_proven"] * row["weakness"]
+            per_entity_weakness = row["weakness_by_entity"]
             for key, held in row["value_by_entity"].items():
                 if key in top["value_by_entity"]:
                     continue
+                fraction = row["severity_proven"] * per_entity_weakness.get(key, row["weakness"])
                 previous = exclusive.get(key)
                 if previous is None or held * fraction > previous["usd"] * previous["fraction"]:
                     exclusive[key] = {"usd": held, "fraction": round(fraction, 6)}
@@ -1440,15 +1595,25 @@ def _entity_contribution(
 
 
 def _closure(seeds: set[str], closure: P.ControlClosure) -> set[str]:
+    """The reach the walk proves, with the burn sentinel refused at every hop.
+
+    ``load_control_closure`` already refuses ``0x0`` at both ends of an edge, so
+    on the production path this guard never fires. It is here because the fold's
+    guarantee must not be a property of how the closure was BUILT: the sentinel
+    is the single largest fan-out in the graph, and one edge into it — from a
+    repoint witness, a hand-built closure, or a future loader — would otherwise
+    hand a row everything behind ``msg.sender != 0x0``. Refusing reach is always
+    monotone, so the second line of defence costs nothing.
+    """
     seen: set[str] = set()
-    stack = sorted(seeds)
+    stack = [key for key in sorted(seeds) if not P.is_zero_key(key)]
     while stack:
         key = stack.pop()
         if key in seen:
             continue
         seen.add(key)
         for edge in closure.edges_from(key):
-            if edge.anchor not in seen:
+            if edge.anchor not in seen and not P.is_zero_key(edge.anchor):
                 stack.append(edge.anchor)
     return seen
 
@@ -1507,7 +1672,11 @@ def _grade(
     gaps: list[dict[str, Any]] = []
     any_priced = False
     for finding in findings:
-        fraction = finding["severity_proven"] * finding["weakness"]
+        # W2c/R9 hook (this dict lookup is the whole change to this function):
+        # inv.5 is the weakest path TO THAT ENTITY, so a merged unit charges each
+        # entity at the rung of the members proven to reach it, not at the unit's
+        # weakest member.
+        per_entity_weakness = finding.get("weakness_by_entity") or {}
         mine = 0.0
         # Entities this row could actually measure a share of. An entity whose
         # budget earlier rows already spent is priced and still unmeasurable,
@@ -1527,7 +1696,7 @@ def _grade(
             held = finding["value_by_entity"].get(key)
             # An entity only a subsumed row reaches is charged at THAT row's
             # fraction, never at this one's.
-            key_fraction = fraction
+            key_fraction = finding["severity_proven"] * per_entity_weakness.get(key, finding["weakness"])
             if held is None and key in exclusive:
                 held = exclusive[key]["usd"]
                 key_fraction = exclusive[key]["fraction"]
@@ -1614,9 +1783,6 @@ def _grade(
     return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps
 
 
-_ZERO_ADDRESS = "0x" + "0" * 40
-
-
 def _entities_outside_perimeter(
     signals: list[FunctionSignal],
     answered: dict[str, list[int]],
@@ -1635,12 +1801,11 @@ def _entities_outside_perimeter(
     address is refused by an admission rule with its own published count, so its
     absence is a decision rather than a gap and it is not reported here.
     """
-    zero_suffix = "::" + _ZERO_ADDRESS
     outside = {key for key in answered if key not in perimeter}
     for signal in signals:
         for raw in signal.value_entity_keys:
             key = value_plane.canonical(raw)
-            if key not in perimeter and not key.endswith(zero_suffix):
+            if key not in perimeter and not P.is_zero_key(key):
                 outside.add(key)
     return sorted(outside)
 
@@ -1650,6 +1815,7 @@ def _confidence(
     value_plane: P.ValuePlane,
     closure: P.ControlClosure,
     proven_eoas: set[str],
+    discovery_entities: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
 
@@ -1659,9 +1825,25 @@ def _confidence(
     drop its unanswered weight out of its own denominator — while an unpriced
     contract outside the closure still carries ``band(None)`` of unanswered
     weight rather than vanishing. Seeding it from the signal population instead
-    is what let LESS analysis publish MORE confidence. Three figures, and the
+    is what let LESS analysis publish MORE confidence. Four figures, and the
     headline is the MINIMUM — knowing who can call something, knowing what it
-    does, and being able to price what it reaches are different questions.
+    does, being able to price what it reaches, and knowing HOW MUCH the reach
+    moves are different questions.
+
+    The closure the scorer WALKS is a subset of the relations discovery proved
+    exist, so seeding the perimeter from the walked closure alone let declining a
+    relation FREE confidence: the entities that relation proved are principals of
+    gated functions never entered the denominator. ``discovery_entities`` carries
+    every endpoint of every relation in the DB's own authority vocabulary, walked
+    or not, so declining one charges confidence and can never relieve it (inv. 6).
+
+    The fourth term is the honest home for an unproven magnitude. A signal that
+    proved reach but not how much value that reach moves is UNANSWERED here — the
+    unknown that otherwise has nowhere to land but the grade. Its denominator is
+    the whole perimeter, exactly as the reachability and capability terms', which
+    is the only shape monotone under losing work: an entity whose signals vanish
+    contributes zero either way, while a denominator scoped to entities that
+    happen to carry a signal would RISE when a signal is lost.
 
     Every key is admitted through ``value_plane.canonical``: an implementation
     is the same entity as the proxy that deploys it, and admitting both hands
@@ -1676,13 +1858,12 @@ def _confidence(
     vacuously answered, while its pricing term is untouched — holding value is
     a question code-lessness does not answer.
     """
-    zero_suffix = "::" + _ZERO_ADDRESS
     perimeter: dict[str, float] = {}
     folded: set[str] = set()
     zero_excluded: set[str] = set()
 
     def admit(raw: str) -> None:
-        if raw.endswith(zero_suffix):
+        if P.is_zero_key(raw):
             zero_excluded.add(raw)
             return
         key = value_plane.canonical(raw)
@@ -1698,11 +1879,27 @@ def _confidence(
         admit(key)
         for controlled in closure.controlled_by(key):
             admit(controlled)
+    # Everything above is what the scorer WALKED. Everything below is what
+    # discovery PROVED exists, per relation — counted against the walked base so
+    # each relation's own contribution is visible rather than assigned to
+    # whichever relation happened to be admitted first.
+    walked = set(perimeter)
+    discovery = discovery_entities or {}
+    discovery_admitted: dict[str, int] = {}
+    for relation in sorted(discovery):
+        keys = sorted(discovery[relation])
+        for key in keys:
+            admit(key)
+        discovery_admitted[relation] = len(
+            {value_plane.canonical(key) for key in keys if not P.is_zero_key(key)} - walked
+        )
     denominator = round(sum(sorted(perimeter.values())), 6)
 
     reach: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     scored: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     priced: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    magnitude: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    magnitude_census: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for signal in signals:
         key = value_plane.canonical(entity_key(signal.chain, signal.deployment_address))
         answered = (
@@ -1729,6 +1926,24 @@ def _confidence(
             )
             if decidable and value_plane.total(key) is not None:
                 priced[key][0] += 1
+        if signal.value_state == VALUE_STATE_PROVEN_REACH:
+            # The reach-magnitude term. A proven reach whose magnitude has no
+            # witness is the unknown that otherwise lands in the grade as the
+            # entity's whole balance sheet; here it lands as UNANSWERED, which is
+            # the only place it can sit without being published as a number.
+            #
+            # EVERY proven-reach signal is in the denominator. A per-capability
+            # exclusion list was tried and removed: a capability that publishes
+            # proven_reach is claiming it can move value, and its only live effect
+            # was on entities carrying both an excluded and an admitted signal,
+            # where dropping the excluded one RAISED the term by discarding a real
+            # unanswered question — the shape this term exists to stop.
+            witnessed = _gate(signal, "reach_magnitude_usd").is_determined
+            magnitude[key][1] += 1
+            magnitude_census[signal.claim_id][1] += 1
+            if witnessed:
+                magnitude[key][0] += 1
+                magnitude_census[signal.claim_id][0] += 1
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -1742,17 +1957,67 @@ def _confidence(
     for key in codeless_answered:
         reach[key] = [1, 1]
         scored[key] = [1, 1]
+        # No code is no capability, and no capability moves no value: there is no
+        # reach magnitude here to leave unwitnessed. Same earned getCode witness,
+        # same VACUOUS answer — counted in the term and disclosed separately as
+        # ``reach_magnitude_vacuous_credit_pct``, because a vacuous answer is not
+        # a witness. The pricing term still stands alone.
+        magnitude[key] = [1, 1]
 
     outside = _entities_outside_perimeter(signals, reach, perimeter, value_plane)
     reach_pct = round(100.0 * weighted(reach) / denominator, 1) if denominator else 0.0
     capability_pct = round(100.0 * weighted(scored) / denominator, 1) if denominator else 0.0
     priced_weight = sum(perimeter[k] for k in sorted(perimeter) if value_plane.total(k) is not None)
     priced_pct = round(100.0 * priced_weight / denominator, 1) if denominator else 0.0
+    magnitude_pct = round(100.0 * weighted(magnitude) / denominator, 1) if denominator else 0.0
+    # The share of the denominator this term could reach at its best: every entity
+    # already answered vacuously, plus every reach-carrying entity if all of its
+    # proven reaches carried a magnitude witness. Without it a consumer cannot
+    # tell how much of the gap is unwitnessed magnitude from how much is perimeter
+    # the signal population never covered — two different pieces of work.
+    magnitude_ceiling = sum(perimeter[k] for k in sorted(magnitude) if magnitude[k][1] and k in perimeter)
+    magnitude_ceiling_pct = round(100.0 * magnitude_ceiling / denominator, 1) if denominator else 0.0
+    # Most of this term can be VACUOUS: a proven-codeless entity answers it with
+    # no magnitude witness at all. Publishing the headline alone would let a
+    # perimeter full of EOAs read as answered magnitude, so the vacuous share is
+    # published beside it (term minus this is the witness-backed share of the
+    # denominator) together with the witnessed share of the weight that actually
+    # carries a proven reach — the figure that only rises when W3/W4b do work.
+    vacuous = {key for key in codeless_answered if key in perimeter}
+    vacuous_weight = sum(perimeter[key] for key in sorted(vacuous))
+    vacuous_pct = round(100.0 * vacuous_weight / denominator, 1) if denominator else 0.0
+    reaching = [key for key in sorted(magnitude) if key not in vacuous and magnitude[key][1] and key in perimeter]
+    reaching_weight = sum(perimeter[key] for key in reaching)
+    reaching_answered = sum(perimeter[key] * (magnitude[key][0] / magnitude[key][1]) for key in reaching)
+    witnessed_of_reaching_pct = round(100.0 * reaching_answered / reaching_weight, 1) if reaching_weight else 0.0
+    # Counted off the census, not off the weighted table: the table also carries
+    # the vacuous credit for proven-codeless entities, which are not signals.
+    signals_seen = sum(v[1] for v in magnitude_census.values())
+    signals_witnessed = sum(v[0] for v in magnitude_census.values())
     return {
-        "pct": min(reach_pct, capability_pct, priced_pct),
+        "pct": min(reach_pct, capability_pct, priced_pct, magnitude_pct),
         "reachability_answered_pct": reach_pct,
         "capability_scored_pct": capability_pct,
         "value_priced_pct": priced_pct,
+        "reach_magnitude_witnessed_pct": magnitude_pct,
+        "reach_magnitude_ceiling_pct": magnitude_ceiling_pct,
+        # Both in the same units as the term (share of the perimeter denominator),
+        # so ``witnessed_pct - vacuous_credit_pct`` is the witness-backed share.
+        "reach_magnitude_vacuous_credit_pct": vacuous_pct,
+        # Of the perimeter weight that actually carries a proven reach, the share
+        # whose magnitude is witnessed. No vacuous credit is in this figure.
+        "reach_magnitude_witnessed_of_reaching_pct": witnessed_of_reaching_pct,
+        "reach_magnitude_signals": {
+            "proven_reach_in_denominator": signals_seen,
+            "magnitude_witnessed": signals_witnessed,
+            "by_capability": {k: v for k, v in sorted(magnitude_census.items())},
+            "denominator_rule": (
+                "EVERY proven-reach signal, with no per-capability exclusions: a capability "
+                "that publishes proven_reach is claiming it moves value, so 'how much' is a "
+                "question it owes an answer to. The freeze fraction (pause.set) is in the "
+                "denominator and unanswered by design until a witness for it exists"
+            ),
+        },
         "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
         "perimeter_entities": len(perimeter),
         # Entities a signal answers FOR or reaches INTO that the denominator
@@ -1768,13 +2033,16 @@ def _confidence(
         "implementation_entities_folded": len(folded),
         "zero_address_entities_excluded": len(zero_excluded),
         "proven_codeless_answered": len(codeless_answered),
+        "discovery_relation_entities_admitted": discovery_admitted,
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (
             "the denominator is the protocol's contracts rows unioned with the value "
-            "plane and the control closure, folded through the discovery-fixed "
-            "implementation alias map, and is built without reference to the "
-            "signal population, so analysis work can only move value from unanswered "
-            "to answered"
+            "plane, the walked control closure and every endpoint of every authority "
+            "relation discovery recorded — walked or not — folded through the "
+            "discovery-fixed implementation alias map, and built without reference to "
+            "the signal population, so analysis work can only move value from "
+            "unanswered to answered and declining to walk a relation can only charge "
+            "confidence, never free it"
         ),
     }
 

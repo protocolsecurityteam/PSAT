@@ -197,10 +197,13 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     const channels = [...container.querySelectorAll(".sc-channel")];
-    expect(channels).toHaveLength(3);
+    // Four terms: the fourth (reach magnitude witnessed) is absent from this
+    // fixture, so it renders unmeasured and can never carry the tag.
+    expect(channels).toHaveLength(4);
     expect(channels[0].querySelector(".sc-hd").textContent).toBe("min");
     expect(channels[1].querySelector(".sc-hd")).toBeNull();
     expect(channels[2].querySelector(".sc-hd")).toBeNull();
+    expect(channels[3].querySelector(".sc-hd")).toBeNull();
     expect(screen.getByText(/it measures how much of the protocol the grade is built on/)).toBeInTheDocument();
   });
 

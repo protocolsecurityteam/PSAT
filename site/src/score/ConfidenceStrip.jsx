@@ -17,7 +17,7 @@ export default function ConfidenceStrip({ channels }) {
         </div>
       ))}
       <div className="sc-conf-note">
-        Confidence is the <b>lowest</b> of the three — it measures how much of the protocol the grade is
+        Confidence is the <b>lowest</b> of these — it measures how much of the protocol the grade is
         built on, not how correct it is.
       </div>
     </div>

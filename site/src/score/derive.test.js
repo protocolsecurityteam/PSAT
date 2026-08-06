@@ -477,7 +477,7 @@ describe("derive — audit posture", () => {
 describe("derive — confidence", () => {
   it("tags whichever channel actually is the minimum", () => {
     const channels = confidenceChannels(ETHERFI);
-    expect(channels.map((c) => c.pct)).toEqual([20.7, 39.2, 40.8]);
+    expect(channels.map((c) => c.pct)).toEqual([20.7, 39.2, 40.8, null]);
     expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual(["capability_scored_pct"]);
   });
 
