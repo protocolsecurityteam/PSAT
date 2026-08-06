@@ -3014,17 +3014,38 @@ def _confidence(
     signals_witnessed = sum(v[0] for v in magnitude_census.values())
     # The term is a per-entity FRACTION, so an entity carrying one witnessed and
     # one unwitnessed proven reach sits at 1/2 — and removing the unwitnessed
-    # signal moves it to 1/1, RAISING the term for having proven less. The shape
-    # is real and is WAIVED here rather than papered over: every alternative
-    # denominator measured is worse. Scoping it to signals that could carry a
-    # magnitude re-introduces the per-capability exclusion this term already
-    # removed for the same reason; fixing the denominator at the distilled
-    # signal count would charge a proven NO-reach signal for a magnitude it does
-    # not owe, permanently. What is published instead is the size of the
-    # exposure: the mixed entities are where the shape can bite, and a
-    # composition pass that gives an entity's second signal a magnitude will move
-    # this count as well as the term.
+    # signal moves it to 1/1, RAISING the term for having proven less.
+    #
+    # RE-EXAMINED at W4b and WAIVED again, now with a measured bound instead of
+    # an argument. Two facts decided it. First, the shape is not this term's: all
+    # four terms are the same per-entity answered/seen fraction over the same
+    # signal population, so deleting an unanswered signal raises the
+    # reachability and capability terms identically — it is a property of the
+    # model's shape, and closing it here alone would leave the headline (a MIN
+    # over the four) moving on the others anyway. Second, no denominator closes
+    # it: every ratio whose denominator counts only the questions that were POSED
+    # rises when an unanswered one is deleted, and a denominator that does not
+    # shrink would have to count magnitude questions an entity owes independently
+    # of its signals — a population nothing in the schema supplies. Denominating
+    # over signals rather than entities (the alternative named in the W3 review)
+    # has the identical algebra and additionally breaks the min() comparability
+    # with the other three terms.
+    #
+    # So the exposure is SIZED and published rather than closed. Composition does
+    # widen it — it is what turns a 0/n entity into a mixed one — and the two
+    # figures below say by exactly how much: the largest single deletion that
+    # could move the term, and the move if every unwitnessed signal at every
+    # mixed entity vanished at once.
     mixed = [key for key in sorted(magnitude) if key not in vacuous and 0 < magnitude[key][0] < magnitude[key][1]]
+    single_gain = total_gain = 0.0
+    for key in mixed:
+        answered, seen = magnitude[key]
+        weight = perimeter.get(key, 0.0)
+        if seen > 1:
+            single_gain = max(single_gain, weight * answered / (seen * (seen - 1)))
+        total_gain += weight * (1.0 - answered / seen)
+    mixed_single_pct = round(100.0 * single_gain / denominator, 2) if denominator else 0.0
+    mixed_total_pct = round(100.0 * total_gain / denominator, 2) if denominator else 0.0
     return {
         "pct": min(reach_pct, capability_pct, priced_pct, magnitude_pct),
         "reachability_answered_pct": reach_pct,
@@ -3051,12 +3072,22 @@ def _confidence(
             "composed_by_capability": {k: v for k, v in sorted(composed_census.items())},
             "by_capability": {k: v for k, v in sorted(magnitude_census.items())},
             "mixed_witness_entities": len(mixed),
+            # The size of the monotonicity edge below, in the term's own units.
+            # The first is the most the term could rise from deleting ONE
+            # unwitnessed proven-reach signal; the second from deleting every
+            # unwitnessed signal at every mixed entity.
+            "mixed_witness_max_single_deletion_gain_pct": mixed_single_pct,
+            "mixed_witness_total_deletion_gain_pct": mixed_total_pct,
             "mixed_witness_reading": (
                 "entities carrying BOTH a witnessed and an unwitnessed proven reach. The term "
                 "is a per-entity fraction, so deleting an unwitnessed signal from one of these "
                 "raises it — a monotonicity edge this model does not close, published rather "
                 "than hidden, because every denominator that closes it charges a signal for a "
-                "magnitude it does not owe"
+                "magnitude it does not owe. It is not this term's shape alone: the "
+                "reachability and capability terms are the same fraction over the same "
+                "population and move the same way. The two gain figures beside this bound the "
+                "exposure in the term's own units, so a reader can see what the edge is worth "
+                "rather than only that it exists"
             ),
             "denominator_rule": (
                 "EVERY proven-reach signal, with no per-capability exclusions: a capability "
