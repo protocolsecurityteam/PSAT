@@ -146,11 +146,13 @@ def value_plane(
     per_asset: dict[str, dict[str, float]] | None = None,
     contracts: tuple[str, ...] = (),
     alias: dict[str, str] | None = None,
+    per_asset_state: dict[str, dict[str, str]] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
+    plane.per_asset_state = per_asset_state or {}
     # The confidence perimeter's base population, as the DB would supply it.
-    plane.contract_entities = set(contracts) | set(plane.per_asset)
+    plane.contract_entities = set(contracts) | set(plane.per_asset) | set(plane.per_asset_state)
     plane.alias = alias or {}
     plane.provenance = {"stub": True}
     return plane
@@ -192,7 +194,7 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
-        monkeypatch.setattr(P, "load_role_holder_floors", lambda s: role_floors or {})
+        monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
         monkeypatch.setattr(P, "perimeter_state", lambda s, p: ("settled", {"pending_jobs": 0}))
         monkeypatch.setattr(P, "plane_row_counts", lambda s, p: {"stub": True})
@@ -1086,7 +1088,12 @@ def test_probe_n_functions_counts_distinct_functions(fold):
 
 def test_r1_capability_principal_is_not_a_reach_relation():
     assert "capability_principal" not in P.CONTROL_RELATIONS
-    assert "capability_principal" in P.UNCONSUMED_REACH_RELATIONS
+    # Not walked, and the exclusion carries a stated reason rather than being a
+    # relation the walk happens never to mention.
+    assert "capability_principal" in P.UNCONSUMED_REACH_REASONS
+    # The rationale the register published before 1.1.0 was refuted: the
+    # materialization budget never bites, so it cannot be the reason.
+    assert "WITHDRAWN" in P.UNCONSUMED_REACH_REASONS["capability_principal"]
 
 
 def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
@@ -1708,3 +1715,243 @@ def test_the_closure_answers_adjacency_from_the_edges_it_carries():
     assert closure.controlled_by(KEY_C) == tuple(sorted((KEY_V, KEY_PROXY)))
     assert closure.controlled_by(KEY_V) == ()
     assert {e.relation for e in closure.edges_from(KEY_C)} == {"controller_value"}
+
+
+# --------------------------------------------------------------------------
+# Value plane: which observation is current, and what a $0.00 reading proves
+# --------------------------------------------------------------------------
+
+
+class _Row:
+    """The columns ``_reduce_observations`` reads off a balance row."""
+
+    def __init__(self, usd, *, block=None, fetched=None, rid=0, raw="1000000"):
+        self.usd_value = usd
+        self.block_number = block
+        self.fetched_at = fetched
+        self.id = rid
+        self.raw_balance = raw
+
+
+def _reduce(**buckets):
+    return P._reduce_observations({("k", "asset"): {a: rows for a, rows in buckets.items()}})
+
+
+def test_one_account_read_twice_publishes_the_LATER_read_not_the_larger():
+    """MAX across two heights of one account is a high-water mark, not a holding.
+
+    The shape that fired on the real corpus: a proxy's live row and its
+    implementation's frozen row are the SAME on-chain account read at two
+    heights, folded into one bucket by the alias map. Reducing by MAX republishes
+    a balance that had already moved when it was written.
+    """
+    account = "0x" + "1" * 40
+    values, states, reduction = _reduce(
+        **{account: [_Row(26_404_230.63, block=25_658_048, rid=1), _Row(14_346_384.46, block=25_691_487, rid=2)]}
+    )
+    assert values["k"]["asset"] == 14_346_384.46
+    assert states["k"]["asset"] == P.ASSET_PRICED
+    # The drop is disclosed, not silently absorbed.
+    assert reduction["stale_high_water_marks_dropped"] == 1
+    assert reduction["stale_high_water_usd_dropped"] == round(26_404_230.63 - 14_346_384.46, 2)
+    assert reduction["height_witnessed_accounts"] == 1
+
+
+def test_two_DISTINCT_accounts_are_two_holdings_and_the_entity_holds_their_sum():
+    """The account is the discriminator: same account = one holding, two = two.
+
+    Unexercised on the corpus this shipped against (every competing pair observes
+    one address), so it is pinned here rather than left to a future reader to
+    infer from the code.
+    """
+    a, b = "0x" + "1" * 40, "0x" + "2" * 40
+    values, _, reduction = _reduce(**{a: [_Row(1000.0, block=10, rid=1)], b: [_Row(400.0, block=10, rid=2)]})
+    assert values["k"]["asset"] == 1400.0
+    assert reduction["multi_account_buckets"] == 1
+    assert reduction.get("unwitnessed_account_buckets", 0) == 0
+
+
+def test_an_unwitnessed_account_identity_is_never_summed():
+    """Summing readings that may be one account twice re-mints the double count.
+
+    Where the identity is missing the reduction falls back to MAX and says so,
+    rather than inventing a holding out of two readings of an unknown number of
+    accounts.
+    """
+    values, _, reduction = _reduce(**{"": [_Row(1000.0, rid=1)], "0x" + "2" * 40: [_Row(400.0, rid=2)]})
+    assert values["k"]["asset"] == 1000.0
+    assert reduction["unwitnessed_account_buckets"] == 1
+
+
+def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
+    """ERC-20 rows are never height-pinned, so most orderings are write order.
+
+    A fact about this database, not about the chain — counted so the fiat is
+    stated rather than passed off as an as-of-block reading.
+    """
+    import datetime as _dt
+
+    early = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    late = _dt.datetime(2026, 2, 1, tzinfo=_dt.timezone.utc)
+    account = "0x" + "1" * 40
+    values, _, reduction = _reduce(**{account: [_Row(900.0, fetched=late, rid=1), _Row(100.0, fetched=early, rid=2)]})
+    assert values["k"]["asset"] == 900.0
+    assert reduction["write_order_accounts"] == 1
+    assert reduction.get("height_witnessed_accounts", 0) == 0
+
+
+def test_a_rounding_floor_reading_is_not_a_proven_zero():
+    """``usd_value`` is numeric(20,2): $0.0035 stores as 0.00.
+
+    Publishing that as a determined 0.0 mints a proven-empty balance sheet out of
+    a price lookup that answered "below half a cent".
+    """
+    plane = P.ValuePlane()
+    plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="12345")]})
+    assert plane.per_asset_state["k"]["asset"] == P.ASSET_BELOW_RESOLUTION
+    assert "asset" not in plane.per_asset.get("k", {})
+    assert plane.sheet_state("k") == P.SHEET_BELOW_RESOLUTION
+    assert plane.total("k") is None
+
+
+def test_a_proven_zero_QUANTITY_is_the_only_witness_of_an_empty_sheet():
+    """The quantity, not the price, is what proves a sheet empty.
+
+    Zero of an asset is worth zero at any price, so this is the one reading under
+    which 0.00 is a number. The arm is unexercised on the shipped corpus — no row
+    anywhere carries a zero raw balance — so it is pinned here.
+    """
+    plane = P.ValuePlane()
+    plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="0")]})
+    assert plane.per_asset_state["k"]["asset"] == P.ASSET_PROVEN_ZERO
+    assert plane.sheet_state("k") == P.SHEET_PROVEN_EMPTY
+    assert plane.total("k") == 0.0
+
+
+def test_the_three_ways_of_having_no_total_stay_apart():
+    """not_determined is not one state: dust, unpriced and no rows are three."""
+    plane = value_plane(
+        per_asset={},
+        per_asset_state={
+            "dust": {"a": P.ASSET_BELOW_RESOLUTION},
+            "unpriced": {"a": P.ASSET_UNPRICED},
+        },
+    )
+    assert plane.sheet_state("dust") == P.SHEET_BELOW_RESOLUTION
+    assert plane.sheet_state("unpriced") == P.SHEET_UNPRICED
+    assert plane.sheet_state("never-seen") == P.SHEET_NO_ROWS
+    assert [plane.total(k) for k in ("dust", "unpriced", "never-seen")] == [None, None, None]
+
+
+def test_a_positive_row_beside_dust_keeps_its_positive_floor():
+    """Dust withholds a number only where it is the ONLY answer."""
+    plane = value_plane(
+        per_asset={"k": {"good": 1000.0}},
+        per_asset_state={"k": {"good": P.ASSET_PRICED, "dust": P.ASSET_BELOW_RESOLUTION}},
+    )
+    assert plane.sheet_state("k") == P.SHEET_PRICED
+    assert plane.total("k") == 1000.0
+
+
+def test_an_all_dust_sheet_charges_no_finding_a_proven_zero_exposure(fold):
+    """The published shape R6 forbids: exposure 0.0 beside a proven reach.
+
+    ``value_at_stake 0.0 / proven_reach / exposure 0.0`` reads as "this capability
+    is proven to reach nothing" — an earned negative minted by a price lookup that
+    answered below its own resolution.
+    """
+    dust_key = entity_key("base", VAULT)
+    plane = value_plane(
+        per_asset={KEY_PROXY: {"token": 5_000_000.0}},
+        per_asset_state={
+            KEY_PROXY: {"token": P.ASSET_PRICED},
+            dust_key: {"dust": P.ASSET_BELOW_RESOLUTION},
+        },
+        contracts=(KEY_C, dust_key, KEY_PROXY),
+    )
+    dust = sig(
+        chain="base",
+        deployment_address=VAULT,
+        **proven(1.0),
+        **reaches(dust_key),
+        authority_openness="open",
+    )
+    priced = sig(
+        deployment_address=PROXY,
+        function_name="g",
+        **proven(1.0),
+        **reaches(KEY_PROXY),
+        authority_openness="open",
+    )
+    document = fold([dust, priced], value=plane).document()
+    row = next(r for r in document["findings"] if r["principal_unit"].startswith("base::"))
+    assert row["value_at_stake_usd"] is None
+    assert row["exposure_usd"] is None
+    assert row["value_band"] == "not_determined"
+    # The priced row beside it still scores, so this is the dust entity's own
+    # answer and not a withheld grade standing in for one.
+    assert document["grade_exposure"] is not None
+
+
+# --------------------------------------------------------------------------
+# Closure admission: the zero address, and the authority it proves absent
+# --------------------------------------------------------------------------
+
+
+def test_a_closure_publishes_a_zero_count_for_a_rule_that_never_fired():
+    """An admission rule reports where it did NOT fire, or it discloses nothing."""
+    closure = closure_of({KEY_C: {KEY_V}})
+    assert closure.refusal_counts() == {P.REFUSAL_ZERO_ANCHOR: 0, P.REFUSAL_ZERO_PRINCIPAL: 0}
+    assert closure.renounced_counts() == {"authority_slots": 0, "anchors": 0}
+
+
+def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
+    """Two different facts about the same row, and only one is evidence.
+
+    "We declined to walk an edge to the burn address" says what this scorer did;
+    "this authority is held by nobody" says what the protocol is. Collapsing them
+    would lose the earned negative inside a housekeeping count.
+    """
+    zero = entity_key("ethereum", P.ZERO_ADDRESS)
+    closure = P.ControlClosure(
+        edges=(),
+        refusals=(
+            P.RefusedEdge(
+                rule=P.REFUSAL_ZERO_PRINCIPAL,
+                principal=zero,
+                anchor=KEY_V,
+                relation="controller_value",
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+                edge_id=1,
+            ),
+        ),
+        renounced=(
+            P.RenouncedAuthority(
+                anchor=KEY_V,
+                relation="controller_value",
+                scope=P.parse_edge_scope("owner", "controller_value"),
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+                edge_id=1,
+            ),
+        ),
+    )
+    assert closure.refusal_counts()[P.REFUSAL_ZERO_PRINCIPAL] == 1
+    assert closure.renounced_counts() == {"authority_slots": 1, "anchors": 1}
+    # The refused edge reaches nothing: it is not in the walked graph at all.
+    assert closure.principals() == ()
+    assert closure.controlled_by(zero) == ()
+
+
+def test_a_single_token_label_restating_its_relation_names_no_state_variable():
+    """ "controller_value" on a controller_value edge is not a variable name.
+
+    The multi-word restatements measured today ("role principal", "safe owner")
+    fail the identifier check anyway; this single-token case is the one the
+    restatement branch actually decides, and without it the parser would publish
+    a state variable no source declares.
+    """
+    scope = P.parse_edge_scope("controller_value", "controller_value")
+    assert (scope.kind, scope.state_var) == (P.SCOPE_NOT_DETERMINED, None)
+    assert scope.label == "controller_value"
+    # A real getter name on the same relation still earns the state-var reading.
+    assert P.parse_edge_scope("owner", "controller_value").kind == P.SCOPE_STATE_VAR

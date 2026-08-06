@@ -183,7 +183,7 @@ def compute_protocol_score(
 
     value_plane = P.load_value_plane(session, protocol_id)
     closure = P.load_control_closure(session, protocol_id)
-    role_floors = P.load_role_holder_floors(session)
+    role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
     principal_facts = P.load_principal_plane(session, refs)

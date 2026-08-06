@@ -29,7 +29,18 @@ from services.scoring.constants import (
 )
 from services.scoring.distill import distill_contract_signals, distill_job_signals
 from services.scoring.fold import compute_protocol_score
-from services.scoring.planes import load_audit_posture, load_value_plane
+from services.scoring.planes import (
+    CONTROL_RELATIONS,
+    REFUSAL_ZERO_ANCHOR,
+    REFUSAL_ZERO_PRINCIPAL,
+    SHEET_BELOW_RESOLUTION,
+    UNCONSUMED_REASON_UNCLASSIFIED,
+    load_audit_posture,
+    load_control_closure,
+    load_role_holder_floors,
+    load_value_plane,
+    unconsumed_reach_relations,
+)
 from services.scoring.population import current_signals_for_protocol
 from services.scoring.schema import entity_key
 from utils.scoring_status import (
@@ -946,9 +957,13 @@ def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus
     _balance(db_session, impl, usd="400.00", token=token)
 
     plane = load_value_plane(db_session, corpus.protocol.id)
-    # One entity, one asset: MAX, never the 1400.00 the two rows would sum to.
-    assert plane.provenance["tracked_total_usd"] == 1000.0
-    assert plane.total(entity_key("ethereum", impl.address)) == 1000.0
+    # One entity, one asset. Neither row records the account it observed, so they
+    # are one account read twice — the later write is the current reading, and
+    # never the 1400.00 the two rows would sum to. The impl's key answers with
+    # the proxy's sheet, which is the alias fold this test exists for.
+    assert plane.provenance["tracked_total_usd"] == 400.0
+    assert plane.total(entity_key("ethereum", impl.address)) == 400.0
+    assert plane.total(entity_key("ethereum", proxy.address)) == 400.0
 
 
 def test_an_unpriced_perimeter_publishes_no_tracked_total(corpus, db_session):
@@ -1074,3 +1089,256 @@ def test_an_unwitnessed_audit_discovery_publishes_no_counts(corpus, db_session):
     assert posture["contracts_proven"] is None
     # The denominator is a discovery fact and stands on its own.
     assert posture["contracts_total"] == 1
+
+
+# --------------------------------------------------------------------------
+# Value-plane hygiene and closure admission, against real rows
+# --------------------------------------------------------------------------
+
+
+def _balance_row(
+    session,
+    contract: Contract,
+    *,
+    usd: str | None,
+    token: str | None,
+    observed: str | None = None,
+    block: int | None = None,
+    raw: str = "1",
+) -> None:
+    """A balance row. ``block`` is only storable on a native row: the schema's
+    ``ck_contract_balances_token_block_null`` enforces that an ERC-20 quantity is
+    never height-pinned, which is why most observations can only be ordered by
+    write order."""
+    from db.models import ContractBalance
+
+    session.add(
+        ContractBalance(
+            contract_id=contract.id,
+            token_address=token,
+            decimals=18,
+            raw_balance=raw,
+            usd_value=None if usd is None else Decimal(usd),
+            observed_address=observed,
+            block_number=block,
+        )
+    )
+    session.commit()
+
+
+def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, db_session):
+    """R5: MAX across heights republishes a balance that had already moved.
+
+    The proxy's live row and its implementation's frozen row observe ONE address;
+    the alias fold puts them in one bucket, and only the height says which is
+    current. Native, because the schema refuses a height on an ERC-20 row.
+    """
+    proxy = corpus.contract("0x" + "f1" * 20, implementation="0x" + "f2" * 20)
+    impl = corpus.contract("0x" + "f2" * 20)
+    _balance_row(db_session, impl, usd="26404230.63", token=None, observed=proxy.address, block=25_658_048)
+    _balance_row(db_session, proxy, usd="14346384.46", token=None, observed=proxy.address, block=25_691_487)
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    assert plane.total(entity_key("ethereum", proxy.address)) == 14346384.46
+    assert plane.provenance["observation_reduction"]["stale_high_water_marks_dropped"] == 1
+    assert plane.provenance["observation_reduction"]["stale_high_water_usd_dropped"] == 12057846.17
+
+
+def test_two_distinct_observed_accounts_of_one_entity_are_summed(corpus, db_session):
+    """R5, the other leg: distinct accounts are distinct holdings.
+
+    Unexercised on the corpus this shipped against — every competing pair there
+    observes one address — so the ruling is pinned rather than left implicit.
+    """
+    token = "0x" + "d6" * 20
+    proxy = corpus.contract("0x" + "f3" * 20, implementation="0x" + "f4" * 20)
+    impl = corpus.contract("0x" + "f4" * 20)
+    _balance_row(db_session, proxy, usd="1000.00", token=token, observed=proxy.address)
+    _balance_row(db_session, impl, usd="400.00", token=token, observed=impl.address)
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    assert plane.total(entity_key("ethereum", proxy.address)) == 1400.0
+    assert plane.provenance["observation_reduction"]["multi_account_buckets"] == 1
+
+
+def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_session):
+    """R6: 0.00 is the storage floor, not a proven-empty balance sheet."""
+    token = "0x" + "d7" * 20
+    other = "0x" + "d8" * 20
+    contract = corpus.contract("0x" + "f5" * 20)
+    _balance_row(db_session, contract, usd="0.00", token=token, observed=contract.address, raw="3500000")
+    _balance_row(db_session, contract, usd=None, token=other, observed=contract.address, raw="900")
+
+    plane = load_value_plane(db_session, corpus.protocol.id)
+    key = entity_key("ethereum", contract.address)
+    assert plane.sheet_state(key) == SHEET_BELOW_RESOLUTION
+    assert plane.total(key) is None
+    # The perimeter is unpriced, so the tracked total is not_determined — never a
+    # zero denominator standing in for "the protocol holds nothing".
+    assert plane.provenance["tracked_total_usd"] is None
+    assert plane.provenance["sheet_states"] == {SHEET_BELOW_RESOLUTION: 1}
+
+
+def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):
+    """R10: a burn sentinel is not a principal, and not an anchor either.
+
+    Admitting it makes every renounced authority in the protocol one principal's
+    closure — the single largest fan-out in the graph, seeded by no witness.
+    """
+    from db.models import ControlGraphEdge
+
+    zero = "0x" + "0" * 40
+    anchor = corpus.contract("0x" + "f6" * 20)
+    real = "0x" + "ab" * 20
+    for from_node, to_node, label in (
+        (anchor.address, zero, "owner"),
+        (zero, real, "authority"),
+        (anchor.address, real, "roleRegistry"),
+    ):
+        db_session.add(
+            ControlGraphEdge(
+                contract_id=anchor.id,
+                from_node_id=f"address:{from_node}",
+                to_node_id=f"address:{to_node}",
+                relation="controller_value",
+                label=label,
+            )
+        )
+    db_session.commit()
+
+    closure = load_control_closure(db_session, corpus.protocol.id)
+    assert closure.refusal_counts() == {REFUSAL_ZERO_ANCHOR: 1, REFUSAL_ZERO_PRINCIPAL: 1}
+    assert entity_key("ethereum", zero) not in closure.principals()
+    assert closure.controlled_by(entity_key("ethereum", zero)) == ()
+    # The one real edge survives: the rule removes reach, it does not empty the graph.
+    assert closure.controlled_by(entity_key("ethereum", real)) == (entity_key("ethereum", anchor.address),)
+
+
+def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(corpus, db_session):
+    """R18: renounced authority is a resolved constraint, not a missing edge.
+
+    Counted apart from the refusal it coincides with — "we declined to walk this"
+    and "nobody holds this authority" are different facts.
+    """
+    from db.models import ControlGraphEdge
+
+    zero = "0x" + "0" * 40
+    anchor = corpus.contract("0x" + "f7" * 20)
+    db_session.add(
+        ControlGraphEdge(
+            contract_id=anchor.id,
+            from_node_id=f"address:{anchor.address}",
+            to_node_id=f"address:{zero}",
+            relation="controller_value",
+            label="owner",
+        )
+    )
+    db_session.commit()
+
+    closure = load_control_closure(db_session, corpus.protocol.id)
+    assert closure.renounced_counts() == {"authority_slots": 1, "anchors": 1}
+    renounced = closure.renounced[0]
+    assert renounced.anchor == entity_key("ethereum", anchor.address)
+    assert renounced.scope.state_var == "owner"
+    assert closure.refusal_counts()[REFUSAL_ZERO_PRINCIPAL] == 1
+
+
+def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus, db_session):
+    """R13: the bound is discovery-fixed, not built from what the walk consumed.
+
+    A relation the scorer never mentions, and a relation that carries no rows
+    today, are both silently unwalked under an enumeration keyed on the consumed
+    set. Both must be published with their counts.
+    """
+    from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
+
+    anchor = corpus.contract("0x" + "f8" * 20)
+    for relation, label in (
+        ("safe_owner", "safe owner"),
+        ("external_call_target", "liquidityPool"),
+        ("controller_value_unattributed", "accountantState.payoutAddress"),
+        ("capability_principal", None),
+        ("controller_value", "owner"),
+        ("some_relation_nobody_classified", "x"),
+    ):
+        db_session.add(
+            ControlGraphEdge(
+                contract_id=anchor.id,
+                from_node_id=f"address:{anchor.address}",
+                to_node_id="address:0x" + "ac" * 20,
+                relation=relation,
+                label=label,
+            )
+        )
+    db_session.commit()
+
+    published = unconsumed_reach_relations(db_session, corpus.protocol.id)
+    relations = published["relations"]
+    # Walked, so absent from the exclusion register.
+    assert "controller_value" not in relations
+    for relation in ("safe_owner", "external_call_target", "controller_value_unattributed", "capability_principal"):
+        assert relations[relation]["edges"] == 1
+        assert relations[relation]["classified"] is True
+    # Present in the writer's allowlist, no rows here — a named zero, not an absence.
+    for relation in set(CONTROL_EDGE_RELATIONS) - set(CONTROL_RELATIONS):
+        assert relation in relations
+    assert relations["timelock_owner"]["edges"] == 0
+    # A relation nobody classified is published rather than dropped.
+    assert relations["some_relation_nobody_classified"] == {
+        "edges": 1,
+        "reason": UNCONSUMED_REASON_UNCLASSIFIED,
+        "classified": False,
+    }
+    assert published["edges_excluded_total"] == 5
+
+
+def test_role_holder_floors_are_scoped_to_the_protocol_being_scored(corpus, db_session):
+    """R20: another protocol's analysis may not move this protocol's floors.
+
+    The table carries no protocol column, so an unscoped read makes the
+    population a function of what else has been analysed — the same protocol
+    scored twice would carry different floors. Only a registry this protocol's
+    own resolution names is in scope, which is exactly the set the fold can join.
+    """
+    contract = corpus.contract("0x" + "fb" * 20)
+    registry = "0x" + "f9" * 20
+    foreign_registry = "0x" + "fa" * 20
+    role_hash = "0x" + "ce" * 32
+    function = corpus.function(
+        contract,
+        name="upgradeTo",
+        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
+    )
+    details = _safe_details(OWNERS, 5)
+    details["trace"] = [{"step": "enumerable_role_store", "authority": registry, "role_labels": {role_hash: "ROLE"}}]
+    corpus.principal(function, address=SAFE, resolved_type="safe", details=details)
+    for address in (registry, foreign_registry):
+        db_session.add(
+            RoleHolderPlane(
+                chain_id=1,
+                registry_address=address,
+                role_hash=role_hash,
+                holders=[OWNERS[0], OWNERS[1]],
+                holders_basis="pinned_has_role_confirmed",
+                as_of_block=100,
+                coverage="lower_bound",
+                holder_set_exhaustive="not_determined",
+                role_name_basis="not_determined",
+                cursor_page_completeness="not_determined",
+                cursor_first_indexed_block_basis="not_determined",
+                cursor_enrollment_bases={},
+                candidate_count=2,
+                unconfirmed_candidate_count=0,
+                fold_chain_disagreements=[],
+            )
+        )
+    db_session.commit()
+    try:
+        floors = load_role_holder_floors(db_session, corpus.protocol.id)
+        assert ("ethereum", registry.lower(), role_hash.lower()) in floors
+        assert ("ethereum", foreign_registry.lower(), role_hash.lower()) not in floors
+    finally:
+        db_session.query(RoleHolderPlane).filter(
+            RoleHolderPlane.registry_address.in_([registry, foreign_registry])
+        ).delete(synchronize_session=False)
+        db_session.commit()

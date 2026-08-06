@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func as sql_func
@@ -26,22 +27,86 @@ from utils.scoring_status import (
 
 NATIVE_ASSET = "native"
 
+ZERO_ADDRESS = "0x" + "0" * 40
+
 # Control relations that carry authority. ``safe_owner`` is excluded (one owner
 # does not satisfy k-of-n) and ``controller_value_unattributed`` is excluded
 # (real principals whose authority RELATION was never established — a confidence
 # item, not an edge).
 CONTROL_RELATIONS = ("controller_value", "role_principal", "mapping_member")
 
-# ``capability_principal`` is deliberately NOT a reach relation here. Its own
-# register entry licenses it "for REACHABILITY only" on the argument that the
-# authority graph already folds the same link — but in THIS closure, which is
-# built from control edges alone, it is the sole carrier of those links rather
-# than a duplicate of them, so admitting it moves value no other witness moved.
-# Its population is also budget-gated (``PSAT_FP_MATERIALIZE_LIMIT``): a reach
-# that appears or disappears with a materialization budget is not a witnessed
-# fact about the protocol. The register's designated reach licence is
-# ``gated_contract_backlink``, which the distiller consumes.
-UNCONSUMED_REACH_RELATIONS = ("capability_principal",)
+# Why each relation this scorer knows of is NOT walked as reach. The map is a
+# vocabulary of reasons, not the published set: ``unconsumed_reach_relations``
+# enumerates from what the DATABASE holds (plus every relation the graph writer
+# can emit), so a relation nobody has classified still gets published with its
+# count rather than being dropped for want of an entry here.
+UNCONSUMED_REACH_REASONS: dict[str, str] = {
+    "safe_owner": (
+        "one owner is not the unit that can act: a k-of-n Safe's authority is folded at "
+        "the Safe, and a single owner edge would publish reach that owner cannot exercise "
+        "alone. The Safe itself reaches through its own controller_value edges"
+    ),
+    "controller_value_unattributed": (
+        "the principal is real but the authority RELATION behind it was never established "
+        "— the label names a value the anchor holds (including dotted paths like "
+        "'accountantState.payoutAddress'), not a proven authority over the anchor. An "
+        "unestablished relation is a confidence item, never an edge"
+    ),
+    "external_call_target": (
+        "direction: the anchor CALLS the target. Being called is not being controlled, so "
+        "walking it as reach would invert the authority arrow"
+    ),
+    "capability_principal": (
+        "a FUNCTION-level claim — this address is a resolved principal of a gated function "
+        "on the anchor — not proof of authority over the anchor ENTITY, which is what this "
+        "closure walks. Declining it costs confidence rather than earning it: the perimeter "
+        "counts the relation whether or not the walk consumes it. The rationale published "
+        "before model_version 1.1.0 — that the population is materialization-budget gated "
+        "(PSAT_FP_MATERIALIZE_LIMIT) — is WITHDRAWN as refuted: the limit is not reached on "
+        "any corpus measured, and the same spawn budget gates every relation equally, so it "
+        "never distinguished this one"
+    ),
+    "timelock_owner": (
+        "in the graph writer's authority allowlist (db.CONTROL_EDGE_RELATIONS) but not in "
+        "this scorer's consumed set. It carries no rows on any corpus measured; this entry "
+        "exists so the day it does, the exclusion is a stated one and not a silent drop"
+    ),
+    "proxy_admin_owner": (
+        "in the graph writer's authority allowlist (db.CONTROL_EDGE_RELATIONS) but not in "
+        "this scorer's consumed set. It carries no rows on any corpus measured; this entry "
+        "exists so the day it does, the exclusion is a stated one and not a silent drop"
+    ),
+}
+
+UNCONSUMED_REASON_UNCLASSIFIED = (
+    "present in this protocol's control_graph_edges but classified by neither this scorer's "
+    "consumed set nor its exclusion register — published with its count so an unrecognised "
+    "relation is visible rather than silently unwalked"
+)
+
+# --- what one (entity, asset) reading proves ---------------------------------
+# ``usd_value`` is numeric(20,2), so 0.00 is the STORAGE FLOOR and not a number:
+# a $0.0035 holding stores as 0.00 indistinguishably from a $0.00 one. The
+# quantity is what separates them — a proven-zero raw balance is worth zero at
+# any price — so a 0.00 reading is only ever a determined zero when the quantity
+# proves it, and is otherwise below the column's resolution.
+ASSET_PRICED = "priced"
+ASSET_BELOW_RESOLUTION = "priced_below_resolution"
+ASSET_PROVEN_ZERO = "proven_zero"
+ASSET_UNPRICED = "unpriced"
+
+# --- what a whole balance sheet proves ---------------------------------------
+SHEET_PRICED = "priced"
+SHEET_BELOW_RESOLUTION = "priced_below_resolution"
+SHEET_UNPRICED = "unpriced"
+SHEET_PROVEN_EMPTY = "proven_empty"
+SHEET_NO_ROWS = "no_rows"
+
+# The states in which a sheet total is NOT a number. Kept apart from each other
+# all the way to the consumer: "every price lookup answered below the column's
+# resolution" and "no price lookup answered" are different facts, and neither is
+# "proven to hold nothing".
+SHEET_NOT_DETERMINED = (SHEET_BELOW_RESOLUTION, SHEET_UNPRICED, SHEET_NO_ROWS)
 
 
 def _lower(value: Any) -> str:
@@ -57,17 +122,25 @@ def _float(value: Any) -> float | None:
 
 @dataclass
 class ValuePlane:
-    """Per-entity value, reduced MAX per (entity, asset).
+    """Per-entity value, reduced to the LATEST observation per (entity, asset).
 
     ``contract_entities`` is every entity the protocol's ``contracts`` rows name,
     priced or not. It is the confidence perimeter's base population: discovery
     fixes it, so it does not move with what has been analysed, and an unpriced
     contract outside the control closure still carries its unanswered weight
     instead of vanishing from its own denominator.
+
+    ``per_asset`` carries only DETERMINED dollar readings — an asset whose price
+    lookup never answered, or answered below the storage column's resolution, is
+    absent from it and named in ``per_asset_state`` instead. The two together are
+    the three-state: a number, a stated reason there is no number, or no row at
+    all. A key present in ``per_asset`` with no ``per_asset_state`` entry (a
+    hand-built plane) is read as determined, which is what that map means.
     """
 
     contract_entities: set[str] = field(default_factory=set)
     per_asset: dict[str, dict[str, float]] = field(default_factory=dict)
+    per_asset_state: dict[str, dict[str, str]] = field(default_factory=dict)
     native_fact: dict[str, str] = field(default_factory=dict)
     alias: dict[str, str] = field(default_factory=dict)
     unpriced_positions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -78,24 +151,177 @@ class ValuePlane:
         """An implementation's key folds onto the proxy that deploys it."""
         return self.alias.get(key, key)
 
-    def total(self, key: str) -> float | None:
-        """The entity's priced holdings, or ``None`` when nothing is priced.
+    def sheet_state(self, key: str) -> str:
+        """What the entity's balance sheet PROVES, in one of five states.
 
-        ``None`` is not zero: an entity whose every row is unpriced and one
-        proven to hold nothing are different facts, and only the second may
-        reach a consumer as a number.
+        ``priced`` — at least one determined non-zero reading, so ``total`` is a
+        floor over what was priced. ``priced_below_resolution`` — every price
+        lookup that answered landed on the ``numeric(20,2)`` floor, which is a
+        holding of *at most* half a cent per row and never a proven zero.
+        ``unpriced`` — rows exist and no lookup answered. ``proven_empty`` — every
+        asset's QUANTITY is proven zero, the only witness under which 0.00 is a
+        number rather than a rounding artefact. ``no_rows`` — nothing observed.
         """
-        assets = self.per_asset.get(self.canonical(key))
-        if not assets:
+        canonical = self.canonical(key)
+        values = self.per_asset.get(canonical) or {}
+        states = self.per_asset_state.get(canonical) or {}
+        if any(value != 0.0 for value in values.values()):
+            return SHEET_PRICED
+        if any(state == ASSET_BELOW_RESOLUTION for state in states.values()):
+            return SHEET_BELOW_RESOLUTION
+        if any(state == ASSET_UNPRICED for state in states.values()):
+            return SHEET_UNPRICED
+        if values or any(state == ASSET_PROVEN_ZERO for state in states.values()):
+            return SHEET_PROVEN_EMPTY
+        return SHEET_NO_ROWS
+
+    def total(self, key: str) -> float | None:
+        """The entity's priced holdings, or ``None`` when they are not a number.
+
+        ``None`` is not zero, and the three ways of not being a number are kept
+        apart in ``sheet_state``: an entity whose every row is unpriced, one whose
+        every price rounded to the storage floor, and one proven to hold nothing
+        are different facts, and only the last may reach a consumer as ``0.0``.
+        """
+        state = self.sheet_state(key)
+        if state == SHEET_PROVEN_EMPTY:
+            return 0.0
+        if state in SHEET_NOT_DETERMINED:
             return None
+        assets = self.per_asset.get(self.canonical(key)) or {}
         return round(sum(sorted(assets.values())), 6)
 
     @property
     def tracked_total(self) -> float:
-        # Only priced entities enter the denominator. An unpriced one contributes
-        # nothing rather than a zero, so the ratio is over what was measured.
-        totals = [self.total(k) for k in self.per_asset]
+        # Only entities with a determined total enter the denominator. One whose
+        # total is not a number contributes nothing rather than a zero, so the
+        # ratio is over what was measured.
+        totals = [self.total(k) for k in set(self.per_asset) | set(self.per_asset_state)]
         return round(sum(sorted(t for t in totals if t is not None)), 2)
+
+
+_EPOCH = datetime.min
+
+
+def _write_order(row: Any) -> tuple[bool, Any, int]:
+    """Insert order, for observations whose READ height was never recorded."""
+    return (row.fetched_at is not None, row.fetched_at or _EPOCH, int(row.id or 0))
+
+
+def _latest_observation(rows: list[Any]) -> tuple[Any, bool]:
+    """The current reading of one account, and whether a HEIGHT witnessed it.
+
+    Ordering by ``block_number`` is the only ordering that proves which reading
+    is current, and it is available only where every competing row carries one:
+    ``contract_balance_fetches.block_number`` pins the native quantity and is
+    deliberately never projected onto ERC-20 rows, so most competing readings
+    have no height at all. There the fallback is write order, which is a fact
+    about this database rather than about the chain — hence the flag, counted in
+    the provenance so the fiat is stated rather than silent.
+    """
+    if len(rows) == 1:
+        return rows[0], rows[0].block_number is not None
+    if all(row.block_number is not None for row in rows):
+        return max(rows, key=lambda row: (row.block_number, _write_order(row))), True
+    return max(rows, key=_write_order), False
+
+
+def _is_proven_zero_quantity(row: Any) -> bool:
+    """Whether the QUANTITY held is proven zero — worth 0 at any price.
+
+    The only witness under which a ``0.00`` dollar reading is a number rather
+    than the storage column's floor. An unparseable raw balance proves nothing
+    and lands on False, which keeps the reading below-resolution rather than
+    minting a proven zero out of a value nobody could read.
+    """
+    try:
+        return float(str(row.raw_balance)) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _asset_reading(row: Any) -> tuple[float | None, str]:
+    """One row's dollar reading and the state that reading is in."""
+    usd = _float(row.usd_value)
+    if usd is None:
+        # NULL usd_value is not_determined, never 0: nothing separates a
+        # worthless asset from a failed price lookup.
+        return None, ASSET_UNPRICED
+    if usd != 0.0:
+        return usd, ASSET_PRICED
+    if _is_proven_zero_quantity(row):
+        return 0.0, ASSET_PROVEN_ZERO
+    return None, ASSET_BELOW_RESOLUTION
+
+
+def _reduce_observations(
+    observations: dict[tuple[str, str], dict[str, list[Any]]],
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, str]], dict[str, Any]]:
+    """Latest observation per account; SUM across DISTINCT observed accounts.
+
+    Two readings of one account are one holding read twice — the later one is
+    the answer and the earlier one is stale, so MAX over them publishes a
+    high-water mark that was already false when it was written. Two readings of
+    two accounts are two holdings of the same entity, and the entity holds their
+    SUM. The discriminator is ``observed_address``, the address the read was
+    actually issued against.
+
+    Where the account identity itself is missing on any competing reading the
+    sum is not licensed — summing over an unwitnessed identity is how the double
+    count this reduction exists to remove gets back in — so those buckets fall
+    back to MAX and are counted separately.
+    """
+    per_asset: dict[str, dict[str, float]] = defaultdict(dict)
+    per_asset_state: dict[str, dict[str, str]] = defaultdict(dict)
+    counters: dict[str, int] = defaultdict(int)
+    stale_usd = 0.0
+
+    for (key, asset), accounts in sorted(observations.items()):
+        counters["buckets"] += 1
+        readings: list[tuple[float | None, str]] = []
+        for account in sorted(accounts):
+            rows = accounts[account]
+            if len(rows) > 1:
+                counters["multi_observation_accounts"] += 1
+            row, height_witnessed = _latest_observation(rows)
+            counters["height_witnessed_accounts" if height_witnessed else "write_order_accounts"] += 1
+            readings.append(_asset_reading(row))
+            priced = [_float(candidate.usd_value) for candidate in rows]
+            highest = max((value for value in priced if value is not None), default=None)
+            current = _float(row.usd_value)
+            if highest is not None and current is not None and highest > current:
+                counters["stale_high_water_marks_dropped"] += 1
+                stale_usd += highest - current
+
+        if len(accounts) > 1:
+            counters["multi_account_buckets"] += 1
+            if "" in accounts:
+                counters["unwitnessed_account_buckets"] += 1
+
+        determined = [value for value, state in readings if value is not None]
+        if any(state == ASSET_PRICED for _, state in readings):
+            state = ASSET_PRICED
+            # The MAX fallback where an account identity is missing: never a sum
+            # over readings that may be the same account twice.
+            value = max(determined) if "" in accounts and len(accounts) > 1 else sum(determined)
+        elif any(pair[1] == ASSET_BELOW_RESOLUTION for pair in readings):
+            state, value = ASSET_BELOW_RESOLUTION, None
+        elif any(pair[1] == ASSET_UNPRICED for pair in readings):
+            state, value = ASSET_UNPRICED, None
+        else:
+            state, value = ASSET_PROVEN_ZERO, 0.0
+        counters[f"assets_{state}"] += 1
+        per_asset_state[key][asset] = state
+        if value is not None:
+            per_asset[key][asset] = round(value, 6)
+
+    reduction: dict[str, Any] = dict(sorted(counters.items()))
+    reduction["stale_high_water_usd_dropped"] = round(stale_usd, 2)
+    return (
+        {k: dict(sorted(v.items())) for k, v in sorted(per_asset.items())},
+        {k: dict(sorted(v.items())) for k, v in sorted(per_asset_state.items())},
+        reduction,
+    )
 
 
 def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
@@ -127,7 +353,6 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             impl_to_proxy[impl_key] = proxy_key
     plane.alias = impl_to_proxy
 
-    per_asset: dict[str, dict[str, float]] = defaultdict(dict)
     native_seen: set[str] = set()
     fetched: list[Any] = []
     rows = (
@@ -137,6 +362,11 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         .order_by(ContractBalanceLatest.contract_id, ContractBalanceLatest.token_address, ContractBalanceLatest.id)
         .all()
     )
+    # One bucket per (entity, asset, observed account). The alias fold puts a
+    # proxy's rows and its implementation's rows under one entity key, and those
+    # are the SAME on-chain account read twice at two heights by two writers —
+    # not two holdings — so the account is what a reading has to be reduced over.
+    observations: dict[tuple[str, str], dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
         key = plane.canonical(entity_key(chain_of.get(row.contract_id), address_of.get(row.contract_id)))
         # A NULL token_address IS the native asset by this column's definition,
@@ -144,17 +374,13 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         asset = _lower(row.token_address) if row.token_address else NATIVE_ASSET
         if asset == NATIVE_ASSET:
             native_seen.add(key)
-        usd = _float(row.usd_value)
         if row.fetched_at is not None:
             fetched.append(row.fetched_at)
-        if usd is None:
-            # NULL usd_value is not_determined, never 0: nothing separates a
-            # worthless asset from a failed price lookup.
-            continue
-        previous = per_asset[key].get(asset)
-        if previous is None or usd > previous:
-            per_asset[key][asset] = usd
-    plane.per_asset = {k: dict(sorted(v.items())) for k, v in sorted(per_asset.items())}
+        observations[(key, asset)][_lower(row.observed_address)].append(row)
+
+    per_asset, per_asset_state, reduction = _reduce_observations(observations)
+    plane.per_asset = per_asset
+    plane.per_asset_state = per_asset_state
 
     # The proven-zero / fetch-failed discriminator for an ABSENT native row.
     latest_fetch: dict[int, Any] = {}
@@ -218,19 +444,58 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             }
         )
 
+    sheet_states: dict[str, int] = defaultdict(int)
+    for key in sorted(set(plane.per_asset) | set(plane.per_asset_state)):
+        sheet_states[plane.sheet_state(key)] += 1
+    if reduction.get(f"assets_{ASSET_BELOW_RESOLUTION}"):
+        plane.annotations.append(
+            {
+                "fact": "priced readings at the storage column's resolution floor are NOT proven zeros",
+                "assets": reduction[f"assets_{ASSET_BELOW_RESOLUTION}"],
+                "entities": sheet_states[SHEET_BELOW_RESOLUTION],
+                "note": (
+                    "usd_value is numeric(20,2), so a $0.0035 holding stores as 0.00. Such a "
+                    "reading answers 'below half a cent', never 'holds nothing', and an entity "
+                    "whose every priced reading is one has NO determined total. Only a "
+                    "proven-zero QUANTITY witnesses an empty sheet"
+                ),
+                "proven_zero_quantity_assets": reduction.get(f"assets_{ASSET_PROVEN_ZERO}", 0),
+                "proven_zero_arm_exercised": bool(reduction.get(f"assets_{ASSET_PROVEN_ZERO}")),
+            }
+        )
+
     plane.contract_entities = {plane.canonical(key) for key in plane.contract_entities}
     plane.provenance = {
         "entity_key": "effective_functions.deployment_address -> contracts.address, chain-scoped",
         "contract_entities": len(plane.contract_entities),
-        "reduction": "MAX per (entity, asset)",
+        "reduction": (
+            "latest observation per (entity, asset, observed account); SUM across DISTINCT observed accounts"
+        ),
+        "observation_reduction": reduction,
+        "observation_reduction_reading": (
+            "two readings of ONE account are one holding read twice, so the later one is the "
+            "answer and MAX would publish a stale high-water mark; two readings of TWO accounts "
+            "are two holdings and the entity holds their sum. height_witnessed_accounts were "
+            "ordered by block_number; write_order_accounts had no recorded read height (ERC-20 "
+            "rows are never height-pinned by construction) and fell back to insert order, which "
+            "is a fact about this database and not about the chain"
+        ),
+        "sheet_states": dict(sorted(sheet_states.items())),
+        "sheet_states_reading": (
+            "priced = a determined non-zero reading, so the total is a floor; "
+            "priced_below_resolution = every price that answered landed on the numeric(20,2) "
+            "floor and the total is NOT a number; unpriced = no price answered; proven_empty = "
+            "every quantity proven zero, the only state in which 0.00 is a number; no_rows = "
+            "nothing observed"
+        ),
         # The fold's own exposure denominator, published rather than left to be
         # back-solved from grade_exposure — which is undefined whenever the grade
         # is withheld. An empty priced sheet is not_determined, never a zero.
         "tracked_total_usd": plane.tracked_total if plane.per_asset else None,
         "tracked_total_usd_reading": (
-            "MAX per (entity, asset), implementation folded onto its proxy; unpriced "
-            "entities contribute nothing and are not read as 0, so this is a floor. "
-            "null = no priced entity in the perimeter"
+            "latest observation per (entity, asset, observed account), implementation folded "
+            "onto its proxy; entities with no determined total contribute nothing and are not "
+            "read as 0, so this is a floor. null = no priced entity in the perimeter"
         ),
         "balance_rows": len(rows),
         "restaking_rows": len(positions),
@@ -374,24 +639,55 @@ def _role_bindings(details: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(out))
 
 
-def load_role_holder_floors(session: Session) -> dict[tuple[str, str, str], dict[str, Any]]:
-    """Proven holder floors per (chain, registry, role hash).
+def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Proven holder floors per (chain, registry, role hash), protocol-scoped.
 
     ``holders`` is a LOWER BOUND and ``len(holders)`` is never a count; the floor
     may raise breadth concern and may never lower it. ``holder_set_exhaustive``
     is always ``not_determined``.
+
+    Scoped to the registries THIS protocol's own resolution names — the
+    ``authority``/``registry`` of a ``function_principals`` trace step, which is
+    the only key the consumer ever looks a floor up by. ``role_holder_planes`` is
+    keyed by ``(chain_id, registry_address, role_hash)`` with no protocol column,
+    so an unscoped read makes this plane's population a function of which OTHER
+    protocols have been analysed: the same protocol scored twice would carry
+    different floors, which is a purity break (inv. 11) before it is anything
+    else. Scoping loses no floor the fold could have consumed, because a registry
+    no trace names has no binding to join to.
     """
-    from db.models import RoleHolderPlane
+    from db.models import Contract, EffectiveFunction, FunctionPrincipal, RoleHolderPlane
+
+    named: set[tuple[str, str]] = set()
+    for details, chain in (
+        session.query(FunctionPrincipal.details, Contract.chain)
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(FunctionPrincipal.id)
+        .all()
+    ):
+        for step in (details or {}).get("trace") or []:
+            if not isinstance(step, dict):
+                continue
+            registry = _lower(step.get("authority") or step.get("registry"))
+            if registry:
+                named.add((coalesce_chain(chain), registry))
+    if not named:
+        return {}
 
     out: dict[tuple[str, str, str], dict[str, Any]] = {}
     rows = (
         session.query(RoleHolderPlane)
+        .filter(sql_func.lower(RoleHolderPlane.registry_address).in_(sorted({address for _, address in named})))
         .order_by(RoleHolderPlane.chain_id, RoleHolderPlane.registry_address, RoleHolderPlane.role_hash)
         .all()
     )
     for row in rows:
         chain = _chain_name(row.chain_id)
-        if chain is None or not isinstance(row.holders, list) or not row.holders:
+        if chain is None or (chain, _lower(row.registry_address)) not in named:
+            continue
+        if not isinstance(row.holders, list) or not row.holders:
             continue
         if row.holders_basis != "pinned_has_role_confirmed":
             continue
@@ -405,10 +701,16 @@ def load_role_holder_floors(session: Session) -> dict[tuple[str, str, str], dict
 
 
 # What an edge's label is allowed to say. A ``role_principal`` label carries the
-# role numbers the principal holds ("roles 12", "roles 14,16"); every other
-# label names a state variable ("owner", "hook", "_roles"). No label in any
-# corpus carries a selector, so an edge never names the function it licenses —
-# that join lives in function_principals, not here.
+# role numbers the principal holds ("roles 12", "roles 14,16") or, on 55 of 285,
+# the bare relation restatement "role principal" and no role at all. Most other
+# labels name a state variable ("owner", "hook", "_roles"), but not all of them
+# do: ``controller_value_unattributed`` carries dotted access paths
+# ("accountantState.payoutAddress", "fee.treasury"), ``safe_owner`` carries the
+# constant "safe owner", and ``capability_principal`` carries no label. Anything
+# that is not a role set and not a single identifier is ``not_determined`` — the
+# parser earns the state-variable reading rather than assuming it. No label in
+# any corpus carries a selector, so an edge never names the function it licenses
+# — that join lives in function_principals, not here.
 SCOPE_ROLES = "roles"
 SCOPE_STATE_VAR = "state_var"
 SCOPE_NOT_DETERMINED = "not_determined"
@@ -452,8 +754,12 @@ def parse_edge_scope(label: str | None, relation: str | None = None) -> EdgeScop
     match = _ROLES_LABEL.match(text)
     if match:
         return EdgeScope(SCOPE_ROLES, roles=tuple(sorted({int(n) for n in match.group(1).split(",")})), label=text)
-    # A label that only restates its own relation ("role principal" on a
-    # role_principal edge) names nothing the relation did not already say.
+    # A label that only restates its own relation names nothing the relation did
+    # not already say. The multi-word restatements measured today ("role
+    # principal", "safe owner") would reach not_determined through the
+    # identifier check below anyway; this branch is what decides the SINGLE-TOKEN
+    # case, where "controller_value" on a controller_value edge would otherwise
+    # be read as a state variable of that name — a variable no source declares.
     if relation and text.replace(" ", "_").lower() == relation.lower():
         return EdgeScope(SCOPE_NOT_DETERMINED, label=text)
     if _IDENTIFIER.match(text):
@@ -478,6 +784,44 @@ class ControlEdge:
     edge_id: int | None = None
 
 
+REFUSAL_ZERO_PRINCIPAL = "zero_address_principal"
+REFUSAL_ZERO_ANCHOR = "zero_address_anchor"
+
+
+@dataclass(frozen=True)
+class RefusedEdge:
+    """An edge the closure declined to admit, and the rule that declined it."""
+
+    rule: str
+    principal: str
+    anchor: str
+    relation: str | None
+    witness: str
+    edge_id: int | None = None
+
+
+@dataclass(frozen=True)
+class RenouncedAuthority:
+    """An authority slot proven EMPTY: the anchor's ``label`` holds ``0x0``.
+
+    An earned negative, not a missing edge and not a refused one. For an
+    ownership slot this is renunciation; for a configuration pointer it is a
+    reference nobody set. Either way the slot names no principal at the observed
+    height, which is a resolved constraint — the mirror of the whole defect class
+    where a proven fact is discarded because the loader had no shape for it.
+
+    Counted apart from the refusals it coincides with: "we refused to walk an
+    edge to the burn address" and "this authority is proven to be held by nobody"
+    are different facts and only the second is evidence about the protocol.
+    """
+
+    anchor: str
+    relation: str | None
+    scope: EdgeScope
+    witness: str
+    edge_id: int | None = None
+
+
 @dataclass
 class ControlClosure:
     """The protocol's control edges, indexed by principal.
@@ -486,9 +830,16 @@ class ControlClosure:
     ask what an edge licenses rather than only whether it exists.
     ``controlled_by`` is the adjacency view — the whole answer this plane used to
     return, now derived from the edges rather than standing in for them.
+
+    ``refusals`` and ``renounced`` are what the loader declined to admit and what
+    it read as a proven-absent authority; both are published counts rather than
+    silent drops, on the ``5b5db0c4`` template where every admission rule states
+    where it fired.
     """
 
     edges: tuple[ControlEdge, ...] = ()
+    refusals: tuple[RefusedEdge, ...] = ()
+    renounced: tuple[RenouncedAuthority, ...] = ()
     _out: dict[str, tuple[ControlEdge, ...]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -508,16 +859,71 @@ class ControlClosure:
         """The distinct entities ``principal`` is a proven controller of."""
         return tuple(sorted({edge.anchor for edge in self.edges_from(principal)}))
 
+    def refusal_counts(self) -> dict[str, int]:
+        """Edges refused, per admission rule. A rule that never fired reports 0."""
+        counts = {REFUSAL_ZERO_PRINCIPAL: 0, REFUSAL_ZERO_ANCHOR: 0}
+        for refusal in self.refusals:
+            counts[refusal.rule] = counts.get(refusal.rule, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def renounced_counts(self) -> dict[str, int]:
+        """The earned negative, counted by edge and by the anchor it frees."""
+        return {
+            "authority_slots": len(self.renounced),
+            "anchors": len({row.anchor for row in self.renounced}),
+        }
+
+
+def _is_zero_key(key: str) -> bool:
+    return key.endswith("::" + ZERO_ADDRESS)
+
 
 def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     """The proven control edges: ``edges_from(X)`` is what X controls.
 
     Chain-scoped on both ends — an edge is only ever within one chain's graph,
     and keying it unscoped would let one chain's twin inherit the other's reach.
+
+    Two admission rules run here, each publishing its own count. The zero address
+    is refused at BOTH ends: it is a burn sentinel, not an assessable entity
+    (``msg.sender != 0x0``), and admitting it as a principal makes it the single
+    largest control hub in the graph — every anchor that ever renounced an
+    authority, folded into one closure that no witness seeds. And a
+    ``controller_value`` edge pointing AT it is read as a renounced authority,
+    an earned negative, rather than thrown away with the refusal.
     """
     from db.models import Contract, ControlGraphEdge
 
     edges: list[ControlEdge] = []
+    refusals: list[RefusedEdge] = []
+    renounced: list[RenouncedAuthority] = []
+
+    def admit(candidate: ControlEdge) -> None:
+        zero_principal = _is_zero_key(candidate.principal)
+        if zero_principal and candidate.relation == "controller_value":
+            renounced.append(
+                RenouncedAuthority(
+                    anchor=candidate.anchor,
+                    relation=candidate.relation,
+                    scope=candidate.scope,
+                    witness=candidate.witness,
+                    edge_id=candidate.edge_id,
+                )
+            )
+        if zero_principal or _is_zero_key(candidate.anchor):
+            refusals.append(
+                RefusedEdge(
+                    rule=REFUSAL_ZERO_PRINCIPAL if zero_principal else REFUSAL_ZERO_ANCHOR,
+                    principal=candidate.principal,
+                    anchor=candidate.anchor,
+                    relation=candidate.relation,
+                    witness=candidate.witness,
+                    edge_id=candidate.edge_id,
+                )
+            )
+            return
+        edges.append(candidate)
+
     rows = (
         session.query(ControlGraphEdge, Contract.chain)
         .join(Contract, Contract.id == ControlGraphEdge.contract_id)
@@ -532,7 +938,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
             continue
         # Stored from=anchor, to=principal; the authority direction is the
         # reverse, so the principal is what controls the anchor.
-        edges.append(
+        admit(
             ControlEdge(
                 principal=entity_key(chain, target),
                 anchor=entity_key(chain, source),
@@ -545,7 +951,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     for contract in session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all():
         if contract.admin:
             chain = coalesce_chain(contract.chain)
-            edges.append(
+            admit(
                 ControlEdge(
                     principal=entity_key(chain, contract.admin),
                     anchor=entity_key(chain, contract.address),
@@ -554,7 +960,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                     witness=EDGE_WITNESS_ADMIN_COLUMN,
                 )
             )
-    return ControlClosure(edges=tuple(edges))
+    return ControlClosure(edges=tuple(edges), refusals=tuple(refusals), renounced=tuple(renounced))
 
 
 def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
@@ -576,31 +982,53 @@ def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
 
 
 def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, Any]:
-    """Edges that exist but are NOT walked as reach, and why. Provenance only.
+    """Every edge that exists but is NOT walked as reach, and why. Provenance.
 
-    A relation this scorer declines to walk is a STATED exclusion rather than a
-    silent one, so a consumer can see how much reach is being left unconsumed and
-    re-open the ruling when a witnessed licence lands.
+    DISCOVERY-FIXED: the enumeration is built from what the database holds —
+    ``GROUP BY relation`` over this protocol's edges, with no filter — unioned
+    with every relation the graph writer is able to emit
+    (``db.CONTROL_EDGE_RELATIONS``). It is deliberately NOT built from what this
+    scorer chose to name: a relation nobody classified, and a relation that
+    carries no rows today and rows tomorrow, would both be silently unwalked
+    under an enumeration keyed on the consumed set. A zero count is a named
+    exclusion, not an absence.
     """
+    from db.models import CONTROL_EDGE_RELATIONS as WRITER_RELATIONS
     from db.models import Contract, ControlGraphEdge
 
-    counts: dict[str, int] = {}
-    for relation in UNCONSUMED_REACH_RELATIONS:
-        counts[relation] = int(
-            session.query(sql_func.count(ControlGraphEdge.id))
-            .join(Contract, Contract.id == ControlGraphEdge.contract_id)
-            .filter(Contract.protocol_id == protocol_id, ControlGraphEdge.relation == relation)
-            .scalar()
-            or 0
-        )
+    counts: dict[str, int] = {
+        str(relation): int(total or 0)
+        for relation, total in session.query(ControlGraphEdge.relation, sql_func.count(ControlGraphEdge.id))
+        .join(Contract, Contract.id == ControlGraphEdge.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .group_by(ControlGraphEdge.relation)
+        .order_by(ControlGraphEdge.relation)
+        .all()
+    }
+    excluded = sorted((set(counts) | set(WRITER_RELATIONS)) - set(CONTROL_RELATIONS))
+    relations = {
+        relation: {
+            "edges": counts.get(relation, 0),
+            "reason": UNCONSUMED_REACH_REASONS.get(relation, UNCONSUMED_REASON_UNCLASSIFIED),
+            "classified": relation in UNCONSUMED_REACH_REASONS,
+        }
+        for relation in excluded
+    }
     return {
-        "edges": counts,
-        "reason": (
-            "capability_principal is the SOLE carrier of these links in a closure built "
-            "from control edges alone, not a duplicate of one, and its population is "
-            "materialization-budget gated — a reach that moves with a budget is not a "
-            "witnessed fact. The register's designated reach licence is "
-            "gated_contract_backlink, which the distiller consumes"
+        "relations": relations,
+        "edges_excluded_total": sum(entry["edges"] for entry in relations.values()),
+        "consumed": sorted(CONTROL_RELATIONS),
+        "basis": (
+            "every relation present in this protocol's control_graph_edges, unioned with "
+            "every relation db.CONTROL_EDGE_RELATIONS lets the writer emit, minus the "
+            "consumed set. Counts are of edges, not of principals: duplicate (principal, "
+            "anchor) pairs are distinct witnesses and are counted as the rows they are"
+        ),
+        "reading": (
+            "an excluded relation is reach this scorer is NOT claiming, published so a "
+            "consumer can see the size of the bound and re-open the ruling when a "
+            "witnessed licence lands. Declining to walk one costs confidence — it never "
+            "earns it"
         ),
     }
 
@@ -911,16 +1339,32 @@ def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
 
 
 __all__ = [
+    "ASSET_BELOW_RESOLUTION",
+    "ASSET_PRICED",
+    "ASSET_PROVEN_ZERO",
+    "ASSET_UNPRICED",
     "CONTROL_RELATIONS",
     "EDGE_WITNESS_ADMIN_COLUMN",
     "EDGE_WITNESS_CONTROL_GRAPH",
+    "REFUSAL_ZERO_ANCHOR",
+    "REFUSAL_ZERO_PRINCIPAL",
     "SCOPE_NOT_DETERMINED",
     "SCOPE_ROLES",
     "SCOPE_STATE_VAR",
+    "SHEET_BELOW_RESOLUTION",
+    "SHEET_NOT_DETERMINED",
+    "SHEET_NO_ROWS",
+    "SHEET_PRICED",
+    "SHEET_PROVEN_EMPTY",
+    "SHEET_UNPRICED",
+    "UNCONSUMED_REACH_REASONS",
+    "ZERO_ADDRESS",
     "ControlClosure",
     "ControlEdge",
     "EdgeScope",
     "PrincipalFacts",
+    "RefusedEdge",
+    "RenouncedAuthority",
     "ValuePlane",
     "load_audit_posture",
     "load_control_closure",
