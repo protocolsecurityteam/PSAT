@@ -35,6 +35,22 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
     expect(letterFor(MODEL, 54.7638)).toEqual({ letter: "C+", tone: "c", calibrated: true });
   });
 
+  it("carries a table for the current model version, so the letter renders", () => {
+    // The band table is keyed by model_version and an unknown version gets NO
+    // letter by design, so a version bump with no entry here silently strips
+    // the published letter. This asserts the current version has one.
+    expect(bandsFor("1.1.0-provisional")).not.toBeNull();
+  });
+
+  it("prices 1.1.0 λ on 1.0.1's cut points, and says what that moved", () => {
+    // The reasoned carry-forward: same cuts, so the same λ reads the same
+    // letter, and the etherfi λ movement (55.009 -> 84.017) is published as a
+    // C+ -> A− migration rather than absorbed by re-cutting the table.
+    expect(letterFor("1.1.0-provisional", 55.009).letter).toBe("C+");
+    expect(letterFor("1.1.0-provisional", 84.017).letter).toBe("A−");
+    expect(bandsFor("1.1.0-provisional")).toEqual(bandsFor(MODEL));
+  });
+
   it("withholds the letter for a model version with no band table", () => {
     const result = letterFor("2.0.0-experimental", 54.7638);
     expect(result.letter).toBeNull();

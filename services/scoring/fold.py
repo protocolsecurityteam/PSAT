@@ -2200,6 +2200,19 @@ def _confidence(
     # the vacuous credit for proven-codeless entities, which are not signals.
     signals_seen = sum(v[1] for v in magnitude_census.values())
     signals_witnessed = sum(v[0] for v in magnitude_census.values())
+    # The term is a per-entity FRACTION, so an entity carrying one witnessed and
+    # one unwitnessed proven reach sits at 1/2 — and removing the unwitnessed
+    # signal moves it to 1/1, RAISING the term for having proven less. The shape
+    # is real and is WAIVED here rather than papered over: every alternative
+    # denominator measured is worse. Scoping it to signals that could carry a
+    # magnitude re-introduces the per-capability exclusion this term already
+    # removed for the same reason; fixing the denominator at the distilled
+    # signal count would charge a proven NO-reach signal for a magnitude it does
+    # not owe, permanently. What is published instead is the size of the
+    # exposure: the mixed entities are where the shape can bite, and a
+    # composition pass that gives an entity's second signal a magnitude will move
+    # this count as well as the term.
+    mixed = [key for key in sorted(magnitude) if key not in vacuous and 0 < magnitude[key][0] < magnitude[key][1]]
     return {
         "pct": min(reach_pct, capability_pct, priced_pct, magnitude_pct),
         "reachability_answered_pct": reach_pct,
@@ -2217,6 +2230,14 @@ def _confidence(
             "proven_reach_in_denominator": signals_seen,
             "magnitude_witnessed": signals_witnessed,
             "by_capability": {k: v for k, v in sorted(magnitude_census.items())},
+            "mixed_witness_entities": len(mixed),
+            "mixed_witness_reading": (
+                "entities carrying BOTH a witnessed and an unwitnessed proven reach. The term "
+                "is a per-entity fraction, so deleting an unwitnessed signal from one of these "
+                "raises it — a monotonicity edge this model does not close, published rather "
+                "than hidden, because every denominator that closes it charges a signal for a "
+                "magnitude it does not owe"
+            ),
             "denominator_rule": (
                 "EVERY proven-reach signal, with no per-capability exclusions: a capability "
                 "that publishes proven_reach is claiming it moves value, so 'how much' is a "

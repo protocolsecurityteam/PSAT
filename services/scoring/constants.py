@@ -412,6 +412,28 @@ def model_parameters() -> dict[str, Any]:
             "864000s_10d": delay_discount(864000),
         },
         "principal_units": "per (chain, address); no cross-chain collapse (strategy §7.4)",
-        "value_reduction": "MAX per (entity, asset), entity = <chain>::<runtime address>",
+        "value_reduction": (
+            "latest observation per (entity, asset, observed account), summed across DISTINCT "
+            "observed accounts; entity = <chain>::<runtime address>, implementation folded onto "
+            "its proxy except where two proxies share one. MAX across observation heights is "
+            "RETIRED: two readings of one account are one holding read twice, and the maximum "
+            "of them is a high-water mark that was already stale when it was written"
+        ),
+        "reach_classes": {
+            "code_control": sorted(CODE_CONTROL_CAPABILITIES),
+            "gate_control": sorted(GATE_CONTROL_CAPABILITIES),
+            "bound": (
+                "both expand over the control closure; code control over the whole closure of "
+                "the controlled node, gate control only through edges whose scope the gate "
+                "confers. Both are bounded by each destination's own caller conditions, and a "
+                "hop that cannot be established either way is published as not_determined "
+                "rather than walked or dropped"
+            ),
+            "magnitude": (
+                "membership is not a magnitude: where no witness proves how much value the "
+                "reach MOVES, the dollar figure is not_determined and the finding keeps the "
+                "unpriced band's floor weight. The entity's balance sheet is never the answer"
+            ),
+        },
         "uncalibrated_arms": list(UNCALIBRATED_ARMS),
     }

@@ -1362,7 +1362,8 @@ def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, 
     exclusion, not an absence.
     """
     from db.models import CONTROL_EDGE_RELATIONS as WRITER_RELATIONS
-    from db.models import Contract, ControlGraphEdge
+    from db.models import Contract, ControlGraphEdge, EffectiveFunction, FunctionPrincipal
+    from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT
 
     counts: dict[str, int] = {
         str(relation): int(total or 0)
@@ -1382,10 +1383,43 @@ def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, 
         }
         for relation in excluded
     }
+    # The withdrawn rationale for excluding ``capability_principal`` was that its
+    # population is materialization-budget gated. Withdrawing it in prose leaves
+    # a reader unable to check the refutation, so the budget and the observed
+    # headroom are published beside the exclusion: the perimeter above is a full
+    # enumeration only if nothing was clipped, and that is a number, not a claim.
+    per_anchor = [
+        int(total or 0)
+        for _, _, total in session.query(
+            EffectiveFunction.contract_id,
+            EffectiveFunction.deployment_address,
+            sql_func.count(sql_func.distinct(sql_func.lower(FunctionPrincipal.address))),
+        )
+        .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .group_by(EffectiveFunction.contract_id, EffectiveFunction.deployment_address)
+        .order_by(EffectiveFunction.contract_id, EffectiveFunction.deployment_address)
+        .all()
+    ]
+    observed_max = max(per_anchor, default=0)
     return {
         "relations": relations,
         "edges_excluded_total": sum(entry["edges"] for entry in relations.values()),
         "consumed": sorted(CONTROL_RELATIONS),
+        "materialization_budget": {
+            "limit": FP_MATERIALIZE_LIMIT,
+            "distinct_principals_per_anchor_scope_max": observed_max,
+            "headroom": FP_MATERIALIZE_LIMIT - observed_max,
+            "anchor_scopes_at_the_limit": sum(1 for total in per_anchor if total >= FP_MATERIALIZE_LIMIT),
+            "anchor_scopes": len(per_anchor),
+            "reading": (
+                "PSAT_FP_MATERIALIZE_LIMIT caps the principals materialised per (contract, "
+                "deployment) scope. Published so the enumeration above can be read as UN-CLIPPED "
+                "rather than trusted to be: anchor_scopes_at_the_limit is the number of scopes "
+                "that could have lost a tail, and a zero there is the proven 'nothing was cut'"
+            ),
+        },
         "basis": (
             "every relation present in this protocol's control_graph_edges, unioned with "
             "every relation db.CONTROL_EDGE_RELATIONS lets the writer emit, minus the "

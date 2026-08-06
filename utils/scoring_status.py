@@ -185,4 +185,13 @@ NO_SELECTOR = ""
 
 # The model version every score row is stamped with until a second protocol
 # exists to calibrate against. Any constant change bumps it (strategy §7.2).
-MODEL_VERSION = "1.0.1-provisional"
+#
+# 1.1.0: reach carries its class and its bounds. A capability that replaces CODE
+# and one that replaces a GATE no longer share a reach rule; both are bounded by
+# the destination's own caller conditions; and — the change that moves the
+# numbers — a reach whose MAGNITUDE no witness proved publishes not_determined
+# instead of the reached entity's balance sheet. The finding survives at the
+# unpriced band's floor and the missing magnitude is charged to confidence.
+# ``site/src/score/gradeBands.js`` carries the matching band table; without an
+# entry there the bump would strip the published letter.
+MODEL_VERSION = "1.1.0-provisional"
