@@ -943,7 +943,7 @@ def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[s
 def _aggregate(
     rows_by_key: dict[tuple[str, str, str], _Row],
     value_plane: P.ValuePlane,
-    closure: dict[str, set[str]],
+    closure: P.ControlClosure,
     units: _UnitResolver,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
@@ -1070,7 +1070,7 @@ def _aggregate(
 
 
 def _row_value(
-    row: _Row, value_plane: P.ValuePlane, closure: dict[str, set[str]]
+    row: _Row, value_plane: P.ValuePlane, closure: P.ControlClosure
 ) -> tuple[dict[str, float], float | None, str, list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     """Value at stake for one row: MAX per entity, never SUM.
 
@@ -1180,7 +1180,7 @@ def _entity_contribution(
     return held, basis
 
 
-def _closure(seeds: set[str], closure: dict[str, set[str]]) -> set[str]:
+def _closure(seeds: set[str], closure: P.ControlClosure) -> set[str]:
     seen: set[str] = set()
     stack = sorted(seeds)
     while stack:
@@ -1188,9 +1188,9 @@ def _closure(seeds: set[str], closure: dict[str, set[str]]) -> set[str]:
         if key in seen:
             continue
         seen.add(key)
-        for nxt in sorted(closure.get(key, ())):
-            if nxt not in seen:
-                stack.append(nxt)
+        for edge in closure.edges_from(key):
+            if edge.anchor not in seen:
+                stack.append(edge.anchor)
     return seen
 
 
@@ -1285,7 +1285,7 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 def _confidence(
     signals: list[FunctionSignal],
     value_plane: P.ValuePlane,
-    closure: dict[str, set[str]],
+    closure: P.ControlClosure,
     proven_eoas: set[str],
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
@@ -1331,10 +1331,10 @@ def _confidence(
         admit(key)
     for key in sorted(value_plane.per_asset):
         admit(key)
-    for key in sorted(closure):
+    for key in closure.principals():
         admit(key)
-        for source in sorted(closure[key]):
-            admit(source)
+        for controlled in closure.controlled_by(key):
+            admit(controlled)
     denominator = round(sum(sorted(perimeter.values())), 6)
 
     reach: dict[str, list[int]] = defaultdict(lambda: [0, 0])

@@ -156,6 +156,33 @@ def value_plane(
     return plane
 
 
+def closure_of(
+    adjacency: dict[str, set[str]] | None,
+    *,
+    relation: str = "controller_value",
+    label: str | None = "owner",
+) -> P.ControlClosure:
+    """A ``ControlClosure`` from bare ``{principal: {anchor}}`` adjacency.
+
+    The relation and label are stub witness detail — these tests assert on reach
+    membership, which is the whole of what the closure carried before it carried
+    scope. A test that means to exercise a scope passes its own.
+    """
+    return P.ControlClosure(
+        edges=tuple(
+            P.ControlEdge(
+                principal=principal,
+                anchor=anchor,
+                relation=relation,
+                scope=P.parse_edge_scope(label, relation),
+                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
+            )
+            for principal, anchors in sorted((adjacency or {}).items())
+            for anchor in sorted(anchors)
+        )
+    )
+
+
 @pytest.fixture()
 def fold(monkeypatch):
     """Drive the fold with stubbed planes: no database, no network."""
@@ -163,7 +190,7 @@ def fold(monkeypatch):
     def _run(signals, *, value=None, closure=None, principals=None, role_floors=None, eoas=None):
         """``signals=None`` drives the PERSISTED path, through the population read."""
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
-        monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure or {})
+        monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -1633,3 +1660,51 @@ def test_a_proven_codeless_eoa_answers_vacuously(fold):
     )
     assert fold([signal], **priced_kwargs).confidence_pct < 100.0
     assert fold([signal], **priced_kwargs, eoas={key_eoa}).confidence_pct == 100.0
+
+
+# --------------------------------------------------------------------------
+# Closure edge scope
+# --------------------------------------------------------------------------
+
+
+def test_role_labels_parse_to_the_roles_they_name():
+    """A multi-role label licenses every role it names, and the pair is the scope."""
+    scope = P.parse_edge_scope("roles 14,16", "role_principal")
+    assert (scope.kind, scope.roles) == (P.SCOPE_ROLES, (14, 16))
+    assert scope.is_determined
+    assert P.parse_edge_scope("roles 12", "role_principal").roles == (12,)
+
+
+def test_a_label_restating_its_relation_is_not_determined_not_an_empty_scope():
+    """A label that only restates its relation names no role.
+
+    Naming no role is not the same fact as licensing none: an empty scope reads
+    as "licenses nothing", and the edge has to survive to be published as the
+    shortfall it is.
+    """
+    scope = P.parse_edge_scope("role principal", "role_principal")
+    assert scope.kind == P.SCOPE_NOT_DETERMINED
+    assert not scope.is_determined
+    assert scope.roles == ()
+    # The verbatim label is kept: the shortfall is citable, not silently dropped.
+    assert scope.label == "role principal"
+    assert P.parse_edge_scope(None).kind == P.SCOPE_NOT_DETERMINED
+
+
+def test_a_getter_name_is_a_state_var_scope_and_never_a_role():
+    """``controller_value`` labels name a state variable.
+
+    Reading one as a role would mint a licence out of a getter name.
+    """
+    scope = P.parse_edge_scope("roleRegistry", "controller_value")
+    assert (scope.kind, scope.state_var, scope.roles) == (P.SCOPE_STATE_VAR, "roleRegistry", ())
+    assert P.parse_edge_scope("_roles", "mapping_member").state_var == "_roles"
+
+
+def test_the_closure_answers_adjacency_from_the_edges_it_carries():
+    """Scope rides along with reach; it does not replace it."""
+    closure = closure_of({KEY_C: {KEY_V, KEY_PROXY}})
+    assert closure.principals() == (KEY_C,)
+    assert closure.controlled_by(KEY_C) == tuple(sorted((KEY_V, KEY_PROXY)))
+    assert closure.controlled_by(KEY_V) == ()
+    assert {e.relation for e in closure.edges_from(KEY_C)} == {"controller_value"}

@@ -9,6 +9,7 @@ is counted in the provenance block rather than defaulted to a number.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -403,15 +404,120 @@ def load_role_holder_floors(session: Session) -> dict[tuple[str, str, str], dict
     return out
 
 
-def load_control_closure(session: Session, protocol_id: int) -> dict[str, set[str]]:
-    """``controls[X] = {Y}``: entities X is a proven controller of.
+# What an edge's label is allowed to say. A ``role_principal`` label carries the
+# role numbers the principal holds ("roles 12", "roles 14,16"); every other
+# label names a state variable ("owner", "hook", "_roles"). No label in any
+# corpus carries a selector, so an edge never names the function it licenses —
+# that join lives in function_principals, not here.
+SCOPE_ROLES = "roles"
+SCOPE_STATE_VAR = "state_var"
+SCOPE_NOT_DETERMINED = "not_determined"
+
+# What produced an edge. ``contracts.admin`` is a column, not a graph row: it
+# carries no relation, no label and no id, so it is named by its origin rather
+# than given an invented relation.
+EDGE_WITNESS_CONTROL_GRAPH = "control_graph_edges"
+EDGE_WITNESS_ADMIN_COLUMN = "contracts.admin"
+
+_ROLES_LABEL = re.compile(r"^roles\s+(\d+(?:\s*,\s*\d+)*)$")
+_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+
+@dataclass(frozen=True)
+class EdgeScope:
+    """What an edge's label says its authority is scoped TO.
+
+    Three-valued by construction. A label that names neither a role set nor a
+    state variable — the 55 ``role principal`` edges that restate their own
+    relation and name no role — is ``not_determined``, never an empty scope: an
+    empty scope reads as "licenses nothing", and these edges license something
+    nobody wrote down.
+    """
+
+    kind: str
+    roles: tuple[int, ...] = ()
+    state_var: str | None = None
+    label: str | None = None
+
+    @property
+    def is_determined(self) -> bool:
+        return self.kind != SCOPE_NOT_DETERMINED
+
+
+def parse_edge_scope(label: str | None, relation: str | None = None) -> EdgeScope:
+    """The scope an edge label proves, or ``not_determined``."""
+    text = str(label or "").strip()
+    if not text:
+        return EdgeScope(SCOPE_NOT_DETERMINED)
+    match = _ROLES_LABEL.match(text)
+    if match:
+        return EdgeScope(SCOPE_ROLES, roles=tuple(sorted({int(n) for n in match.group(1).split(",")})), label=text)
+    # A label that only restates its own relation ("role principal" on a
+    # role_principal edge) names nothing the relation did not already say.
+    if relation and text.replace(" ", "_").lower() == relation.lower():
+        return EdgeScope(SCOPE_NOT_DETERMINED, label=text)
+    if _IDENTIFIER.match(text):
+        return EdgeScope(SCOPE_STATE_VAR, state_var=text, label=text)
+    return EdgeScope(SCOPE_NOT_DETERMINED, label=text)
+
+
+@dataclass(frozen=True)
+class ControlEdge:
+    """One proven control edge: ``principal`` has authority over ``anchor``.
+
+    Both ends are chain-scoped entity keys. ``relation`` and ``edge_id`` are
+    ``None`` for the ``contracts.admin`` column, which is a witness that exists
+    in no edge table.
+    """
+
+    principal: str
+    anchor: str
+    relation: str | None
+    scope: EdgeScope
+    witness: str
+    edge_id: int | None = None
+
+
+@dataclass
+class ControlClosure:
+    """The protocol's control edges, indexed by principal.
+
+    Every edge carries the relation and scope it was proven under, so a walk can
+    ask what an edge licenses rather than only whether it exists.
+    ``controlled_by`` is the adjacency view — the whole answer this plane used to
+    return, now derived from the edges rather than standing in for them.
+    """
+
+    edges: tuple[ControlEdge, ...] = ()
+    _out: dict[str, tuple[ControlEdge, ...]] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        grouped: dict[str, list[ControlEdge]] = defaultdict(list)
+        for edge in self.edges:
+            grouped[edge.principal].append(edge)
+        self._out = {principal: tuple(rows) for principal, rows in sorted(grouped.items())}
+
+    def principals(self) -> tuple[str, ...]:
+        """Every entity with at least one outbound control edge, ordered."""
+        return tuple(self._out)
+
+    def edges_from(self, principal: str) -> tuple[ControlEdge, ...]:
+        return self._out.get(principal, ())
+
+    def controlled_by(self, principal: str) -> tuple[str, ...]:
+        """The distinct entities ``principal`` is a proven controller of."""
+        return tuple(sorted({edge.anchor for edge in self.edges_from(principal)}))
+
+
+def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
+    """The proven control edges: ``edges_from(X)`` is what X controls.
 
     Chain-scoped on both ends — an edge is only ever within one chain's graph,
     and keying it unscoped would let one chain's twin inherit the other's reach.
     """
     from db.models import Contract, ControlGraphEdge
 
-    controls: dict[str, set[str]] = defaultdict(set)
+    edges: list[ControlEdge] = []
     rows = (
         session.query(ControlGraphEdge, Contract.chain)
         .join(Contract, Contract.id == ControlGraphEdge.contract_id)
@@ -426,12 +532,29 @@ def load_control_closure(session: Session, protocol_id: int) -> dict[str, set[st
             continue
         # Stored from=anchor, to=principal; the authority direction is the
         # reverse, so the principal is what controls the anchor.
-        controls[entity_key(chain, target)].add(entity_key(chain, source))
+        edges.append(
+            ControlEdge(
+                principal=entity_key(chain, target),
+                anchor=entity_key(chain, source),
+                relation=edge.relation,
+                scope=parse_edge_scope(edge.label, edge.relation),
+                witness=EDGE_WITNESS_CONTROL_GRAPH,
+                edge_id=edge.id,
+            )
+        )
     for contract in session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all():
         if contract.admin:
             chain = coalesce_chain(contract.chain)
-            controls[entity_key(chain, contract.admin)].add(entity_key(chain, contract.address))
-    return {key: set(value) for key, value in sorted(controls.items())}
+            edges.append(
+                ControlEdge(
+                    principal=entity_key(chain, contract.admin),
+                    anchor=entity_key(chain, contract.address),
+                    relation=None,
+                    scope=EdgeScope(SCOPE_NOT_DETERMINED),
+                    witness=EDGE_WITNESS_ADMIN_COLUMN,
+                )
+            )
+    return ControlClosure(edges=tuple(edges))
 
 
 def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
@@ -789,6 +912,14 @@ def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
 
 __all__ = [
     "CONTROL_RELATIONS",
+    "EDGE_WITNESS_ADMIN_COLUMN",
+    "EDGE_WITNESS_CONTROL_GRAPH",
+    "SCOPE_NOT_DETERMINED",
+    "SCOPE_ROLES",
+    "SCOPE_STATE_VAR",
+    "ControlClosure",
+    "ControlEdge",
+    "EdgeScope",
     "PrincipalFacts",
     "ValuePlane",
     "load_audit_posture",
@@ -800,6 +931,7 @@ __all__ = [
     "load_upgrade_provenance",
     "load_value_plane",
     "native_value_state",
+    "parse_edge_scope",
     "perimeter_state",
     "plane_row_counts",
 ]
