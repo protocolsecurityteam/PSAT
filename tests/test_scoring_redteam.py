@@ -3879,6 +3879,16 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
     step = composed[0]["act_as_chain"][0]
     assert (step["caller"], step["destination"], step["calling_function"]) == (KEY_C, KEY_V, "bulkWithdraw")
     assert step["receiver_observed_via"] == "eth_call" and step["receiver_block"] == 25_657_731
+    # A composed call is COUNTED as composed, not as carrying no witness: the
+    # census key existed and was never incremented, so the rows that composed
+    # published a zero where the count belonged.
+    census = row["magnitude_witness_census"]
+    assert census["magnitude_composed"] == 1
+    assert census["magnitude_not_witnessed"] == 0
+    assert (
+        census["magnitude_composed"] + census["magnitude_not_witnessed"] + census["magnitude_witnessed"]
+        == census["instances"]
+    )
 
 
 def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
@@ -4073,3 +4083,10 @@ def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
     assert row["reach_licensed_functions"] == {KEY_V: [{"selector": COMPOSED_SELECTOR, "name": "exit"}]}
     assert row["reach_composed_magnitudes"] == []
     assert row["value_at_stake_usd"] is None
+    # ...and the break is NAMED. A licensed hop the walk never offered is not an
+    # act-as refusal at that hop — the question was never asked there — and
+    # publishing it as an empty refusal map left the unit's most important
+    # negative result readable only as silence.
+    census = row["reach_composition_census"]
+    assert census["licensed_hops"] == 1 and census["licensed_selectors"] == 0
+    assert census["act_as_refused"] == {FOLD.ACT_AS_CALLER_UNREACHED: 1}

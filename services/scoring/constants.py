@@ -472,8 +472,16 @@ def model_parameters() -> dict[str, Any]:
         "model_version_migration": {
             "from": "1.0.1-provisional",
             "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
-            "grade_lambda": [54.1614, 73.2508],
-            "letter": ["C+", "B+"],
+            # Three points, not two: the version floors an unwitnessed magnitude
+            # (lambda RISES) and then composes a witnessed one back (lambda
+            # FALLS), and a before/after pair hides that they move opposite ways.
+            "grade_lambda": [54.1614, 84.0166, 73.2508],
+            "letter": ["C+", "A−", "B+"],
+            "grade_lambda_reading": (
+                "shipped 1.0.1 -> magnitudes floored -> destination witnesses composed back; "
+                "only the first and last are published documents, the middle is this version's "
+                "own intermediate and is quoted so the two halves are not read as one move"
+            ),
             "confidence_pct": [29.0, 18.6],
             "exposure_usd": [1227107593.64, 18059003.86],
             "what_moved": (

@@ -2205,7 +2205,19 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "variable holds the destination). A receiver bound to a parameter, a local or an "
             "unresolved head is refused: the caller of the function picks that address, so the "
             "code witnesses a call at an address nobody named. sinks_naming_a_selector minus "
-            "sinks_whose_receiver_is_a_state_variable is the size of that refusal"
+            "sinks_whose_receiver_is_a_state_variable is the size of that refusal. "
+            "THE RESIDUAL THIS PLANE DOES NOT CLOSE: the calling function's guard is witnessed "
+            "consulting AN authority (a canCall call), never that it is the same authority the "
+            "finding's gate seizes — the guard's receiver is a local and no read pins it. The "
+            "same-kind GateGrant bound stands in for it, and a bound is not a witness. It is "
+            "measured safe on the reference corpus rather than assumed: of the 87 contracts "
+            "carrying a canCall guard, NONE carries more than one authority-kind state variable "
+            "(68 carry exactly one, 19 carry none), so there is no second candidate the guard "
+            "could be reading; and every one of the 13 callers that actually composed carries "
+            "exactly the variable 'authority', which on those contracts is written (state_writes "
+            "origin=body) by setAuthority and by nothing else — the gate the finding seizes. On "
+            "a corpus where a contract carries two authority-kind variables that measurement "
+            "fails and the bound would be doing work a witness should"
         ),
     }
     return plane

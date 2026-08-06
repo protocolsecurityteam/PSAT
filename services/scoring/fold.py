@@ -1753,7 +1753,12 @@ def _row_value(
         unbounded_floors.extend(unbounded)
         census["instances"] += 1
         if _witnessed_magnitude(instance) is None:
-            census["magnitude_not_witnessed"] += 1
+            # A composed magnitude is a witness — the DESTINATION's — so it is
+            # counted apart from both the calls that carried their own and the
+            # calls that carry none. Folding it into either reports a different
+            # fact than the one that was proved, and leaving it at zero on the
+            # rows that composed says no witness answered where one did.
+            census["magnitude_composed" if composed else "magnitude_not_witnessed"] += 1
         else:
             census["magnitude_witnessed"] += 1
             census["capped" if cap is not None else "within_witnessed_bound"] += 1
@@ -1824,10 +1829,15 @@ def _row_value(
 def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str, Any]]) -> dict[str, Any]:
     """Every row's composition census, summed to the protocol.
 
-    Findings and subsumed rows are rolled up SEPARATELY: a subsumed row is
-    usually the same walk seen through a weaker capability, so adding the two
-    would count one composition twice and publish twice the recovery. Only the
-    findings' dollars enter the grade.
+    Findings and subsumed rows are rolled up SEPARATELY because a subsumed row is
+    usually the same walk seen through a weaker capability: adding the two counts
+    one composition twice and publishes twice the recovery. That is the whole
+    reason for the split, and it is NOT that a subsumed row's dollars stay out of
+    the grade — they do not. A subsumed row's entities that no surviving row
+    reaches are charged to the top row's exposure at its own fraction
+    (``subsumed_exclusive_value_by_entity``), and on the reference corpus a
+    subsumed ``authority.replace`` row's composed ``ethereum::0x657e8c86``
+    ($11,358,880.43) enters the top finding's published exposure that way.
 
     Entities are counted DISTINCT within each population — two findings composing
     the same vault composed one entity — while the dollars are summed per row,
@@ -1865,9 +1875,12 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
         "subsumed_rows": roll(subsumed),
         "reading": (
             "the composition pass rolled up to the protocol, findings and subsumed rows kept "
-            "APART because only the findings' dollars enter the grade and a subsumed row is "
-            "usually the same walk under a weaker capability — summing the two would double "
-            "one composition and read as twice the recovery. licensed_selectors is every "
+            "APART because a subsumed row is usually the same walk under a weaker capability "
+            "and summing the two would double one composition and read as twice the recovery. "
+            "It is NOT that a subsumed row's dollars stay out of the grade: its entities that "
+            "no surviving row reaches charge the top row's exposure at that row's own fraction "
+            "(subsumed_exclusive_value_by_entity), and one composed subsumed entity does so "
+            "here. licensed_selectors is every "
             "(hop, licensed function) pair a gate-control walk offered; act_as_witnessed is "
             "the subset where the caller is witnessed able to make that call at that "
             "destination; the pairs under act_as_refused are the ones whose magnitude stayed "
@@ -2063,6 +2076,17 @@ def _compose(
                     chains[hop.destination] = prefix + (step_for_hop,)
                     nxt.append(hop.destination)
         frontier = sorted(nxt)
+    # Hops the BFS never offered because it never reached their CALLER. Without
+    # a name they leave the largest negative result on this corpus published as
+    # silence: the two rows seized at a RolesAuthority carry eleven and three
+    # licensed hops, offer nothing and refuse nothing, and a reader has no way
+    # to tell that from a walk that found no licensed hop at all. Counted in the
+    # same (hop, licensed function) units as every other refusal.
+    for caller, hops_here in sorted(by_caller.items()):
+        if caller in chains:
+            continue
+        for hop in hops_here:
+            refusals[ACT_AS_CALLER_UNREACHED] += len(hop.licensed)
     census["composed"] = len(composed)
     return composed, census, dict(sorted(refusals.items()))
 
@@ -2314,6 +2338,12 @@ def _entity_contribution(
         None,
     )
 
+
+# A licensed hop the composition walk never offered, because it never reached
+# the hop's CALLER: every path from the seized node to it broke at an earlier
+# hop that carried no act-as witness. Not an act-as refusal at this hop — the
+# question was never asked here — and named separately for exactly that reason.
+ACT_AS_CALLER_UNREACHED = "caller_not_reachable_from_the_seized_node"
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"
 HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"
