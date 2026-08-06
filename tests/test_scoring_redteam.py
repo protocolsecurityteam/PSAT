@@ -2809,3 +2809,58 @@ def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
         KEY_V: WEAKNESS_SAFE_MAJORITY,
     }
     assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
+
+
+def _repoint_facts() -> Any:
+    facts_ = D._ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=C, functions=[])
+    facts_.protocol_entities = {KEY_C, KEY_V}
+    return facts_
+
+
+@pytest.mark.parametrize(
+    ("named", "tier", "why"),
+    [
+        (P.ZERO_ADDRESS, "behavioral_observed", "zero_address_is_a_burn_sentinel_not_an_entity"),
+        (VAULT, "policy_derived", "witness_tier_policy_derived(a static inference, not a value witness)"),
+        (OUTSIDER, "behavioral_observed", "named_entity_is_not_a_contract_of_this_protocol_on_this_chain"),
+    ],
+)
+def test_w3_a_repoint_is_admitted_only_on_a_validated_value_witness(named, tier, why):
+    """R2 — a repoint adds a foreign entity to a reach set, and must earn it.
+
+    It did the same job as the backlink licence with none of that function's
+    checks: no protocol, no chain, no existence, and no check that the witness
+    naming the entity proved anything about value. The burn-sentinel arm in
+    particular has never fired on any corpus, which is why it is pinned rather
+    than observed.
+    """
+    keys, bases, refused = D._repointed_entities({"tier": tier, "witness": {"callee": named}}, _repoint_facts())
+    assert (keys, bases) == ([], [])
+    assert [row["why"] for row in refused] == [why]
+    assert refused[0]["basis"] == "witness.callee"
+
+    # The positive control: a value witness naming an entity of this protocol on
+    # this chain is admitted, so the refusals above are decisions and not a
+    # recogniser that never says yes.
+    admitted = D._repointed_entities({"tier": "behavioral_observed", "witness": {"callee": VAULT}}, _repoint_facts())
+    assert admitted == ([KEY_V], ["witness.callee"], [])
+
+
+def test_w3_a_repoint_never_upgrades_an_unscored_capability():
+    """The second half of R2: naming a callee is not proving a capability.
+
+    Six ``flow.in`` rows were promoted from ``capability_not_scored`` to
+    ``proven_reach`` purely because a witness named an address — an upgrade of
+    the reach STATE out of a fact about call structure.
+    """
+    facts_ = _repoint_facts()
+    reach = D._reach_for_claim(
+        facts_,
+        claim_id="flow.in",
+        entries=[{"tier": "behavioral_observed", "witness": {"callee": VAULT}}],
+        acting_key=KEY_C,
+        gates={},
+        citations=[],
+    )
+    assert reach.state != VALUE_STATE_PROVEN_REACH
+    assert reach.basis == "capability_not_scored(not_determined)"

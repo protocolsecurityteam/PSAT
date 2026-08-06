@@ -156,6 +156,11 @@ class _ContractFacts:
     pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
+    # Every entity key this protocol's own ``contracts`` rows name, chain-scoped.
+    # A reach key that names nothing in here names nothing this document can
+    # answer for, and charging it would both invent reach and spend exposure room
+    # belonging to an entity in the perimeter.
+    protocol_entities: set[str] = field(default_factory=set)
 
 
 def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSignal]]:
@@ -794,19 +799,57 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
     return _no_reach("reach_not_witnessed(not_determined)")
 
 
-def _repointed_entities(witness: dict[str, Any], facts: _ContractFacts) -> tuple[list[str], list[str]]:
-    """Entities the witness itself names as where the value is / what is affected."""
+def _repointed_entities(
+    entry: dict[str, Any], facts: _ContractFacts
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """Entities the witness itself names as where the value is / what is affected.
+
+    A repoint adds a foreign entity to a reach set, which is the same act as the
+    backlink licence one screen up — and it was performed with none of that
+    function's checks: no protocol, no chain, no existence, and no check that the
+    witness naming the entity is a witness that proved anything about value.
+
+    Three admissions, each earned:
+
+    * The witness must be a VALUE witness. A ``policy_derived`` claim is a static
+      inference — the ``configures`` producer's own docstring concedes that "the
+      written set-var stands in for the spec's 'read by the hook fn'" — and an
+      inference about what a function configures is not evidence about where
+      value sits.
+    * The named address must be a contract of THIS protocol on THIS chain, the
+      same three checks :func:`_licensed_reach_entities` makes.
+    * The burn address is never an entity. It is the graph's single largest
+      fan-out and the sentinel every renunciation writes.
+
+    A repoint never supplies a magnitude and never upgrades ``value_state``:
+    naming a callee proves a call, not that value moves. Refusals are returned
+    rather than dropped, so a reach this scorer declined is visible on the signal
+    instead of being absent from it.
+    """
+    from services.scoring.planes import is_zero_key
+
+    witness = entry.get("witness") or {}
     keys: list[str] = []
     bases: list[str] = []
-    callee = witness.get("callee")
-    if callee:
-        keys.append(entity_key(facts.chain, callee))
-        bases.append("witness.callee")
-    configures = witness.get("configures")
-    if configures:
-        keys.append(entity_key(facts.chain, configures))
-        bases.append("witness.configures")
-    return keys, bases
+    refused: list[dict[str, Any]] = []
+    tier = _tier(entry)
+    for field_name, basis in (("callee", "witness.callee"), ("configures", "witness.configures")):
+        named = witness.get(field_name)
+        if not named:
+            continue
+        key = entity_key(facts.chain, named)
+        if tier == WITNESS_TIER_POLICY_DERIVED:
+            why = "witness_tier_policy_derived(a static inference, not a value witness)"
+        elif is_zero_key(key):
+            why = "zero_address_is_a_burn_sentinel_not_an_entity"
+        elif key not in facts.protocol_entities:
+            why = "named_entity_is_not_a_contract_of_this_protocol_on_this_chain"
+        else:
+            keys.append(key)
+            bases.append(basis)
+            continue
+        refused.append({"entity_key": key, "basis": basis, "witness_tier": tier, "why": why})
+    return keys, bases, refused
 
 
 # ---------------------------------------------------------------- the signals
@@ -1121,15 +1164,20 @@ def _reach_for_claim(
                 best = candidate
         reach = best or _no_reach("reach_not_witnessed(not_determined)")
         for entry in entries:
-            keys, bases = _repointed_entities(entry.get("witness") or {}, facts)
+            keys, bases, refused = _repointed_entities(entry, facts)
+            _cite_refused_repoints(refused, citations)
             if keys and reach.state == VALUE_STATE_PROVEN_REACH:
                 reach = _Reach(
                     state=reach.state,
                     bound=reach.bound,
                     entity_keys=tuple(sorted(set(reach.entity_keys) | set(keys))),
                     basis=reach.basis + "+" + ",".join(bases),
+                    # The magnitude the flow witness proved, unchanged. A repoint
+                    # widens WHERE that one call's value may sit; it does not
+                    # multiply the call, and the per-call cap holds the sum of
+                    # the widened key set to the figure the witness proved.
                     magnitude=reach.magnitude,
-                    notes=reach.notes,
+                    notes=reach.notes + ("reach_repointed_by_witness",),
                 )
                 citations.append({"field": bases[0], "value": keys})
         return reach
@@ -1155,20 +1203,39 @@ def _reach_for_claim(
     repointed: list[str] = []
     bases: list[str] = []
     for entry in entries:
-        keys, entry_bases = _repointed_entities(entry.get("witness") or {}, facts)
+        keys, entry_bases, refused = _repointed_entities(entry, facts)
+        _cite_refused_repoints(refused, citations)
         repointed.extend(keys)
         bases.extend(entry_bases)
-    if claim_id in K.BASE_SEVERITY or repointed:
-        keys = tuple(sorted({acting_key, *repointed}))
-        basis = "acting_entity" + ("+" + ",".join(sorted(set(bases))) if bases else "")
-        return _Reach(
-            state=VALUE_STATE_PROVEN_REACH,
-            bound=VALUE_BOUND_FLOOR,
-            entity_keys=keys,
-            basis=basis,
-            magnitude=Tri[float].not_determined(),
+    if claim_id not in K.BASE_SEVERITY:
+        # A named callee is not a capability. Reading the repoint as one is what
+        # promoted six ``flow.in`` rows from capability_not_scored to
+        # proven_reach purely because a witness named an address — an upgrade of
+        # the reach STATE out of a fact about call structure.
+        return _no_reach("capability_not_scored(not_determined)")
+    keys = tuple(sorted({acting_key, *repointed}))
+    basis = "acting_entity" + ("+" + ",".join(sorted(set(bases))) if bases else "")
+    return _Reach(
+        state=VALUE_STATE_PROVEN_REACH,
+        bound=VALUE_BOUND_FLOOR,
+        entity_keys=keys,
+        basis=basis,
+        magnitude=Tri[float].not_determined(),
+    )
+
+
+def _cite_refused_repoints(refused: list[dict[str, Any]], citations: list[dict[str, Any]]) -> None:
+    """A declined repoint is published, never absent.
+
+    An admitted repoint travels as a citation; a refused one that travelled as
+    nothing would be indistinguishable from a witness that named no entity at
+    all, and the two are opposite facts about how much reach this row is not
+    claiming.
+    """
+    for entry in refused:
+        citations.append(
+            {"field": entry["basis"], "value": entry["entity_key"], "admitted": False, "why": entry["why"]}
         )
-    return _no_reach("capability_not_scored(not_determined)")
 
 
 def _reach_rank(reach: _Reach) -> tuple[int, int]:
