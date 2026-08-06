@@ -309,7 +309,7 @@ def compute_protocol_score(
     findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, conditions, units)
     warnings.extend(value_warnings)
 
-    grade_lambda, grade_exposure, exposure_usd, exposure_gaps = _grade(findings, value_plane)
+    grade_lambda, grade_exposure, exposure_usd, exposure_gaps, exposure_coverage = _grade(findings, value_plane)
     confidence = _confidence(
         signals,
         value_plane,
@@ -366,15 +366,25 @@ def compute_protocol_score(
             "hop_census": _hop_census(closure, conditions),
             "reading": (
                 "code control expands over the whole closure of the controlled node — owning "
-                "the code exercises everything the code is authorized to exercise — while gate "
-                "control expands only through edges whose scope the gate confers, because "
-                "holding a gate does not make the node act. Both are bounded by the "
-                "destination's own caller conditions. Every hop neither class could establish "
-                "is published per finding as reach_hops_not_determined, never dropped"
+                "the code exercises everything the code is authorized to exercise. Gate control "
+                "expands only through edges whose label names a scope at all: a role number or "
+                "a state variable. That is a label-PRESENCE test. It is NOT the conferral test "
+                "the class distinction ultimately needs — walked_by_scope_kind.state_var counts "
+                "hops admitted on a label that names a getter, which licenses nothing anyone has "
+                "shown, and the role->selector join that would narrow a determined scope to what "
+                "the role actually confers is not applied here. So gate-control reach is an "
+                "UPPER BOUND that may only shrink when that join lands. Both classes are bounded "
+                "by the destination's own caller conditions. Every hop neither class could "
+                "establish is published per finding as reach_hops_not_determined, never dropped"
             ),
         },
         "unpriced_positions": value_plane.unpriced_positions,
         "exposure_gaps": exposure_gaps,
+        # How much of the perimeter grade_exposure was measured over. Without
+        # it the ratio's numerator (a few findings) and its denominator (the
+        # whole priced perimeter) are not comparable quantities, and the figure
+        # reads as a measurement of safety rather than of coverage.
+        "exposure_coverage": exposure_coverage,
         "principal_units": units.published_units(),
         "safe_keyset_overlaps": units.overlaps,
         "unit_evidence_scope": (
@@ -1718,16 +1728,36 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane) -> dict
         pairs.setdefault((edge.principal, edge.anchor), edge)
     census: dict[str, Any] = {"distinct_hops": len(pairs), "edges": len(closure.edges)}
     for label, code_control in (("code_control", True), ("gate_control", False)):
-        counts = {"walked": 0, HOP_REFUSED_SCOPE: 0, HOP_REFUSED_CONDITION: 0}
+        counts: dict[str, int] = {"walked": 0, HOP_REFUSED_SCOPE: 0, HOP_REFUSED_CONDITION: 0}
+        counts.update(dict.fromkeys(P.WALKED_COVERAGE, 0))
+        by_scope_kind = {P.SCOPE_ROLES: 0, P.SCOPE_STATE_VAR: 0, P.SCOPE_NOT_DETERMINED: 0}
         for edge in pairs.values():
             bound = _hop_bound(edge, conditions, code_control=code_control)
-            counts["walked" if bound is None else bound["reason"]] += 1
-        census[label] = counts
+            if bound is not None:
+                counts[bound["reason"]] += 1
+                continue
+            counts["walked"] += 1
+            by_scope_kind[edge.scope.kind] += 1
+            counts[conditions.hop(edge.principal, edge.anchor).coverage or P.WALKED_NO_FUNCTION] += 1
+        # What the label the hop was admitted on actually said. For gate control
+        # every walked hop is here BECAUSE its label named something, so this is
+        # the size of the label-presence test — and state_var is where a getter
+        # name ("vault", "hook") stands in for a conferral nobody demonstrated.
+        counts_out: dict[str, Any] = dict(counts)
+        counts_out["walked_by_scope_kind"] = dict(sorted(by_scope_kind.items()))
+        census[label] = counts_out
     census["reading"] = (
         "what each class could establish about every hop the closure holds, before any "
         "signal seeds it. A hop counted not_determined here is withheld from a finding "
         "only when that finding's walk actually needs it and no other path reaches the "
-        "destination; the per-finding lists carry that narrower population"
+        "destination; the per-finding lists carry that narrower population. The three "
+        "walked_* counts partition `walked` by what was READ to walk it: "
+        "walked_on_analysed_conditions had AT LEAST ONE permitting function whose conditions "
+        "were extracted, so a guard was there to find and was not found — the other two are "
+        "hops where no condition existed to read at all, walked on the edge "
+        "alone. walked_by_scope_kind partitions the same total by what the edge label "
+        "named, and for gate control it is the size of the label-presence test that stands "
+        "in for a conferral test until the role->selector join lands"
     )
     return census
 
@@ -1862,9 +1892,9 @@ def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[An
 
 def _grade(
     findings: list[dict[str, Any]], value_plane: P.ValuePlane
-) -> tuple[float | None, float | None, float | None, list[dict[str, Any]]]:
+) -> tuple[float | None, float | None, float | None, list[dict[str, Any]], dict[str, Any]]:
     if not findings:
-        return None, None, None, []
+        return None, None, None, [], _exposure_coverage([], value_plane, value_plane.tracked_total)
     for index, finding in enumerate(findings):
         finding["net_points_lambda"] = round(finding["raw_points"] * (K.LAMBDA**index), 4)
     cumulative = round(sum(f["net_points_lambda"] for f in findings), 4)
@@ -1984,9 +2014,68 @@ def _grade(
             exposure += finding["exposure_usd"]
 
     tracked = value_plane.tracked_total
+    coverage = _exposure_coverage(findings, value_plane, tracked)
     if not tracked or not any_priced:
-        return grade_lambda, None, round(exposure, 2), gaps
-    return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps
+        return grade_lambda, None, round(exposure, 2), gaps, coverage
+    return grade_lambda, round(100.0 * (1.0 - exposure / tracked), 3), round(exposure, 2), gaps, coverage
+
+
+def _exposure_coverage(findings: list[dict[str, Any]], value_plane: P.ValuePlane, tracked: float) -> dict[str, Any]:
+    """How much of the perimeter the exposure ratio was actually measured over.
+
+    ``grade_exposure`` is ``100 * (1 - exposure / tracked_total)``. The
+    denominator is the whole priced perimeter; the numerator is a sum over only
+    the findings whose exposure could be measured at all. Once an unwitnessed
+    magnitude publishes ``not_determined`` instead of a balance sheet, most
+    findings contribute nothing to that numerator — and a ratio near 100 then
+    reads as "almost nothing is exposed" when what it says is "almost nothing
+    was measurable". The ratio is not adjusted for this: adjusting it would mint
+    a number out of the same absence. It is DISCLOSED, so the figure cannot be
+    read as a measurement it is not.
+
+    ``perimeter_usd_charged`` is the priced value of the entities that received
+    a charge, and ``perimeter_usd_reached_unmeasured`` the priced value reached
+    by findings whose own exposure is ``not_determined`` and which no charged
+    row covers — the weight the ratio is silent about.
+    """
+    determined = [f for f in findings if f.get("exposure_usd") is not None]
+    undetermined = [f for f in findings if f.get("exposure_usd") is None]
+    charged: set[str] = set()
+    for finding in determined:
+        charged.update(finding.get("exposure_entities_charged") or [])
+
+    def priced(keys: set[str]) -> float:
+        total = 0.0
+        for key in sorted(keys):
+            value = value_plane.total(value_plane.canonical(key))
+            if value is not None:
+                total += value
+        return round(total, 2)
+
+    unmeasured: set[str] = set()
+    for finding in undetermined:
+        unmeasured.update(value_plane.canonical(key) for key in finding.get("reach_entities") or [])
+    unmeasured -= {value_plane.canonical(key) for key in charged}
+    charged_usd = priced(charged)
+    return {
+        "findings": len(findings),
+        "findings_with_determined_exposure": len(determined),
+        "findings_with_exposure_not_determined": len(undetermined),
+        "entities_charged": len(charged),
+        "perimeter_usd_charged": charged_usd,
+        "perimeter_usd_reached_unmeasured": priced(unmeasured),
+        "tracked_total_usd": round(tracked, 2) if tracked else None,
+        "tracked_share_measured_pct": (round(100.0 * charged_usd / tracked, 3) if tracked else None),
+        "reading": (
+            "grade_exposure divides a numerator summed over "
+            f"{len(determined)} of {len(findings)} findings by the WHOLE priced perimeter. The "
+            "other findings publish exposure_usd null — no witness proved how much their reach "
+            "moves — and contribute nothing rather than a zero, so a grade_exposure near 100 is "
+            "'this much of the perimeter was not measured against', never 'this much is safe'. "
+            "perimeter_usd_reached_unmeasured is the priced value those findings reach that no "
+            "charged row covers"
+        ),
+    }
 
 
 def _entities_outside_perimeter(

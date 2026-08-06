@@ -1162,14 +1162,45 @@ SURFACE_FUNCTION_PRINCIPAL = "function_principal_witness"
 SURFACE_DESTINATION_FUNCTIONS = "destination_functions"
 SURFACE_NONE = "destination_functions_not_analysed"
 
+# On what a walked hop was walked. "No condition disproved the caller" is three
+# different facts, and only the first of them is a read of any condition:
+#
+#   ANALYSED       at least one function that permits the caller had its
+#                  conditions extracted, so a guard was there to find and was
+#                  not found.
+#   UNANALYSED     every function that permits the caller has ``conditions``
+#                  NULL — the extraction never ran there, so "no guard" is a
+#                  coverage gap wearing the shape of a clean read.
+#   NO_FUNCTION    the destination has no analysed function at all; nothing was
+#                  consulted, and the hop stands on the edge alone.
+#
+# The hop is walked in all three (refusing on an absence would let a coverage
+# gap overturn a proven authority relation), so the distinction is a DISCLOSURE
+# and not a bound — but a consumer cannot tell a checked hop from an unchecked
+# one unless the counts are published apart.
+WALKED_ON_ANALYSED = "walked_on_analysed_conditions"
+WALKED_ON_UNANALYSED = "walked_on_unanalysed_conditions"
+WALKED_NO_FUNCTION = "walked_with_no_analysed_function"
+WALKED_COVERAGE = (WALKED_ON_ANALYSED, WALKED_ON_UNANALYSED, WALKED_NO_FUNCTION)
+
 
 @dataclass(frozen=True)
 class DestinationFunction:
-    """One function of a destination entity, and the caller guards it carries."""
+    """One function of a destination entity, and the caller guards it carries.
+
+    ``analysed`` separates "conditions were extracted and none pins the caller"
+    from "the column holds no array and nothing was extracted". Both reach
+    ``caller_pinned_to_self == ()``, and reading the second as the first is the
+    absence-as-a-witness move at the coverage level. The discriminator is
+    ``isinstance(conditions, list)``, which is what puts a SQL null and the
+    jsonb scalar null on the same side as each other and the opposite side from
+    an empty array — the three-state this column's own read has to make.
+    """
 
     function_id: int
     name: str
     caller_pinned_to_self: tuple[str, ...] = ()
+    analysed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1181,6 +1212,9 @@ class HopConditions:
     surface: str
     functions_consulted: int
     disproving: tuple[dict[str, Any], ...] = ()
+    # For a walked hop, which of the three readings above licensed it. ``None``
+    # on a hop that was not walked.
+    coverage: str | None = None
 
 
 @dataclass
@@ -1211,9 +1245,14 @@ class ConditionPlane:
         A destination with no analysed function at all consults nothing, and
         nothing is not a disproof — the edge remains the witness and the
         shortfall is counted rather than converted into a refusal.
+
+        A walked hop carries WHICH of the three coverage readings licensed it,
+        because "no condition disproved this caller" over a function whose
+        conditions were never extracted is not the same fact as over one whose
+        were.
         """
         if caller == destination:
-            return HopConditions(HOP_WALKED, "caller_is_the_destination", SURFACE_NONE, 0)
+            return HopConditions(HOP_WALKED, "caller_is_the_destination", SURFACE_NONE, 0, coverage=WALKED_NO_FUNCTION)
         surface = self.licensed.get((destination, caller))
         surface_kind = SURFACE_FUNCTION_PRINCIPAL
         if not surface:
@@ -1225,14 +1264,20 @@ class ConditionPlane:
                 "destination_functions_not_analysed(no caller condition witnessed)",
                 SURFACE_NONE,
                 0,
+                coverage=WALKED_NO_FUNCTION,
             )
         permitted = [fn for fn in surface if not fn.caller_pinned_to_self]
         if permitted:
+            analysed = [fn for fn in permitted if fn.analysed]
             return HopConditions(
                 HOP_WALKED,
-                f"caller_condition_permits({len(permitted)} of {len(surface)} consulted functions)",
+                (
+                    f"caller_condition_permits({len(permitted)} of {len(surface)} consulted "
+                    f"functions, {len(analysed)} of them with conditions extracted)"
+                ),
                 surface_kind,
                 len(surface),
+                coverage=WALKED_ON_ANALYSED if analysed else WALKED_ON_UNANALYSED,
             )
         return HopConditions(
             HOP_NOT_DETERMINED,
@@ -1280,12 +1325,19 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
         .all()
     )
     pinned_functions = 0
+    analysed_functions = 0
     for function_id, name, conditions, deployment, address, chain in functions:
         chain_name = coalesce_chain(chain)
         key = entity_key(chain_name, deployment or address)
         pins = _caller_self_pins(conditions)
+        # An ARRAY is an extraction that ran, empty or not. Anything else — a SQL
+        # null, the jsonb scalar null a Python ``None`` write stores — is one
+        # that never did, and the two are indistinguishable downstream unless
+        # they are separated here.
+        analysed = isinstance(conditions, list)
         pinned_functions += 1 if pins else 0
-        by_entity[key].append(DestinationFunction(int(function_id), str(name), pins))
+        analysed_functions += 1 if analysed else 0
+        by_entity[key].append(DestinationFunction(int(function_id), str(name), pins, analysed))
         entity_of[int(function_id)] = (key, chain_name)
     plane.by_entity = {key: tuple(rows) for key, rows in sorted(by_entity.items())}
 
@@ -1312,6 +1364,13 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
     plane.provenance = {
         "functions": len(functions),
         "entities_with_analysed_functions": len(plane.by_entity),
+        # The coverage this recogniser actually had. A function whose
+        # ``conditions`` column is NULL carries no guard to find, so it can only
+        # ever report "nothing disproves this caller" — which is the answer a
+        # clean read gives too. Published apart, because a hop walked over
+        # nothing but unextracted functions is not a checked hop.
+        "functions_with_conditions_extracted": analysed_functions,
+        "functions_with_no_conditions_recorded": len(functions) - analysed_functions,
         "functions_pinning_caller_to_self": pinned_functions,
         "caller_licensed_pairs": len(plane.licensed),
         "recognised_shape": (
@@ -1325,7 +1384,11 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
             "the functions of the destination on which the caller is a RESOLVED principal where "
             "such a witness exists, else the destination's whole analysed function set. A "
             "destination with no analysed function consults nothing and the hop stands on the "
-            "edge, counted as a coverage shortfall rather than converted into a refusal"
+            "edge rather than being converted into a refusal. The shortfall that produces is "
+            "counted in provenance.reach_bounds.hop_census, which splits every walked hop into "
+            "walked_on_analysed_conditions, walked_on_unanalysed_conditions and "
+            "walked_with_no_analysed_function — the second and third are hops no condition was "
+            "ever read for, and they are walked on the edge alone"
         ),
     }
     return plane

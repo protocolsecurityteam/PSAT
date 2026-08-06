@@ -2959,6 +2959,15 @@ def _repoint_facts() -> Any:
         (P.ZERO_ADDRESS, "behavioral_observed", "zero_address_is_a_burn_sentinel_not_an_entity"),
         (VAULT, "policy_derived", "witness_tier_policy_derived(a static inference, not a value witness)"),
         (OUTSIDER, "behavioral_observed", "named_entity_is_not_a_contract_of_this_protocol_on_this_chain"),
+        # The arm a DENYLIST would have admitted: no tier token at all, which
+        # resolves to not_determined — a witness that proved nothing, and the
+        # easiest of all to pass a "refuse policy_derived" gate with.
+        (VAULT, None, "witness_tier_not_determined(not_determined; no tier token this scorer can vouch for)"),
+        (
+            VAULT,
+            "invented_tier",
+            "witness_tier_not_determined(not_determined; no tier token this scorer can vouch for)",
+        ),
     ],
 )
 def test_w3_a_repoint_is_admitted_only_on_a_validated_value_witness(named, tier, why):
@@ -2969,8 +2978,16 @@ def test_w3_a_repoint_is_admitted_only_on_a_validated_value_witness(named, tier,
     naming the entity proved anything about value. The burn-sentinel arm in
     particular has never fired on any corpus, which is why it is pinned rather
     than observed.
+
+    The tier test is an ALLOWLIST, and the last two cases are why: a denylist of
+    ``policy_derived`` passes every tier nobody classified, and an absent or
+    unrecognised token resolves to ``not_determined`` — the weakest witness
+    there is, admitted by the gate meant to demand the strongest.
     """
-    keys, bases, refused = D._repointed_entities({"tier": tier, "witness": {"callee": named}}, _repoint_facts())
+    entry: dict[str, Any] = {"witness": {"callee": named}}
+    if tier is not None:
+        entry["tier"] = tier
+    keys, bases, refused = D._repointed_entities(entry, _repoint_facts())
     assert (keys, bases) == ([], [])
     assert [row["why"] for row in refused] == [why]
     assert refused[0]["basis"] == "witness.callee"

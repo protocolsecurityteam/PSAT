@@ -23,8 +23,28 @@ const LETTER_CUTS = [
 // What moved. 1.1.0 stops charging a finding the reached entity's whole balance
 // sheet when no witness proved how much the reach moves: those rows drop from a
 // value band of 0.5–1.0 to the unpriced floor of 0.15, so λ RISES without any
-// protocol becoming safer. Measured on the only local protocol (etherfi,
-// protocol 1): λ 55.009 → 84.017, which crosses C+ → A− under these cuts.
+// protocol becoming safer. Measured across the VERSION BOUNDARY — the last
+// published 1.0.1 document against the first 1.1.0 one, on the only local
+// protocol (etherfi, protocol 1):
+//
+//     λ           54.1614 → 84.0166      letter C+ → A−
+//     confidence     29.0 → 18.6
+//     exposure_usd  $1,227,107,593.64 → $76.07
+//
+// Three facts a reader needs before treating that confidence drop as the price
+// paid for the letter, because it is not:
+//   (a) the reach-magnitude term does NOT bind the headline here. min() is
+//       taken on value_priced_pct 18.6; the magnitude term sits at 34.2, a
+//       clear 15.6pp above it. The new term is real but it is not what the
+//       published confidence is reporting.
+//   (b) the strictest figure this model publishes about magnitude —
+//       reach_magnitude_witnessed_of_reaching_pct, 15.3 — WOULD bind if it were
+//       the term, and 1.1.0 does not move it at all: flooring an unwitnessed
+//       magnitude mints no witness. The composition pass is what moves it.
+//   (c) the 29.0 → 18.6 fall happened WITHIN 1.0.1, from the same-version
+//       reach-magnitude term and perimeter widening, not from this change. The
+//       letter improvement and the confidence fall are both real and both
+//       published; they are not a trade this change made.
 //
 // Why the cuts do not move with it.
 //   1. Moving them would fit the table to ONE protocol's λ. That is the same
@@ -36,12 +56,13 @@ const LETTER_CUTS = [
 //      gate-control class and pushes λ back down. Cut points fitted to the gap
 //      between them would be recalibrated again immediately, and in the interim
 //      they would hide the very movement they were fitted to.
-//   3. The letter is not the only published number. The confidence axis is
-//      first-class output and it falls as λ rises — the unproven magnitude moves
-//      OUT of the grade and INTO the reach-magnitude confidence term. A reader
-//      seeing A− beside a confidence in the teens is being told exactly what
-//      happened; a table quietly re-cut to hold the letter at C+ would tell them
-//      nothing and would assert a calibration nobody performed.
+//   3. The letter is not the only published number, and the grade's own
+//      coverage travels beside it: provenance.exposure_coverage says how many
+//      findings the exposure ratio was measured over, so an A− standing on a
+//      numerator summed from a handful of rows cannot be read as "measured
+//      safe". A table quietly re-cut to hold the letter at C+ would assert a
+//      calibration nobody performed and would hide that coverage question
+//      behind a familiar-looking letter.
 //
 // So the letter delta is published as a migration fact rather than absorbed.
 const BANDS = {

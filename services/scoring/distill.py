@@ -108,6 +108,16 @@ _SOLMATE_MUTATOR_SELECTORS: dict[str, str] = {
 }
 _TIMELOCK_ENTRYPOINTS = frozenset({"schedule", "scheduleBatch", "execute", "executeBatch"})
 
+# The witness tiers a REPOINT may be admitted on, as an allowlist. A repoint adds
+# a foreign entity to a reach set, so the tier that named it has to be one this
+# scorer can vouch for. Stated positively on purpose: a denylist of
+# ``policy_derived`` admits every tier nobody classified, and an absent or
+# unrecognised ``tier`` token resolves to ``not_determined`` — a witness that
+# proved nothing would have been the easiest of all to pass.
+REPOINT_ADMISSIBLE_TIERS = frozenset(
+    {WITNESS_TIER_BEHAVIORAL_OBSERVED, WITNESS_TIER_STANDARD_EXACT, WITNESS_TIER_IDIOM_STRUCTURAL}
+)
+
 
 def _f(value: Any) -> float | None:
     try:
@@ -838,11 +848,15 @@ def _repointed_entities(
 
     Three admissions, each earned:
 
-    * The witness must be a VALUE witness. A ``policy_derived`` claim is a static
-      inference — the ``configures`` producer's own docstring concedes that "the
-      written set-var stands in for the spec's 'read by the hook fn'" — and an
-      inference about what a function configures is not evidence about where
-      value sits.
+    * The witness must be a VALUE witness, and that is tested as an ALLOWLIST of
+      the tiers that are one (``REPOINT_ADMISSIBLE_TIERS``). A denylist of
+      ``policy_derived`` would admit every tier nobody has classified — including
+      the ``not_determined`` an absent or unrecognised ``tier`` token falls to,
+      which is precisely a witness that proved nothing. A ``policy_derived``
+      claim is a static inference — the ``configures`` producer's own docstring
+      concedes that "the written set-var stands in for the spec's 'read by the
+      hook fn'" — and an inference about what a function configures is not
+      evidence about where value sits.
     * The named address must be a contract of THIS protocol on THIS chain, the
       same three checks :func:`_licensed_reach_entities` makes.
     * The burn address is never an entity. It is the graph's single largest
@@ -867,6 +881,8 @@ def _repointed_entities(
         key = entity_key(facts.chain, named)
         if tier == WITNESS_TIER_POLICY_DERIVED:
             why = "witness_tier_policy_derived(a static inference, not a value witness)"
+        elif tier not in REPOINT_ADMISSIBLE_TIERS:
+            why = f"witness_tier_not_determined({tier}; no tier token this scorer can vouch for)"
         elif is_zero_key(key):
             why = "zero_address_is_a_burn_sentinel_not_an_entity"
         elif key not in facts.protocol_entities:
@@ -1107,6 +1123,25 @@ def _build_signal(
     extra_keys: list[str] = []
     if reach.state == VALUE_STATE_PROVEN_REACH and licensed:
         extra_keys = [entry["entity_key"] for entry in licensed]
+    if licensed:
+        # ``licensed`` is a fact about the GATE — this contract is the gating
+        # contract of those vaults — and it is stamped whatever this signal's own
+        # reach turned out to be. The licence is consumed as a reach key only
+        # where the signal ALSO proved reach; on every other signal the state
+        # names a witness that was cited and not spent, and reading it as a
+        # consumed reach key is the laundering this field was corrected to stop.
+        citations.append(
+            {
+                "field": "reach_gate_state",
+                "value": REACH_GATE_LICENSED,
+                "licensed_keys_cited": len(licensed),
+                "licensed_keys_consumed": len(extra_keys),
+                "reading": (
+                    "licensed names the gate witness, not a consumed reach key: the keys are "
+                    "added to this signal's reach only where the signal proved reach of its own"
+                ),
+            }
+        )
     keys = tuple(sorted(set(reach.entity_keys) | set(extra_keys)))
     fields["value_state"] = reach.state
     fields["value_bound"] = reach.bound

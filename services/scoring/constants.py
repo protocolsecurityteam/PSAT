@@ -424,15 +424,48 @@ def model_parameters() -> dict[str, Any]:
             "gate_control": sorted(GATE_CONTROL_CAPABILITIES),
             "bound": (
                 "both expand over the control closure; code control over the whole closure of "
-                "the controlled node, gate control only through edges whose scope the gate "
-                "confers. Both are bounded by each destination's own caller conditions, and a "
-                "hop that cannot be established either way is published as not_determined "
-                "rather than walked or dropped"
+                "the controlled node, gate control only through edges whose label names a SCOPE "
+                "AT ALL — a role number or a state variable. That is a label-presence test and "
+                "NOT a conferral test: a label naming a getter ('vault', 'hook', 'endpoint') "
+                "names a scope this walk cannot show the gate confers, and it is walked anyway. "
+                "Narrowing a determined scope to the selectors the role actually licenses is "
+                "NOT YET APPLIED, so gate-control reach here is an UPPER BOUND on the licensed "
+                "reach and may only shrink when that join lands. Both classes are bounded by "
+                "each destination's own caller conditions, and a hop that cannot be established "
+                "either way is published as not_determined rather than walked or dropped. "
+                "provenance.reach_bounds.hop_census counts how many hops each rule walked and "
+                "on what basis"
             ),
             "magnitude": (
                 "membership is not a magnitude: where no witness proves how much value the "
                 "reach MOVES, the dollar figure is not_determined and the finding keeps the "
                 "unpriced band's floor weight. The entity's balance sheet is never the answer"
+            ),
+        },
+        "model_version_migration": {
+            "from": "1.0.1-provisional",
+            "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+            "grade_lambda": [54.1614, 84.0166],
+            "letter": ["C+", "A−"],
+            "confidence_pct": [29.0, 18.6],
+            "exposure_usd": [1227107593.64, 76.07],
+            "what_moved": (
+                "a reach whose MAGNITUDE no witness proved stops charging the reached entity's "
+                "balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced "
+                "floor of 0.15, so lambda RISES and exposure collapses without any protocol "
+                "becoming safer. The band table carries 1.0.1's cut points forward unchanged, so "
+                "the letter delta is published rather than absorbed by a recut nobody calibrated"
+            ),
+            "read_the_confidence_fall_correctly": (
+                "(a) the reach-magnitude term does NOT bind the headline on this corpus - the "
+                "min() is value_priced_pct 18.6 and the magnitude term sits 15.6pp clear at 34.2; "
+                "(b) the strictest magnitude figure published, "
+                "reach_magnitude_witnessed_of_reaching_pct 15.3, WOULD bind if it were the term "
+                "and this version does not move it at all, because flooring an unwitnessed "
+                "magnitude mints no witness - only composing one does; (c) the 29.0 -> 18.6 fall "
+                "happened WITHIN 1.0.1, from that version's own reach-magnitude term and "
+                "perimeter widening. The letter improvement here was NOT paid for by a "
+                "confidence fall in this change; both are real, and neither is the other's price"
             ),
         },
         "uncalibrated_arms": list(UNCALIBRATED_ARMS),
