@@ -197,6 +197,10 @@ class _RowValue:
     # not_determined names ONE destination; everything the closure places behind
     # it is withheld too and appears nowhere on the row.
     withheld_behind_hops: dict[str, Any] = field(default_factory=dict)
+    # Floor magnitudes charged against an entity whose priced sheet is
+    # not_determined, so nothing was available to bound them with. Published
+    # rather than absorbed: the figure is the witness's, not the entity's.
+    unbounded_floor_magnitudes: list[dict[str, Any]] = field(default_factory=list)
 
 
 def compute_protocol_score(
@@ -1289,6 +1293,11 @@ def _aggregate(
                 "undetermined_instances": undetermined,
                 "proven_no_reach_instances": valued.proven_no_reach,
                 "witnessed_magnitude_caps": valued.magnitude_caps,
+                # A floor witness the entity's own sheet could not bound. The
+                # published dollars for these entities are the witness's figure
+                # standing alone, which is a different fact from a figure two
+                # witnesses agreed on.
+                "unbounded_floor_magnitudes": valued.unbounded_floor_magnitudes,
                 # ``witnessed_magnitude_caps`` lists only the calls a witness
                 # actually TRIMMED. Read alone it says nothing about the calls
                 # that carried no witness at all, which are the majority and
@@ -1526,6 +1535,7 @@ def _row_value(
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
+    unbounded_floors: list[dict[str, Any]] = []
     hops: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
     census: dict[str, int] = dict.fromkeys(
@@ -1596,7 +1606,10 @@ def _row_value(
         # unproven one is missing is the whole error this fold is being repaired
         # for. Priced or not, the row reaches these entities.
         reached.update(value_plane.canonical(key) for key in keys)
-        contributions, gaps, cap = _instance_contributions(instance, keys, value_plane, transitive=transitive)
+        contributions, gaps, cap, unbounded = _instance_contributions(
+            instance, keys, value_plane, transitive=transitive
+        )
+        unbounded_floors.extend(unbounded)
         census["instances"] += 1
         if _witnessed_magnitude(instance) is None:
             census["magnitude_not_witnessed"] += 1
@@ -1630,6 +1643,7 @@ def _row_value(
             census,
             licensed_out,
             withheld_behind,
+            unbounded_floors,
         )
     basis = (
         "witnessed reach magnitude over the "
@@ -1655,12 +1669,13 @@ def _row_value(
         census,
         licensed_out,
         withheld_behind,
+        unbounded_floors,
     )
 
 
 def _instance_contributions(
     instance: _Instance, keys: set[str], value_plane: P.ValuePlane, *, transitive: bool
-) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any] | None]:
+) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any] | None, list[dict[str, Any]]]:
     """One call's per-entity contributions, bounded by the one magnitude it proved.
 
     A witnessed magnitude is a per-CALL quantity: ``withdraw`` proven to move
@@ -1683,8 +1698,11 @@ def _instance_contributions(
     """
     per_key: dict[str, float] = {}
     gaps: list[dict[str, Any]] = []
+    unbounded: list[dict[str, Any]] = []
     for key in sorted(keys):
-        contribution, why = _entity_contribution(instance, key, value_plane, transitive=transitive)
+        contribution, why, note = _entity_contribution(instance, key, value_plane, transitive=transitive)
+        if note is not None:
+            unbounded.append(note)
         if contribution is None:
             # The RAW key the walk reached, not its canonical fold — pre-existing
             # and kept, because this row names where the walk landed and folding
@@ -1703,7 +1721,7 @@ def _instance_contributions(
 
     magnitude = _witnessed_magnitude(instance)
     if magnitude is None or len(per_key) < 2:
-        return per_key, gaps, None
+        return per_key, gaps, None, unbounded
 
     uncapped = round(sum(sorted(per_key.values())), 6)
     if instance.magnitude.state != "proven_exact":
@@ -1732,9 +1750,10 @@ def _instance_contributions(
                     "is not_determined rather than the floor charged once per entity"
                 ),
             },
+            unbounded,
         )
     if uncapped <= magnitude:
-        return per_key, gaps, None
+        return per_key, gaps, None, unbounded
 
     capped: dict[str, float] = {}
     exhausted: list[str] = []
@@ -1774,6 +1793,7 @@ def _instance_contributions(
                 "and no witness apportions this magnitude between the entities"
             ),
         },
+        unbounded,
     )
 
 
@@ -1787,7 +1807,7 @@ def _witnessed_magnitude(instance: _Instance) -> float | None:
 
 def _entity_contribution(
     instance: _Instance, key: str, value_plane: P.ValuePlane, *, transitive: bool
-) -> tuple[float | None, str]:
+) -> tuple[float | None, str, dict[str, Any] | None]:
     """The dollars this call is PROVEN to move against one entity, or ``None``.
 
     There is exactly one source of a number here: a magnitude witness. Reach
@@ -1805,18 +1825,27 @@ def _entity_contribution(
     reach-magnitude term, which is the only place an unknown can sit without
     being published as a number.
 
+    A FLOOR witness is bounded by the sheet exactly as an exact one is. The
+    witness proves the call moves at least that much SOMEWHERE; against one
+    entity it can still move no more than that entity holds, so a $28M floor
+    charged against a $1k sheet publishes $28M of a protocol that has $1k — the
+    same substitution one step over, with the direction of the error hidden by
+    the word "floor". Where the sheet is not determined there is nothing to bound
+    it with: the floor stands, and it is DISCLOSED as a figure exceeding an
+    unknown sheet rather than published as if the sheet had agreed.
+
     ``key`` is refused outright when two proxies share it as an implementation:
     the plane folds it onto neither, and charging a shared implementation
     against a proxy picked by sort order publishes the other proxy's sheet.
     """
     if key in value_plane.alias_ambiguous:
-        return None, "shared_implementation_folds_onto_no_proxy(not_determined)"
+        return None, "shared_implementation_folds_onto_no_proxy(not_determined)", None
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.
         native = P.native_value_state(value_plane, key)
         if not native.is_determined:
-            return None, "native_only_flow+absent_native_row(not_determined)"
+            return None, "native_only_flow+absent_native_row(not_determined)", None
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
         basis = "native_only_flow x native_balance"
@@ -1830,11 +1859,32 @@ def _entity_contribution(
             # The witness bounds what this call moves; the entity's sheet bounds
             # what is there to move. Neither alone is the answer, and the sheet
             # alone is the balance-sheet-as-a-reach error.
-            return (min(held, magnitude) if held is not None else magnitude), f"witnessed_reach(exact) x {basis}"
-        return magnitude, "witnessed_reach(floor)"
+            return (min(held, magnitude) if held is not None else magnitude), f"witnessed_reach(exact) x {basis}", None
+        if held is not None:
+            return min(held, magnitude), f"witnessed_reach(floor) x {basis}", None
+        return (
+            magnitude,
+            "witnessed_reach(floor)+sheet_not_determined",
+            {
+                "function": instance.signal.function_name,
+                "capability": instance.signal.claim_id,
+                "entity": key,
+                "witnessed_floor_usd": magnitude,
+                "reading": (
+                    "a floor witness charged against an entity whose priced sheet is "
+                    "not_determined: nothing here says the entity holds this much, only that "
+                    "the call moves at least this much somewhere, and no sheet was available "
+                    "to bound it against this entity"
+                ),
+            },
+        )
     if held is None:
-        return None, "entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"
-    return None, ("reach_magnitude_not_witnessed(not_determined) x " + basis + ("+closure" if transitive else ""))
+        return None, ("entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"), None
+    return (
+        None,
+        ("reach_magnitude_not_witnessed(not_determined) x " + basis + ("+closure" if transitive else "")),
+        None,
+    )
 
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"

@@ -2386,6 +2386,55 @@ def test_r4_one_key_keeps_its_floor_witness_exactly(fold):
     assert finding["witnessed_magnitude_caps"] == []
 
 
+def test_r4_a_floor_magnitude_is_bounded_by_the_entity_it_is_charged_against(fold):
+    """A floor witness is not licence to publish more than the entity holds.
+
+    The exact branch has always taken ``min(sheet, witness)``; the floor branch
+    returned the witness untouched, so a $28M floor charged against a $1k sheet
+    published $28M — the balance-sheet substitution inverted, with the word
+    "floor" hiding which direction the error runs in.
+    """
+    signal = flow_sig(
+        function_name="withdraw",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        gates={"reach_magnitude_usd": Tri.proven("proven_floor", 28_000_000.0).to_json()},
+        **proven(0.9, ("caller_arbitrary_proven",)),
+        **reaches(KEY_C, bound=VALUE_BOUND_FLOOR),
+    )
+    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000.0}}))
+    finding = document.findings[0]
+    assert finding["value_by_entity"] == {KEY_C: 1_000.0}
+    assert finding["value_at_stake_usd"] == 1_000.0
+    # Nothing was left unbounded: the sheet did the bounding.
+    assert finding["unbounded_floor_magnitudes"] == []
+
+
+def test_r4_a_floor_against_an_undetermined_sheet_is_disclosed_not_absorbed(fold):
+    """No sheet means nothing to bound the floor with, and that is a fact.
+
+    The floor still stands — it is a witness — but it stands ALONE, and a reader
+    must be able to tell a figure two witnesses agreed on from one the entity's
+    own books never answered.
+    """
+    signal = flow_sig(
+        function_name="withdraw",
+        authority_openness="open",
+        principal_state="none_required",
+        witness_tier="behavioral_observed",
+        gates={"reach_magnitude_usd": Tri.proven("proven_floor", 28_000_000.0).to_json()},
+        **proven(0.9, ("caller_arbitrary_proven",)),
+        **reaches(KEY_C, bound=VALUE_BOUND_FLOOR),
+    )
+    document = fold([signal], value=value_plane(contracts=(KEY_C,)))
+    finding = document.findings[0]
+    assert finding["value_by_entity"] == {KEY_C: 28_000_000.0}
+    disclosed = finding["unbounded_floor_magnitudes"]
+    assert [row["entity"] for row in disclosed] == [KEY_C]
+    assert disclosed[0]["witnessed_floor_usd"] == 28_000_000.0
+
+
 def test_r7_an_exhausted_exposure_budget_is_not_a_measured_zero(fold):
     """Rows that spent an entity's budget leave the next one nothing to measure.
 
