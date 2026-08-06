@@ -31,6 +31,7 @@ from services.scoring.distill import distill_contract_signals, distill_job_signa
 from services.scoring.fold import compute_protocol_score
 from services.scoring.planes import (
     CONTROL_RELATIONS,
+    REFUSAL_SELF_EDGE,
     REFUSAL_ZERO_ANCHOR,
     REFUSAL_ZERO_PRINCIPAL,
     SHEET_BELOW_RESOLUTION,
@@ -1219,7 +1220,11 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
     db_session.commit()
 
     closure = load_control_closure(db_session, corpus.protocol.id)
-    assert closure.refusal_counts() == {REFUSAL_ZERO_ANCHOR: 1, REFUSAL_ZERO_PRINCIPAL: 1}
+    assert closure.refusal_counts() == {
+        REFUSAL_SELF_EDGE: 0,
+        REFUSAL_ZERO_ANCHOR: 1,
+        REFUSAL_ZERO_PRINCIPAL: 1,
+    }
     assert entity_key("ethereum", zero) not in closure.principals()
     assert closure.controlled_by(entity_key("ethereum", zero)) == ()
     # The one real edge survives: the rule removes reach, it does not empty the graph.
@@ -1248,7 +1253,15 @@ def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(c
     db_session.commit()
 
     closure = load_control_closure(db_session, corpus.protocol.id)
-    assert closure.renounced_counts() == {"edges": 1, "authority_slots": 1, "anchors": 1}
+    assert closure.renounced_counts() == {
+        "edges": 1,
+        "authority_slots": 1,
+        "anchors": 1,
+        # A renounced ``owner`` and a never-set ``accessController`` are both
+        # proven-absent authority and both land here; which slot it was is the
+        # difference between a renunciation and a pointer nobody wired.
+        "authority_slots_by_label": {"owner": 1},
+    }
     renounced = closure.renounced[0]
     assert renounced.anchor == entity_key("ethereum", anchor.address)
     assert renounced.scope.state_var == "owner"

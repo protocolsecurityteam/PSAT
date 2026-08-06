@@ -143,12 +143,23 @@ class ValuePlane:
     per_asset_state: dict[str, dict[str, str]] = field(default_factory=dict)
     native_fact: dict[str, str] = field(default_factory=dict)
     alias: dict[str, str] = field(default_factory=dict)
+    # Implementation keys TWO proxies share. There is no proxy to fold them onto
+    # — pinning one is a coin toss that charges the loser's sheet — so they are
+    # named here and aliased nowhere.
+    alias_ambiguous: set[str] = field(default_factory=set)
     unpriced_positions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self, key: str) -> str:
-        """An implementation's key folds onto the proxy that deploys it."""
+        """An implementation's key folds onto the proxy that deploys it.
+
+        Resolved to a FIXED POINT at load: ``J -> I`` beside ``I -> P`` answers
+        ``P`` here and not ``I``, so a two-step alias chain cannot orphan J's
+        balances at a key nothing else folds onto while P is counted twice.
+        A key in ``alias_ambiguous`` folds onto nothing — two proxies share that
+        implementation and neither owns it.
+        """
         return self.alias.get(key, key)
 
     def sheet_state(self, key: str) -> str:
@@ -366,6 +377,33 @@ def _reduce_observations(
     )
 
 
+class AliasCycleError(ValueError):
+    """The implementation alias map contains a cycle. Loud, never resolved."""
+
+
+def _alias_fixed_point(alias: dict[str, str]) -> dict[str, str]:
+    """Follow ``J -> I -> P`` to ``J -> P``, and refuse a cycle out loud.
+
+    A single-level lookup answers ``I`` for J, so J's balances fold onto a key
+    that itself folds elsewhere: J is orphaned from the entity that ends up
+    holding it and P is counted once for itself and once for I. A cycle is not a
+    fold at all — it says two contracts each implement the other — so it raises
+    rather than picking a member, which would publish a canonical entity chosen
+    by iteration order.
+    """
+    out: dict[str, str] = {}
+    for key in sorted(alias):
+        seen = [key]
+        current = alias[key]
+        while current in alias and alias[current] != current:
+            if current in seen:
+                raise AliasCycleError("implementation alias cycle: " + " -> ".join([*seen, current]))
+            seen.append(current)
+            current = alias[current]
+        out[key] = current
+    return out
+
+
 def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import native_balance_fact
@@ -375,7 +413,7 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     chain_of: dict[int, str] = {}
     address_of: dict[int, str] = {}
     impl_to_proxy: dict[str, str] = {}
-    shared_impl: list[dict[str, Any]] = []
+    impl_proxies: dict[str, set[str]] = defaultdict(set)
     for contract in contracts:
         chain = coalesce_chain(contract.chain)
         chain_of[contract.id] = chain
@@ -385,15 +423,20 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             continue
         impl_key = entity_key(chain, contract.implementation)
         proxy_key = entity_key(chain, contract.address)
-        previous = impl_to_proxy.get(impl_key)
-        if previous is not None and previous != proxy_key:
-            # Two proxies sharing one implementation. Last-wins would be
-            # arbitrary; pin the lowest key and publish the collision.
-            shared_impl.append({"implementation": impl_key, "proxies": sorted([previous, proxy_key])})
-            impl_to_proxy[impl_key] = min(previous, proxy_key)
-        else:
-            impl_to_proxy[impl_key] = proxy_key
-    plane.alias = impl_to_proxy
+        impl_proxies[impl_key].add(proxy_key)
+        impl_to_proxy[impl_key] = proxy_key
+    # Two proxies sharing one implementation. Pinning either of them — by
+    # ``min``, by ``contracts.id`` order, by anything — charges a finding that
+    # reaches only proxy B's implementation with proxy A's whole balance sheet,
+    # publishes A as an entity nothing reached, and spends A's exposure budget.
+    # The implementation is not a fold of either proxy, so it folds onto
+    # NEITHER: it keeps its own key and the collision is published.
+    ambiguous = {impl for impl, proxies in impl_proxies.items() if len(proxies) > 1}
+    shared_impl = [{"implementation": impl, "proxies": sorted(impl_proxies[impl])} for impl in sorted(ambiguous)]
+    for impl in ambiguous:
+        impl_to_proxy.pop(impl, None)
+    plane.alias = _alias_fixed_point(impl_to_proxy)
+    plane.alias_ambiguous = ambiguous
 
     native_seen: set[str] = set()
     fetched: list[Any] = []
@@ -554,6 +597,16 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         "balance_rows": len(rows),
         "restaking_rows": len(positions),
         "shared_implementations": shared_impl,
+        "shared_implementation_aliases_refused": len(shared_impl),
+        "shared_implementation_reading": (
+            "an implementation two proxies share folds onto NEITHER: it keeps its own entity "
+            "key, so a reach that lands on it is charged that key's own sheet and never the "
+            "sheet of whichever proxy an arbitrary pin happened to select. A zero here is the "
+            "proven 'no implementation is shared', not an unasked question"
+        ),
+        "implementation_alias_fixed_point": (
+            "resolved transitively, so J->I beside I->P answers P for J; a cycle raises rather than selecting a member"
+        ),
         "fetched_at_span_seconds": (
             round((max(fetched) - min(fetched)).total_seconds(), 3) if len(fetched) > 1 else None
         ),
@@ -774,6 +827,13 @@ SCOPE_NOT_DETERMINED = "not_determined"
 # than given an invented relation.
 EDGE_WITNESS_CONTROL_GRAPH = "control_graph_edges"
 EDGE_WITNESS_ADMIN_COLUMN = "contracts.admin"
+# ``contracts.beacon`` is the same kind of witness as ``contracts.admin`` — a
+# column populated by the same slot read, present in no edge table — and it
+# carries its own name rather than borrowing admin's, because a consumer that
+# wants to know which witness produced a hop must be able to tell them apart.
+# Consumers branch on THIS value; ``relation is None`` is a property both share
+# and is not a witness.
+EDGE_WITNESS_BEACON_COLUMN = "contracts.beacon"
 
 _ROLES_LABEL = re.compile(r"^roles\s+(\d+(?:\s*,\s*\d+)*)$")
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -840,6 +900,11 @@ class ControlEdge:
 
 REFUSAL_ZERO_PRINCIPAL = "zero_address_principal"
 REFUSAL_ZERO_ANCHOR = "zero_address_anchor"
+# A beacon or admin column that names the contract itself. The edge would say
+# the entity controls itself, which adds no reach and asserts no authority over
+# anyone — refused with a count rather than admitted as a self-loop the walk
+# silently absorbs.
+REFUSAL_SELF_EDGE = "self_referential_column"
 
 
 @dataclass(frozen=True)
@@ -915,12 +980,12 @@ class ControlClosure:
 
     def refusal_counts(self) -> dict[str, int]:
         """Edges refused, per admission rule. A rule that never fired reports 0."""
-        counts = {REFUSAL_ZERO_PRINCIPAL: 0, REFUSAL_ZERO_ANCHOR: 0}
+        counts = {REFUSAL_ZERO_PRINCIPAL: 0, REFUSAL_ZERO_ANCHOR: 0, REFUSAL_SELF_EDGE: 0}
         for refusal in self.refusals:
             counts[refusal.rule] = counts.get(refusal.rule, 0) + 1
         return dict(sorted(counts.items()))
 
-    def renounced_counts(self) -> dict[str, int]:
+    def renounced_counts(self) -> dict[str, Any]:
         """The earned negative, counted three ways because they differ.
 
         ``control_graph_edges`` carries one row per witnessed read, so the same
@@ -930,10 +995,21 @@ class ControlClosure:
         authority — and the edge count is kept beside it rather than replaced,
         since it is the citable population.
         """
+        slots = {(row.anchor, row.scope.label) for row in self.renounced}
+        by_label: dict[str, int] = {}
+        for _, label in slots:
+            by_label[str(label)] = by_label.get(str(label), 0) + 1
         return {
             "edges": len(self.renounced),
-            "authority_slots": len({(row.anchor, row.scope.label) for row in self.renounced}),
+            "authority_slots": len(slots),
             "anchors": len({row.anchor for row in self.renounced}),
+            # An ``owner`` slot holding 0x0 is a renunciation; a ``_pendingOwner``
+            # or an ``accessController`` holding it is a pointer nobody ever set.
+            # Both are proven-absent authority, and the earned negative is the
+            # same shape — but they are different facts about the protocol, and
+            # the day one of them moves a number the distinction has to already
+            # be in the document rather than be reconstructed from it.
+            "authority_slots_by_label": dict(sorted(by_label.items())),
         }
 
 
@@ -960,6 +1036,13 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     authority, folded into one closure that no witness seeds. And a
     ``controller_value`` edge pointing AT it is read as a renounced authority,
     an earned negative, rather than thrown away with the refusal.
+
+    Two column witnesses join the graph rows. ``contracts.admin`` is the proxy
+    admin; ``contracts.beacon`` is the beacon whose implementation slot every
+    proxy pointing at it follows — the broadest code-control link there is, and
+    one the closure carried no representation of at all. Both are populated by
+    the same slot read, exist in no edge table, and carry their own witness
+    string so a consumer can tell which produced a hop.
     """
     from db.models import Contract, ControlGraphEdge
 
@@ -979,10 +1062,21 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                     edge_id=candidate.edge_id,
                 )
             )
-        if zero_principal or is_zero_key(candidate.anchor):
+        # The self-edge rule is scoped to the COLUMN witnesses: a
+        # ``contracts.beacon`` naming the proxy itself is a degenerate column
+        # read, while a witnessed graph row saying an entity holds authority
+        # over itself is a fact this loader has no licence to discard.
+        self_column = candidate.principal == candidate.anchor and candidate.relation is None
+        if zero_principal or is_zero_key(candidate.anchor) or self_column:
             refusals.append(
                 RefusedEdge(
-                    rule=REFUSAL_ZERO_PRINCIPAL if zero_principal else REFUSAL_ZERO_ANCHOR,
+                    rule=(
+                        REFUSAL_ZERO_PRINCIPAL
+                        if zero_principal
+                        else REFUSAL_ZERO_ANCHOR
+                        if is_zero_key(candidate.anchor)
+                        else REFUSAL_SELF_EDGE
+                    ),
                     principal=candidate.principal,
                     anchor=candidate.anchor,
                     relation=candidate.relation,
@@ -1018,15 +1112,20 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
             )
         )
     for contract in session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all():
-        if contract.admin:
-            chain = coalesce_chain(contract.chain)
+        chain = coalesce_chain(contract.chain)
+        for column, witness in (
+            (contract.admin, EDGE_WITNESS_ADMIN_COLUMN),
+            (contract.beacon, EDGE_WITNESS_BEACON_COLUMN),
+        ):
+            if not column:
+                continue
             admit(
                 ControlEdge(
-                    principal=entity_key(chain, contract.admin),
+                    principal=entity_key(chain, column),
                     anchor=entity_key(chain, contract.address),
                     relation=None,
                     scope=EdgeScope(SCOPE_NOT_DETERMINED),
-                    witness=EDGE_WITNESS_ADMIN_COLUMN,
+                    witness=witness,
                 )
             )
     return ControlClosure(edges=tuple(edges), refusals=tuple(refusals), renounced=tuple(renounced))

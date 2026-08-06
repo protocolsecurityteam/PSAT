@@ -1670,6 +1670,8 @@ def _entity_contribution(
     the plane folds it onto neither, and charging a shared implementation
     against a proxy picked by sort order publishes the other proxy's sheet.
     """
+    if key in value_plane.alias_ambiguous:
+        return None, "shared_implementation_folds_onto_no_proxy(not_determined)"
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.

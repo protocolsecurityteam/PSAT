@@ -2002,8 +2002,17 @@ def test_an_all_dust_sheet_charges_no_finding_a_proven_zero_exposure(fold):
 def test_a_closure_publishes_a_zero_count_for_a_rule_that_never_fired():
     """An admission rule reports where it did NOT fire, or it discloses nothing."""
     closure = closure_of({KEY_C: {KEY_V}})
-    assert closure.refusal_counts() == {P.REFUSAL_ZERO_ANCHOR: 0, P.REFUSAL_ZERO_PRINCIPAL: 0}
-    assert closure.renounced_counts() == {"edges": 0, "authority_slots": 0, "anchors": 0}
+    assert closure.refusal_counts() == {
+        P.REFUSAL_SELF_EDGE: 0,
+        P.REFUSAL_ZERO_ANCHOR: 0,
+        P.REFUSAL_ZERO_PRINCIPAL: 0,
+    }
+    assert closure.renounced_counts() == {
+        "edges": 0,
+        "authority_slots": 0,
+        "anchors": 0,
+        "authority_slots_by_label": {},
+    }
 
 
 def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
@@ -2037,7 +2046,12 @@ def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
         ),
     )
     assert closure.refusal_counts()[P.REFUSAL_ZERO_PRINCIPAL] == 1
-    assert closure.renounced_counts() == {"edges": 1, "authority_slots": 1, "anchors": 1}
+    assert closure.renounced_counts() == {
+        "edges": 1,
+        "authority_slots": 1,
+        "anchors": 1,
+        "authority_slots_by_label": {"owner": 1},
+    }
     # The refused edge reaches nothing: it is not in the walked graph at all.
     assert closure.principals() == ()
     assert closure.controlled_by(zero) == ()
@@ -2149,7 +2163,15 @@ def test_a_renounced_slot_is_counted_as_slots_and_as_the_edges_that_witness_it()
             for anchor, edge_id in ((KEY_V, 1), (KEY_V, 2), (KEY_V, 3), (KEY_C, 4))
         ),
     )
-    assert closure.renounced_counts() == {"edges": 4, "authority_slots": 2, "anchors": 2}
+    assert closure.renounced_counts() == {
+        "edges": 4,
+        "authority_slots": 2,
+        "anchors": 2,
+        # One label over two anchors: the slot count is per (anchor, label),
+        # and this breakdown is per label, so both anchors' ``owner`` slots
+        # land on the one key.
+        "authority_slots_by_label": {"owner": 2},
+    }
 
 
 # --------------------------------------------------------------------------
@@ -3286,3 +3308,67 @@ def test_w3_case2_both_sides_of_the_inversion_fall_to_not_determined(fold):
     # reaches the entity that holds the money.
     assert KEY_SOLVER not in unreachable["reach_entities"]
     assert KEY_SOLVER in reachable["reach_entities"]
+
+
+def test_w3_a_shared_implementation_folds_onto_no_proxy(fold):
+    """R14: two proxies, one implementation, and no coin toss between them.
+
+    Pinning either proxy charges a row that reached only the OTHER proxy's
+    implementation with this one's whole sheet, publishes it as an entity nothing
+    reached, and spends its exposure budget. Zero shared implementations exist on
+    any corpus measured, so the rule is pinned here rather than observed.
+    """
+    plane = value_plane({KEY_PROXY: {"usdc": 100_000_000.0}})
+    plane.alias_ambiguous = {KEY_IMPL}
+    signal = sig(
+        deployment_address=PROXY,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(100_000_000.0),
+        **proven(1.0),
+        **reaches(KEY_IMPL),
+    )
+    finding = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert finding["value_by_entity"] == {}
+    assert finding["value_at_stake_usd"] is None
+    gap = finding["undetermined_instances"][0]
+    assert gap["entity"] == KEY_IMPL
+    assert gap["why"] == "shared_implementation_folds_onto_no_proxy(not_determined)"
+
+
+def test_w3_an_alias_cycle_fails_loud(fold):
+    """R15: ``A -> B`` beside ``B -> A`` is a contradiction, not a fold.
+
+    Resolving it by picking a member would publish a canonical entity chosen by
+    iteration order, and orphan the other one's balances behind it.
+    """
+    with pytest.raises(P.AliasCycleError):
+        P._alias_fixed_point({KEY_PROXY: KEY_IMPL, KEY_IMPL: KEY_PROXY})
+    # And a chain resolves rather than stopping one hop short.
+    third = entity_key("ethereum", "0x" + "d" * 40)
+    assert P._alias_fixed_point({third: KEY_IMPL, KEY_IMPL: KEY_PROXY}) == {
+        third: KEY_PROXY,
+        KEY_IMPL: KEY_PROXY,
+    }
+
+
+def test_w3_a_beacon_is_a_code_control_edge_with_its_own_witness():
+    """R16: whoever controls the beacon sets the implementation of every proxy.
+
+    The broadest code-control link there is, and the closure carried no
+    representation of it at all. It is named by its own column rather than
+    borrowing the admin witness — consumers branch on the witness string, and
+    ``relation is None`` is a property both columns share.
+    """
+    assert P.EDGE_WITNESS_BEACON_COLUMN != P.EDGE_WITNESS_ADMIN_COLUMN
+    edge = P.ControlEdge(
+        principal=KEY_C,
+        anchor=KEY_PROXY,
+        relation=None,
+        scope=P.EdgeScope(P.SCOPE_NOT_DETERMINED),
+        witness=P.EDGE_WITNESS_BEACON_COLUMN,
+    )
+    closure = P.ControlClosure(edges=(edge,))
+    conditions = condition_plane()
+    assert FOLD._closure({KEY_C}, closure, conditions, code_control=True)[0] == {KEY_C, KEY_PROXY}
