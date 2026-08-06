@@ -274,6 +274,22 @@ def conferral_plane(*, rewrites=("owner",), role_functions=None) -> P.ConferralP
     return _StubConferral(rewrites, role_functions)
 
 
+def act_as_plane(
+    call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool], ...]] | None = None,
+    reads: dict[tuple[str, str], tuple[str, str, int | None]] | None = None,
+) -> P.ActAsPlane:
+    """An ``ActAsPlane`` from bare call sites and receiver reads.
+
+    Empty by default, which is the honest state for every test written before
+    composition existed: nothing witnesses that a seized node can be made to act
+    anywhere, so no gate-control magnitude composes and the reach keeps the
+    not_determined magnitude those tests assert on.
+    """
+    plane = P.ActAsPlane(call_sites=dict(call_sites or {}), reads=dict(reads or {}))
+    plane.provenance = {"stub": True}
+    return plane
+
+
 @pytest.fixture()
 def fold(monkeypatch):
     """Drive the fold with stubbed planes: no database, no network."""
@@ -289,6 +305,7 @@ def fold(monkeypatch):
         discovery=None,
         conditions=None,
         conferral=None,
+        act_as=None,
     ):
         """``signals=None`` drives the PERSISTED path, through the population read."""
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
@@ -296,6 +313,7 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
         monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or conferral_plane())
+        monkeypatch.setattr(P, "load_act_as_plane", lambda s, p: act_as or act_as_plane())
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -3188,8 +3206,8 @@ def test_w4a_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
     conditions = condition_plane()
     grant = conferral_plane().grant_for("ownership.transfer", None)
 
-    gate, gate_hops, licensed = FOLD._closure({KEY_C}, unlabelled, conditions, grant=grant)
-    code, code_hops, _ = FOLD._closure({KEY_C}, unlabelled, conditions, grant=None)
+    gate, gate_hops, licensed, _ = FOLD._closure({KEY_C}, unlabelled, conditions, grant=grant)
+    code, code_hops, _, _ = FOLD._closure({KEY_C}, unlabelled, conditions, grant=None)
     assert gate == {KEY_C} and code == {KEY_C, KEY_V}
     assert gate_hops[0]["reason"] == FOLD.HOP_REFUSED_SCOPE
     assert gate_hops[0]["conferral"] == P.CONFERRAL_SCOPE_NOT_DETERMINED
@@ -3211,14 +3229,16 @@ def test_w4a_a_role_confers_only_where_the_join_names_a_function_there(fold):
     conditions = condition_plane()
 
     licensing = conferral_plane(role_functions={(KEY_V, 77): (P.LicensedFunction("0xdeadbeef", "exit"),)})
-    seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=licensing.grant_for("roles.grant", None))
+    seen, hops, licensed, _ = FOLD._closure(
+        {KEY_C}, closure, conditions, grant=licensing.grant_for("roles.grant", None)
+    )
     assert seen == {KEY_C, KEY_V}
     assert hops == []
     assert licensed == {KEY_V: {P.LicensedFunction("0xdeadbeef", "exit")}}
 
     # Same edge, same label, no witness of what the role licenses there.
     silent = conferral_plane(role_functions={(KEY_V, 78): (P.LicensedFunction("0xdeadbeef", "exit"),)})
-    seen, hops, licensed = FOLD._closure({KEY_C}, closure, conditions, grant=silent.grant_for("roles.grant", None))
+    seen, hops, licensed, _ = FOLD._closure({KEY_C}, closure, conditions, grant=silent.grant_for("roles.grant", None))
     assert seen == {KEY_C}
     assert licensed == {}
     assert hops[0]["reason"] == FOLD.HOP_REFUSED_CONFERRAL
@@ -3244,7 +3264,7 @@ def test_w4a_a_gate_does_not_confer_a_variable_it_is_not_witnessed_to_rewrite(fo
     assert FOLD._closure({KEY_C}, owner_hop, conditions, grant=owns)[0] == {KEY_C, KEY_V}
 
     hook_hop = P.ControlClosure(edges=(_var_edge("hook"),))
-    seen, hops, _ = FOLD._closure({KEY_C}, hook_hop, conditions, grant=owns)
+    seen, hops, _, _ = FOLD._closure({KEY_C}, hook_hop, conditions, grant=owns)
     assert seen == {KEY_C}
     assert hops[0]["reason"] == FOLD.HOP_REFUSED_CONFERRAL
     assert hops[0]["conferral"] == P.CONFERRAL_VARIABLE_NOT_REWRITTEN
@@ -3267,7 +3287,7 @@ def test_w4a_a_gate_whose_writes_were_never_extracted_confers_nothing():
     assert not grant.writes_extracted
 
     closure = P.ControlClosure(edges=(_var_edge("owner"),))
-    seen, hops, _ = FOLD._closure({KEY_C}, closure, conditions, grant=grant)
+    seen, hops, _, _ = FOLD._closure({KEY_C}, closure, conditions, grant=grant)
     assert seen == {KEY_C}
     assert hops[0]["conferral"] == P.CONFERRAL_WRITES_NOT_EXTRACTED
     # A role hop asks the join, not state_writes, so it is unaffected by the gap.
@@ -3770,3 +3790,286 @@ def test_w4a_a_dangling_function_reference_recovers_on_deployment_and_selector()
     lost = plane.grant_for("ownership.transfer", None, entity=KEY_V, selector="0xabcdef12")
     assert not lost.writes_extracted
     assert lost.confers(scope, KEY_V).outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED
+
+
+# --------------------------------------------------------------------------
+# W4b — compositional gate-control magnitude (Phase 6)
+# --------------------------------------------------------------------------
+
+# The flow.out selector the destination's own witness is written against, and
+# the licence that names it. One pair, reused, so each test below varies exactly
+# one witness.
+COMPOSED_SELECTOR = "0x18457e61"
+
+
+def _composing_case(**over: Any) -> dict[str, Any]:
+    """A gate over ``C`` whose role licenses ``exit`` at ``V``, which moves $1M.
+
+    Everything a composed magnitude needs, assembled once: the licence (role 12
+    naming ``exit`` at the vault), the destination's own ``flow.out`` witness,
+    and the act-as step (a restricted, authority-gated function of ``C`` calling
+    that selector on a state variable read on-chain holding ``V``).
+    """
+    case: dict[str, Any] = {
+        "closure": P.ControlClosure(edges=(_role_edge("roles 12"),)),
+        "conferral": conferral_plane(role_functions={(KEY_V, 12): (P.LicensedFunction(COMPOSED_SELECTOR, "exit"),)}),
+        "act_as": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True),)},
+            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 25_657_731)},
+        ),
+        "value": value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C,)),
+    }
+    case.update(over)
+    return case
+
+
+def _composing_signals() -> list[FunctionSignal]:
+    gate = sig(
+        claim_id="authority.replace",
+        function_name="setAuthority",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+    )
+    destination = flow_sig(
+        deployment_address=VAULT,
+        contract_id=2,
+        function_name="exit",
+        selector=COMPOSED_SELECTOR,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(2, "ethereum", SAFE),),
+        witness_tier="behavioral_observed",
+        gates={"reach_magnitude_usd": Tri.proven("proven_exact", 1_000_000.0).to_json()},
+        **proven(0.9),
+        **reaches(KEY_V),
+    )
+    return [gate, destination]
+
+
+def _composing_principals() -> dict[int, P.PrincipalFacts]:
+    return {1: facts(1, EOA, "eoa"), 2: facts(2, SAFE, "safe", owners=OWNERS, threshold=3)}
+
+
+def _gate_row(document) -> dict[str, Any]:
+    return next(f for f in document.findings if f["capability"] == "authority.replace")
+
+
+def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
+    """Phase 6, whole. The dollars are the DESTINATION's witness, not the sheet.
+
+    Three witnesses and the row publishes all three: the role licenses ``exit``
+    at the vault, ``exit`` carries its own fork-proven ``flow.out`` magnitude,
+    and a restricted authority-gated function of the seized node is witnessed
+    calling that selector on a state variable read on-chain holding the vault.
+    """
+    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
+    row = _gate_row(document)
+    assert row["value_at_stake_usd"] == 1_000_000.0
+    composed = row["reach_composed_magnitudes"]
+    assert [c["entity"] for c in composed] == [KEY_V]
+    assert composed[0]["flow_out_witness"] == {
+        "state": "proven_exact",
+        "usd": 1_000_000.0,
+        "function": "exit",
+        "entity": KEY_V,
+    }
+    step = composed[0]["act_as_chain"][0]
+    assert (step["caller"], step["destination"], step["calling_function"]) == (KEY_C, KEY_V, "bulkWithdraw")
+    assert step["receiver_observed_via"] == "eth_call" and step["receiver_block"] == 25_657_731
+
+
+def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
+    """The anti-composition regression test.
+
+    The destination's witness is the ceiling and the destination's sheet is the
+    other ceiling; the published figure clears neither, whichever is lower.
+    """
+    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
+        document = fold(
+            _composing_signals(),
+            principals=_composing_principals(),
+            **_composing_case(value=value_plane({KEY_V: {"usdc": sheet}}, contracts=(KEY_C,))),
+        )
+        row = _gate_row(document)
+        composed = row["reach_composed_magnitudes"][0]
+        assert composed["published_usd"] == expected
+        assert composed["published_usd"] <= composed["flow_out_witness"]["usd"]
+        assert composed["published_usd"] <= sheet
+        assert row["value_at_stake_usd"] == expected
+
+
+def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold):
+    """The binding rule. A licence says N MAY call D, never that P can make it.
+
+    Each variant removes exactly one part of the act-as witness and each one is
+    enough on its own to withhold the magnitude — including the live corpus
+    shape, where the call site takes its callee as a PARAMETER so nothing
+    witnesses which address it lands on.
+    """
+    variants = {
+        # the corpus's own AtomicSolverV3 shape: receiver is not a state variable
+        "receiver_not_a_state_variable": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("finishSolve", "restricted", "", True),)},
+            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
+        ),
+        "receiver_never_read": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True),)},
+        ),
+        "receiver_holds_another_address": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True),)},
+            reads={(KEY_C, "vault"): (KEY_PROXY, "eth_call", 1)},
+        ),
+        "call_site_is_public": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "open", "vault", True),)},
+            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
+        ),
+        "gate_is_not_delegated_to_an_authority": act_as_plane(
+            call_sites={(KEY_C, COMPOSED_SELECTOR): (("receiveFlashLoan", "restricted", "vault", False),)},
+            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
+        ),
+        "no_call_site_at_all": act_as_plane(),
+    }
+    for name, plane in variants.items():
+        document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(act_as=plane))
+        row = _gate_row(document)
+        assert row["value_at_stake_usd"] is None, name
+        assert row["value_state"] == "not_determined", name
+        assert row["reach_composed_magnitudes"] == [], name
+        assert row["reach_composition_census"]["act_as_refused"], name
+        # ...and the reach itself is untouched: membership never depended on it.
+        assert KEY_V in row["reach_entities"], name
+
+
+def test_w4b_an_empty_licence_map_composes_nothing(fold):
+    """A destination reached only through a state-variable hop names no function.
+
+    There is no compositional source for it — nothing said WHICH of its
+    functions the gate reaches — and an empty licence must never be read as
+    "price the sheet".
+    """
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        **_composing_case(
+            closure=P.ControlClosure(edges=(_var_edge("owner"),)),
+            conferral=conferral_plane(rewrites=("owner",)),
+        ),
+    )
+    row = _gate_row(document)
+    assert KEY_V in row["reach_entities"]
+    assert row["reach_licensed_functions"] == {}
+    assert row["reach_composed_magnitudes"] == []
+    assert row["value_at_stake_usd"] is None
+
+
+def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
+    """Composition REUSES a witness; where there is none there is nothing to reuse."""
+    gate, _ = _composing_signals()
+    unwitnessed = flow_sig(
+        deployment_address=VAULT,
+        contract_id=2,
+        function_name="exit",
+        selector=COMPOSED_SELECTOR,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(2, "ethereum", SAFE),),
+        witness_tier="behavioral_observed",
+        **proven(0.9),
+        **reaches(KEY_V),
+    )
+    document = fold([gate, unwitnessed], principals=_composing_principals(), **_composing_case())
+    row = _gate_row(document)
+    assert row["value_at_stake_usd"] is None
+    assert row["reach_composed_magnitudes"] == []
+    assert row["reach_composition_census"]["act_as_witnessed"] == 1
+    assert row["reach_composition_census"]["destination_magnitude_witnessed"] == 0
+
+
+def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
+    """pause.set is untouched by Phase 6 (§7).
+
+    Nothing composes into "how much a freeze immobilises": the destination
+    witness Phase 6 reuses answers how much a CALL MOVES, which is a different
+    quantity. Even with every act-as witness in place the freeze row publishes
+    no magnitude.
+    """
+    freeze = pause_sig(
+        function_name="pause",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.6),
+        **reaches(KEY_C),
+    )
+    _, destination = _composing_signals()
+    document = fold([freeze, destination], principals=_composing_principals(), **_composing_case())
+    row = next(f for f in document.findings if f["capability"] == "pause.set")
+    assert row["value_at_stake_usd"] is None
+    assert row["value_state"] == "not_determined"
+    assert row.get("reach_composed_magnitudes") == []
+
+
+def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
+    """inv. 6: composing an answer may only raise the term, and only where real.
+
+    The signal whose magnitude composed counts as answered; the unwitnessed
+    freeze beside it does not, so the term rises by exactly one signal's worth
+    and not to the ceiling.
+    """
+    signals = _composing_signals()
+    without = fold(signals, principals=_composing_principals(), **_composing_case(act_as=act_as_plane()))
+    with_ = fold(signals, principals=_composing_principals(), **_composing_case())
+    detail_before = without.model_parameters["confidence_detail"]
+    detail_after = with_.model_parameters["confidence_detail"]
+    before = detail_before["reach_magnitude_signals"]
+    after = detail_after["reach_magnitude_signals"]
+    assert before["magnitude_witnessed"] == 1 and before.get("magnitude_composed", 0) == 0
+    assert after["magnitude_witnessed"] == 2 and after["magnitude_composed"] == 1
+    assert after["composed_by_capability"] == {"authority.replace": 1}
+    assert detail_after["reach_magnitude_witnessed_pct"] >= detail_before["reach_magnitude_witnessed_pct"]
+
+
+def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
+    """§9.5 case 2, as the corpus actually answers it.
+
+    The spec expected the timelock behind RolesAuthority ``0x4df6b733`` to regain
+    a witnessed magnitude at Phase 6. It does not, and the shape is this one: the
+    seized node is an AUTHORITY, its own outgoing hop names no licensed function,
+    and the vault two hops out — which has a ``flow.out`` witness and a caller
+    with a full act-as witness — is behind that break. A chain is as strong as
+    its weakest step, so the magnitude stays not_determined for the timelock
+    exactly as it does for the two EOAs the shipped document over-charged. That
+    is §9.5 case 2's OTHER admissible outcome ("both sides fall to
+    not_determined"), not its headline one, and this test pins which.
+    """
+    signals = _composing_signals()
+    document = fold(
+        signals,
+        principals=_composing_principals(),
+        **_composing_case(
+            closure=P.ControlClosure(
+                edges=(
+                    # seed -> intermediate, a state-variable hop licensing nothing
+                    _var_edge("authority", principal=KEY_C, anchor=KEY_PROXY),
+                    # intermediate -> destination, fully licensed and fully act-as witnessed
+                    _role_edge("roles 12", principal=KEY_PROXY, anchor=KEY_V),
+                )
+            ),
+            conferral=conferral_plane(
+                rewrites=("authority",),
+                role_functions={(KEY_V, 12): (P.LicensedFunction(COMPOSED_SELECTOR, "exit"),)},
+            ),
+            act_as=act_as_plane(
+                call_sites={(KEY_PROXY, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True),)},
+                reads={(KEY_PROXY, "vault"): (KEY_V, "eth_call", 1)},
+            ),
+        ),
+    )
+    row = _gate_row(document)
+    assert {KEY_PROXY, KEY_V} <= set(row["reach_entities"])
+    assert row["reach_licensed_functions"] == {KEY_V: [{"selector": COMPOSED_SELECTOR, "name": "exit"}]}
+    assert row["reach_composed_magnitudes"] == []
+    assert row["value_at_stake_usd"] is None

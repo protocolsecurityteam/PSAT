@@ -170,6 +170,65 @@ class _Row:
     citations: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _WalkedHop:
+    """One hop the closure walk admitted, and what it licensed at its far end."""
+
+    caller: str
+    destination: str
+    licensed: frozenset[P.LicensedFunction]
+
+
+@dataclass(frozen=True)
+class _ComposedMagnitude:
+    """A destination function's own magnitude witness, reached along a witnessed path.
+
+    ``chain`` is every act-as step from the seized node to the destination, in
+    order. ``usd`` is the destination witness's figure after the R4 bound against
+    the destination's own sheet; ``bounded_by_sheet`` records which of the two
+    bound it, and ``sheet_not_determined`` marks the case where no sheet was
+    available to bound it with at all.
+    """
+
+    entity: str
+    selector: str
+    function: str
+    witness_state: str
+    witnessed_usd: float
+    usd: float
+    sheet_usd: float | None
+    chain: tuple[P.ActAsStep, ...]
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "entity": self.entity,
+            "destination_function": self.function,
+            "selector": self.selector,
+            "flow_out_witness": {
+                "state": self.witness_state,
+                "usd": round(self.witnessed_usd, 2),
+                "function": self.function,
+                "entity": self.entity,
+            },
+            "destination_sheet_usd": (round(self.sheet_usd, 2) if self.sheet_usd is not None else None),
+            "published_usd": round(self.usd, 2),
+            "bounded_by": (
+                "flow.out witness"
+                if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
+                else "destination sheet"
+            ),
+            "sheet_not_determined": self.sheet_usd is None,
+            "act_as_chain": [step.as_json() for step in self.chain],
+            "reading": (
+                "the dollars are the DESTINATION function's own flow.out witness, not this "
+                "row's and not the destination's balance sheet. Every hop from the seized "
+                "node to it carries an act-as witness: a restricted function of the caller "
+                "whose body calls that selector on a state variable read on-chain holding the "
+                "next node. Remove any one of those witnesses and this figure is not_determined"
+            ),
+        }
+
+
 @dataclass
 class _RowValue:
     """What one row's instances proved about value, and what they did not."""
@@ -201,6 +260,12 @@ class _RowValue:
     # not_determined, so nothing was available to bound them with. Published
     # rather than absorbed: the figure is the witness's, not the entity's.
     unbounded_floor_magnitudes: list[dict[str, Any]] = field(default_factory=list)
+    # Phase 6: the destination witnesses that supplied a gate-control magnitude,
+    # the census of how far every licensed hop got, and the signals whose
+    # magnitude question composition answered.
+    composed_magnitudes: dict[str, _ComposedMagnitude] = field(default_factory=dict)
+    composition_census: dict[str, Any] = field(default_factory=dict)
+    composed_signals: frozenset[tuple[Any, ...]] = frozenset()
 
 
 def compute_protocol_score(
@@ -232,6 +297,7 @@ def compute_protocol_score(
     closure = P.load_control_closure(session, protocol_id)
     conditions = P.load_condition_plane(session, protocol_id)
     conferral = P.load_conferral_plane(session, protocol_id)
+    act_as = P.load_act_as_plane(session, protocol_id)
     role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
@@ -320,7 +386,18 @@ def compute_protocol_score(
             )
             _attach(row, signal, instance, extra_notes | set(notes))
 
-    findings, subsumed, value_warnings = _aggregate(rows_by_key, value_plane, closure, conditions, conferral, units)
+    composed_signals: set[tuple[Any, ...]] = set()
+    findings, subsumed, value_warnings = _aggregate(
+        rows_by_key,
+        value_plane,
+        closure,
+        conditions,
+        conferral,
+        act_as,
+        _destination_magnitudes(signals),
+        units,
+        composed_signals,
+    )
     warnings.extend(value_warnings)
 
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps, exposure_coverage = _grade(findings, value_plane)
@@ -330,6 +407,7 @@ def compute_protocol_score(
         closure,
         P.load_proven_eoa_entities(session, protocol_id),
         P.discovery_relation_entities(session, protocol_id),
+        composed_signals,
     )
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
@@ -1129,6 +1207,8 @@ def _member_weakness(
     closure: P.ControlClosure,
     conditions: P.ConditionPlane,
     conferral: P.ConferralPlane,
+    act_as: P.ActAsPlane,
+    magnitudes: dict[tuple[str, str], _DestinationMagnitude],
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
     """A merged unit's weakness, per REACHED ENTITY (inv. 5).
 
@@ -1167,7 +1247,7 @@ def _member_weakness(
         # value map: W2b's per-call magnitude cap scales what a member is charged
         # and can empty ``per_entity`` outright, but it moves no entity out of
         # what the member provably reaches.
-        reached = _row_value(probe, value_plane, closure, conditions, conferral).reach
+        reached = _row_value(probe, value_plane, closure, conditions, conferral, act_as, magnitudes).reach
         reach_by_member[address] = reached
 
     weakness_by_entity: dict[str, float] = {}
@@ -1225,7 +1305,10 @@ def _aggregate(
     closure: P.ControlClosure,
     conditions: P.ConditionPlane,
     conferral: P.ConferralPlane,
+    act_as: P.ActAsPlane,
+    magnitudes: dict[tuple[str, str], _DestinationMagnitude],
     units: _UnitResolver,
+    composed_signals: set[tuple[Any, ...]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -1233,7 +1316,8 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        valued = _row_value(row, value_plane, closure, conditions, conferral)
+        valued = _row_value(row, value_plane, closure, conditions, conferral, act_as, magnitudes)
+        composed_signals.update(valued.composed_signals)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
         value_basis = valued.basis
         if row.zero_reach_stripped:
@@ -1245,7 +1329,7 @@ def _aggregate(
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
         is_floor = bool(value_usd is not None and (undetermined or partially_priced))
         weakness_by_entity, weakness, weakest = _member_weakness(
-            row, per_entity, value_plane, closure, conditions, conferral
+            row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes
         )
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
@@ -1298,6 +1382,14 @@ def _aggregate(
                 # standing alone, which is a different fact from a figure two
                 # witnesses agreed on.
                 "unbounded_floor_magnitudes": valued.unbounded_floor_magnitudes,
+                # Phase 6: every dollar this row carries that came from a
+                # DESTINATION function's own flow.out witness rather than from a
+                # witness on this row's own call, with the act-as chain that
+                # licensed it published beside it (inv. 9 exact decomposition).
+                "reach_composed_magnitudes": [
+                    entry.as_json() for _, entry in sorted(valued.composed_magnitudes.items())
+                ],
+                "reach_composition_census": valued.composition_census,
                 # ``witnessed_magnitude_caps`` lists only the calls a witness
                 # actually TRIMMED. Read alone it says nothing about the calls
                 # that carried no witness at all, which are the majority and
@@ -1510,6 +1602,8 @@ def _row_value(
     closure: P.ControlClosure,
     conditions: P.ConditionPlane,
     conferral: P.ConferralPlane,
+    act_as: P.ActAsPlane,
+    magnitudes: dict[tuple[str, str], _DestinationMagnitude],
 ) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
@@ -1536,10 +1630,22 @@ def _row_value(
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
     unbounded_floors: list[dict[str, Any]] = []
+    composition: dict[str, _ComposedMagnitude] = {}
+    composition_census: dict[str, int] = {}
+    composition_refusals: dict[str, int] = defaultdict(int)
+    composed_signals: set[tuple[Any, ...]] = set()
     hops: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
-    census: dict[str, int] = dict.fromkeys(
-        ("instances", "magnitude_witnessed", "magnitude_not_witnessed", "capped", "within_witnessed_bound"), 0
+    census: dict[str, Any] = dict.fromkeys(
+        (
+            "instances",
+            "magnitude_witnessed",
+            "magnitude_composed",
+            "magnitude_not_witnessed",
+            "capped",
+            "within_witnessed_bound",
+        ),
+        0,
     )
     code_control = row.capability in K.CODE_CONTROL_CAPABILITIES
     transitive = code_control or row.capability in K.GATE_CONTROL_CAPABILITIES
@@ -1578,6 +1684,7 @@ def _row_value(
             continue
 
         keys = set(instance.entity_keys)
+        composed: dict[str, _ComposedMagnitude] = {}
         if transitive:
             grant = (
                 None
@@ -1589,7 +1696,8 @@ def _row_value(
                     selector=instance.signal.selector,
                 )
             )
-            keys, withheld, licensed_here = _closure(keys, closure, conditions, grant=grant)
+            seeds = set(keys)
+            keys, withheld, licensed_here, walked_hops = _closure(keys, closure, conditions, grant=grant)
             for hop in withheld:
                 hops.setdefault((hop["caller"], hop["destination"]), hop)
             # Keyed on the CANONICAL entity, the same key ``reached`` uses. The
@@ -1599,6 +1707,22 @@ def _row_value(
             # destination that folds.
             for destination, functions in licensed_here.items():
                 licensed[value_plane.canonical(destination)].update(functions)
+            if not code_control:
+                # Phase 6. Code control asks no conferral question, so it names
+                # no destination function and has no compositional source; its
+                # magnitude question is a different one and stays where Phase 4
+                # left it.
+                composed, counts, refused = _compose(seeds, walked_hops, act_as, magnitudes, value_plane)
+                for key, entry in composed.items():
+                    previous = composition.get(key)
+                    if previous is None or entry.usd > previous.usd:
+                        composition[key] = entry
+                for name, count in counts.items():
+                    composition_census[name] = composition_census.get(name, 0) + count
+                for reason, hits in refused.items():
+                    composition_refusals[reason] += hits
+                if composed:
+                    composed_signals.add(_signal_identity(instance.signal))
         # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
         # the value map: an entity drops out of that map whenever its dollars
         # are not_determined — an unpriced sheet today, a refused magnitude once
@@ -1607,7 +1731,7 @@ def _row_value(
         # for. Priced or not, the row reaches these entities.
         reached.update(value_plane.canonical(key) for key in keys)
         contributions, gaps, cap, unbounded = _instance_contributions(
-            instance, keys, value_plane, transitive=transitive
+            instance, keys, value_plane, transitive=transitive, composed=composed
         )
         unbounded_floors.extend(unbounded)
         census["instances"] += 1
@@ -1629,6 +1753,7 @@ def _row_value(
     census["hops_not_determined_withholding_reach"] = len(hop_gaps)
     withheld_behind = _behind_the_frontier(hop_gaps, closure, conditions, value_plane, reached)
     licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
+    composition_report = _composition_report(composition, composition_census, dict(composition_refusals))
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
         return _RowValue(
@@ -1644,6 +1769,9 @@ def _row_value(
             licensed_out,
             withheld_behind,
             unbounded_floors,
+            composition,
+            composition_report,
+            frozenset(composed_signals),
         )
     basis = (
         "witnessed reach magnitude over the "
@@ -1670,11 +1798,204 @@ def _row_value(
         licensed_out,
         withheld_behind,
         unbounded_floors,
+        composition,
+        composition_report,
+        frozenset(composed_signals),
     )
 
 
+def _signal_identity(signal: FunctionSignal) -> tuple[Any, ...]:
+    """What names one signal row across the fold and the confidence pass.
+
+    ``contract_id`` is part of it because split-proxy secondary implementations
+    share a ``deployment_address`` and are legitimately different contracts.
+    """
+    return (signal.contract_id, signal.chain, signal.deployment_address, signal.selector, signal.claim_id)
+
+
+def _composition_report(
+    composed: dict[str, _ComposedMagnitude], census: dict[str, int], refusals: dict[str, int]
+) -> dict[str, Any]:
+    """What composition proved, and — in the same object — what it refused.
+
+    A report listing only the entities that composed would read as a coverage
+    figure. The refusals are the larger population by an order of magnitude on
+    the reference corpus and they are the honest denominator: a licensed hop that
+    composed nothing is a hop whose magnitude is still not_determined, and the
+    reason it stayed there is the difference between "no witness exists" and
+    "this fold declined to look".
+    """
+    return {
+        **{key: value for key, value in sorted(census.items())},
+        # Per-ENTITY, so it lines up with reach_composed_magnitudes. The
+        # per-instance counts above are over (hop, selector) pairs and two
+        # instances reaching one destination raise them twice.
+        "composed": len(composed),
+        "composed_usd": round(sum(sorted(entry.usd for entry in composed.values())), 2),
+        "act_as_refused": dict(sorted(refusals.items())),
+        "reading": (
+            "licensed_selectors counts every (hop, licensed function) pair the walk offered "
+            "composition. act_as_witnessed is the subset where a restricted function of the "
+            "CALLER is witnessed calling that selector on a state variable read on-chain "
+            "holding the destination — the step a licence does not imply and without which a "
+            "magnitude is priced on membership alone. destination_magnitude_witnessed is the "
+            "subset of those whose destination function also carries its own flow.out witness. "
+            "composed is the distinct entities that cleared every one. Everything in "
+            "act_as_refused stayed not_determined and is charged to confidence"
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class _DestinationMagnitude:
+    """A ``flow.out`` witness at one destination function, as the fold received it."""
+
+    state: str
+    usd: float
+    function: str
+
+
+def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, str], _DestinationMagnitude]:
+    """Every witnessed ``flow.out`` magnitude, keyed by (entity, selector).
+
+    This is the same 55-row population the fold already prices flow rows from —
+    ``distill._flow_reach``'s ``_proven_number`` is its only constructor — read a
+    second time as what a DESTINATION function is proven to move. Composition
+    adds no witness; it joins an existing one to a reach that was already proven.
+
+    Keyed on the selector because that is what a role licenses. A destination
+    function with no selector (fallback, receive) can never be the far end of a
+    licence and is left out.
+    """
+    out: dict[tuple[str, str], _DestinationMagnitude] = {}
+    for signal in signals:
+        if signal.claim_id != "flow.out" or not signal.selector.startswith("0x"):
+            continue
+        magnitude = _gate(signal, "reach_magnitude_usd")
+        if not magnitude.is_determined or not _is_number(magnitude.value):
+            continue
+        key = (entity_key(signal.chain, signal.deployment_address), signal.selector.lower())
+        usd = float(magnitude.value)  # type: ignore[arg-type]  # _is_number narrows it
+        previous = out.get(key)
+        # Two signals on one selector are the same function distilled twice; the
+        # LOWER figure is the one both witnesses support.
+        if previous is None or usd < previous.usd:
+            out[key] = _DestinationMagnitude(magnitude.state, usd, signal.function_name)
+    return out
+
+
+def _compose(
+    seeds: set[str],
+    hops: list[_WalkedHop],
+    act_as: P.ActAsPlane,
+    magnitudes: dict[tuple[str, str], _DestinationMagnitude],
+    value_plane: P.ValuePlane,
+) -> tuple[dict[str, _ComposedMagnitude], dict[str, int], dict[str, int]]:
+    """The gate-control magnitude the destination's own witness supplies (Phase 6).
+
+    Phase 4 floored every gate-control magnitude to ``not_determined`` because
+    nothing proved how much the reach moves. For a licensed hop that is
+    recoverable without new evidence: the destination function the gate licenses
+    may already carry its OWN ``flow.out`` magnitude witness, and that witness
+    bounds what a call to it moves whoever makes the call.
+
+    Three witnesses, and all three are required:
+
+    1. the LICENCE (W4a) — the role the hop walks is witnessed licensing this
+       named selector at this destination;
+    2. the destination's ``flow.out`` MAGNITUDE — a fork-proven figure for that
+       selector, reused, never re-derived;
+    3. the ACT-AS step, at EVERY hop from the seized node to the destination —
+       a restricted function of the caller whose body calls that selector on a
+       state variable read on-chain holding the next node.
+
+    (3) is the one the licence does not imply and the one this pass exists to
+    enforce. A role saying N MAY call D says nothing about whether the principal
+    can make N do it: seizing an authority pointer on N buys N's own restricted
+    functions, and unless one of those is witnessed calling D, the path stops at
+    N. Pricing on membership alone is the banned move at one remove, and the
+    reference corpus has a live instance of exactly it — an EOA over
+    AtomicSolverV3 walks roles 12 to five Tellers whose call sites take the
+    callee as a PARAMETER, so nothing witnesses which address they land on and
+    the magnitude stays not_determined.
+
+    The path is walked breadth-first from the seeds, which are act-as reachable
+    by definition (they are the entities the finding's own signal was witnessed
+    on). A destination inherits reachability only through a hop that carries its
+    own act-as witness, so a chain is only ever as strong as its weakest step.
+    """
+    census: dict[str, int] = dict.fromkeys(
+        (
+            "licensed_hops",
+            "licensed_selectors",
+            "destination_magnitude_witnessed",
+            "act_as_witnessed",
+            "composed",
+        ),
+        0,
+    )
+    refusals: dict[str, int] = defaultdict(int)
+    by_caller: dict[str, list[_WalkedHop]] = defaultdict(list)
+    for hop in hops:
+        if hop.licensed:
+            census["licensed_hops"] += 1
+            by_caller[hop.caller].append(hop)
+
+    composed: dict[str, _ComposedMagnitude] = {}
+    chains: dict[str, tuple[P.ActAsStep, ...]] = {key: () for key in sorted(seeds)}
+    frontier = sorted(seeds)
+    while frontier:
+        nxt: list[str] = []
+        for caller in frontier:
+            prefix = chains[caller]
+            for hop in by_caller.get(caller, ()):
+                step_for_hop: P.ActAsStep | None = None
+                for licensed in sorted(hop.licensed):
+                    census["licensed_selectors"] += 1
+                    verdict = act_as.acts_as(caller, hop.destination, licensed.selector)
+                    if not verdict.witnessed or verdict.step is None:
+                        refusals[verdict.outcome] += 1
+                        continue
+                    census["act_as_witnessed"] += 1
+                    step_for_hop = step_for_hop or verdict.step
+                    chain = prefix + (verdict.step,)
+                    magnitude = magnitudes.get((hop.destination, licensed.selector))
+                    if magnitude is None:
+                        refusals["destination_carries_no_flow_out_magnitude_witness"] += 1
+                        continue
+                    census["destination_magnitude_witnessed"] += 1
+                    key = value_plane.canonical(hop.destination)
+                    sheet = value_plane.total(key)
+                    # R4: the witness bounds the call, the sheet bounds what is
+                    # there to move. Neither alone, and never their sum.
+                    usd = min(magnitude.usd, sheet) if sheet is not None else magnitude.usd
+                    previous = composed.get(key)
+                    if previous is None or usd > previous.usd:
+                        composed[key] = _ComposedMagnitude(
+                            entity=key,
+                            selector=licensed.selector,
+                            function=magnitude.function,
+                            witness_state=magnitude.state,
+                            witnessed_usd=magnitude.usd,
+                            usd=usd,
+                            sheet_usd=sheet,
+                            chain=chain,
+                        )
+                if step_for_hop is not None and hop.destination not in chains:
+                    chains[hop.destination] = prefix + (step_for_hop,)
+                    nxt.append(hop.destination)
+        frontier = sorted(nxt)
+    census["composed"] = len(composed)
+    return composed, census, dict(sorted(refusals.items()))
+
+
 def _instance_contributions(
-    instance: _Instance, keys: set[str], value_plane: P.ValuePlane, *, transitive: bool
+    instance: _Instance,
+    keys: set[str],
+    value_plane: P.ValuePlane,
+    *,
+    transitive: bool,
+    composed: dict[str, _ComposedMagnitude] | None = None,
 ) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any] | None, list[dict[str, Any]]]:
     """One call's per-entity contributions, bounded by the one magnitude it proved.
 
@@ -1700,7 +2021,9 @@ def _instance_contributions(
     gaps: list[dict[str, Any]] = []
     unbounded: list[dict[str, Any]] = []
     for key in sorted(keys):
-        contribution, why, note = _entity_contribution(instance, key, value_plane, transitive=transitive)
+        contribution, why, note = _entity_contribution(
+            instance, key, value_plane, transitive=transitive, composed=composed
+        )
         if note is not None:
             unbounded.append(note)
         if contribution is None:
@@ -1806,7 +2129,12 @@ def _witnessed_magnitude(instance: _Instance) -> float | None:
 
 
 def _entity_contribution(
-    instance: _Instance, key: str, value_plane: P.ValuePlane, *, transitive: bool
+    instance: _Instance,
+    key: str,
+    value_plane: P.ValuePlane,
+    *,
+    transitive: bool,
+    composed: dict[str, _ComposedMagnitude] | None = None,
 ) -> tuple[float | None, str, dict[str, Any] | None]:
     """The dollars this call is PROVEN to move against one entity, or ``None``.
 
@@ -1878,6 +2206,28 @@ def _entity_contribution(
                 ),
             },
         )
+    supplied = (composed or {}).get(value_plane.canonical(key))
+    if supplied is not None:
+        # The dollars are the DESTINATION function's witness, composed along a
+        # path every hop of which carries an act-as witness. The bound against
+        # this entity's sheet was already applied where a sheet existed; where it
+        # did not, the same disclosure the floor branch owes is owed here.
+        note = (
+            None
+            if supplied.sheet_usd is not None
+            else {
+                "function": instance.signal.function_name,
+                "capability": instance.signal.claim_id,
+                "entity": supplied.entity,
+                "witnessed_floor_usd": supplied.usd,
+                "reading": (
+                    "a composed magnitude charged against an entity whose priced sheet is "
+                    f"not_determined: {supplied.function} at {supplied.entity} is witnessed "
+                    "moving this much, and no sheet was available to bound it against"
+                ),
+            }
+        )
+        return supplied.usd, f"composed_reach_magnitude({supplied.function}) x {basis}", note
     if held is None:
         return None, ("entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"), None
     return (
@@ -2123,7 +2473,7 @@ def _behind_the_frontier(
     if not gaps:
         return {"hops": 0, "entities": 0, "entity_keys": [], "reading": "no hop was withheld"}
     frontier = {str(gap["destination"]) for gap in gaps}
-    seen, _, _ = _closure(frontier, closure, conditions, grant=None)
+    seen, _, _, _ = _closure(frontier, closure, conditions, grant=None)
     behind = sorted({value_plane.canonical(key) for key in seen} - reached)
     return {
         "hops": len(gaps),
@@ -2141,7 +2491,7 @@ def _behind_the_frontier(
 
 def _closure(
     seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
-) -> tuple[set[str], list[dict[str, Any]], dict[str, set[P.LicensedFunction]]]:
+) -> tuple[set[str], list[dict[str, Any]], dict[str, set[P.LicensedFunction]], list[_WalkedHop]]:
     """The reach the walk proves, every hop it could not establish, and what the
     hops it did walk LICENSE at each destination.
 
@@ -2169,10 +2519,19 @@ def _closure(
     row per witnessed read — 2,937 rows over 565 pairs on the reference corpus —
     so counting refusals per EDGE would report the same withheld hop five times
     and read as five findings.
+
+    The fourth return value is the walked hops themselves — (caller, destination,
+    what that hop licensed there). The licensed map above collapses every caller
+    that reached a destination into one entry, which is the right shape for "what
+    does this row reach it to do" and the wrong one for composing a magnitude:
+    the question a composition asks is whether THAT caller can be made to act,
+    and a map keyed on the destination alone cannot say which caller a licence
+    came from.
     """
     seen: set[str] = set()
     withheld: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
+    walked: dict[tuple[str, str], set[P.LicensedFunction]] = {}
     stack = [key for key in sorted(seeds) if not P.is_zero_key(key)]
     while stack:
         key = stack.pop()
@@ -2184,8 +2543,11 @@ def _closure(
                 continue
             bound = _hop_bound(edge, conditions, grant=grant)
             if bound is None:
+                here: set[P.LicensedFunction] = set()
                 if grant is not None:
-                    licensed[edge.anchor].update(grant.confers(edge.scope, edge.anchor).licensed)
+                    here = set(grant.confers(edge.scope, edge.anchor).licensed)
+                    licensed[edge.anchor].update(here)
+                walked.setdefault((edge.principal, edge.anchor), set()).update(here)
                 if edge.anchor not in seen:
                     stack.append(edge.anchor)
                 continue
@@ -2194,7 +2556,11 @@ def _closure(
     # reach either way, and reporting it as a gap would publish a shortfall the
     # walk does not have.
     gaps = [bound for pair, bound in sorted(withheld.items()) if pair[1] not in seen]
-    return seen, gaps, {key: set(rows) for key, rows in sorted(licensed.items()) if rows}
+    hops = [
+        _WalkedHop(caller=pair[0], destination=pair[1], licensed=frozenset(rows))
+        for pair, rows in sorted(walked.items())
+    ]
+    return seen, gaps, {key: set(rows) for key, rows in sorted(licensed.items()) if rows}, hops
 
 
 def _gap_reading(exposure: float | None, unpriced: list[Any], exhausted: list[Any], partial: list[Any]) -> str:
@@ -2454,6 +2820,7 @@ def _confidence(
     closure: P.ControlClosure,
     proven_eoas: set[str],
     discovery_entities: dict[str, set[str]] | None = None,
+    composed_signals: set[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the PERIMETER.
 
@@ -2538,6 +2905,7 @@ def _confidence(
     priced: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     magnitude: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     magnitude_census: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    composed_census: dict[str, int] = defaultdict(int)
     for signal in signals:
         key = value_plane.canonical(entity_key(signal.chain, signal.deployment_address))
         answered = (
@@ -2576,12 +2944,24 @@ def _confidence(
             # was on entities carrying both an excluded and an admitted signal,
             # where dropping the excluded one RAISED the term by discarding a real
             # unanswered question — the shape this term exists to stop.
-            witnessed = _gate(signal, "reach_magnitude_usd").is_determined
+            #
+            # A magnitude the fold COMPOSED counts as answered here on the same
+            # terms as one the signal carried itself: the answer is a witness
+            # either way (the destination function's own flow.out figure), and
+            # the whole point of composing it is that the question stops being
+            # open. It is counted separately below so a reader can see which of
+            # the two supplied it, and composed answers are recorded per signal
+            # rather than per entity — an entity carrying two proven reaches of
+            # which one composed is 1/2 answered, not answered.
+            own = _gate(signal, "reach_magnitude_usd").is_determined
+            by_composition = not own and _signal_identity(signal) in (composed_signals or set())
             magnitude[key][1] += 1
             magnitude_census[signal.claim_id][1] += 1
-            if witnessed:
+            if own or by_composition:
                 magnitude[key][0] += 1
                 magnitude_census[signal.claim_id][0] += 1
+            if by_composition:
+                composed_census[signal.claim_id] += 1
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -2661,6 +3041,14 @@ def _confidence(
         "reach_magnitude_signals": {
             "proven_reach_in_denominator": signals_seen,
             "magnitude_witnessed": signals_witnessed,
+            # Of those, the ones answered by COMPOSING the destination
+            # function's witness rather than by a witness on the signal's own
+            # call. Published apart because they are the same kind of answer
+            # arrived at through one more join, and a reader sizing the
+            # pipeline's own magnitude coverage needs to be able to subtract
+            # them.
+            "magnitude_composed": sum(composed_census.values()),
+            "composed_by_capability": {k: v for k, v in sorted(composed_census.items())},
             "by_capability": {k: v for k, v in sorted(magnitude_census.items())},
             "mixed_witness_entities": len(mixed),
             "mixed_witness_reading": (

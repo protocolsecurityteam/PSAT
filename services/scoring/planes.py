@@ -1915,6 +1915,302 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
     return plane
 
 
+ACT_AS_WITNESSED = "witnessed"
+ACT_AS_NO_CALL_SITE = "no_function_of_the_caller_calls_this_selector"
+ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE = "call_site_receiver_is_not_a_state_variable"
+ACT_AS_RECEIVER_NOT_READ = "caller_state_variable_never_read_on_chain"
+ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS = "caller_state_variable_holds_a_different_address"
+ACT_AS_CALL_SITE_IS_PUBLIC = "the_call_site_needs_no_gate"
+ACT_AS_CALL_SITE_GATE_NOT_DELEGATED = "call_site_caller_gate_is_not_witnessed_delegated_to_an_authority"
+
+# The method a guard calls when a function's caller set is decided by an
+# external authority contract rather than by the function's own code. 748 guard
+# sinks on the reference corpus carry it; it is the witness that seizing that
+# authority is what opens the function.
+_DELEGATED_GUARD_METHOD = "cancall"
+
+
+@dataclass(frozen=True)
+class ActAsStep:
+    """One witnessed "N can be made to call ``selector`` at D" step.
+
+    Every field names a witness, not an inference. ``calling_function`` is the
+    function of N whose compiled body carries the call site; ``receiver_variable``
+    is the state variable that call site's receiver is bound to; ``receiver_*``
+    is the on-chain read that proved that variable holds D.
+    """
+
+    caller: str
+    destination: str
+    selector: str
+    calling_function: str
+    calling_function_openness: str
+    receiver_variable: str
+    receiver_observed_via: str
+    receiver_block: int | None
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "caller": self.caller,
+            "destination": self.destination,
+            "selector": self.selector,
+            "calling_function": self.calling_function,
+            "calling_function_openness": self.calling_function_openness,
+            "receiver_variable": self.receiver_variable,
+            "receiver_observed_via": self.receiver_observed_via,
+            "receiver_block": self.receiver_block,
+            "basis": (
+                f"{self.calling_function} is a restricted function of {self.caller} whose body "
+                f"calls {self.selector} on its own state variable '{self.receiver_variable}', and "
+                f"'{self.receiver_variable}' was read {self.receiver_observed_via} at block "
+                f"{self.receiver_block} holding {self.destination}"
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class ActAsVerdict:
+    outcome: str
+    step: ActAsStep | None = None
+
+    @property
+    def witnessed(self) -> bool:
+        return self.outcome == ACT_AS_WITNESSED
+
+
+# An on-chain read of the caller's own storage. ``eth_call_error`` is excluded:
+# it is the record of a read that FAILED, and its resolved_type is 'unknown'.
+_READ_OBSERVATIONS = frozenset({"eth_call", "eth_call_impl_fallback", "beacon_owner", "event_log"})
+
+
+@dataclass
+class ActAsPlane:
+    """Whether seizing a node's gate witnesses making that node ACT somewhere.
+
+    Membership in a gate's licensed set answers "may N call ``s`` at D". It does
+    not answer "can the principal make N do it" — the question a composed
+    magnitude turns on. Seizing an authority POINTER on N buys the ability to
+    call N's own restricted functions; it buys a call at D only if one of those
+    functions is witnessed calling D. Pricing the hop on the licence alone is
+    the membership-as-capability error one level up from the sheet-as-reach one.
+
+    Two witnesses, joined:
+
+    * the CALL SITE — ``effective_functions.sinks``, an ``external_call`` entry
+      carrying the called ``selector`` and the receiver it is bound to. This is
+      compiled from N's own verified source.
+    * the RECEIVER — ``controller_values``, the on-chain read (``eth_call`` at a
+      recorded block) of the state variable that receiver is bound to. The row
+      says N's ``vault`` IS D; nothing else in the schema says which address a
+      call site lands on.
+
+    A call site whose receiver is a parameter, a local, or an unresolved head is
+    REFUSED, not credited: whoever calls N chooses that address, so the code
+    witnesses a call at an address nobody named. It is a plausible path and it is
+    not a witnessed one, and the difference is the whole discipline.
+
+    The calling function must itself be ``restricted`` AND its caller gate must
+    be witnessed DELEGATED — a guard-origin sink calling ``canCall`` on an
+    authority contract. Restricted alone is not enough and the corpus proves it:
+    ``ManagerWithMerkleVerification.receiveFlashLoan`` is restricted, calls
+    ``vault.manage``, and is gated by ``msg.sender == balancerVault`` — its
+    ``authority_roles`` is the proven-empty ``[]`` and it carries no ``canCall``
+    guard. Seizing the manager's authority pointer opens
+    ``manageVaultWithMerkleVerification`` and does not open that one, and without
+    the guard witness the two are indistinguishable. A public call site is
+    refused for the opposite reason: it needs no gate at all, so the dollars it
+    moves belong to its own finding and not to a gate that conferred nothing.
+
+    What this plane still does NOT witness is that the authority the guard
+    consults is the same one the finding's gate seizes: the ``canCall`` receiver
+    is a local, and no read pins it. The same-kind bound (``GateGrant``) is what
+    stands in for it, and it is a bound, not a witness — recorded here so the
+    residual is visible where the composition is built rather than only in a
+    review note.
+    """
+
+    # (caller entity, selector) -> ((calling function, openness, receiver variable,
+    # whether that function's caller gate is delegated to an authority), ...)
+    call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool], ...]] = field(default_factory=dict)
+    # (caller entity, state variable) -> (address it was read holding, observed_via, block)
+    reads: dict[tuple[str, str], tuple[str, str, int | None]] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def acts_as(self, caller: str, destination: str, selector: str) -> ActAsVerdict:
+        sites = self.call_sites.get((caller, _lower(selector)))
+        if not sites:
+            return ActAsVerdict(ACT_AS_NO_CALL_SITE)
+        outcome = ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE
+        for name, openness, variable, delegated in sites:
+            if not variable:
+                continue
+            read = self.reads.get((caller, variable))
+            if read is None:
+                outcome = _rank_outcome(outcome, ACT_AS_RECEIVER_NOT_READ)
+                continue
+            held, observed_via, block = read
+            if held != destination:
+                outcome = _rank_outcome(outcome, ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS)
+                continue
+            if openness != "restricted":
+                outcome = _rank_outcome(outcome, ACT_AS_CALL_SITE_IS_PUBLIC)
+                continue
+            if not delegated:
+                outcome = _rank_outcome(outcome, ACT_AS_CALL_SITE_GATE_NOT_DELEGATED)
+                continue
+            return ActAsVerdict(
+                ACT_AS_WITNESSED,
+                ActAsStep(
+                    caller=caller,
+                    destination=destination,
+                    selector=_lower(selector),
+                    calling_function=name,
+                    calling_function_openness=openness,
+                    receiver_variable=variable,
+                    receiver_observed_via=observed_via,
+                    receiver_block=block,
+                ),
+            )
+        return ActAsVerdict(outcome)
+
+
+# How far a call site GOT before it was refused, so a caller with several call
+# sites for one selector reports the sharpest shortfall rather than whichever it
+# happened to look at last.
+_ACT_AS_RANK = {
+    ACT_AS_CALL_SITE_GATE_NOT_DELEGATED: 0,
+    ACT_AS_CALL_SITE_IS_PUBLIC: 1,
+    ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS: 2,
+    ACT_AS_RECEIVER_NOT_READ: 3,
+    ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE: 4,
+    ACT_AS_NO_CALL_SITE: 5,
+}
+
+
+def _rank_outcome(current: str, candidate: str) -> str:
+    return candidate if _ACT_AS_RANK[candidate] < _ACT_AS_RANK[current] else current
+
+
+def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
+    """The call-site and receiver witnesses, indexed for the composition walk."""
+    from db.models import Contract, ControllerValue, EffectiveFunction
+
+    call_sites: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = defaultdict(list)
+    sinks_read = external_calls = selector_bearing = state_variable_bound = delegated_gates = 0
+    functions = (
+        session.query(
+            EffectiveFunction.function_name,
+            EffectiveFunction.authority_openness,
+            EffectiveFunction.sinks,
+            EffectiveFunction.deployment_address,
+            Contract.address,
+            Contract.chain,
+        )
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(EffectiveFunction.id)
+        .all()
+    )
+    for name, openness, sinks, deployment, address, chain in functions:
+        if not isinstance(sinks, list):
+            # SQL NULL is "the effects stage did not run here", which is a
+            # different fact from a function proven to call nothing. Neither
+            # produces a call site, and only the second is an answer.
+            continue
+        sinks_read += 1
+        key = entity_key(coalesce_chain(chain), deployment or address)
+        delegated = any(
+            isinstance(sink, dict)
+            and sink.get("origin") == "guard"
+            and _lower(str(sink.get("target") or "")).rsplit(".", 1)[-1] == _DELEGATED_GUARD_METHOD
+            for sink in sinks
+        )
+        delegated_gates += 1 if delegated else 0
+        for sink in sinks:
+            if not isinstance(sink, dict) or sink.get("kind") != "external_call":
+                continue
+            external_calls += 1
+            selector = _lower(str(sink.get("selector") or ""))
+            if not selector.startswith("0x"):
+                continue
+            selector_bearing += 1
+            receiver = sink.get("receiver") if isinstance(sink.get("receiver"), dict) else {}
+            variable = ""
+            if (receiver or {}).get("binding") == "state_variable":
+                variable = str((receiver or {}).get("variable") or "")
+                if variable:
+                    state_variable_bound += 1
+            call_sites[(key, selector)].append((str(name), str(openness or "not_determined"), variable, delegated))
+
+    reads: dict[tuple[str, str], tuple[str, str, int | None]] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    rows = (
+        session.query(
+            ControllerValue.source,
+            ControllerValue.value,
+            ControllerValue.resolved_type,
+            ControllerValue.observed_via,
+            ControllerValue.block_number,
+            ControllerValue.deployment_address,
+            Contract.address,
+            Contract.chain,
+        )
+        .join(Contract, Contract.id == ControllerValue.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .order_by(ControllerValue.id)
+        .all()
+    )
+    for source, value, resolved_type, observed_via, block, deployment, address, chain in rows:
+        if not source or resolved_type != "contract" or observed_via not in _READ_OBSERVATIONS:
+            continue
+        held = _lower(str(value or ""))
+        if not held.startswith("0x"):
+            continue
+        key = (entity_key(coalesce_chain(chain), deployment or address), str(source))
+        held_key = entity_key(coalesce_chain(chain), held)
+        previous = reads.get(key)
+        if previous is not None and previous[0] != held_key:
+            # Two reads of one variable disagreeing on which address it holds.
+            # Picking one publishes a call destination out of row order, so the
+            # variable resolves to nothing and the hop stays unwitnessed.
+            ambiguous.add(key)
+            continue
+        reads.setdefault(key, (held_key, str(observed_via), int(block) if block is not None else None))
+    for key in ambiguous:
+        reads.pop(key, None)
+
+    plane = ActAsPlane(
+        call_sites={key: tuple(sorted(set(rows))) for key, rows in sorted(call_sites.items())},
+        reads=reads,
+    )
+    plane.provenance = {
+        "call_sites": {
+            "functions_with_sinks_extracted": sinks_read,
+            "functions": len(functions),
+            "external_call_sinks": external_calls,
+            "sinks_naming_a_selector": selector_bearing,
+            "sinks_whose_receiver_is_a_state_variable": state_variable_bound,
+            "functions_whose_caller_gate_is_delegated_to_an_authority": delegated_gates,
+        },
+        "receiver_reads": {
+            "state_variables_read_on_chain_holding_a_contract": len(reads),
+            "variables_two_reads_disagree_under": len(ambiguous),
+            "observations_admitted": sorted(_READ_OBSERVATIONS),
+        },
+        "reading": (
+            "the two witnesses a composed magnitude needs on top of a licence: the CALL SITE "
+            "(effective_functions.sinks, an external_call carrying the called selector and the "
+            "receiver it binds to, compiled from the caller's own source) and the RECEIVER "
+            "(controller_values, an on-chain read at a recorded block proving that state "
+            "variable holds the destination). A receiver bound to a parameter, a local or an "
+            "unresolved head is refused: the caller of the function picks that address, so the "
+            "code witnesses a call at an address nobody named. sinks_naming_a_selector minus "
+            "sinks_whose_receiver_is_a_state_variable is the size of that refusal"
+        ),
+    }
+    return plane
+
+
 def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
     """Entity keys proven codeless: ``resolved_type == 'eoa'`` is only ever
     written after an empty ``eth_getCode`` (an RPC failure classifies as
@@ -2362,6 +2658,13 @@ def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
 
 
 __all__ = [
+    "ACT_AS_CALL_SITE_GATE_NOT_DELEGATED",
+    "ACT_AS_CALL_SITE_IS_PUBLIC",
+    "ACT_AS_NO_CALL_SITE",
+    "ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS",
+    "ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE",
+    "ACT_AS_RECEIVER_NOT_READ",
+    "ACT_AS_WITNESSED",
     "ASSET_BELOW_RESOLUTION",
     "ASSET_PRICED",
     "ASSET_PROVEN_ZERO",
@@ -2389,6 +2692,9 @@ __all__ = [
     "UNCONSUMED_REACH_REASONS",
     "ZERO_ADDRESS",
     "is_zero_key",
+    "ActAsPlane",
+    "ActAsStep",
+    "ActAsVerdict",
     "ConferralPlane",
     "ConferralVerdict",
     "ControlClosure",
@@ -2400,6 +2706,7 @@ __all__ = [
     "RefusedEdge",
     "RenouncedAuthority",
     "ValuePlane",
+    "load_act_as_plane",
     "load_audit_posture",
     "discovery_relation_entities",
     "load_conferral_plane",
