@@ -157,6 +157,74 @@ ARM_REPUBLISHED_DIRECT = "republished_direct"
 ARM_NOT_DETERMINED = NOT_DETERMINED
 COMPOSITION_ARMS = (ARM_GATE_ONLY, ARM_WITHHELD, ARM_REPUBLISHED_DIRECT, ARM_NOT_DETERMINED)
 
+# True on every withheld entry whatever arm withheld it: the candidate reached
+# the rule at all, which is what a destination magnitude plus a witnessed reach
+# buys, and the figure is gone anyway.
+_WITHHELD_OPENING = (
+    "the destination carries a flow.out magnitude and this principal is witnessed able to reach "
+    "it, and the DOLLARS are still withheld"
+)
+
+# One middle per arm, because the three arms withhold for three different
+# reasons and a single sentence for all of them is false on at least one. The
+# transport-fault arm is the sharp case: :func:`_admit_composed` computes the
+# route classification and the deletability verdict BEFORE the fault branch, so
+# a faulted entry can publish ``authority_deletability.state == "deletable"`` —
+# and a sentence saying "neither answered in favour of the figure" is then false
+# beside the block that disproves it. Naming the arm's own reason is the fix;
+# softening the sentence until it is true everywhere would trade a false claim
+# for an unfalsifiable one.
+_WITHHELD_ARM_READINGS = {
+    ARM_WITHHELD: (
+        ". The figure's own execution could not be READ at all: proving_execution above carries "
+        "the typed transport fault that stopped it, so there is no proven call here for "
+        "route_comparison to compare this entry's claimed route against, and it reports that "
+        "rather than a match. The act_as_chain is published above in full — it is the act-as "
+        "plane's witness and is established without any transcript — and whether the proof was "
+        "admitted for THIS caller is answered separately under gate_claim, which has no recorded "
+        "caller to read. route_classification and authority_deletability were both computed "
+        "before this arm was reached and are published above unchanged: a deletability licence "
+        "standing beside this refusal does NOT release it, because an execution that could not "
+        "be read is not a proven call to republish"
+    ),
+    ARM_GATE_ONLY: (
+        ". What was proven is the call recorded under proving_execution; what this entry claims "
+        "is a route through an intermediate, and the two are compared under route_comparison "
+        "rather than assumed equal. The gate claim survives that difference — an authorization "
+        "check reads msg.sender and msg.sig and no ARGUMENT, so a route the proof did not take "
+        "says nothing about it — and the act_as_chain above is published in full. Whether the "
+        "proof was admitted for THIS caller is a separate question and is answered separately, "
+        "under gate_claim: a different caller is not covered by that argument, because "
+        "msg.sender is what the check reads. The MAGNITUDE does not survive it: "
+        "route_classification witnesses the traversed body acting on what the destination call "
+        "carries, under the typed finding withheld_reason names, and authority_deletability did "
+        "not prove this principal could have issued the proven call itself. The refusal is the "
+        "route's; what the join answered — a proven negative or an undetermined one — is "
+        "published beside it either way and is not collapsed into it"
+    ),
+    ARM_NOT_DETERMINED: (
+        ". What was proven is the call recorded under proving_execution; what this entry claims "
+        "is a route through an intermediate, and the two are compared under route_comparison "
+        "rather than assumed equal. The gate claim survives that difference — an authorization "
+        "check reads msg.sender and msg.sig and no ARGUMENT, so a route the proof did not take "
+        "says nothing about it — and the act_as_chain above is published in full. Whether the "
+        "proof was admitted for THIS caller is a separate question and is answered separately, "
+        "under gate_claim: a different caller is not covered by that argument, because "
+        "msg.sender is what the check reads. The MAGNITUDE is refused by neither question and "
+        "carried by neither: route_classification earned no typed finding about the traversed "
+        "body and stands at not_determined, and authority_deletability did not prove this "
+        "principal could have issued the proven call itself. There is no fourth arm that "
+        "publishes on an unanswered route"
+    ),
+}
+
+# A field-description: it says what a consumer may not conclude and asserts
+# nothing about the entry carrying it.
+_WITHHELD_CLOSING = (
+    ". This is a REFUSAL and not a zero: nothing here says the principal moves nothing, only "
+    "that what it moves is not determined by this evidence"
+)
+
 
 @dataclass
 class _Instance:
@@ -238,6 +306,30 @@ _WITNESS_STATE_CLAIM = {
 # only where it is the sole candidate — where it is the only thing there is to
 # publish and no comparison was made.
 _WITNESS_STATE_UNRANKED = len(_WITNESS_STATE_CLAIM) + 1
+
+# Where the published dollars came from, one sentence per value of
+# ``bounded_by``. A single sentence for both is a claim about the row and it is
+# FALSE on one of them: the entry's figure is the MIN of the destination
+# function's own flow.out witness and the destination entity's balance sheet, so
+# on every entry the sheet won, "not the destination's balance sheet" names as
+# excluded the very thing that capped the figure — and ``destination_sheet_usd``
+# beside it equals ``published_usd``, so the document contradicts itself in two
+# adjacent keys. Neither sentence asserts which ceiling is the smaller in
+# general; each says which one bound THIS figure and points at the other.
+_COMPOSED_SOURCE_READINGS = {
+    "flow.out witness": (
+        "the dollars are the DESTINATION function's own flow.out witness, and not this row's "
+        "balance sheet. The destination entity's own sheet did not bind them here — bounded_by "
+        "beside destination_sheet_usd and sheet_not_determined says which of the two ceilings "
+        "did and what the other one was"
+    ),
+    "destination sheet": (
+        "the dollars are the DESTINATION entity's own BALANCE SHEET, and not this row's. The "
+        "sheet is BELOW that function's flow.out witness here and is what capped the figure — "
+        "bounded_by beside destination_sheet_usd and flow_out_witness.usd says which of the two "
+        "ceilings did and what the other one was"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -326,18 +418,33 @@ class _ComposedMagnitude:
             ),
         }
 
+    @property
+    def bounded_by(self) -> str:
+        """Which of the two ceilings was the binding one on THIS entry.
+
+        A property rather than an inline expression in :meth:`as_json` because
+        the published ``reading`` is derived from it: the sentence naming where
+        the dollars came from has to say the same thing this field does, and
+        computing the answer twice is how the two drift apart.
+        """
+        return (
+            "flow.out witness"
+            if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
+            else "destination sheet"
+        )
+
     def _predicates_json(self) -> dict[str, Any]:
         found = self.predicates
         reading = (
             "the predicate texts extracted from the DESTINATION function's compiled body, "
             "published verbatim and in stored order so this entry's ceiling can be checked "
-            "against the evidence rather than taken on the fold's word. Four things about "
+            "against the evidence rather than taken on the fold's word. Three things about "
             "them. (1) They are stored WITHOUT POLARITY: the same text is a require-condition "
             "in one function and a revert-condition in another, so nothing here can tell "
             "whether any one of them must hold or must not. (2) The scorer therefore EVALUATES "
             "NONE of them and no published figure, band, refusal or count is affected by any "
             "one of them — removing this block changes no number. (3) The list is not a list of "
-            "unmet business conditions: it includes the authorization guard that this step's "
+            "unmet business conditions: it may include the authorization guard that this step's "
             "own act-as witness proves satisfied, and it may include transfer post-conditions "
             "and compiler or decompiler artefacts, all of which the extractor labels 'business' "
             "alike — which is why the label is not read and the list is not filtered. state is "
@@ -413,11 +520,7 @@ class _ComposedMagnitude:
             # Which of the two ceilings was the binding one. Not
             # flow_out_witness.state, which says whether the destination's own
             # dollar figure for one call is exact or a priced floor.
-            "bounded_by": (
-                "flow.out witness"
-                if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
-                else "destination sheet"
-            ),
+            "bounded_by": self.bounded_by,
             "sheet_not_determined": self.sheet_usd is None,
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
@@ -426,8 +529,8 @@ class _ComposedMagnitude:
             # here", which is a different fact from a field nobody filled in.
             "composed_selector_tie": self._tie_json(),
             "reading": (
-                "the dollars are the DESTINATION function's own flow.out witness, not this "
-                "row's and not the destination's balance sheet. Every hop from the seized node to it carries "
+                _COMPOSED_SOURCE_READINGS[self.bounded_by] + ". "
+                "Every hop from the seized node to it carries "
                 "its own act-as witness, in one of two admissible shapes named per step under "
                 "witness_kind: "
                 "the CALLER'S OWN state variable, read on-chain holding the next node, or — "
@@ -2833,6 +2936,12 @@ class _WithheldComposition:
     route: P.RouteClassification
     deletability: P.DeletabilityVerdict
 
+    def __post_init__(self) -> None:
+        # An arm with no registered sentence would otherwise reach the published
+        # reading through a default, which is a claim nobody wrote for it.
+        if self.arm not in _WITHHELD_ARM_READINGS:
+            raise ValueError(f"no withheld reading is registered for arm {self.arm!r}")
+
     @property
     def counter_key(self) -> str:
         """The ``(state, reason)`` pair the refusal counter keys on.
@@ -2869,24 +2978,7 @@ class _WithheldComposition:
             "act_as_chain_length": len(self.chain),
             "route_classification": self.route.as_json(),
             "authority_deletability": self.deletability.disclosure(),
-            "reading": (
-                "the destination carries a flow.out magnitude and this principal is witnessed "
-                "able to reach it, and the DOLLARS are still withheld. What was proven is a "
-                "call the probe made directly to the destination; what this entry claims is a "
-                "route through an intermediate, and the two are compared under route_comparison "
-                "rather than assumed equal. The gate claim survives that difference — an "
-                "authorization check reads msg.sender and msg.sig and no ARGUMENT, so a route "
-                "the proof did not take says nothing about it — and the act_as_chain above is "
-                "published in full. Whether the proof was admitted for THIS caller is a separate "
-                "question and is answered separately, under gate_claim: a different caller is not "
-                "covered by that argument, because msg.sender is what the check reads. The "
-                "magnitude does not survive either: route_classification "
-                "names what the traversed body does to the destination's arguments, and "
-                "authority_deletability names whether this principal could have issued the "
-                "proven call itself. Neither answered in favour of the figure, so no figure is "
-                "published. This is a REFUSAL and not a zero: nothing here says the principal "
-                "moves nothing, only that what it moves is not determined by this evidence"
-            ),
+            "reading": _WITHHELD_OPENING + _WITHHELD_ARM_READINGS[self.arm] + _WITHHELD_CLOSING,
         }
 
 
