@@ -392,12 +392,27 @@ def model_parameters() -> dict[str, Any]:
                 "question stays on it; SUSTAINABLE is added only on proven key-set "
                 "dependence and the RECOVERABLE credit only on proven independence"
             ),
-            # The second clause used to read "duration_bound_source is
-            # not_determined wherever populated" — a universal over the scored
-            # data, authored in a module that opens no session and reads no row,
-            # so nothing here could have checked it. What the ladder itself
-            # knows is that it has no duration term, and that is all it says.
-            "note": "no duration term: the ladder is not a function of duration_bound_source at all",
+            # Both halves of this note were false, in two different ways, and
+            # ruling 7's "split rather than rewrite" is what separates them.
+            # The second half read "duration_bound_source is not_determined
+            # wherever populated" — a universal over the scored data, authored
+            # in a module that opens no session and reads no row, so nothing
+            # here could have checked it. The FIRST half read "no duration
+            # term", which is contradicted by the ``auto_expiry`` rung sitting
+            # in this very dict: ``distill.py``'s freeze severity applies it
+            # only where a witnessed ``duration_bound_seconds`` is at or below
+            # FREEZE_AUTO_EXPIRY_MAX_SECONDS. Duration is a GATE on one rung
+            # rather than a term in any of them, and the two thresholds are
+            # interpolated so a reader can check the sentence against the
+            # constants it describes instead of against a number typed once.
+            "note": (
+                f"duration is a GATE on one rung and a term in none: the auto_expiry rung "
+                f"({FREEZE_AUTO_EXPIRY}) is admitted only where a witnessed duration bound is at "
+                f"or below {FREEZE_AUTO_EXPIRY_MAX_SECONDS} seconds, and its size does not vary "
+                f"with that bound — a freeze bounded one second under the threshold and one "
+                f"bounded a month under it credit identically. No other rung reads a duration at "
+                f"all, and no rung is a function of duration_bound_source"
+            ),
         },
         "weakness_ladder": {
             "anyone": WEAKNESS_ANYONE,
