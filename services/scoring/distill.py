@@ -36,12 +36,16 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from utils import execution_record as EX
+from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
     DESTINATION_FREE_CLAIMS,
     DESTINATION_SHAPE_NOT_APPLICABLE,
     DESTINATION_STATE_CONSTRAINED_PROVEN,
     DESTINATION_STATE_NOT_APPLICABLE,
     DESTINATION_STATE_UNCONSTRAINED_PROVEN,
+    MAGNITUDE_STATE_PROVEN_FLOOR,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
     NO_SELECTOR,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
@@ -787,10 +791,21 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             )
         return _Reach(
             state=VALUE_STATE_PROVEN_REACH,
+            # The ENTITY-SET bound, and it is exact here: ``keys`` is every
+            # holder the observation named, not a floor over them. A different
+            # axis from the magnitude state below, which grades the DOLLARS.
             bound=VALUE_BOUND_EXACT,
             entity_keys=keys,
             basis="observed_reach_value_usd(fork-proven)",
-            magnitude=_proven_number("proven_exact", value_usd),
+            # F4. This is the ATTRIBUTION path: the probe moved a compile-time
+            # constant amount and ``recipes._add_reach`` credited the holder's
+            # ENTIRE priced balance for the pair, discarding the transferred
+            # value. Nothing here witnesses that the call moves that balance, so
+            # the figure is an upper bound on what one call moves — exactness is
+            # unearnable in principle on this path. It is not re-pointed at
+            # ``proven_floor`` either: that state's prose means "at least this
+            # much", and this figure bounds the opposite direction.
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_UPPER_BOUND, value_usd),
             notes=("reach_holder_is_not_this_entity",) if holders and acting_key not in keys else (),
         )
 
@@ -803,7 +818,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
                 bound=VALUE_BOUND_FLOOR,
                 entity_keys=(acting_key,),
                 basis="observed_reach_floor_usd(>= floor, reach_indeterminate)",
-                magnitude=_proven_number("proven_floor", floor),
+                magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, floor),
             )
         # A 0.0 floor is "no proven bound": an all-unpriced sheet sums to the
         # same zero as a proven-empty one, and an ungated floor is not the
@@ -826,7 +841,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             bound=VALUE_BOUND_FLOOR,
             entity_keys=keys,
             basis="observed_reach_priced_usd(>= floor)",
-            magnitude=_proven_number("proven_floor", priced),
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, priced),
             notes=("reach_partially_priced",),
         )
     if _is_true(observed.get("contract_balance_seeded")):
@@ -834,6 +849,49 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
         # verdict proves a code capability, not an outflow of present treasury.
         return _no_reach("contract_balance_seeded(not_determined)", ("reach_seeded_balance_only",))
     return _no_reach("reach_not_witnessed(not_determined)")
+
+
+def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> Tri[dict[str, Any]]:
+    """The execution that proved this signal's magnitude, as a gate envelope.
+
+    The gate answers a question the distiller can ALWAYS answer — "does a
+    persisted execution record exist for this signal?" — which is why both of its
+    states are proven. The record's own three-state answer to the different
+    question ("what execution proved this figure?") rides inside the payload,
+    together with the typed reason where there is none. It has to be spelled that
+    way round: a ``Tri.not_determined()`` envelope may carry no value at all, so
+    routing the negative through it would delete the reason, and a reader could
+    not tell a row that predates the record from a transcript that failed to
+    store.
+
+    Read off the claim witness the effects→claims bridge projects, never by
+    fetching the transcript: the record is persisted at production time on
+    ``effect_verdicts.observed_residue`` precisely so this layer does not have to
+    reach into object storage to learn who called.
+
+    The FIRST entry carrying an ``effect_verdict_id`` decides, matching the
+    ``effect_verdict_id`` the signal itself publishes one screen down — one
+    signal names one verdict, and picking a different one here would publish an
+    execution belonging to a row the signal does not cite.
+    """
+    for entry in entries:
+        witness = entry.get("witness") or {}
+        raw_id = witness.get("effect_verdict_id")
+        if raw_id is None:
+            continue
+        verdict_id = int(raw_id)
+        verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == verdict_id), None)
+        ptr = getattr(verdict, "transcript_ptr", None) if verdict is not None else None
+        if verdict is None:
+            record = EX.not_determined(EX.REASON_VERDICT_NOT_LOCATED, effect_verdict_id=verdict_id)
+        else:
+            observed = witness.get("observed") or {}
+            record = EX.from_residue(
+                observed.get(PROVING_EXECUTION_KEY), transcript_ptr=ptr, effect_verdict_id=verdict_id
+            )
+        state = EX.GATE_STATE_RECORDED if record.is_recorded else EX.GATE_STATE_NOT_RECORDED
+        return Tri.proven(state, record.as_json())
+    return Tri.proven(EX.GATE_STATE_NOT_RECORDED, EX.not_determined(EX.REASON_NO_VERDICT).as_json())
 
 
 def _repointed_entities(
@@ -1148,6 +1206,11 @@ def _build_signal(
     fields["value_entity_keys"] = keys if reach.state == VALUE_STATE_PROVEN_REACH else ()
     fields["value_basis"] = reach.basis
     gates["reach_magnitude_usd"] = reach.magnitude.to_json()
+    # F6: the execution that PROVED the figure above, carried BESIDE it. The two
+    # travel together or the fold publishes a number with no account of the call
+    # it came from — which is what every consumer of this magnitude has had until
+    # now, because the caller exists only inside the transcript blob.
+    gates[PROVING_EXECUTION_KEY] = _proving_execution_gate(facts, func, entries).to_json()
     notes.update(reach.notes)
 
     # --- claim-scoped gates -------------------------------------------------
