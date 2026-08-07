@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from services.scoring import distill as D
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef, Tri
@@ -651,3 +652,171 @@ def test_a_withheld_entity_is_not_replaced_by_the_next_candidate_down(fold):  # 
     assert len(_entries(row)) + len(_withheld(row)) == 1
     assert {e["entity"] for e in _withheld(row)} == {KEY_V}
     assert _entries(row) == []
+
+
+# ---------------------------------------------------------------------------
+# The transcript derivation — the piece that moves this corpus from
+# "not_determined" to "recorded", and which nothing else pins
+# ---------------------------------------------------------------------------
+
+
+def _transcript(**over: Any) -> dict[str, Any]:
+    """A ``value_out`` transcript in the shape ``harness.record_calls`` writes."""
+    blob: dict[str, Any] = {
+        "feature": "value_out",
+        "tier": "tier1",
+        "chain_id": 1,
+        "block_number": 25_658_245,
+        "block_source": "invocation_pin",
+        "calls": [
+            {"label": "value_probe", "from": "0xAAA", "to": "0xBBB", "data": "0x18457e61aabb"},
+            {"label": "sentinel_probe", "from": "0xAAA", "to": "0xBBB", "data": "0x18457e61ccdd"},
+        ],
+        "results": [{"label": "value_probe", "success": True}, {"label": "sentinel_probe", "success": True}],
+    }
+    blob.update(over)
+    return blob
+
+
+def _seeded_transcript() -> dict[str, Any]:
+    """The seeded shape: read-backs and the target call under one label, and the
+    attempt the recipe recorded as landed."""
+    return _transcript(
+        calls=[
+            {"label": "value_probe", "from": "0xAAA", "to": "0xBBB", "data": "0x18457e61aabb"},
+            {"label": "seeded_probe", "to": "0xTOKEN", "data": "0x70a08231"},
+            {"label": "seeded_probe", "from": "0xAAA", "to": "0xBBB", "data": "0x18457e61eeff"},
+            {"label": "sentinel_probe", "from": "0xAAA", "to": "0xBBB", "data": "0x18457e61ccdd"},
+        ],
+        results=[
+            {"label": "value_probe", "success": False},
+            {"label": "seeded_probe", "success": True},
+            {"label": "seeded_probe", "success": True},
+            {"label": "sentinel_probe", "success": True},
+        ],
+        seed_attempts=[
+            {"label": "seeded_probe_payable", "outcome": "skipped_no_viable_attempt"},
+            {"label": "seeded_probe", "outcome": "executed"},
+        ],
+        input_seeded=True,
+        contract_balance_seeded=False,
+    )
+
+
+def test_the_unseeded_probe_is_the_record_where_no_seeded_attempt_landed():
+    """And both seeding qualifiers are EARNED from that choice, never defaulted."""
+    record = EX.from_transcript(_transcript(), transcript_ptr="job::art", effect_verdict_id=7)
+    assert record.is_recorded
+    assert (record.caller, record.target, record.selector) == ("0xaaa", "0xbbb", "0x18457e61")
+    assert record.calldata == "0x18457e61aabb"
+    assert record.probe_label == "value_probe"
+    assert record.succeeded is True
+    assert record.input_seeded is False and record.contract_balance_seeded is False
+    assert (record.block_number, record.block_source, record.chain_id, record.tier) == (
+        25_658_245,
+        "invocation_pin",
+        1,
+        "tier1",
+    )
+    # The sentinel is a DIFFERENT call and is never the record, even though it
+    # is the last impersonated call in the blob.
+    assert "ccdd" not in record.calldata
+
+
+def test_the_seeded_retry_that_landed_is_the_record_and_not_the_call_that_reverted():
+    """The producer's rule, re-derived from the producer's own marker. Recording
+    the unseeded probe here would name an execution that proved nothing."""
+    record = EX.from_transcript(_seeded_transcript(), transcript_ptr="job::art", effect_verdict_id=7)
+    assert record.probe_label == "seeded_probe"
+    assert record.calldata == "0x18457e61eeff"
+    assert record.succeeded is True
+    assert record.input_seeded is True
+    assert record.contract_balance_seeded is False
+    # The read-back under the same label is not the target call.
+    assert record.target == "0xbbb"
+
+
+def test_a_seeded_record_reads_the_balance_override_as_undetermined_where_unstated():
+    blob = _seeded_transcript()
+    del blob["contract_balance_seeded"]
+    record = EX.from_transcript(blob, transcript_ptr="job::art", effect_verdict_id=7)
+    assert record.contract_balance_seeded == EX.SEEDING_NOT_DETERMINED
+    assert record.contract_balance_seeded is not False
+
+
+def test_an_uncertified_height_is_dropped_rather_than_published_as_the_observations():
+    blob = _transcript()
+    del blob["block_source"]
+    record = EX.from_transcript(blob, transcript_ptr="job::art", effect_verdict_id=7)
+    assert record.block_number is None and record.block_source is None
+
+
+def test_a_transcript_naming_no_proving_call_is_its_own_reason_and_not_a_fault():
+    record = EX.from_transcript(
+        _transcript(calls=[{"label": "sentinel_probe", "to": "0xBBB", "data": "0x1234"}], results=[]),
+        transcript_ptr="job::art",
+        effect_verdict_id=7,
+    )
+    assert record.state == EX.EXECUTION_NOT_DETERMINED
+    assert record.reason == EX.REASON_NO_PROVING_CALL
+    assert record.reason not in EX.FAULT_REASONS
+    assert record.transcript_ptr == "job::art"
+
+
+@pytest.mark.parametrize(
+    "pointer,parts",
+    [("job::art", ("job", "art")), ("job::a::b", ("job", "a::b")), ("job", None), ("::art", None), (None, None)],
+)
+def test_a_pointer_that_does_not_resolve_is_not_coerced_into_one(pointer, parts):
+    assert EX.pointer_parts(pointer) == parts
+
+
+class _FakeQuery:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+
+    def filter(self, *_a: Any) -> _FakeQuery:
+        return self
+
+    def one_or_none(self) -> Any:
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+
+class _FakeSession:
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+
+    def query(self, *_a: Any) -> _FakeQuery:
+        return _FakeQuery(self._outcome)
+
+
+@pytest.mark.parametrize(
+    "outcome,reason",
+    [
+        (None, EX.REASON_TRANSCRIPT_UNSTORED),
+        (RuntimeError("boom"), EX.REASON_FETCH_FAILED),
+    ],
+    ids=["no_artifact_row", "transport_failure"],
+)
+def test_each_way_of_failing_to_reach_the_transcript_keeps_its_own_reason(outcome, reason):
+    """Three different things to a reader deciding whether to look again: a row
+    that does not exist, a row naming no key, and a transport error. All three
+    are faults; none of them may borrow another's name."""
+    D.clear_transcript_cache()
+    reader = D._TranscriptReader(cast(Any, _FakeSession(outcome)))
+    record = reader.execution(transcript_ptr="job::art", effect_verdict_id=7)
+    assert record.state == EX.EXECUTION_NOT_DETERMINED
+    assert record.reason == reason
+    assert record.reason in EX.FAULT_REASONS
+    assert record.effect_verdict_id == 7
+    D.clear_transcript_cache()
+
+
+def test_an_unresolvable_pointer_never_reaches_object_storage():
+    D.clear_transcript_cache()
+    reader = D._TranscriptReader(cast(Any, None))  # a session use would raise
+    record = reader.execution(transcript_ptr="not-a-pointer", effect_verdict_id=7)
+    assert record.reason == EX.REASON_PTR_UNRESOLVABLE
+    assert record.reason in EX.FAULT_REASONS
