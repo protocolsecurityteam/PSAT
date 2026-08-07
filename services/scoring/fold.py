@@ -331,6 +331,20 @@ _COMPOSED_SOURCE_READINGS = {
     ),
 }
 
+# One name per component of :func:`_composed_order`'s key, positionally. The
+# published ``chosen_by`` reads the component that ACTUALLY separated this
+# candidate from each one it was chosen over, so the names have to line up with
+# the tuple; a length mismatch is a fixture-free way for the string to name the
+# wrong rule, and it is asserted rather than trusted.
+_ORDER_COMPONENT_NAMES = (
+    "the published figure, highest",
+    "the weakest witness state",
+    "the lowest selector",
+    "the lowest destination function",
+    "the chain's calling selectors, in order",
+    "the chain's own published identity",
+)
+
 
 @dataclass(frozen=True)
 class _ComposedMagnitude:
@@ -383,6 +397,86 @@ class _ComposedMagnitude:
     deletability: P.DeletabilityVerdict | None = None
     route: P.RouteClassification | None = None
 
+    def _chain_identity_gloss(self) -> str:
+        """What the order's last component actually ranges over, read off the steps.
+
+        The shipped gloss named five fields — caller, selector, calling selector,
+        receiver variable, receiver block — and :func:`_composed_order`'s tail is
+        every field ``P.ActAsStep.as_json`` publishes, which is more than five and
+        grows. Under-stating the key it describes made the string false of every
+        carrier (``COMPOSITION_WITNESS_SHAPE_SPEC.md`` §11.2 (k)). Reading the
+        field names off the steps in hand keeps the gloss exhaustive by
+        construction, including on the day a step publishes a new field.
+        """
+        fields = sorted({name for entry in (self, *self.tied_with) for step in entry.chain for name in step.as_json()})
+        if not fields:
+            return (
+                "Its last component is every field each act_as_chain step publishes, and no "
+                "candidate here publishes a step at all, so that component is empty on all of "
+                "them and separates nothing"
+            )
+        return (
+            "Its last component is EVERY field each act_as_chain step publishes — on these "
+            "candidates " + ", ".join(fields) + " — taken from the step's own published shape "
+            "rather than from a list written into this sentence, so the key stays total over "
+            "the entry on the day a step publishes a new field"
+        )
+
+    def _chosen_by(self) -> str:
+        """The rule, and the component of it that decided THIS tie.
+
+        Reciting the whole ladder reads as though every component applied. It did
+        not: on a tie the components ahead of the deciding one hold the same
+        value on every candidate — the figure always does, by the definition of
+        a tie — and the ones behind it are never reached. So the deciding
+        component is computed per tie, against each candidate this entry was
+        chosen over, and the case where the order separates nothing is published
+        as itself rather than left to read as a decision.
+        """
+        key = _composed_order(self)
+        decided: dict[int, int] = defaultdict(int)
+        unseparated = 0
+        for other in self.tied_with:
+            component = _first_differing_component(key, _composed_order(other))
+            if component is None:
+                unseparated += 1
+            else:
+                decided[component] += 1
+        named = [
+            f"{_ORDER_COMPONENT_NAMES[index]} (component {index + 1} of {len(key)}) against {hits} candidate(s)"
+            for index, hits in sorted(decided.items())
+        ]
+        if not named:
+            what_decided = (
+                f"This order decides NOTHING here: every component of the key holds the same "
+                f"value on all {unseparated} of them, so which one is published rests on the "
+                f"order the candidates were built in and not on this rule"
+            )
+        else:
+            what_decided = (
+                "What decided it: "
+                + "; ".join(named)
+                + " — in each case the FIRST component on which this entry differs from that "
+                "candidate. The components ahead of a deciding one hold the same value on every "
+                "candidate in this tie and decided nothing, and the components behind it were "
+                "never reached"
+            )
+            if unseparated:
+                what_decided += (
+                    f". It separates this entry from {unseparated} of them not at all — every "
+                    "component of the key is equal there, so which of those is published rests "
+                    "on the order the candidates were built in and not on this rule"
+                )
+        return (
+            f"the total order at _composed_order, over the {len(self.tied_with) + 1} candidates "
+            "this entity offered at the same published figure: "
+            + "; then ".join(_ORDER_COMPONENT_NAMES)
+            + ". "
+            + self._chain_identity_gloss()
+            + ". "
+            + what_decided
+        )
+
     def _tie_json(self) -> dict[str, Any] | None:
         if not self.tied_with:
             return None
@@ -398,13 +492,7 @@ class _ComposedMagnitude:
                 }
                 for entry in sorted((self, *self.tied_with), key=_composed_order)
             ],
-            "chosen_by": (
-                "the weakest witness state; then the lowest selector; then the lowest "
-                "destination function; then the chain's calling selectors; then "
-                "the chain's own identity — each step's caller, selector, calling selector, "
-                "receiver variable and receiver block. Total over every field the entry "
-                "publishes, so nothing is left to the order the candidates were built in"
-            ),
+            "chosen_by": self._chosen_by(),
             "reading": (
                 "this entity carries more than one call at the same PUBLISHED figure, and "
                 "which of them names the published selector, destination_function and "
@@ -597,6 +685,22 @@ def _composed_order(entry: _ComposedMagnitude) -> tuple[Any, ...]:
         tuple(step.calling_selector or "" for step in entry.chain),
         tuple(tuple(sorted((key, repr(value)) for key, value in step.as_json().items())) for step in entry.chain),
     )
+
+
+def _first_differing_component(chosen: tuple[Any, ...], other: tuple[Any, ...]) -> int | None:
+    """The index of the component that decided ``chosen`` over ``other``.
+
+    ``None`` where no component differs — the two candidates are equal under the
+    whole key and the order decided nothing between them. That is a real third
+    state on a total-by-construction key (two candidates can agree on every
+    ordered field and still differ in fields the key does not read, such as the
+    execution that proved each one), and the published ``chosen_by`` says so
+    rather than naming a component that separated nothing.
+    """
+    for index, (mine, theirs) in enumerate(zip(chosen, other)):
+        if mine != theirs:
+            return index
+    return None
 
 
 def _select_composed(candidates: list[_ComposedMagnitude]) -> _ComposedMagnitude:
