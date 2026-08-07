@@ -45,7 +45,7 @@ question and this shape carries the bytes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 # The ``effect_verdicts.observed_residue`` key, and the ``gate_inputs`` name the
 # distiller writes it under. One string, so a rename cannot desynchronise the
@@ -88,10 +88,86 @@ NOT_DETERMINED_REASONS = (
     REASON_PTR_UNRESOLVABLE,
 )
 
+# What each reason MEANS, one sentence per reason, because a single sentence for
+# all seven would be a data-claim that is false on most of them. The pattern is
+# the one C15/F7 measures: a string DESCRIBING what a field means may be constant
+# (it is documentation), a string making a claim ABOUT THE ROW's data must be
+# derived, because it can be false for the row carrying it. "The execution exists
+# in the transcript the pointer names" is a claim about the row, and it is false
+# for every reason below whose row has no transcript to name.
+#
+# Each sentence is written to be true of EVERY row that can carry it — including
+# what it does NOT assert, which is the half that matters here: none of them says
+# a call was absent, and none of them says a pointer resolves.
+_REASON_READINGS = {
+    REASON_NOT_PERSISTED: (
+        "the verdict this figure was read from carries no stored execution record, so the call that "
+        "proved it is not_determined here. It is not a claim that no call was made: the probe ran "
+        "and its verdict stands, and what is missing is the record of WHICH call — that record is "
+        "written at production time and was never written for this row"
+    ),
+    REASON_NO_VERDICT: (
+        "no effect verdict is attached to this claim at all, so there is no probe execution to name "
+        "and no transcript to look in. The claim rests on some other witness, and nothing here says "
+        "a call was simulated for it"
+    ),
+    REASON_VERDICT_NOT_LOCATED: (
+        "the claim names an effect verdict this fold could not find, so neither the execution nor "
+        "the verdict row behind the figure could be read. The identifier is published beside this "
+        "so the mismatch can be checked rather than taken on the fold's word"
+    ),
+    REASON_TRANSCRIPT_UNSTORED: (
+        "the probe ran but its transcript was never stored, so no replayable record of the call "
+        "exists to name and none can be recovered later"
+    ),
+    REASON_STORAGE_KEY_MISSING: (
+        "the transcript is registered but carries no storage key, so its body cannot be located. "
+        "The call was made and its record is not reachable from here"
+    ),
+    REASON_FETCH_FAILED: (
+        "the transcript's body could not be fetched. This is a transport failure and not a "
+        "statement about the call: a later read may recover the same record intact"
+    ),
+    REASON_PTR_UNRESOLVABLE: (
+        "the transcript pointer does not resolve to a stored artifact, so the call that proved this "
+        "figure cannot be reached from the pointer the verdict carries"
+    ),
+}
+
+# Appended only where it is TRUE — a pointer was carried through. On the
+# backfill-gap reason the transcript really does hold the execution, and saying
+# so is what turns a gap into something a reader can close; on a row with no
+# pointer the same sentence would name a transcript that is not there.
+_POINTER_CLAUSE = (
+    ". The transcript_ptr beside this names the stored transcript the execution was recorded in, "
+    "so the call is recoverable by reading it"
+)
+
+# A field-description, true of every carrier by construction: it says what a
+# consumer may not conclude, and asserts nothing about the row.
+_ABSENCE_CLAUSE = (
+    ". A consumer must not read this absence as an unseeded probe, as an absent caller, or as a route that matches"
+)
+
 # The third state of the two seeding qualifiers. Spelled, never ``None``: a
 # ``None`` in a JSON payload is one ``or False`` away from reading as an earned
 # negative.
 SEEDING_NOT_DETERMINED = "not_determined"
+
+
+def undetermined_reading(reason: str, transcript_ptr: str | None) -> str:
+    """The reading for one undetermined record, derived from its own reason.
+
+    Three parts, and only the middle one is conditional: what this reason means,
+    the pointer clause where a pointer was actually carried, and the invariant a
+    consumer must not violate. An unregistered reason cannot reach here —
+    :meth:`ProvingExecution.__post_init__` rejects it — so there is no default
+    sentence standing in for a fact nobody stated.
+    """
+    body = _REASON_READINGS[reason]
+    pointer = _POINTER_CLAUSE if reason == REASON_NOT_PERSISTED and transcript_ptr else ""
+    return body + pointer + _ABSENCE_CLAUSE
+
 
 # The route comparison's three states. ``route_match`` and ``route_mismatch``
 # are each earned from a record; with no record neither is, and there is no
@@ -170,6 +246,13 @@ class ProvingExecution:
         pointers — rather than the full field list with nulls in it. A block of
         nulls reads as an execution whose every field came back empty, which is
         a stronger and false claim about how far the lookup got.
+
+        Its ``reading`` is DERIVED from the reason (:func:`undetermined_reading`)
+        and not a constant. One sentence for all seven reasons would be a claim
+        about the row that is false on most of them — "the execution exists in
+        the transcript the pointer names" is not true of a row that has no
+        verdict and therefore no pointer — which is the authored-string defect
+        class this record exists on the other side of.
         """
         if not self.is_recorded:
             return {
@@ -177,13 +260,7 @@ class ProvingExecution:
                 "reason": self.reason,
                 "transcript_ptr": self.transcript_ptr,
                 "effect_verdict_id": self.effect_verdict_id,
-                "reading": (
-                    "no execution record is stored for the verdict this figure was read from, so "
-                    "the call that proved it is not_determined here. This is not a claim that no "
-                    "call was made: the execution exists in the transcript the pointer names, and "
-                    "the reason says why it did not reach this row. A consumer must not read the "
-                    "absence as an unseeded probe, as an absent caller, or as a route that matches"
-                ),
+                "reading": undetermined_reading(cast(str, self.reason), self.transcript_ptr),
             }
         return {
             "state": self.state,
