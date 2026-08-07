@@ -101,6 +101,35 @@ def test_the_seeding_qualifiers_are_three_valued_and_absence_is_the_third():
     assert (seeded.input_seeded, seeded.contract_balance_seeded) == (True, False)
 
 
+def test_the_undetermined_reading_is_derived_from_its_own_reason():
+    """A single sentence for all seven reasons would be a data-claim that is
+    FALSE on most of them: "the execution exists in the transcript the pointer
+    names" is untrue of a row that has no verdict and therefore no pointer. Each
+    reason states what is true of every row that can carry it, and the transcript
+    clause appears only where a transcript was actually pointed at."""
+    readings = {reason: EX.undetermined_reading(reason, "job::art") for reason in EX.NOT_DETERMINED_REASONS}
+    # Seven reasons, seven distinct sentences: no constant standing in for the lot.
+    assert len(set(readings.values())) == len(EX.NOT_DETERMINED_REASONS)
+
+    # The clause that was false on the pointerless reasons is now conditional AND
+    # scoped to the one reason it is true of.
+    with_ptr = EX.not_determined(EX.REASON_NOT_PERSISTED, transcript_ptr="job::art").as_json()["reading"]
+    without = EX.not_determined(EX.REASON_NOT_PERSISTED).as_json()["reading"]
+    assert "transcript_ptr beside this" in with_ptr
+    assert "transcript_ptr beside this" not in without
+
+    # Neither of the two reasons that ALWAYS carry a null pointer may name one.
+    for reason in (EX.REASON_NO_VERDICT, EX.REASON_VERDICT_NOT_LOCATED):
+        reading = EX.not_determined(reason).as_json()["reading"]
+        assert "transcript_ptr beside this" not in reading
+        assert "is recoverable by reading it" not in reading
+
+    # The invariant clause is a field-description and rides every one of them: it
+    # says what a consumer may not conclude and asserts nothing about the row.
+    for reading in readings.values():
+        assert "must not read this absence as an unseeded probe" in reading
+
+
 def test_an_undetermined_record_must_name_a_registered_reason():
     with pytest.raises(ValueError):
         EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason="because")
@@ -304,6 +333,12 @@ class _Row:
         self.verdict = VERDICT_PROVEN
 
 
+class _Row6(_Row):
+    def __init__(self, ptr):
+        super().__init__(ptr)
+        self.id = 6
+
+
 def test_the_distiller_publishes_the_typed_reason_when_no_record_is_stored():
     """The negative branch keeps the reason AND the pointers. A gate that dropped
     them would turn "this row predates the record" into an unreadable silence."""
@@ -326,6 +361,33 @@ def test_the_distiller_carries_a_stored_record_onto_the_signal():
     assert gate.value["caller"] == C
     assert gate.value["input_seeded"] is True
     assert gate.value["transcript_ptr"] == "job::art"
+
+
+def test_the_execution_and_the_published_verdict_id_name_the_same_row():
+    """One selection rule, read once. The gate used to take the FIRST
+    verdict-bearing entry and the signal the LAST, so a claim carrying two would
+    have paired one verdict's dollars with another's caller — the failure
+    _destination_magnitudes forbids one file over. Both now read
+    _cited_verdict_entry, so they agree by construction rather than by two scans
+    that happen to."""
+    first = {"witness": {"effect_verdict_id": 5, "observed": {}}}
+    second = {
+        "witness": {
+            "effect_verdict_id": 6,
+            "observed": {EX.PROVING_EXECUTION_KEY: {"target": VAULT, "calldata": CALLDATA, "caller": C}},
+        }
+    }
+    entries = [first, second]
+    facts = _facts([_Row("job::art"), _Row6("job::art6")])
+
+    chosen = D._cited_verdict_entry(entries)
+    assert chosen is second
+    gate = D._proving_execution_gate(facts, _Func(), entries)
+    assert isinstance(gate.value, dict)
+    # The record read is the SECOND entry's — the same one the signal publishes.
+    assert gate.value["effect_verdict_id"] == 6
+    assert gate.value["caller"] == C
+    assert D._verdict_bearing_entries(entries) == entries
 
 
 def test_a_claim_with_no_verdict_says_so_rather_than_going_silent():
@@ -599,6 +661,113 @@ def test_case5_holds_on_a_subsumed_row_too(fold):
     for row in list(document.findings) + subsumed:
         assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED, row["capability"]
         assert not row["value_band"].startswith(">= ")
+
+
+# --- the two arms V0-R ruled on, each pinned so a rename cannot pass ---------
+
+
+def _unbounded_row(state: str, *, usd: float = 5_000.0) -> tuple[FunctionSignal, P.ValuePlane]:
+    """A magnitude in ``state`` charged against an entity whose priced sheet is
+    NOT DETERMINED — the case the reference corpus does not contain, and the one
+    the disclosing arm exists for."""
+    signal = _flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven(state, usd).to_json()},
+        **_proven(1.0),
+        **_reaches(KEY_C),
+    )
+    # No priced rows for KEY_C at all: ``total`` returns None, which is the
+    # not_determined sheet and NOT a zero.
+    return signal, _value_plane({}, contracts=(KEY_C,))
+
+
+def test_an_upper_bound_over_an_unpriced_sheet_is_never_disclosed_as_a_floor(fold):
+    """The direction-earned key, pinned.
+
+    A floor and an attribution-derived upper bound charged against an entity with
+    no priced sheet are the SAME arithmetic and OPPOSITE claims. Publishing the
+    second under ``witnessed_floor_usd`` republishes a ceiling as an at-least —
+    and it moves no number, so nothing but this assertion can catch it."""
+    signal, plane = _unbounded_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND)
+    finding = fold([signal], principals={1: _principal_facts(1, EOA, "eoa")}, value=plane).findings[0]
+    disclosed = finding["unbounded_floor_magnitudes"]
+    assert len(disclosed) == 1
+    note = disclosed[0]
+    assert note["witness_state"] == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
+    assert note["witnessed_upper_bound_usd"] == 5_000.0
+    assert "witnessed_floor_usd" not in note
+    assert "ABOVE" in note["reading"]
+    assert "at least this much" not in note["reading"]
+    # The figure itself is unchanged by which name discloses it.
+    assert finding["value_at_stake_usd"] == 5_000.0
+
+
+def test_a_floor_over_an_unpriced_sheet_keeps_its_own_name_verbatim(fold):
+    """The twin, so the assertion above cannot pass by never using either key.
+    The floor path is byte-identical to what it published before the third
+    magnitude state existed."""
+    signal, plane = _unbounded_row(MAGNITUDE_STATE_PROVEN_FLOOR)
+    finding = fold([signal], principals={1: _principal_facts(1, EOA, "eoa")}, value=plane).findings[0]
+    note = finding["unbounded_floor_magnitudes"][0]
+    assert note["witness_state"] == MAGNITUDE_STATE_PROVEN_FLOOR
+    assert note["witnessed_floor_usd"] == 5_000.0
+    assert "witnessed_upper_bound_usd" not in note
+    assert "the call moves at least this much somewhere" in note["reading"]
+
+
+def _two_key_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
+    """One call witnessed over TWO priced entities — the signal-525 shape
+    (``0xf3fef3a3 withdraw``, two ``value_entity_keys``, $28.1M), which is the
+    only live instance of this branch in the database."""
+    signal = _flow_sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven(state, 3_000.0).to_json()},
+        **_proven(1.0),
+        **_reaches(KEY_C, KEY_V),
+    )
+    plane = _value_plane({KEY_C: {"usdc": 2_000.0}, KEY_V: {"usdc": 2_000.0}})
+    return signal, plane
+
+
+def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold):
+    """The apportionment refusal, pinned on the state that joined the vocabulary.
+
+    An EXACT witness bounds the whole call, so its keys may consume it as a
+    budget. An upper bound may not: split across two entities with no
+    apportionment witness it would attribute up to the WHOLE bound at each, which
+    is the balance-sheet-as-a-reach error with a ceiling in place of a sheet.
+    Letting it join the exact side moves no number on this corpus — signal 525
+    scores in no row — so only this assertion stands between the ruling and a
+    silent regression."""
+    signal, plane = _two_key_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND)
+    finding = fold([signal], principals={1: _principal_facts(1, EOA, "eoa")}, value=plane).findings[0]
+    # Refused: no dollars are published for either entity, and the refusal is
+    # typed per key rather than left as an absence.
+    assert finding["value_by_entity"] == {}
+    assert finding["value_at_stake_usd"] is None
+    refusals = {
+        gap["entity"]: gap["why"] for gap in finding["undetermined_instances"] if "apportionment" in str(gap.get("why"))
+    }
+    assert set(refusals) == {KEY_C, KEY_V}
+    cap = next(
+        c for c in finding["witnessed_magnitude_caps"] if c["witness_state"] == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
+    )
+    assert cap["published_sum_usd"] is None
+    assert cap["uncapped_sum_usd"] == 4_000.0
+
+
+def test_an_exact_witness_over_two_keys_still_apportions(fold):
+    """The twin. The refusal above must be about the STATE, not about the
+    two-key shape — an exact witness bounds the whole call and its keys consume
+    it as a budget, which is behaviour this change must leave alone."""
+    signal, plane = _two_key_row(MAGNITUDE_STATE_PROVEN_EXACT)
+    finding = fold([signal], principals={1: _principal_facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert finding["value_at_stake_usd"] == 3_000.0
+    assert set(finding["value_by_entity"]) == {KEY_C, KEY_V}
 
 
 def test_the_floor_arm_is_not_vacuously_true_on_an_empty_contribution_set():
