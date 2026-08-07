@@ -1,21 +1,15 @@
 """Stub planes for the two witnesses the composition rule decides an arm from.
 
-The three-arm rule asks two questions of every composed candidate: can this
-principal author the destination's calldata itself (``DeletabilityPlane``), and
-what does the body the chain traverses do to that calldata
-(``RouterFlowPlane``). Both are database-backed, so every fold-level test has to
-supply them.
-
-:func:`admits_every_principal` is a deliberate bypass and is named as one: it
-answers the deletability question "yes" for everybody, so a test about some
-OTHER axis of composition — a tie, a chain shape, a predicate block — still
-composes. It must never be used by a test that is about the rule itself; those
-build explicit rows with :func:`deletability_plane` and assert both arms.
+:func:`admits_every_principal` is a deliberate bypass: it answers the
+deletability question "yes" for everybody so a test about some OTHER axis of
+composition still composes. It must never be used by a test about the rule
+itself; those build explicit rows with :func:`deletability_plane`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 from services.scoring import planes as P
 
@@ -106,3 +100,26 @@ def router_flow_plane(rows: Iterable[tuple[str, str, str, str | None, str | None
             )
         )
     return P.RouterFlowPlane(flows={key: tuple(rows_here) for key, rows_here in flows.items()})
+
+
+def composed_document(
+    fold: Any,
+    *,
+    signals: Any = None,
+    deletability: P.DeletabilityPlane | None = None,
+    routes: Iterable[tuple[str, str, str, str | None, str | None]] = (),
+    case: dict[str, Any] | None = None,
+) -> Any:
+    """Fold the one-hop composing case. ``deletability`` and ``routes`` are the
+    two axes the composition rule decides an arm from, so they are what callers
+    vary; ``case``/``signals`` swap in the two-hop or tied shape."""
+    # Deferred: test_scoring_redteam imports this module.
+    from tests import test_scoring_redteam as RT
+
+    return fold(
+        RT._composing_signals() if signals is None else signals,
+        principals=RT._composing_principals(),
+        deletability=deletability if deletability is not None else deletability_plane(),
+        routes=router_flow_plane(routes),
+        **(RT._composing_case() if case is None else case),
+    )

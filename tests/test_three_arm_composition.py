@@ -2,22 +2,12 @@
 
 On the reference corpus the authority-deletability join and the banned
 ``len(act_as_chain) == 1`` shortcut partition the forty composed entries
-identically — 28 kept, 12 withheld, the same six rows either way — so every
-headline number is reachable by a rule that never opens a
+identically, so every headline number is reachable by a rule that never opens a
 ``function_principals`` row. The two fixtures that tell them apart are cases 3a
-and 3b below, and they are constructed rather than found, because the corpus
-contains no instance of either shape:
-
-* **3a** — one hop, no deletability row. A hop-count rule republishes it
-  (length 1) and is wrong. The rule must WITHHOLD.
-* **3b** — two hops, a qualifying row. A hop-count rule withholds it (length 2)
-  and is wrong. The rule must REPUBLISH.
-
-Both assert the arm taken and the fields published, not that the code ran.
-
-Case numbering follows the handoff's §14. Cases 4, 5 and the execution record's
-own shape live in ``tests/test_execution_record.py``; this module is the rule
-that decides what a composed entry publishes.
+(one hop, no deletability row — the rule must WITHHOLD) and 3b (two hops, a
+qualifying row — the rule must REPUBLISH), and they are constructed rather than
+found. Cases 4, 5 and the execution record's own shape live in
+``tests/test_execution_record.py``.
 """
 
 from __future__ import annotations
@@ -42,8 +32,6 @@ from tests.test_scoring_redteam import (
     KEY_T,
     KEY_V,
     SAFE,
-    _composing_case,
-    _composing_principals,
     _composing_signals,
     _gate_row,
     _two_hop_case,
@@ -55,9 +43,7 @@ from tests.test_scoring_redteam import (
 )
 from utils import execution_record as EX
 
-# The intermediate's own body, as the router-flow plane reads it. The one-hop
-# case traverses ``C``'s calling function; the two-hop case traverses the
-# teller's.
+# The intermediate's own body, as the router-flow plane reads it.
 _AUTHORS_THE_AMOUNT_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param_derived", "unconstrained_proven"),)
 _AUTHORS_THE_AMOUNT_AT_T = ((KEY_T, HOP1_SELECTOR, COMPOSED_SELECTOR, "param_derived", "unconstrained_proven"),)
 _CONSTRAINS_THE_TARGET_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param", "constrained"),)
@@ -66,10 +52,7 @@ _FORWARDS_EVERYTHING_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param
 
 _DELETES_THE_VAULT_AUTHORITY = ((KEY_V, EOA, "setAuthority"),)
 
-# The gating authority the vault's ``exit`` is witnessed consulting. Present, so
-# the AUTHORITY arm is asked on a witness that answered and a join returning no
-# row is an EARNED negative rather than an unresolved question — the two are
-# different published states and this module pins both.
+# Present, so a join returning no row is an EARNED negative and not an unknown.
 _GATING_AUTHORITY = "0x" + "9" * 40
 _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_SELECTOR): (_GATING_AUTHORITY,)}
 
@@ -82,32 +65,22 @@ def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:
     return list(row.get("reach_composed_magnitudes_withheld") or [])
 
 
-# ---------------------------------------------------------------------------
+def _refusing() -> P.DeletabilityPlane:
+    """The join runs, the authority resolves, and no setter row comes back."""
+    return CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY)
+
+
+def _licensing() -> P.DeletabilityPlane:
+    return CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY)
+
+
 # 3a / 3b — the only two cases that separate the rule from the shortcut
-# ---------------------------------------------------------------------------
 
 
 def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # noqa: F811
-    """NEGATIVE ARM, mandatory. Length 1 and the figure is still withheld.
-
-    Everything a composed magnitude needs is present: the licence, the
-    destination's own ``flow.out`` witness, and a single act-as step. What is
-    absent is any ``function_principals`` row naming this principal on
-    ``setUserRole`` / ``setRoleCapability`` / ``setAuthority`` /
-    ``transferOwnership`` at the destination or at the authority gating it — so
-    nothing proves this principal could have issued the direct call the probe
-    ran, and arm 3 has nothing to republish.
-
-    A hop-count implementation publishes $1,000,000 here.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    row = _gate_row(document)
+    """NEGATIVE ARM, mandatory. Length 1 and the figure is still withheld — a
+    hop-count implementation publishes $1,000,000 here."""
+    row = _gate_row(CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C))
 
     # Nothing published, and the chain really is one hop — so the shortcut and
     # the rule genuinely disagree on this fixture.
@@ -117,7 +90,6 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # no
     entry = withheld[0]
     assert entry["act_as_chain_length"] == 1
 
-    # The arm, and the typed refusal the traversed body earned.
     assert entry["arm_taken"] == FOLD.ARM_GATE_ONLY
     assert entry["withheld_reason"] == P.ROUTE_AMOUNT_AUTHORED
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
@@ -128,9 +100,7 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # no
     assert entry["act_as_chain"][0]["destination"] == KEY_V
     assert entry["act_as_chain"][0]["witness_kind"]
 
-    # The execution record is published, with the exact state this fixture
-    # produces — a disjunction over the whole domain would assert only that the
-    # field exists.
+    # The exact state this fixture produces, not a disjunction over the domain.
     assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED
     assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
     assert entry["route_comparison"]["verdict"] == EX.ROUTE_NOT_DETERMINED
@@ -140,12 +110,17 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # no
     assert "witnessed_usd" not in entry and "flow_out_witness" not in entry
     assert not any(isinstance(v, float) for v in entry.values())
 
-    # The refusal is an EARNED negative here — the join ran and returned no row.
+    # An EARNED negative: the join ran and returned no row.
     assert entry["authority_deletability"]["state"] == P.DELETABILITY_PROVEN_NOT_DELETABLE
     assert entry["authority_deletability"]["reason"] == P.DELETABILITY_NO_SETTER_ROW
     # No republished direct path anywhere on the row.
     assert row["value_by_entity"] == {}
     assert row["entities_priced_from_a_composed_ceiling"] == []
+
+    # Trap 16: the rule runs on the entries selection CHOSE, not the pool, so a
+    # withheld candidate is not replaced by the next one down.
+    assert len(_entries(row)) + len(_withheld(row)) == 1
+    assert {e["entity"] for e in _withheld(row)} == {KEY_V}
 
 
 def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  # noqa: F811
@@ -159,14 +134,14 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  
 
     A hop-count implementation withholds this entry.
     """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_T),
-        **_two_hop_case(),
+    row = _gate_row(
+        CA.composed_document(
+            fold,
+            deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+            routes=_AUTHORS_THE_AMOUNT_AT_T,
+            case=_two_hop_case(),
+        )
     )
-    row = _gate_row(document)
     assert _withheld(row) == []
     entries = _entries(row)
     assert len(entries) == 1
@@ -190,19 +165,13 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  
     # The execution record travels with the figure it accounts for.
     assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED
     assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
-    # The body still authors the amount; the licence is what overrode it, and
-    # the entry publishes both rather than hiding the one it did not act on.
+    # The body still authors the amount; the entry publishes both.
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
 
 
 def test_the_decision_reads_a_setter_row_and_never_a_chain_length():
-    """inv. 16, on the source. The rule's own body names no hop count.
-
-    The corpus cannot catch this — the two partitions are identical on it — so
-    the ban is asserted where it can be: in the text of the function that
-    decides. 3a and 3b catch the behaviour; this catches an implementation that
-    passes them by accident and then drifts.
-    """
+    """inv. 16, on the source: 3a and 3b catch the behaviour, this catches an
+    implementation that passes them by accident and then drifts."""
     source = inspect.getsource(FOLD._admit_composed)
     # The docstring argues about hop counts; the CODE must not mention one.
     body = source.split('"""')[-1]
@@ -211,63 +180,14 @@ def test_the_decision_reads_a_setter_row_and_never_a_chain_length():
     assert "authority_deletability" in body
 
 
-# ---------------------------------------------------------------------------
-# Case 1 — the route is compared, not assumed
-# ---------------------------------------------------------------------------
-
-
-def test_case1_the_same_magnitude_withholds_through_a_wrapper_and_publishes_direct(fold):  # noqa: F811
-    """One magnitude, two claims about how it is reached, two outcomes.
-
-    Identical signals, identical value plane, identical destination witness.
-    The ONLY difference is whether a row proves this principal can author the
-    destination's calldata itself — which is the difference between claiming a
-    number through a body that computes it and claiming the call that was
-    actually proven.
-    """
-    common = dict(
-        principals=_composing_principals(),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    through_wrapper = _gate_row(
-        fold(_composing_signals(), deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), **common)
-    )
-    direct = _gate_row(
-        fold(
-            _composing_signals(),
-            deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-            **common,
-        )
-    )
-
-    assert _entries(through_wrapper) == []
-    assert _withheld(through_wrapper)[0]["withheld_reason"] == P.ROUTE_AMOUNT_AUTHORED
-    assert through_wrapper["value_at_stake_usd"] is None
-
-    assert _withheld(direct) == []
-    assert _entries(direct)[0]["published_usd"] == 1_000_000.0
-    assert direct["value_at_stake_usd"] == 1_000_000.0
-
-
-# ---------------------------------------------------------------------------
 # Case 2 — the gate transfers; only the figure is lost
-# ---------------------------------------------------------------------------
 
 
 def test_case2_a_withheld_entry_keeps_its_gate_claim_and_loses_only_the_figure(fold):  # noqa: F811
-    """What survives arm 2, field by field.
-
-    An authorization check reads ``msg.sender`` and ``msg.sig`` and no argument,
-    so the route the proof took is irrelevant to it. Every witness that proves
-    the principal can MAKE the call is published; the number it moves is not.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_two_hop_case(),
+    """What survives arm 2, field by field: every witness that proves the
+    principal can MAKE the call is published; the number it moves is not."""
+    document = CA.composed_document(
+        fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C, case=_two_hop_case()
     )
     entry = _withheld(_gate_row(document))[0]
 
@@ -285,27 +205,14 @@ def test_case2_a_withheld_entry_keeps_its_gate_claim_and_loses_only_the_figure(f
     assert "REFUSAL and not a zero" in entry["reading"]
 
 
-# ---------------------------------------------------------------------------
 # Case 6 — the refusal is typed, counted, and does not move confidence
-# ---------------------------------------------------------------------------
 
 
 def test_case6_a_withheld_entry_is_counted_by_state_and_reason_together(fold):  # noqa: F811
-    """The counter decomposes, because the two halves are different facts.
-
-    ``DELETABILITY_REASONS`` mixes one earned negative — a join that ran and
-    found no row — with several undetermined kinds. Keying the counter on the
-    reason alone would put a proven fact and a disclosed unknown in one bucket,
-    which is the collapse the join exists to prevent, relocated into the count.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    row = _gate_row(document)
+    """``DELETABILITY_REASONS`` mixes one earned negative with several
+    undetermined kinds, so keying the counter on the reason alone would put a
+    proven fact and a disclosed unknown in one bucket."""
+    row = _gate_row(CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C))
     census = row["reach_composition_census"]
     assert census["composed"] == 0
     assert census["composed_withheld"] == 1
@@ -319,21 +226,9 @@ def test_case6_a_withheld_entry_is_counted_by_state_and_reason_together(fold):  
 
 def test_case6_a_refusal_does_not_move_confidence(fold):  # noqa: F811
     """``confidence_pct`` is a MIN over four terms and ``refused`` feeds none of
-    them. Asserting that a refusal moves it is a false proposition, and pinning
-    the falsehood is what keeps a future edit from wiring one in."""
-    common = dict(
-        principals=_composing_principals(),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    kept = fold(
-        _composing_signals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        **common,
-    )
-    refused = fold(
-        _composing_signals(), deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), **common
-    )
+    them; pinning that falsehood is what keeps a future edit from wiring one in."""
+    kept = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
+    refused = CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
     detail = kept.model_parameters["confidence_detail"]
     refused_detail = refused.model_parameters["confidence_detail"]
     assert refused.confidence_pct == min(
@@ -342,22 +237,19 @@ def test_case6_a_refusal_does_not_move_confidence(fold):  # noqa: F811
         refused_detail["value_priced_pct"],
         refused_detail["reach_magnitude_witnessed_pct"],
     )
-    # The refusal DOES cost witnessed magnitude — that is the term it belongs in
-    # — while the published headline binds on whichever term is lowest.
+    # The refusal DOES cost witnessed magnitude — the term it belongs in.
     assert refused_detail["reach_magnitude_witnessed_pct"] <= detail["reach_magnitude_witnessed_pct"]
-    # …and the refusal reaches NONE of the four terms the headline is a min over.
+    # …and reaches NONE of the four terms the headline is a min over.
     assert "refused" not in refused_detail
 
 
-# ---------------------------------------------------------------------------
 # Case 7 — subsumed parity
-# ---------------------------------------------------------------------------
 
 
-def _two_capability_signals() -> list[Any]:
-    """The composing case with a SECOND capability on the same principal unit,
-    so one of the two rows is published under ``provenance.subsumed_rows``."""
-    weaker = sig(
+def _weaker_capability() -> Any:
+    """A second, weaker capability on the same principal unit, so one of the two
+    rows is published under ``provenance.subsumed_rows``."""
+    return sig(
         claim_id="ownership.transfer",
         function_name="transferOwnership",
         selector="0xf2fde38b",
@@ -367,34 +259,32 @@ def _two_capability_signals() -> list[Any]:
         **proven(0.75),
         **reaches(KEY_C),
     )
-    return [*_composing_signals(), weaker]
 
 
-@pytest.mark.parametrize(
-    "deletability,expect_published",
-    [
-        (CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), False),
-        (CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), True),
-    ],
-    ids=["withheld", "republished"],
-)
-def test_case7_both_arms_hold_on_a_subsumed_row(fold, deletability, expect_published):  # noqa: F811
-    """Three investigation passes measured findings only. Twenty-one of the
-    forty entries live under ``provenance.subsumed_rows``, and one of them is a
-    keep-it row worth $11.36M — so a rule that only ever ran on findings would
-    have withheld it with no diagnostic saying why."""
-    document = fold(
-        _two_capability_signals(),
-        principals=_composing_principals(),
-        deletability=deletability,
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
+def _composing_subsumed_rows(document) -> list[dict[str, Any]]:
     subsumed = list(document.provenance.get("subsumed_rows") or [])
     assert subsumed, "the case must exercise a subsumed row, not two findings"
     composing = [row for row in subsumed if _entries(row) or _withheld(row)]
     assert composing, "the subsumed row must have offered a composed candidate"
-    for row in composing:
+    return composing
+
+
+@pytest.mark.parametrize(
+    "deletability,expect_published",
+    [(CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), False), (_licensing(), True)],
+    ids=["withheld", "republished"],
+)
+def test_case7_both_arms_hold_on_a_subsumed_row(fold, deletability, expect_published):  # noqa: F811
+    """Twenty-one of the forty entries live under ``provenance.subsumed_rows``,
+    one of them a keep-it row worth $11.36M, so a rule that only ever ran on
+    findings would have withheld it with no diagnostic saying why."""
+    document = CA.composed_document(
+        fold,
+        signals=[*_composing_signals(), _weaker_capability()],
+        deletability=deletability,
+        routes=_AUTHORS_THE_AMOUNT_AT_C,
+    )
+    for row in _composing_subsumed_rows(document):
         if expect_published:
             assert [e["arm_taken"] for e in _entries(row)] == [FOLD.ARM_REPUBLISHED_DIRECT]
             assert _withheld(row) == []
@@ -405,24 +295,11 @@ def test_case7_both_arms_hold_on_a_subsumed_row(fold, deletability, expect_publi
 
 
 def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negative(fold):  # noqa: F811
-    """inv. 13, where the exposure is structural.
-
-    Under this rule a protocol that makes its gating authority unresolvable has
-    its figure WITHHELD, which LOWERS its published dollars — so obscuring
-    evidence pays unless the obscuring itself is published. It is: the entry
-    lands on ``not_determined`` under its own token, distinct from the earned
-    negative, and the row's census counts the two apart. A suppressed authority
-    then reads as a disclosed unknown and never as an absent finding.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        # No gating witness at all: the join cannot ask the authority arm.
-        deletability=CA.deletability_plane(),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    row = _gate_row(document)
+    """inv. 13. Obscuring the gating authority LOWERS published dollars, so it
+    pays unless the obscuring itself is published: the entry lands on
+    ``not_determined`` under its own token and the census counts the two apart."""
+    # No gating witness at all: the join cannot ask the authority arm.
+    row = _gate_row(CA.composed_document(fold, routes=_AUTHORS_THE_AMOUNT_AT_C))
     entry = _withheld(row)[0]
     disclosure = entry["authority_deletability"]
     assert disclosure["state"] == P.DELETABILITY_NOT_DETERMINED
@@ -444,9 +321,7 @@ def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negativ
     )
 
 
-# ---------------------------------------------------------------------------
 # The typed reason is earned per entry, from the body the chain traverses
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -460,84 +335,56 @@ def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negativ
     ids=["amount_authored", "target_constrained", "neither_conjunct", "no_flow_witness"],
 )
 def test_the_typed_reason_is_read_off_the_traversed_body(fold, routes, state, reason):  # noqa: F811
-    """Four intermediates, four answers, one destination.
-
-    The wrapper's NAME, its selector and the chain's shape are identical across
-    all four; only the intermediate's own stored value-flow witness differs. A
-    rule that recognised wrappers by name would give one answer to all four.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(routes),
-        **_composing_case(),
-    )
-    entry = _withheld(_gate_row(document))[0]
+    """Four intermediates, four answers, one destination. The wrapper's NAME, its
+    selector and the chain's shape are identical across all four; only the stored
+    value-flow witness differs, so a rule that recognised wrappers by name would
+    give one answer to all four."""
+    entry = _withheld(_gate_row(CA.composed_document(fold, deletability=_refusing(), routes=routes)))[0]
     assert entry["route_classification"]["state"] == state
     assert entry["route_classification"]["reason"] == reason
     assert entry["withheld_reason"] == (state if reason is None else reason)
-    # Ruling 8(b): an unrecognised route fails to not_determined and never falls
-    # through to an arm that publishes.
+    # Ruling 8(b): an unrecognised route never falls through to a publishing arm.
     assert entry["arm_taken"] == (FOLD.ARM_NOT_DETERMINED if reason else FOLD.ARM_GATE_ONLY)
     assert entry["published_usd"] is None
 
 
 def test_an_unclassifiable_route_is_still_republished_where_the_join_licenses_it(fold):  # noqa: F811
-    """The two questions are independent, and the corpus proves it: twelve of the
-    twenty-eight surviving entries traverse a body whose flow witness classifies
-    neither way. What licenses them is the join, not the route — and the entry
-    publishes the unclassified route beside the figure rather than suppressing
-    it."""
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_FORWARDS_EVERYTHING_AT_C),
-        **_composing_case(),
-    )
-    entry = _entries(_gate_row(document))[0]
+    """The two questions are independent: twelve of the twenty-eight surviving
+    entries traverse a body whose flow witness classifies neither way, and the
+    entry publishes the unclassified route beside the figure."""
+    entry = _entries(
+        _gate_row(CA.composed_document(fold, deletability=_licensing(), routes=_FORWARDS_EVERYTHING_AT_C))
+    )[0]
     assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
     assert entry["published_usd"] == 1_000_000.0
     assert entry["route_classification"]["state"] == P.ROUTE_NOT_DETERMINED
     assert entry["route_classification"]["reason"] == P.ROUTE_NEITHER_CONJUNCT
 
 
-# ---------------------------------------------------------------------------
 # "No execution, no figure" — scoped to the FAULT reasons and nowhere else
-# ---------------------------------------------------------------------------
 
 
-def _composing_signals_with_a_transport_fault() -> list[Any]:
-    """The composing case with the destination's execution unreachable.
-
-    ``fetch_failed`` is a transport failure: the transcript exists, the probe
-    ran, and nothing about the call it made could be read. That is the branch
-    "no execution, no figure" is scoped to.
-    """
+def _with_destination_gate(payload: Any) -> list[Any]:
+    """The composing case with the destination's ``proving_execution`` replaced."""
     signals = _composing_signals()
     destination = signals[-1]
-    gates = dict(destination.gate_inputs)
-    gates[EX.PROVING_EXECUTION_KEY] = Tri.proven(
-        EX.GATE_STATE_NOT_RECORDED,
-        EX.not_determined(EX.REASON_FETCH_FAILED, transcript_ptr="job::art").as_json(),
-    ).to_json()
-    signals[-1] = replace(destination, gate_inputs=gates)
+    signals[-1] = replace(destination, gate_inputs={**destination.gate_inputs, EX.PROVING_EXECUTION_KEY: payload})
     return signals
 
 
 def test_an_unfetchable_transcript_withholds_even_where_the_join_licenses_it(fold):  # noqa: F811
-    """A fault is not a gap. Where the transcript could not be read at all,
+    """A fault is not a gap: where the transcript could not be read at all,
     nothing is known about the call the figure was read off, and the licence to
     issue that call does not substitute for knowing what it was."""
-    document = fold(
-        _composing_signals_with_a_transport_fault(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
+    faulted = _with_destination_gate(
+        Tri.proven(
+            EX.GATE_STATE_NOT_RECORDED,
+            EX.not_determined(EX.REASON_FETCH_FAILED, transcript_ptr="job::art").as_json(),
+        ).to_json()
     )
-    row = _gate_row(document)
+    row = _gate_row(
+        CA.composed_document(fold, signals=faulted, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
+    )
     assert _entries(row) == []
     entry = _withheld(row)[0]
     assert entry["arm_taken"] == FOLD.ARM_WITHHELD
@@ -549,49 +396,28 @@ def test_an_unfetchable_transcript_withholds_even_where_the_join_licenses_it(fol
 
 
 def test_a_record_that_was_never_persisted_is_a_gap_and_does_not_withhold(fold):  # noqa: F811
-    """The scoping that keeps the rule from becoming the refuted blanket refusal.
-
-    Every verdict in the reference corpus predates the execution record, so its
-    residue carries none and the reason is ``execution_record_not_persisted``.
-    Treating that as a fault withholds all forty figures and lands on the
-    outcome already measured and refuted — 0 entries, and the real $44.35M
-    finding gone.
-    """
+    """The scoping that keeps the rule from becoming the refuted blanket refusal:
+    every verdict in the reference corpus predates the execution record, so
+    treating ``execution_record_not_persisted`` as a fault withholds all forty
+    figures and lands on the outcome already measured and refuted."""
     assert EX.REASON_NOT_PERSISTED not in EX.FAULT_REASONS
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
+    document = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
     entry = _entries(_gate_row(document))[0]
     assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
     assert entry["published_usd"] == 1_000_000.0
+    # Case 1's publishing half: identical signals, identical value plane, and the
+    # row's total follows the one thing that differs — the deletability row.
+    assert _gate_row(document)["value_at_stake_usd"] == 1_000_000.0
 
 
-# ---------------------------------------------------------------------------
 # U4's ceiling arm on a row that lost every composed figure
-# ---------------------------------------------------------------------------
 
 
 def test_a_row_that_loses_every_composed_figure_publishes_none_and_not_zero(fold):  # noqa: F811
-    """The four rows the gate empties, in fixture form.
-
-    ``_row_value`` returns ``total_usd=None`` on an empty ``per_entity`` and the
-    band, the direction and the floor flag all follow from that. The failure
-    this pins is the other one: a sum over an empty contribution set is ``0.0``,
-    which would publish a priced row at zero dollars, ``>= $0`` on the band and
-    a floor badge on a page — a floor earned by having nothing in it.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    row = _gate_row(document)
+    """A sum over an empty contribution set is ``0.0``, which would publish a
+    priced row at zero dollars, ``>= $0`` on the band and a floor badge on a page
+    — a floor earned by having nothing in it."""
+    row = _gate_row(CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C))
     assert row["value_at_stake_usd"] is None
     assert row["value_at_stake_usd"] != 0.0
     assert row["value_by_entity"] == {}
@@ -601,8 +427,7 @@ def test_a_row_that_loses_every_composed_figure_publishes_none_and_not_zero(fold
     assert row["value_at_stake_is_floor"] is False
     assert not str(row["value_band"]).startswith(">=")
 
-    # The empty ceiling list is beside a NON-empty refusal list, so it reads as
-    # a typed refusal rather than as a row that never composed anything.
+    # Beside a NON-empty refusal list, so it reads as a typed refusal.
     assert row["entities_priced_from_a_composed_ceiling"] == []
     withheld = row["entities_withheld_from_a_composed_ceiling"]
     assert [w["entity"] for w in withheld] == [KEY_V]
@@ -612,10 +437,8 @@ def test_a_row_that_loses_every_composed_figure_publishes_none_and_not_zero(fold
 
 
 def test_a_row_that_never_composed_anything_publishes_neither_list(fold):  # noqa: F811
-    """The other side of the same distinction: an empty ceiling list on a row
-    with no composition at all carries an EMPTY refusal list beside it, so the
-    two situations are told apart by what is published and not by what is
-    absent."""
+    """The other side of the same distinction: the two situations are told apart
+    by what is published and not by what is absent."""
     lone = sig(
         claim_id="authority.replace",
         function_name="setAuthority",
@@ -625,44 +448,15 @@ def test_a_row_that_never_composed_anything_publishes_neither_list(fold):  # noq
         **proven(0.75),
         **reaches(KEY_C),
     )
-    document = fold([lone], principals={1: facts(1, SAFE, "safe", threshold=2)})
-    row = _gate_row(document)
+    row = _gate_row(fold([lone], principals={1: facts(1, SAFE, "safe", threshold=2)}))
     assert row["entities_priced_from_a_composed_ceiling"] == []
     assert row["entities_withheld_from_a_composed_ceiling"] == []
     assert row["reach_composed_magnitudes"] == []
     assert row["reach_composed_magnitudes_withheld"] == []
 
 
-# ---------------------------------------------------------------------------
-# The withheld population is not laundered away by a substituted candidate
-# ---------------------------------------------------------------------------
-
-
-def test_a_withheld_entity_is_not_replaced_by_the_next_candidate_down(fold):  # noqa: F811
-    """Trap 16. The document is not monotone under withholding.
-
-    The rule runs on the entries the selection already CHOSE, never on the pool
-    it chose from. Run inside the pool, a withheld candidate would be replaced
-    by the next one at the same entity and the refusal would be invisible: one
-    measured pass dropped ten entries and came back with thirty-six.
-    """
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    row = _gate_row(document)
-    assert len(_entries(row)) + len(_withheld(row)) == 1
-    assert {e["entity"] for e in _withheld(row)} == {KEY_V}
-    assert _entries(row) == []
-
-
-# ---------------------------------------------------------------------------
-# The transcript derivation — the piece that moves this corpus from
-# "not_determined" to "recorded", and which nothing else pins
-# ---------------------------------------------------------------------------
+# The transcript derivation — what moves this corpus from "not_determined" to
+# "recorded", and which nothing else pins
 
 
 def _transcript(**over: Any) -> dict[str, Any]:
@@ -723,14 +517,13 @@ def test_the_unseeded_probe_is_the_record_where_no_seeded_attempt_landed():
         1,
         "tier1",
     )
-    # The sentinel is a DIFFERENT call and is never the record, even though it
-    # is the last impersonated call in the blob.
+    # The sentinel is never the record, though it is the blob's last call.
     assert "ccdd" not in record.calldata
 
 
 def test_the_seeded_retry_that_landed_is_the_record_and_not_the_call_that_reverted():
-    """The producer's rule, re-derived from the producer's own marker. Recording
-    the unseeded probe here would name an execution that proved nothing."""
+    """Recording the unseeded probe here would name an execution that proved
+    nothing."""
     record = EX.from_transcript(_seeded_transcript(), transcript_ptr="job::art", effect_verdict_id=7)
     assert record.probe_label == "seeded_probe"
     assert record.calldata == "0x18457e61eeff"
@@ -741,19 +534,23 @@ def test_the_seeded_retry_that_landed_is_the_record_and_not_the_call_that_revert
     assert record.target == "0xbbb"
 
 
-def test_a_seeded_record_reads_the_balance_override_as_undetermined_where_unstated():
-    blob = _seeded_transcript()
-    del blob["contract_balance_seeded"]
-    record = EX.from_transcript(blob, transcript_ptr="job::art", effect_verdict_id=7)
-    assert record.contract_balance_seeded == EX.SEEDING_NOT_DETERMINED
-    assert record.contract_balance_seeded is not False
-
-
-def test_an_uncertified_height_is_dropped_rather_than_published_as_the_observations():
-    blob = _transcript()
-    del blob["block_source"]
-    record = EX.from_transcript(blob, transcript_ptr="job::art", effect_verdict_id=7)
-    assert record.block_number is None and record.block_source is None
+@pytest.mark.parametrize(
+    "blob,dropped,expected",
+    [
+        (_seeded_transcript, "contract_balance_seeded", {"contract_balance_seeded": EX.SEEDING_NOT_DETERMINED}),
+        (_transcript, "block_source", {"block_number": None, "block_source": None}),
+    ],
+    ids=["seeding_qualifier", "certified_height"],
+)
+def test_a_field_the_transcript_does_not_state_falls_to_its_own_third_state(blob, dropped, expected):
+    """And never to ``False``/``None`` beside a value that would read as observed."""
+    payload = blob()
+    del payload[dropped]
+    record = EX.from_transcript(payload, transcript_ptr="job::art", effect_verdict_id=7)
+    for field, value in expected.items():
+        assert getattr(record, field) == value
+        # An unstated qualifier is the third state and emphatically not ``False``.
+        assert getattr(record, field) is not False
 
 
 def test_a_transcript_naming_no_proving_call_is_its_own_reason_and_not_a_fault():
@@ -806,9 +603,8 @@ class _FakeSession:
     ids=["no_artifact_row", "transport_failure"],
 )
 def test_each_way_of_failing_to_reach_the_transcript_keeps_its_own_reason(outcome, reason):
-    """Three different things to a reader deciding whether to look again: a row
-    that does not exist, a row naming no key, and a transport error. All three
-    are faults; none of them may borrow another's name."""
+    """Three different things to a reader deciding whether to look again; all
+    three are faults and none of them may borrow another's name."""
     D.clear_transcript_cache()
     reader = D._TranscriptReader(cast(Any, _FakeSession(outcome)))
     record = reader.execution(transcript_ptr="job::art", effect_verdict_id=7)
@@ -827,12 +623,9 @@ def test_an_unresolvable_pointer_never_reaches_object_storage():
     assert record.reason in EX.FAULT_REASONS
 
 
-# ---------------------------------------------------------------------------
 # §7.2 arm 1's CALLER conjunct — "gate claims transfer ON CALLER MATCH"
-# ---------------------------------------------------------------------------
 
-# The bare address the one-hop case's last act-as step names as its caller, and
-# an address that is not it.
+# The address the last act-as step names as its caller, and one that is not it.
 _CLAIMED_CALLER = KEY_C.partition("::")[2]
 _OTHER_CALLER = "0x" + "9" * 40
 
@@ -840,55 +633,47 @@ _OTHER_CALLER = "0x" + "9" * 40
 def _signals_proved_by(caller: str) -> list[Any]:
     """The composing case with the destination's magnitude proved by a RECORDED
     execution issued from ``caller``."""
-    signals = _composing_signals()
-    destination = signals[-1]
-    gates = dict(destination.gate_inputs)
-    gates[EX.PROVING_EXECUTION_KEY] = Tri.proven(
-        EX.GATE_STATE_RECORDED,
-        EX.residue_payload(
-            caller=caller,
-            target=KEY_V.partition("::")[2],
-            calldata=COMPOSED_SELECTOR + "00" * 32,
-            probe_label="value_probe",
-            succeeded=True,
-            block_number=25_658_245,
-            block_source="invocation_pin",
-            chain_id=1,
-            tier="tier1",
-            input_seeded=False,
-            contract_balance_seeded=False,
-        ),
-    ).to_json()
-    signals[-1] = replace(destination, gate_inputs=gates)
-    return signals
+    return _with_destination_gate(
+        Tri.proven(
+            EX.GATE_STATE_RECORDED,
+            EX.residue_payload(
+                caller=caller,
+                target=KEY_V.partition("::")[2],
+                calldata=COMPOSED_SELECTOR + "00" * 32,
+                probe_label="value_probe",
+                succeeded=True,
+                block_number=25_658_245,
+                block_source="invocation_pin",
+                chain_id=1,
+                tier="tier1",
+                input_seeded=False,
+                contract_balance_seeded=False,
+            ),
+        ).to_json()
+    )
 
 
-def _arm1_case(caller: str, **over: Any) -> tuple[dict[str, Any], list[Any]]:
-    """``(fold kwargs, signals)`` for the one-hop case proved by ``caller``."""
-    case: dict[str, Any] = {
-        "principals": _composing_principals(),
-        "routes": CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
+def _proved_by(fold, caller: str, deletability: P.DeletabilityPlane, **over: Any):  # noqa: F811
+    return CA.composed_document(
+        fold,
+        signals=[*_signals_proved_by(caller), *over.pop("extra_signals", [])],
+        deletability=deletability,
+        routes=_AUTHORS_THE_AMOUNT_AT_C,
         **over,
-    }
-    return case, _signals_proved_by(caller)
+    )
 
 
 def test_a_gate_claim_the_proof_was_admitted_for_publishes_corroborated(fold):  # noqa: F811
-    """The conjunct SATISFIED. The probe was admitted at the destination as the
-    very address the chain's last step names, so the destination's authorization
-    check was exercised for that address — and the route it took to get there is
-    irrelevant, because the check reads no argument."""
-    case, signals = _arm1_case(_CLAIMED_CALLER)
-    document = fold(signals, deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), **case)
-    entry = _entries(_gate_row(document))[0]
+    """The conjunct SATISFIED: the probe was admitted at the destination as the
+    very address the chain's last step names, so the route it took is irrelevant
+    — the destination's check reads no argument."""
+    entry = _entries(_gate_row(_proved_by(fold, _CLAIMED_CALLER, _licensing())))[0]
     claim = entry["gate_claim"]
     assert claim["state"] == EX.GATE_CLAIM_CORROBORATED
     assert claim["reason"] == EX.GATE_CLAIM_REASON_SAME_CALLER
     assert claim["proven_caller"] == _CLAIMED_CALLER
     assert claim["claimed_caller"] == KEY_C
-    # The route still does NOT match — which is the whole point: routing is
-    # irrelevant to the gate claim, the caller is not.
+    # Routing is irrelevant to the gate claim; the caller is not.
     assert entry["route_comparison"]["caller_matches"] is True
     assert entry["route_comparison"]["verdict"] == EX.ROUTE_MISMATCH
     assert "UNCORROBORATED" not in claim["reading"]
@@ -896,26 +681,16 @@ def test_a_gate_claim_the_proof_was_admitted_for_publishes_corroborated(fold):  
 
 def test_a_gate_claim_the_proof_used_another_caller_for_is_qualified_not_asserted(fold):  # noqa: F811
     """The conjunct FAILED, and the entry says so rather than publishing an
-    unqualified gate claim.
-
-    ``isAuthorized(msg.sender, msg.sig)`` reads no ARGUMENT, which is why a
-    route the proof did not take says nothing about the claim. It reads
-    ``msg.sender`` exactly, which is why a caller the proof did not use says
-    everything about it: the execution establishes the destination's check for
-    the address it impersonated and for no other. The act-as chain is not
-    retracted — it is the act-as plane's own witness — but what the execution
-    adds to it is nothing, and that is published.
-    """
-    case, signals = _arm1_case(_OTHER_CALLER)
-    document = fold(signals, deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), **case)
-    row = _gate_row(document)
+    unqualified gate claim. ``isAuthorized(msg.sender, msg.sig)`` reads
+    ``msg.sender`` exactly, so a caller the proof did not use says everything
+    about the claim; the act-as chain is qualified, never retracted."""
+    row = _gate_row(_proved_by(fold, _OTHER_CALLER, _licensing()))
     entry = _entries(row)[0]
     claim = entry["gate_claim"]
 
     assert claim["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
     assert claim["reason"] == EX.GATE_CLAIM_REASON_OTHER_CALLER
-    # BOTH addresses are named — "a different caller" is a claim about this row
-    # and a constant sentence could not say which one.
+    # BOTH addresses named: a constant sentence could not say which one.
     assert claim["proven_caller"] == _OTHER_CALLER
     assert claim["claimed_caller"] == KEY_C
     assert _OTHER_CALLER in claim["reading"] and KEY_C in claim["reading"]
@@ -923,8 +698,7 @@ def test_a_gate_claim_the_proof_used_another_caller_for_is_qualified_not_asserte
     # The chain is qualified, never deleted: it has a witness of its own.
     assert entry["act_as_chain"][0]["caller"] == KEY_C
     assert "act-as witness alone" in claim["reading"]
-    # …and the figure is untouched by the conjunct. The caller mismatch costs the
-    # gate claim its corroboration, not the magnitude its arm.
+    # The mismatch costs the gate claim its corroboration, not the arm.
     assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
     assert entry["published_usd"] == 1_000_000.0
 
@@ -933,12 +707,8 @@ def test_a_gate_claim_the_proof_used_another_caller_for_is_qualified_not_asserte
 
 
 def test_a_withheld_entry_carries_the_caller_conjunct_too(fold):  # noqa: F811
-    """Arm 2 keeps the gate claim, so arm 2 owes the conjunct as well. An entry
-    that lost its figure and publishes an UNqualified gate claim would be making
-    the broader of the two claims it had evidence for."""
-    case, signals = _arm1_case(_OTHER_CALLER)
-    document = fold(signals, deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), **case)
-    row = _gate_row(document)
+    """Arm 2 keeps the gate claim, so arm 2 owes the conjunct as well."""
+    row = _gate_row(_proved_by(fold, _OTHER_CALLER, _refusing()))
     entry = _withheld(row)[0]
     assert entry["arm_taken"] == FOLD.ARM_GATE_ONLY
     assert entry["gate_claim"]["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
@@ -948,16 +718,9 @@ def test_a_withheld_entry_carries_the_caller_conjunct_too(fold):  # noqa: F811
 
 
 def test_no_execution_to_compare_a_caller_against_is_its_own_state(fold):  # noqa: F811
-    """Three states, not two. An entry whose execution names no caller has not
-    failed the conjunct — it has not been asked, and reading that absence as
-    either answer is the collapse three-valued logic exists to prevent."""
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
+    """Three states, not two: an entry whose execution names no caller has not
+    failed the conjunct, it has not been asked."""
+    document = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
     claim = _entries(_gate_row(document))[0]["gate_claim"]
     assert claim["state"] == EX.GATE_CLAIM_NOT_DETERMINED
     assert claim["reason"] == EX.GATE_CLAIM_REASON_NOT_COMPARED
@@ -972,41 +735,21 @@ def test_no_execution_to_compare_a_caller_against_is_its_own_state(fold):  # noq
     ids=["corroborated", "not_corroborated"],
 )
 def test_the_caller_conjunct_holds_on_a_subsumed_row_too(fold, caller, state):  # noqa: F811
-    """Case 7's clause, on the conjunct. Twenty-one of the forty entries live
-    under ``provenance.subsumed_rows`` and four of the ten caller mismatches are
-    among them."""
-    weaker = sig(
-        claim_id="ownership.transfer",
-        function_name="transferOwnership",
-        selector="0xf2fde38b",
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        **proven(0.75),
-        **reaches(KEY_C),
-    )
-    document = fold(
-        [*_signals_proved_by(caller), weaker],
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    subsumed = [r for r in (document.provenance.get("subsumed_rows") or []) if _entries(r) or _withheld(r)]
-    assert subsumed, "the case must exercise a subsumed row, not two findings"
-    for row in subsumed:
+    """Case 7's clause, on the conjunct: four of the ten caller mismatches live
+    under ``provenance.subsumed_rows``."""
+    document = _proved_by(fold, caller, _licensing(), extra_signals=[_weaker_capability()])
+    for row in _composing_subsumed_rows(document):
         for entry in _entries(row) + _withheld(row):
             assert entry["gate_claim"]["state"] == state
         assert row["reach_composition_census"]["gate_claim_by_state"] == {state: len(_entries(row) + _withheld(row))}
 
 
 def test_the_conjunct_is_read_from_the_execution_and_not_defaulted():
-    """inv. 16 on the conjunct's own source: the outcome is derived from the two
-    callers and nothing else, and there is no branch that assumes a match."""
+    """inv. 16 on the conjunct's own source: derived from the two callers and
+    nothing else, with no branch that assumes a match."""
     body = inspect.getsource(EX.gate_claim).split('"""')[-1]
     assert "_addr_matches" in body
     for banned in ("True  #", "or True", "default"):
         assert banned not in body, banned
-    # All three states are constructible from the function, none by falling off
-    # the end of it.
+    # All three states constructible, none by falling off the end.
     assert body.count("return {") == 3
