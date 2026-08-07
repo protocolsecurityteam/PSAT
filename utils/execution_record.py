@@ -78,10 +78,30 @@ REASON_TRANSCRIPT_UNSTORED = "transcript_unstored"
 REASON_STORAGE_KEY_MISSING = "storage_key_missing"
 REASON_FETCH_FAILED = "fetch_failed"
 REASON_PTR_UNRESOLVABLE = "ptr_unresolvable"
+REASON_NO_PROVING_CALL = "transcript_names_no_proving_call"
 NOT_DETERMINED_REASONS = (
     REASON_NOT_PERSISTED,
     REASON_NO_VERDICT,
     REASON_VERDICT_NOT_LOCATED,
+    REASON_TRANSCRIPT_UNSTORED,
+    REASON_STORAGE_KEY_MISSING,
+    REASON_FETCH_FAILED,
+    REASON_PTR_UNRESOLVABLE,
+    REASON_NO_PROVING_CALL,
+)
+
+# The reasons that are a FAULT in reaching the evidence rather than a gap in what
+# was recorded — we asked the transcript and could not be answered. These are the
+# ones "no execution, no figure" is scoped to.
+#
+# The scoping is load-bearing and was measured: applied to the whole vocabulary
+# it withholds every composed figure in the reference corpus, because every
+# verdict there predates the record and reads REASON_NOT_PERSISTED. That is the
+# blanket refusal an earlier pass already measured and refuted (it deletes the
+# real $44.35M finding and leaves the document with zero composed entries). A
+# record that was never persisted but IS derivable must be derived; a transcript
+# that cannot be read at all is the one that refuses.
+FAULT_REASONS = (
     REASON_TRANSCRIPT_UNSTORED,
     REASON_STORAGE_KEY_MISSING,
     REASON_FETCH_FAILED,
@@ -131,6 +151,12 @@ _REASON_READINGS = {
     REASON_PTR_UNRESOLVABLE: (
         "the transcript pointer does not resolve to a stored artifact, so the call that proved this "
         "figure cannot be reached from the pointer the verdict carries"
+    ),
+    REASON_NO_PROVING_CALL: (
+        "the transcript was read and names no call this reader can identify as the one the figure "
+        "was read off. The probe ran and its record is intact; what is not determined is which of "
+        "the recorded calls is the proving one, and guessing among them would name an execution "
+        "the verdict never rested on"
     ),
 }
 
@@ -395,6 +421,147 @@ def from_residue(
         input_seeded=_seeding(payload.get("input_seeded")),
         contract_balance_seeded=_seeding(payload.get("contract_balance_seeded")),
     )
+
+
+# How ``effect_verdicts.transcript_ptr`` is spelled: ``"{job_id}::{artifact_name}"``
+# (``workers/effects_worker.py``). Split here rather than at each reader so the
+# two ends cannot drift.
+_POINTER_SEPARATOR = "::"
+
+# The label :func:`services.effects.recipes.value_out` gives its UNSEEDED probe,
+# and the outcome ``_record_seed_outcome`` writes for the seeded attempt that
+# LANDED. Both are the producer's own vocabulary, read back rather than guessed:
+# the recipe keeps a seeded attempt only when its read-back held and the target
+# call succeeded, and it records exactly that attempt as ``executed`` and returns
+# immediately — so at most one attempt bears it.
+_BASE_PROBE_LABEL = "value_probe"
+_SEED_OUTCOME_EXECUTED = "executed"
+
+
+def pointer_parts(transcript_ptr: Any) -> tuple[str, str] | None:
+    """``(job_id, artifact_name)`` for a well-formed pointer, else ``None``.
+
+    Both halves must be non-empty. A pointer that does not split is not a
+    pointer to anything, and coercing it into one would send the reader after an
+    artifact nobody named.
+    """
+    if not isinstance(transcript_ptr, str):
+        return None
+    job_id, separator, name = transcript_ptr.partition(_POINTER_SEPARATOR)
+    if not separator or not job_id or not name:
+        return None
+    return job_id, name
+
+
+def from_transcript(
+    blob: Any,
+    *,
+    transcript_ptr: str | None,
+    effect_verdict_id: int | None,
+) -> ProvingExecution:
+    """The record derived from the stored transcript, for a verdict that predates it.
+
+    The record is written at production time onto ``observed_residue``; every
+    verdict produced before that write existed carries none. The transcript it
+    points at, however, holds the same call — so the record is RECOVERABLE, and a
+    reader that refuses it because the column is empty would publish "the
+    execution is unknown" about a call it can read.
+
+    Which call is the proving one is the recipe's decision, not this reader's,
+    and it is re-derived from the producer's own markers rather than guessed at:
+    the seeded retry where ``seed_attempts`` records one as ``executed`` (the
+    recipe writes that outcome only when the read-back held AND the target call
+    succeeded, and returns on the spot), and the unseeded ``value_probe``
+    otherwise. Where neither marker is present the transcript is intact and the
+    proving call is simply not identifiable, which is its own reason —
+    picking the largest, the last or the first call would name an execution the
+    verdict never rested on.
+
+    The seeding qualifiers are EARNED from the same choice: taking the unseeded
+    probe means no attempt landed, which is what ``input_seeded: false`` asserts.
+    Where a seeded call is the proving one, ``contract_balance_seeded`` is read
+    off the transcript and is ``not_determined`` if the transcript does not say —
+    never ``False``.
+    """
+    if not isinstance(blob, dict):
+        return not_determined(REASON_FETCH_FAILED, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
+    calls = blob.get("calls")
+    results = blob.get("results")
+    if not isinstance(calls, list) or not isinstance(results, list):
+        return not_determined(
+            REASON_NO_PROVING_CALL, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id
+        )
+    index = _proving_call_index(blob, calls)
+    if index is None:
+        return not_determined(
+            REASON_NO_PROVING_CALL, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id
+        )
+    call = calls[index]
+    target = call.get("to")
+    calldata = call.get("data")
+    if not isinstance(target, str) or not isinstance(calldata, str):
+        return not_determined(
+            REASON_NO_PROVING_CALL, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id
+        )
+    result = results[index] if index < len(results) and isinstance(results[index], dict) else {}
+    caller = call.get("from")
+    seeded = call.get("label") != _BASE_PROBE_LABEL
+    balance_seeded: bool | str
+    if not seeded:
+        # The unseeded probe is the one that proved it, so nothing was seeded and
+        # nothing was overridden. Both negatives are the producer's own and are
+        # earned by the choice above, not defaulted.
+        balance_seeded = False
+    else:
+        balance_seeded = _seeding(blob.get("contract_balance_seeded"))
+    return ProvingExecution(
+        state=EXECUTION_RECORDED,
+        transcript_ptr=transcript_ptr,
+        effect_verdict_id=effect_verdict_id,
+        caller=caller.lower() if isinstance(caller, str) else None,
+        target=target.lower(),
+        selector=_selector_of(calldata),
+        calldata=calldata,
+        probe_label=call.get("label") if isinstance(call.get("label"), str) else None,
+        succeeded=result.get("success") if isinstance(result.get("success"), bool) else None,
+        block_number=_pinned_height(blob),
+        block_source=blob.get("block_source") if isinstance(blob.get("block_source"), str) else None,
+        chain_id=blob.get("chain_id") if isinstance(blob.get("chain_id"), int) else None,
+        tier=blob.get("tier") if isinstance(blob.get("tier"), str) else None,
+        input_seeded=seeded,
+        contract_balance_seeded=balance_seeded,
+    )
+
+
+def _pinned_height(blob: dict[str, Any]) -> int | None:
+    """The observed height, only where the transcript CERTIFIED it.
+
+    ``new_transcript`` writes ``block_source`` for a positive, named pin and for
+    nothing else, so a height with no source beside it is a bystander — the same
+    rule :func:`residue_payload` applies on the producer side.
+    """
+    source = blob.get("block_source")
+    height = blob.get("block_number")
+    if not isinstance(source, str) or not isinstance(height, int) or isinstance(height, bool):
+        return None
+    return height
+
+
+def _proving_call_index(blob: dict[str, Any], calls: list[Any]) -> int | None:
+    """Which recorded call the figure was read off, by the producer's own markers."""
+    landed = None
+    for attempt in blob.get("seed_attempts") or []:
+        if isinstance(attempt, dict) and attempt.get("outcome") == _SEED_OUTCOME_EXECUTED:
+            landed = attempt.get("label")
+    label = landed if isinstance(landed, str) else _BASE_PROBE_LABEL
+    # The LAST call under the label: ``_run`` appends an attempt's read-backs and
+    # its target call under one label, and the target is the last of them. The
+    # unseeded probe is a single call, so the rule is the same read either way.
+    for index in range(len(calls) - 1, -1, -1):
+        call = calls[index]
+        if isinstance(call, dict) and call.get("label") == label:
+            return index
+    return None
 
 
 def route_comparison(
