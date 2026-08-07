@@ -2786,22 +2786,38 @@ def _counted(values: Iterable[str]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-# Why each arm withheld, one clause per arm, for the CENSUS's account of
-# ``composed_withheld``. The sentence these replace gave a single cause for a
-# counter three different arms feed — "because the route they publish is not the
-# route the proof took and nothing proved this principal could have issued the
-# proven call itself" — and both halves are the two clauses B1-N1 removed from
-# the per-entry reading, failing on the same carriers: there is no proven route
-# to differ from on the transport-fault arm, no typed route finding either way
-# on the unclassified arm, and the fault arm is reached BEFORE the join is
-# consulted, so it can publish ``deletable`` beside its own refusal. Rolling
-# three findings into one cause at the aggregate is the same collapse the
-# per-entry fix removed, one level up.
-_WITHHELD_ARM_CAUSES = {
-    ARM_GATE_ONLY: (
+# Why each arm withheld, for the CENSUS's account of ``composed_withheld``. The
+# sentence these replace gave a single cause for a counter three different arms
+# feed — "because the route they publish is not the route the proof took and
+# nothing proved this principal could have issued the proven call itself" — and
+# both halves are the two clauses B1-N1 removed from the per-entry reading,
+# failing on the same carriers: there is no proven route to differ from on the
+# transport-fault arm, no typed route finding either way on the unclassified
+# arm, and the fault arm is reached BEFORE the join is consulted, so it can
+# publish ``deletable`` beside its own refusal. Rolling three findings into one
+# cause at the aggregate is the same collapse the per-entry fix removed, one
+# level up.
+#
+# ``ARM_GATE_ONLY`` is keyed on the ROUTE TOKEN and not on the arm, because the
+# arm fires on two of them (:func:`_admit_composed`) and they are two different
+# findings about the traversed body: one says the intermediate computes the
+# quantity, the other says it pins the counterparty. Keyed on the arm alone, a
+# target-constrained carrier read "AUTHORING" in the census beside its own
+# ``withheld_reason`` naming the other token — the same disagreement between two
+# adjacent blocks, one level down. The other two arms do not read the route at
+# all: the transport fault is a finding about neither witness, and the
+# unclassified arm's own reason IS the route's.
+_GATE_ONLY_ROUTE_CAUSES = {
+    P.ROUTE_AMOUNT_AUTHORED: (
         "a route witnessed AUTHORING what the destination call carries, so the destination's own "
         "figure is not a figure for this route"
     ),
+    P.ROUTE_TARGET_CONSTRAINED: (
+        "a route witnessed PINNING which counterparty the destination call pays, so the "
+        "destination's own figure is not a figure this caller can direct"
+    ),
+}
+_ARM_ONLY_CAUSES = {
     ARM_WITHHELD: (
         "an execution that could not be READ at all — which is a finding about neither the route "
         "nor the join: both were computed before this arm was reached and are published, and a "
@@ -2811,13 +2827,34 @@ _WITHHELD_ARM_CAUSES = {
         "a route that earned no typed finding in either direction, with no arm left to fall through to"
     ),
 }
+# Every (arm, route token) pair that has a registered cause, in the order the
+# census lists them. There is no default: a pair absent here raises rather than
+# reaching the document through a sentence nobody wrote for it.
+_WITHHELD_CAUSE_ORDER: tuple[tuple[str, str | None], ...] = tuple(
+    (ARM_GATE_ONLY, state) for state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_TARGET_CONSTRAINED)
+) + tuple((arm, None) for arm in COMPOSITION_ARMS if arm in _ARM_ONLY_CAUSES)
+
+
+def _withheld_cause_key(record: "_WithheldComposition") -> tuple[str, str | None]:
+    """The (arm, route token) pair this record's census cause is keyed on."""
+    return (record.arm, record.route.state if record.arm == ARM_GATE_ONLY else None)
+
+
+def _withheld_cause(key: tuple[str, str | None]) -> str:
+    arm, route_state = key
+    if arm == ARM_GATE_ONLY:
+        return _GATE_ONLY_ROUTE_CAUSES[cast(str, route_state)]
+    return _ARM_ONLY_CAUSES[arm]
 
 
 def _withheld_cause_clause(withheld: tuple["_WithheldComposition", ...]) -> str:
-    """The census's account of ``composed_withheld``, derived from the arms that
-    actually fired on THIS row rather than authored once for all of them."""
-    counts = _counted(record.arm for record in withheld)
-    fired = [(arm, counts[arm]) for arm in COMPOSITION_ARMS if counts.get(arm)]
+    """The census's account of ``composed_withheld``, derived from the arms and
+    route tokens that actually fired on THIS row rather than authored once for
+    all of them."""
+    counts: dict[tuple[str, str | None], int] = defaultdict(int)
+    for record in withheld:
+        counts[_withheld_cause_key(record)] += 1
+    fired = [(key, counts[key]) for key in _WITHHELD_CAUSE_ORDER if counts.get(key)]
     if not fired:
         return (
             "composed_withheld is 0 here: no candidate that cleared the witnesses above lost its "
@@ -2827,9 +2864,11 @@ def _withheld_cause_clause(withheld: tuple["_WithheldComposition", ...]) -> str:
     return (
         "composed_withheld is a LATER and different refusal: those candidates cleared every "
         "witness above and then lost their figure to the composition rule — "
-        + "; ".join(f"{hits} to {_WITHHELD_ARM_CAUSES[arm]}" for arm, hits in fired)
-        + ". The three are not interchangeable and composed_withheld_by_arm beside this keeps "
-        "them apart"
+        + "; ".join(f"{hits} to {_withheld_cause(key)}" for key, hits in fired)
+        + f". The {len(_WITHHELD_CAUSE_ORDER)} registered causes are not interchangeable. "
+        "composed_withheld_by_arm beside this separates the arms, and because one arm withholds "
+        "under either of two route tokens, composed_withheld_by_reason is what separates those "
+        "two — each entry's own withheld_reason names the token it was refused under"
     )
 
 
@@ -3191,7 +3230,7 @@ def _admit_composed(
         elif verdict.is_deletable:
             kept[key] = replace(entry, arm_taken=ARM_REPUBLISHED_DIRECT, deletability=verdict, route=route)
             continue
-        elif route.state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_CALLEE_RESTRICTED):
+        elif route.state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_TARGET_CONSTRAINED):
             arm, reason = ARM_GATE_ONLY, route.state
         else:
             arm, reason = ARM_NOT_DETERMINED, cast(str, route.reason)

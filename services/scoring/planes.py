@@ -3873,9 +3873,16 @@ def authority_deletability(
 # own stored value-flow witness — never from the function's name, its selector,
 # its hop position or the shape of the contract it sits on.
 ROUTE_AMOUNT_AUTHORED = "destination_amount_is_authored_by_the_intermediate"
-ROUTE_CALLEE_RESTRICTED = "destination_callee_is_restricted_by_the_intermediate"
+# Named for the field it is EARNED from — ``target_constraint`` on the
+# intermediate's own flow witness, which pins the destination call's counterparty
+# ARGUMENT. It is deliberately not called a callee restriction: ``callee`` is an
+# intra-unit AST name for the object the external call is made on
+# (``services/static/claims/matchers/flows.py``), and no stored witness says the
+# intermediate restricts THAT. A token asserting a restricted callee set would be
+# a positive security claim on evidence that answers a different question.
+ROUTE_TARGET_CONSTRAINED = "destination_target_is_constrained_by_the_intermediate"
 ROUTE_NOT_DETERMINED = "not_determined"
-ROUTE_CLASSIFICATIONS = (ROUTE_AMOUNT_AUTHORED, ROUTE_CALLEE_RESTRICTED, ROUTE_NOT_DETERMINED)
+ROUTE_CLASSIFICATIONS = (ROUTE_AMOUNT_AUTHORED, ROUTE_TARGET_CONSTRAINED, ROUTE_NOT_DETERMINED)
 
 # Why a route stayed unclassified. Two different evidential situations: the
 # intermediate's body carries no flow witness naming this destination call at
@@ -3931,7 +3938,7 @@ class RouteClassification:
     target_constrained: bool | None
 
     def __post_init__(self) -> None:
-        if self.state in (ROUTE_AMOUNT_AUTHORED, ROUTE_CALLEE_RESTRICTED):
+        if self.state in (ROUTE_AMOUNT_AUTHORED, ROUTE_TARGET_CONSTRAINED):
             if self.reason is not None or not self.flows:
                 raise ValueError("a classified route names no reason and rests on at least one flow witness")
         elif self.state == ROUTE_NOT_DETERMINED:
@@ -4013,7 +4020,7 @@ class RouterFlowPlane:
             # hidden by the order.
             return RouteClassification(ROUTE_AMOUNT_AUTHORED, None, rows, True, target_constrained)
         if target_constrained:
-            return RouteClassification(ROUTE_CALLEE_RESTRICTED, None, rows, False, True)
+            return RouteClassification(ROUTE_TARGET_CONSTRAINED, None, rows, False, True)
         return RouteClassification(ROUTE_NOT_DETERMINED, ROUTE_NEITHER_CONJUNCT, rows, False, False)
 
 
@@ -4162,11 +4169,11 @@ __all__ = [
     "ControlEdge",
     "DeletabilityPlane",
     "ROUTE_AMOUNT_AUTHORED",
-    "ROUTE_CALLEE_RESTRICTED",
     "ROUTE_CLASSIFICATIONS",
     "ROUTE_NEITHER_CONJUNCT",
     "ROUTE_NOT_DETERMINED",
     "ROUTE_NO_FLOW_WITNESS",
+    "ROUTE_TARGET_CONSTRAINED",
     "RouteClassification",
     "RouterFlow",
     "RouterFlowPlane",

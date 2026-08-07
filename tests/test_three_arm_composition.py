@@ -453,7 +453,7 @@ def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negativ
     "routes,state,reason",
     [
         (_AUTHORS_THE_AMOUNT_AT_C, P.ROUTE_AMOUNT_AUTHORED, None),
-        (_CONSTRAINS_THE_TARGET_AT_C, P.ROUTE_CALLEE_RESTRICTED, None),
+        (_CONSTRAINS_THE_TARGET_AT_C, P.ROUTE_TARGET_CONSTRAINED, None),
         (_FORWARDS_EVERYTHING_AT_C, P.ROUTE_NOT_DETERMINED, P.ROUTE_NEITHER_CONJUNCT),
         ((), P.ROUTE_NOT_DETERMINED, P.ROUTE_NO_FLOW_WITNESS),
     ],

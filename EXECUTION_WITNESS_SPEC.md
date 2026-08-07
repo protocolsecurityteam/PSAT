@@ -315,8 +315,18 @@ for the row carrying it. Nobody has classified the other 16.
 1. **Gate claims transfer** on caller match; routing is irrelevant to them.
 2. **Magnitudes are withheld** across an argument-authoring wrapper, under two typed reasons:
    `destination_amount_is_authored_by_the_intermediate` and
-   `destination_callee_is_restricted_by_the_intermediate`. The entry publishes the gate, the
+   `destination_target_is_constrained_by_the_intermediate`. The entry publishes the gate, the
    execution record, and the refusal — never a figure.
+   ⚠ **Corrected by CAP-A §R2, implemented by B2.** The second token was written here as
+   `destination_callee_is_restricted_by_the_intermediate` and shipped that way in PR #169. It is
+   **retired with no producer.** As ruled and as implemented, the second reason is earned from
+   `target_constraint` on the intermediate's own stored flow witness, which constrains the
+   destination call's **counterparty argument** — not its callee. `callee` is an intra-unit AST name
+   (`services/static/claims/matchers/flows.py`) and no stored witness says the intermediate
+   restricts the callee *set*. A genuine callee-set restriction — the Manager's merkle verification
+   — is **not witnessed in this data and is not claimed**: A3 measured the Manager's
+   `target_constraint` at `not_determined` on all 12 `manage` entries. The retired token is
+   registered in `model_parameters.uncalibrated_arms` as a reason with no producer on this corpus.
 3. **Direct paths are republished** where the **authority-deletability join** (§7.3) proves the
    principal can author the calldata itself. The published route is then the one the probe ran.
 
@@ -591,7 +601,8 @@ naming the row's principal on any of `setUserRole` / `setRoleCapability` / `setA
 `transferOwnership` for the gating authority or the host.
 Must take: **arm 2** (withhold). Must publish: the gate claim, the execution record, and the typed
 refusal (`destination_amount_is_authored_by_the_intermediate` or
-`destination_callee_is_restricted_by_the_intermediate`, whichever the traversed body earns).
+`destination_target_is_constrained_by_the_intermediate`, whichever the traversed body earns — see
+§7.2's correction).
 Must NOT publish: `published_usd`, or any republished direct path.
 **This is the anti-hop-count case.** A hop-count implementation republishes it (length == 1) and
 fails. A deletability implementation withholds it and passes. **This fixture is the only thing in

@@ -692,10 +692,17 @@ def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_f
 
 
 def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
-    """The registry cannot collapse, and the publishing arm has no entry."""
-    assert set(FOLD._WITHHELD_ARM_CAUSES) == set(FOLD._WITHHELD_ARM_READINGS)
-    assert len(set(FOLD._WITHHELD_ARM_CAUSES.values())) == len(FOLD._WITHHELD_ARM_CAUSES)
-    assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_CAUSES
+    """The registry cannot collapse, and the publishing arm has no entry.
+
+    Keyed on ``(arm, route token)`` since B2: the gate-only arm fires on two
+    tokens and each carries its own cause, so the registry is larger than the
+    arm set and the distinctness has to hold over the pairs.
+    """
+    arms = {arm for arm, _ in FOLD._WITHHELD_CAUSE_ORDER}
+    assert arms == set(FOLD._WITHHELD_ARM_READINGS)
+    causes = [FOLD._withheld_cause(key) for key in FOLD._WITHHELD_CAUSE_ORDER]
+    assert len(set(causes)) == len(causes)
+    assert FOLD.ARM_REPUBLISHED_DIRECT not in arms
 
 
 def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries():
