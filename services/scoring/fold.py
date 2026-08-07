@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -52,6 +52,7 @@ from services.scoring.schema import (
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
+    GRADE_FAULT_DEGRADED,
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
     MAGNITUDE_STATE_PROVEN_EXACT,
@@ -972,6 +973,14 @@ def compute_protocol_score(
     warnings.extend(value_warnings)
     composition_census = _composition_totals(findings, subsumed)
 
+    # A transport fault takes the composition rule's withheld arm and moves the
+    # grade, so it must not be discoverable only by reading every execution
+    # block: an artifact store that stops answering would otherwise look exactly
+    # like a code regression.
+    execution_faults = _execution_fault_census(findings, subsumed)
+    if execution_faults is not None:
+        warnings.append(_execution_fault_warning(execution_faults))
+
     grade_lambda, grade_exposure, exposure_usd, exposure_gaps, exposure_coverage = _grade(findings, value_plane)
     confidence = _confidence(
         signals,
@@ -1142,6 +1151,7 @@ def compute_protocol_score(
         model_parameters={**K.model_parameters(), "confidence_detail": confidence},
         provenance={**provenance, "subsumed_rows": subsumed, "exposure_usd": exposure_usd if scored else None},
         uncalibrated_arms=K.UNCALIBRATED_ARMS,
+        execution_evidence_faults=execution_faults,
     )
 
 
@@ -2870,6 +2880,113 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "hop composes only where the licensed party is ALSO witnessed makeable to use the "
             "licence, and act_as_refused counts, by reason, every pair where it was not"
         ),
+    }
+
+
+def _execution_carriers(node: Any) -> Iterator[dict[str, Any]]:
+    """Every published dict carrying a ``proving_execution`` block, wherever it sits.
+
+    Walked structurally rather than read off the two list names the composition
+    rule uses today: a census that names its carriers cannot count a carrier
+    added after it was written, and an execution block this document publishes
+    but the census never looked at is exactly the silent miss the census exists
+    to stop.
+    """
+    if isinstance(node, dict):
+        if isinstance(node.get(PROVING_EXECUTION_KEY), dict):
+            yield node
+        for value in node.values():
+            yield from _execution_carriers(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _execution_carriers(item)
+
+
+def _execution_fault_census(findings: list[dict[str, Any]], subsumed: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The published magnitudes whose proving execution could not be read, or ``None``.
+
+    ``None`` where the walk covered every published execution block and none of
+    them carried a registered fault reason — a completed count of zero, which is
+    why the document omits the field rather than publishing an empty census.
+
+    The reasons counted here are :data:`EX.FAULT_REASONS`, the subset
+    :func:`_admit_composed` takes the ``withheld`` arm on. That arm fires BEFORE
+    the deletability join is consulted, so a faulted entry loses its dollars
+    however the join answered — which is why a fault is a fact about the GRADE
+    and not only about one entry, and why it is announced at the document's top
+    level instead of being left to be found by reading forty blocks.
+
+    Nothing here names a cause. A body that could not be read is not a store
+    that was unavailable, and the four reasons are not even one situation
+    between them: ``transcript_unstored`` is a record that was never written,
+    while ``fetch_failed`` is a read that did not come back. They are published
+    apart and counted apart.
+    """
+    populations = (("findings", findings), ("subsumed_rows", subsumed))
+    examined = 0
+    reasons: list[str] = []
+    by_population: dict[str, int] = {name: 0 for name, _ in populations}
+    entities: set[str] = set()
+    for name, rows in populations:
+        for carrier in _execution_carriers(rows):
+            examined += 1
+            reason = carrier[PROVING_EXECUTION_KEY].get("reason")
+            if reason not in EX.FAULT_REASONS:
+                continue
+            reasons.append(str(reason))
+            by_population[name] += 1
+            entity = carrier.get("entity")
+            if isinstance(entity, str):
+                entities.add(entity)
+    if not reasons:
+        return None
+    return {
+        # The machine-checkable marker. Not a ``grade_state`` value — see
+        # ``utils.scoring_status.GRADE_FAULT_DEGRADED`` for why the two
+        # vocabularies are kept apart.
+        "grade_qualifier": GRADE_FAULT_DEGRADED,
+        "records_faulted": len(reasons),
+        # The denominator, so a reader can tell one unreadable block in forty
+        # from forty in forty without counting them.
+        "execution_records_examined": examined,
+        "faulted_by_reason": _counted(reasons),
+        "faulted_by_population": by_population,
+        "entities_affected": sorted(entities),
+        "registered_fault_reasons": sorted(EX.FAULT_REASONS),
+        "reading": (
+            "every published magnitude names the execution that proved it, and records_faulted "
+            "of them name a typed reason that execution could not be READ. Each one was withheld "
+            "by the composition rule's fault arm whatever the authority-deletability join "
+            "licensed, so grade_lambda, grade_exposure and confidence_pct here were computed over "
+            "fewer composed figures than the same database state yields when every transcript "
+            "body reads. THIS DOCUMENT MUST NOT BE COMPARED AGAINST A FAULT-FREE RUN: a moved "
+            "grade is not evidence the protocol changed. What is proven is that these bodies "
+            "could not be read on this fold — nothing here proves the object storage was "
+            "unavailable, and faulted_by_reason keeps the registered situations apart because a "
+            "transcript that was never stored and a fetch that did not return are different "
+            "facts. entities_affected is the distinct entity of each faulted carrier, published "
+            "so the census can be checked against the rows rather than taken on the fold's word"
+        ),
+    }
+
+
+def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
+    """The census's top-level warning, with its counts derived from the census."""
+    breakdown = ", ".join(f"{reason} x{hits}" for reason, hits in census["faulted_by_reason"].items())
+    return {
+        "kind": "execution_evidence_unreadable",
+        "note": (
+            f"{census['records_faulted']} of {census['execution_records_examined']} published "
+            f"proving-execution records could not be read: {breakdown}. Every one of them was "
+            "withheld by the composition rule's fault arm regardless of what the "
+            "authority-deletability join licensed, so the grade, exposure and confidence in this "
+            "document moved with what could be read here and not only with the protocol. Do not "
+            "compare this document against a fault-free run. This is not proof the artifact store "
+            "was unavailable — what is proven is that these bodies could not be read on this fold; "
+            "see execution_evidence_faults for the per-reason census"
+        ),
+        "records_faulted": census["records_faulted"],
+        "faulted_by_reason": dict(census["faulted_by_reason"]),
     }
 
 

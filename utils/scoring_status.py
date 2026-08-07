@@ -190,6 +190,17 @@ GRADE_STATE_COMPUTED = "computed"
 GRADE_STATE_NOT_DETERMINED = "not_determined"
 GRADE_STATES = (GRADE_STATE_COMPUTED, GRADE_STATE_NOT_DETERMINED)
 
+# The grade's answer to a question ``grade_state`` does not ask: was every
+# published magnitude's proving execution reachable when this document was
+# folded. Deliberately NOT a fourth ``GRADE_STATES`` member — a fault-degraded
+# grade is still a COMPUTED one (lambda, exposure and confidence are all
+# present, and ``ck_protocol_scores_grade_pairing`` binds that token to exactly
+# that), so putting it in the same vocabulary would either falsify the
+# constraint or force the three figures to null and withhold a grade that was
+# computed. It rides its own document field instead, and the two questions stay
+# apart.
+GRADE_FAULT_DEGRADED = "fault_degraded"
+
 # Widened from the strategy's ``perimeter_settled`` bool so a failed queue read
 # cannot land on either polarity. The two ruled values are ``settled`` /
 # ``unsettled``; a score computed without a readable queue is stamped
