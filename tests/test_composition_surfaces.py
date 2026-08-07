@@ -228,6 +228,41 @@ def test_chosen_by_names_the_component_that_actually_decided_the_tie():
     assert "the weakest witness state (component 2 of 6) against" not in _tie(by_selector)["chosen_by"]
 
 
+@pytest.mark.parametrize(
+    "rival,first,later",
+    [
+        ({"selector": "0x22222222", "function": "manage"}, 3, 4),
+        ({"witness_state": "proven_upper_bound", "selector": "0x22222222"}, 2, 3),
+        ({"witness_state": "proven_upper_bound", "selector": "0x22222222", "function": "manage"}, 2, 4),
+    ],
+    ids=["selector_then_function", "state_then_selector", "three_components"],
+)
+def test_chosen_by_names_the_FIRST_differing_component_and_not_a_later_one(rival, first, later):
+    """B2-R SF-1. The published sentence asserts *"in each case the FIRST
+    component on which this entry differs from that candidate"*, and every other
+    fixture here builds a rival differing at exactly ONE component — where first
+    and last are the same index, so the claim is unpinned. A rule returning the
+    LAST differing component is still derived, still moves all twelve published
+    strings, and passed the module.
+
+    These rivals differ at two components (and one at three). The components
+    behind the first are never reached, so naming one of them would be the
+    sentence contradicting itself.
+    """
+    chosen_by = _tie(_tied_pair(**rival))["chosen_by"]
+
+    def as_decider(index):
+        return f"{FOLD._ORDER_COMPONENT_NAMES[index - 1]} (component {index} of 6) against"
+
+    assert f"What decided it: {as_decider(first)} 1 candidate(s)" in chosen_by
+    # The later component IS named — the ladder recital lists every one — but
+    # never as a decider, because the components behind the first are not reached.
+    assert as_decider(later) not in chosen_by
+    assert FOLD._ORDER_COMPONENT_NAMES[later - 1] in chosen_by, "the recital still lists every component"
+    # Exactly one component decided this tie, so exactly one is named as one.
+    assert chosen_by.count(" against ") == 1
+
+
 def test_chosen_by_counts_the_candidates_each_component_separated():
     """The counts are this tie's own, not a frozen "1 candidate(s)"."""
     winner = _tied_pair(selector="0x22222222")
