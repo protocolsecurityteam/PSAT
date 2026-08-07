@@ -3,7 +3,7 @@
   "protocol_id": 1,
   "score_id": 7,
   "model_version": "1.1.0-provisional",
-  "computed_at": "2026-08-07T16:37:55.506274+00:00",
+  "computed_at": "2026-08-07T17:50:54.623566+00:00",
   "trigger": "manual",
   "trigger_job_id": null,
   "grade_state": "computed",
@@ -18806,9 +18806,9 @@
         "B+"
       ],
       "operational_hazard_the_gate_conferral_test_introduces": "the state-variable branch reads the gate's OWN function through function_score_signals.function_id, which is ON DELETE SET NULL against effective_functions - and a re-analysis DELETES and reinserts a contract's function rows. So a persisted signal that outlives one re-analysis of its contract points at nothing, every one of its state-variable hops degrades to capability_state_writes_not_extracted, and the row silently loses reach it held the day before. The withhold is counted, but its cause would read as an extraction that never ran rather than a stale foreign key. A dangling reference therefore falls back to the signal's own (deployment entity, selector), which the re-analysis preserves, admitted only where every function under that key agrees on what it rewrites; the recovery population and the keys two functions disagree under are published in provenance.reach_bounds.gate_conferral.stale_function_reference_recovery. Operators re-folding a protocol whose signals predate its last re-analysis should expect that block to be non-zero and should read it before reading a reach delta",
-      "read_the_confidence_fall_correctly": "(a) the reach-magnitude term does NOT bind the headline on this corpus - the min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; (b) the strictest magnitude figure published, reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and composition is the only thing in this version that moves it: flooring an unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the 40 signals composition answered and on nothing else; (c) the 29.0 -> 18.6 fall happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude term: the dust third state stopped counting a sheet whose only priced rows are storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became discovery-fixed, widening 295 -> 468 entities by admitting every recorded discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal principals — so the term now answers 'what share of {protocol contracts UNION signer wallets} did we price', a strictly harder question than the one 33.7 answered. The letter improvement here was NOT paid for by a confidence fall in this change; both are real, and neither is the other's price",
+      "read_the_confidence_fall_correctly": "(a) the reach-magnitude term does NOT bind the headline on this corpus - the min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; (b) the strictest magnitude figure published, reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and composition is the only thing in this version that moves it: flooring an unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the 40 signals composition was asked of and on nothing else - 28 of them publish a composed figure and 12 are withheld under typed refusals since the execution-witness pass; (c) the 29.0 -> 18.6 fall happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude term: the dust third state stopped counting a sheet whose only priced rows are storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became discovery-fixed, widening 295 -> 468 entities by admitting every recorded discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal principals — so the term now answers 'what share of {protocol contracts UNION signer wallets} did we price', a strictly harder question than the one 33.7 answered. The letter improvement here was NOT paid for by a confidence fall in this change; both are real, and neither is the other's price",
       "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
-      "what_composition_did_not_recover": "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities carrying a flow.out magnitude covering 100% of reached priced value - is PARTIALLY REFUTED on this corpus, because it counted the destination witness and never the act-as step. Of 64 (hop, licensed selector) pairs the walk offered, 27 carry an act-as witness and 19 of those also have a destination flow.out witness, composing 13 entities and $46,164,146.29 across two findings. The rest stay not_determined and are charged to confidence. The single largest refusal class is a call site whose receiver is a PARAMETER, which is the whole AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not regain a witnessed magnitude, it and the two EOAs the shipped document over-charged all sit at not_determined together",
+      "what_composition_did_not_recover": "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities carrying a flow.out magnitude covering 100% of reached priced value - is PARTIALLY REFUTED on this corpus, because it counted the destination witness and never the act-as step. Of 64 (hop, licensed selector) pairs the walk offered, 27 carry an act-as witness and 19 of those also have a destination flow.out witness. At this bump's own measurement (1.1.0-provisional, before the execution-witness pass) those composed 13 entities and $46,164,146.29 across two findings; that pass then made every composed figure conditional on its proving execution and the authority-deletability join, and what survives is counted in reach_composition_census rather than asserted here. The rest stay not_determined and are charged to confidence. The single largest refusal class is a call site whose receiver is a PARAMETER, which is the whole AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not regain a witnessed magnitude, it and the two EOAs the shipped document over-charged all sit at not_determined together",
       "what_moved": "a reach whose MAGNITUDE no witness proved stops charging the reached entity's balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced floor of 0.15, so lambda RISES and exposure collapses without any protocol becoming safer. The composition pass then gives part of that class a WITNESSED magnitude back - the destination function's own flow.out figure, reached along a path every hop of which carries an act-as witness - which pushes lambda back down from 84.0166 to 73.2508 and exposure back up from $76.07 to $18,059,003.86 on witnesses, not on sheets. The band table carries 1.0.1's cut points forward unchanged, so the letter delta is published rather than absorbed by a recut nobody calibrated"
     },
     "principal_units": "per (chain, address); no cross-chain collapse (strategy §7.4)",
@@ -18921,6 +18921,17 @@
           "population_census": null,
           "published_at": null,
           "state": "destination_callee_is_restricted_by_the_intermediate"
+        },
+        {
+          "arm": "value_at_stake_bound_direction:ceiling",
+          "exercised_by": [
+            "tests/test_scoring_redteam.py::test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling",
+            "tests/test_scoring_redteam.py::test_b7_a_direction_is_published_only_where_one_was_proven"
+          ],
+          "note": "the one arm here that PREDATES this run: 0 rows before Phase A and 0 after. It is deliberately unearnable on this corpus — the conjunction requires every contribution to be a proven ceiling with no coverage gap, and ruling 6.3 item 4 declined to relax it to make it exercisable, which is why the flag rather than the relaxation is the right disclosure. Earnability stays deferred with that ruling and is NOT reopened by registering it. Registered because the obligation is a flag in this document and a spec deferral does not discharge one, and because site/src/score/derive.js allow-lists this direction: the page would render a <= badge for a state nothing can earn, with nothing published saying so",
+          "population_census": null,
+          "published_at": "findings[].value_at_stake_bound_direction",
+          "state": "ceiling"
         }
       ]
     },
@@ -18943,7 +18954,8 @@
       "authority_deletability:not_determined",
       "authority_deletability_basis_arm:gating_authority",
       "route_comparison_verdict:route_match",
-      "retired:destination_callee_is_restricted_by_the_intermediate"
+      "retired:destination_callee_is_restricted_by_the_intermediate",
+      "value_at_stake_bound_direction:ceiling"
     ],
     "unpriced_band": 0.15,
     "value_bands": [
@@ -19004,7 +19016,8 @@
     "authority_deletability:not_determined",
     "authority_deletability_basis_arm:gating_authority",
     "route_comparison_verdict:route_match",
-    "retired:destination_callee_is_restricted_by_the_intermediate"
+    "retired:destination_callee_is_restricted_by_the_intermediate",
+    "value_at_stake_bound_direction:ceiling"
   ],
   "provenance": {
     "audit_posture": {
