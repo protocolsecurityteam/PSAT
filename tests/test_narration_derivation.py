@@ -218,8 +218,47 @@ def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_row
 def test_the_order_tie_reading_scales_with_the_number_of_shared_entities():
     """Three carriers, three strings: a sentence that names a count cannot be
     written once."""
-    readings = [FOLD._order_tie_reading(list(names)) for names in ([], ["a"], ["a", "b"])]
+    readings = [FOLD._order_tie_reading(list(names), 1) for names in ([], ["a"], ["a", "b"])]
     assert len(set(readings)) == 3
+
+
+def test_the_order_tie_reading_says_which_side_of_the_split_this_row_is_on():
+    """B1-R S2. The first row in a tie group has no tied row AHEAD of it and is
+    charged FIRST — "the earlier row consumes the exposure budget first and this
+    row is charged the remainder" is false of exactly the carrier
+    ``position_in_tie`` identifies, one field away in the same block. Asserted as
+    truth per position, not as a substring."""
+    first = FOLD._order_tie_reading(["a"], 0)
+    second = FOLD._order_tie_reading(["a"], 1)
+    third = FOLD._order_tie_reading(["a"], 2)
+
+    # The mutation: dropping position_in_tie from the derivation makes these equal.
+    assert len({first, second, third}) == 3
+
+    # Position 0 is charged first and never described as taking a remainder.
+    assert "FIRST in the tie (position_in_tie 0)" in first
+    assert "consumes that shared exposure budget before any row tied with it" in first
+    assert "this row is charged what is left" not in first
+    assert "row(s) ahead" not in first
+
+    # Every later position names how many rows are ahead of it, and is the one
+    # charged the remainder.
+    assert "the 1 row(s) ahead of this one in the tie (position_in_tie 1)" in second
+    assert "the 2 row(s) ahead of this one in the tie (position_in_tie 2)" in third
+    for later in (second, third):
+        assert "this row is charged what is left of it" in later
+        assert "FIRST in the tie" not in later
+
+
+def test_a_real_tie_group_publishes_the_position_it_also_prints():
+    """The block publishes ``position_in_tie`` beside the sentence; they must
+    agree on the same carrier, through the real emission site."""
+    group = _tied_findings(shared=True)
+    FOLD._disclose_order_ties(group)
+    for index, finding in enumerate(group):
+        block = finding["exposure_order_tie"]
+        assert block["position_in_tie"] == index
+        assert block["reading"] == FOLD._order_tie_reading(block["shared_entities"], index)
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +399,65 @@ def test_the_ceiling_basis_counts_the_condition_texts_it_names():
     assert "precondition" not in without_text
     assert "travel with 1 of those 1 figure(s)" in with_text
     assert "no condition text was extracted" in without_text
+
+
+def _mixed_ceiling(with_text: int, without_text: int) -> tuple[dict[str, Any], frozenset[str]]:
+    """A ceiling-bearing row of ``with_text + without_text`` composed entries,
+    only the first group of which publishes extracted predicate text."""
+    composed: dict[str, Any] = {}
+    for index in range(with_text + without_text):
+        key = f"ethereum::0x{index:040x}"
+        composed[key] = FOLD._ComposedMagnitude(
+            entity=key,
+            selector=COMPOSED_SELECTOR,
+            function="exit",
+            witness_state="proven_floor",
+            witnessed_usd=1.0,
+            usd=1.0,
+            sheet_usd=None,
+            chain=(),
+            predicates=(
+                _predicates("require(bool)(isAuthorized(msg.sender,msg.sig))")
+                if index < with_text
+                else P.DestinationPredicates(
+                    state="column_holds_no_array",
+                    function_id=None,
+                    function_name=None,
+                    descriptions=None,
+                    entries_stored=None,
+                    functions_matching=0,
+                )
+            ),
+            execution=_recorded(),
+        )
+    return composed, frozenset(composed)
+
+
+def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
+    """B1-R S1. The one-entity carrier above pins the BRANCH and never the
+    COUNT: freezing the interpolation to "1 of those 1 figure(s)" left the suite
+    green while the document published that literal on rows carrying 11 and 2
+    figures. These carriers have M > 1 and N != M — the shapes the live corpus
+    actually holds (11/11 and 2/2) plus a mixed one no corpus row has — so a
+    frozen pair fails."""
+    eleven = _basis(*_mixed_ceiling(11, 0))
+    two = _basis(*_mixed_ceiling(2, 0))
+    mixed = _basis(*_mixed_ceiling(2, 3))
+    one = _basis(*_mixed_ceiling(1, 0))
+
+    # The mutation: any frozen count collapses at least two of these.
+    assert len({eleven, two, mixed, one}) == 4
+
+    assert "travel with 11 of those 11 figure(s)" in eleven
+    assert "travel with 2 of those 2 figure(s)" in two
+    # N < M: the numerator and the denominator are read from different fields
+    # and a single count standing in for both would hide the shortfall.
+    assert "travel with 2 of those 5 figure(s)" in mixed
+    assert "travel with 1 of those 1 figure(s)" in one
+    # The numerator is not the denominator restated: on the mixed carrier the
+    # two must be different numbers or the shortfall disappears.
+    assert "travel with 5 of those 5 figure(s)" not in mixed
+    assert "travel with 2 of those 2 figure(s)" not in mixed
 
 
 # ---------------------------------------------------------------------------
@@ -554,3 +652,62 @@ def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletabilit
             )
         for dead in _DEAD_CONCEPTS:
             assert dead not in reading
+
+
+# ---------------------------------------------------------------------------
+# reach_composition_census.reading — B1-N1's two clauses, one level up
+# ---------------------------------------------------------------------------
+
+
+def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_fired():
+    """B1-R S3. The census explained `composed_withheld` with a single cause —
+    "because the route they publish is not the route the proof took and nothing
+    proved this principal could have issued the proven call itself" — which is
+    B1-N1's two clauses aggregated. Both fail on the transport-fault arm, which
+    is reached before the join is consulted and can publish `deletable` beside
+    its refusal, and the first fails on the unclassified arm too."""
+    none = FOLD._withheld_cause_clause(())
+    gate_only = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_GATE_ONLY),))
+    fault = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE),))
+    undetermined = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_NOT_DETERMINED),))
+    both = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_GATE_ONLY), _withheld_entry(FOLD.ARM_WITHHELD)))
+
+    # The mutation: one authored cause for the counter collapses all of these.
+    assert len({none, gate_only, fault, undetermined, both}) == 5
+
+    # The two clauses that were false on the fault arm are gone from the census
+    # exactly as they are gone from the entry.
+    for clause in (none, gate_only, fault, undetermined, both):
+        assert "not the route the proof took" not in clause
+        assert "nothing proved this principal could have issued the proven call" not in clause
+
+    assert "composed_withheld is 0 here" in none
+    assert "count of nothing and not a claim that the rule was not asked" in none
+    assert "1 to a route witnessed AUTHORING" in gate_only
+    assert "could not be READ at all" in fault
+    assert "does not release the figure" in fault
+    assert "earned no typed finding in either direction" in undetermined
+    # Two arms on one row are counted apart, never merged into one cause.
+    assert "1 to a route witnessed AUTHORING" in both and "could not be READ at all" in both
+
+
+def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
+    """The registry cannot collapse, and the publishing arm has no entry."""
+    assert set(FOLD._WITHHELD_ARM_CAUSES) == set(FOLD._WITHHELD_ARM_READINGS)
+    assert len(set(FOLD._WITHHELD_ARM_CAUSES.values())) == len(FOLD._WITHHELD_ARM_CAUSES)
+    assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_CAUSES
+
+
+def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries():
+    """B1-R S4. "no duration term" is false beside the `auto_expiry` rung in the
+    same dict, which `distill.py` applies only under a witnessed
+    `duration_bound_seconds` ceiling. Both thresholds are read from the constants
+    so the sentence moves with them."""
+    from services.scoring import constants as K
+
+    note = K.model_parameters()["freeze_ladder"]["note"]
+    assert str(K.FREEZE_AUTO_EXPIRY) in note
+    assert str(K.FREEZE_AUTO_EXPIRY_MAX_SECONDS) in note
+    assert "GATE on one rung and a term in none" in note
+    assert "no duration term" not in note
+    assert "is not_determined wherever populated" not in note
