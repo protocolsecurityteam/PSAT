@@ -35,6 +35,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from utils import execution_record as EX
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
@@ -4071,22 +4072,28 @@ def test_b7_a_direction_is_published_only_where_one_was_proven():
     both, one = frozenset({KEY_C, KEY_V}), frozenset({KEY_V})
     direction = FOLD._bound_direction
 
-    assert direction(1.0, both, frozenset(), True, False) == FOLD.BOUND_DIRECTION_FLOOR
+    assert direction(1.0, both, frozenset(), True, False, both) == FOLD.BOUND_DIRECTION_FLOOR
     # A withheld hop is value the row reaches and the sum does not carry: it
     # cannot lower the truth, so the floor stands.
-    assert direction(1.0, both, frozenset(), True, True) == FOLD.BOUND_DIRECTION_FLOOR
-    assert direction(1.0, one, one, False, False) == FOLD.BOUND_DIRECTION_CEILING
+    assert direction(1.0, both, frozenset(), True, True, both) == FOLD.BOUND_DIRECTION_FLOOR
+    assert direction(1.0, one, one, False, False, frozenset()) == FOLD.BOUND_DIRECTION_CEILING
 
     # Every way of failing the ceiling, one at a time.
-    assert direction(1.0, one, one, True, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert direction(1.0, one, one, False, True) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, one, one, True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, one, one, False, True, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     # MIXED: one entity's figure is a ceiling and the other's is graded in no
     # direction, so their sum bounds the principal in neither.
-    assert direction(1.0, both, one, False, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, both, one, False, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     # Neither signal fired, which is not a proof that the sum is two-sided.
-    assert direction(1.0, both, frozenset(), False, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, both, frozenset(), False, False, both) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     # No total, no direction — and never a floor over a figure that is absent.
-    assert direction(None, frozenset(), frozenset(), True, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(None, frozenset(), frozenset(), True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # F5: the coverage gap is NOT the whole question. An attribution-derived
+    # contribution is itself a ceiling, so a gap over one earns no floor — and a
+    # partial grade is as disqualifying as none, because the ungraded entity's
+    # figure may be the ceiling.
+    assert direction(1.0, both, frozenset(), True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, both, frozenset(), True, False, one) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     # Only the two proven directions qualify the band.
     assert FOLD._BAND_PREFIX == {FOLD.BOUND_DIRECTION_FLOOR: ">= ", FOLD.BOUND_DIRECTION_CEILING: "<= "}
 
@@ -5352,7 +5359,12 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
     finding's seized gate is spent a second time, on a node no hop admitted a
     function of. Empty must reach the plane as a constraint nothing satisfies.
     """
-    magnitude = FOLD._DestinationMagnitude(state="proven_exact", usd=5_000_000.0, function="exit")
+    magnitude = FOLD._DestinationMagnitude(
+        state="proven_exact",
+        usd=5_000_000.0,
+        function="exit",
+        execution=EX.not_determined(EX.REASON_NOT_PERSISTED),
+    )
     plane = act_as_plane(
         # A call site that WOULD witness at hop 1 — so the old spelling composes
         # the vault's $5M here and the new one refuses it.
@@ -5600,6 +5612,7 @@ def _candidate(
         chain=chain,
         caller_holding=FOLD._CallerHoldingPrecondition(chain[-1].caller, "caller_supplied_arguments", None, "no_rows"),
         predicates=P.DestinationPredicates(P.PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0),
+        execution=EX.not_determined(EX.REASON_NOT_PERSISTED),
     )
 
 
