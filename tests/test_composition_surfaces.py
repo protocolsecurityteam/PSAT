@@ -8,6 +8,7 @@ here, and a test that asserts only that the field exists does not count.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -24,8 +25,11 @@ from tests.test_scoring_redteam import (
     _composing_principals,
     _composing_signals,
     _gate_row,
+    _tied_case,
+    _tied_signals,
     fold,  # noqa: F401  — the fold fixture
 )
+from utils import execution_record as EX
 
 _AUTHORS_THE_AMOUNT_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param_derived", "unconstrained_proven"),)
 _CONSTRAINS_THE_TARGET_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param", "constrained"),)
@@ -153,16 +157,137 @@ def test_a_cause_is_registered_per_arm_and_route_token_with_no_fall_through():
 
 
 def _a_withheld_record() -> FOLD._WithheldComposition:
-    from utils import execution_record as EX
-
     return FOLD._WithheldComposition(
         entity=KEY_V,
         selector=COMPOSED_SELECTOR,
         function="exit",
         chain=(),
-        execution=FOLD.EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_NOT_PERSISTED),
+        execution=EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_NOT_PERSISTED),
         arm=FOLD.ARM_NOT_DETERMINED,
         reason=P.ROUTE_NO_FLOW_WITNESS,
         route=P.RouteClassification(P.ROUTE_NOT_DETERMINED, P.ROUTE_NO_FLOW_WITNESS, (), None, None),
         deletability=P.authority_deletability(P.DeletabilityPlane({}, {}, {}), [], KEY_V, COMPOSED_SELECTOR),
     )
+
+
+# ---------------------------------------------------------------------------
+# Ruling 6.2 M4 / §11.2 (k) — chosen_by names what decided THIS tie
+# ---------------------------------------------------------------------------
+
+
+def _tied_pair(**over: Any) -> FOLD._ComposedMagnitude:
+    """A winner carrying one tied candidate that differs only where ``over`` says."""
+    base = FOLD._ComposedMagnitude(
+        entity=KEY_V,
+        selector="0x11111111",
+        function="exit",
+        witness_state="proven_floor",
+        witnessed_usd=1_000_000.0,
+        usd=1_000_000.0,
+        sheet_usd=None,
+        chain=(),
+        predicates=P.DestinationPredicates(P.PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0),
+        execution=EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_NOT_PERSISTED),
+    )
+    return replace(base, tied_with=(replace(base, **over),))
+
+
+def _tie(entry: FOLD._ComposedMagnitude) -> dict[str, Any]:
+    """The published tie block. ``None`` there is the proven "one candidate",
+    which none of these fixtures builds, so it is an error rather than a skip."""
+    block = entry._tie_json()
+    assert block is not None
+    return block
+
+
+def test_chosen_by_names_the_component_that_actually_decided_the_tie():
+    """Ruling 6.2 M4. Reciting the whole ladder reads as though every component
+    applied. It did not: the components ahead of the deciding one are equal on
+    every candidate — the figure always is, by the definition of a tie — and the
+    ones behind it are never reached.
+
+    Three ties decided at three different components publish three different
+    strings, which a recital of the ladder cannot do.
+    """
+    by_state = _tied_pair(witness_state="proven_upper_bound")
+    by_selector = _tied_pair(selector="0x22222222")
+    by_function = _tied_pair(function="manage")
+
+    assert len({_tie(entry)["chosen_by"] for entry in (by_state, by_selector, by_function)}) == 3
+    assert "the weakest witness state (component 2 of 6)" in _tie(by_state)["chosen_by"]
+    assert "the lowest selector (component 3 of 6)" in _tie(by_selector)["chosen_by"]
+    assert "the lowest destination function (component 4 of 6)" in _tie(by_function)["chosen_by"]
+    # ...and each names only its own component as a decider, not the ladder.
+    assert "the lowest selector (component 3 of 6) against" not in _tie(by_state)["chosen_by"]
+    assert "the weakest witness state (component 2 of 6) against" not in _tie(by_selector)["chosen_by"]
+
+
+def test_chosen_by_counts_the_candidates_each_component_separated():
+    """The counts are this tie's own, not a frozen "1 candidate(s)"."""
+    winner = _tied_pair(selector="0x22222222")
+    two_rivals = replace(
+        winner,
+        tied_with=(
+            replace(winner, tied_with=(), selector="0x22222222"),
+            replace(winner, tied_with=(), selector="0x33333333"),
+        ),
+    )
+    one = _tie(winner)["chosen_by"]
+    two = _tie(two_rivals)["chosen_by"]
+    assert "against 1 candidate(s)" in one and "over the 2 candidates" in one
+    assert "against 2 candidate(s)" in two and "over the 3 candidates" in two
+    assert one != two
+
+
+def test_a_tie_the_order_does_not_separate_publishes_that_and_names_no_decider():
+    """The third state, and it is not reachable by reciting the ladder. Two
+    candidates equal under the whole key can still differ in fields the key does
+    not read — here the execution that proved each one — and the order decided
+    nothing between them. Naming a component there credits the rule with a
+    choice the arrival order made."""
+    unseparated = replace(
+        _tied_pair(),
+        tied_with=(
+            replace(
+                _tied_pair(),
+                tied_with=(),
+                execution=EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_FETCH_FAILED),
+            ),
+        ),
+    )
+    chosen_by = _tie(unseparated)["chosen_by"]
+    assert "decides NOTHING here" in chosen_by
+    assert "the order the candidates were built in and not on this rule" in chosen_by
+    assert "component 1 of 6" not in chosen_by
+    assert chosen_by != _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
+
+
+def test_the_component_names_line_up_with_the_order_they_describe():
+    """A name per component, positionally. A ladder that grew a component without
+    a name would publish the wrong rule for every tie decided past it."""
+    assert len(FOLD._ORDER_COMPONENT_NAMES) == len(FOLD._composed_order(_tied_pair()))
+
+
+def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):  # noqa: F811
+    """§11.2 (k). The shipped gloss named five fields and the order's tail is
+    every field ``ActAsStep.as_json`` publishes. Read off the steps in hand, the
+    gloss cannot under-state the key it describes."""
+    document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
+    tied = [
+        entry
+        for entry in (_gate_row(document).get("reach_composed_magnitudes") or [])
+        if entry.get("composed_selector_tie")
+    ]
+    assert tied, "this fixture must compose a tie for the chain gloss to be read off a real step"
+    chosen_by = tied[0]["composed_selector_tie"]["chosen_by"]
+    step_fields = set(tied[0]["act_as_chain"][0])
+    assert len(step_fields) > 5, "the gloss is only under-inclusive where the step publishes more than five"
+    for field_name in step_fields:
+        assert field_name in chosen_by
+
+
+def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence():
+    """A chain-less candidate cannot claim a field list it does not publish."""
+    chosen_by = _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
+    assert "no candidate here publishes a step at all" in chosen_by
+    assert "receiver_variable" not in chosen_by
