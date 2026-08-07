@@ -76,8 +76,49 @@ def _keys_for(row: dict[str, Any], unit_field: str) -> set[str]:
     return {k for k in keys if k}
 
 
+def _identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    """The triple that names one row of one document.
+
+    ``(principal_unit, capability, access_path)`` is unique across a document's
+    findings and subsumed rows, so two rows carrying it are the same row and the
+    address-set match below — which is a *recovery* for units this scorer and the
+    prototype name differently — must never be asked about them.
+    """
+    return (
+        str(row.get("principal_unit") or "").lower(),
+        str(row.get("capability")),
+        str(row.get("access_path") or ""),
+    )
+
+
+def _oracle_subsumed_rows(oracle: dict[str, Any]) -> tuple[list[dict[str, Any]], str, int | None]:
+    """The oracle's subsumed rows, which shape they came from, and what was left.
+
+    The prototype documents in ``scoring_prototype/`` carry them at top level;
+    every document ``document_json`` writes carries them under ``provenance``.
+    Reading one place only mis-reads the other silently — as a whole population
+    of rows that are "added" because they were never looked for. ``absent`` is a
+    third state: an oracle with no subsumed rows is a different fact from one
+    this code failed to find them in, and the two must not spell the same.
+
+    A document carrying BOTH is answered by the top-level list — it is the
+    author's explicit statement about this document — but the population that
+    lost is counted and published, because rows dropped in silence come back as
+    ``added``, and the reader would have no way to tell that from a real one.
+    """
+    top = oracle.get("subsumed_rows")
+    nested = (oracle.get("provenance") or {}).get("subsumed_rows")
+    if top is not None:
+        if nested:
+            return list(top), "top_level_over_provenance", len(nested)
+        return list(top), "top_level", None
+    if nested is not None:
+        return list(nested), "provenance", None
+    return [], "absent", None
+
+
 def _causes(previous: dict[str, Any], row: dict[str, Any]) -> list[str]:
-    """What moved between two rows for the same (unit, capability).
+    """What moved between two rows for the same (unit, capability, access path).
 
     Analysed for EVERY matched pair, including rows matched only after a unit
     re-key or an access-path split: a re-key that also changed the arithmetic
@@ -108,29 +149,85 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
     Not byte-equality by design: this scorer consumes planes the prototype
     predates and removes its defects, so every delta must be attributable to a
     named divergence rather than explained away by a version bump.
+
+    Two rows are the same row when ``(principal_unit, capability, access_path)``
+    matches; only where no such twin exists does the address-set match run, and
+    it is a recovery for units the two documents name differently, not the
+    identity test. A document diffed against itself therefore reports nothing —
+    every delta published here is one the evidence moved.
     """
     new_rows = list(document.findings) + list(document.provenance.get("subsumed_rows", []))
-    old_rows = list(oracle.get("findings", [])) + list(oracle.get("subsumed_rows", []))
+    oracle_subsumed, subsumed_source, subsumed_ignored = _oracle_subsumed_rows(oracle)
+    old_rows = list(oracle.get("findings", [])) + oracle_subsumed
 
     new_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    new_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in new_rows:
         for key in _keys_for(row, "principal_unit"):
             new_by_key.setdefault((key, str(row.get("capability"))), []).append(row)
+        new_by_identity.setdefault(_identity_key(row), []).append(row)
 
     matched_new: set[int] = set()
     changed, removed, split = [], [], []
+
+    # Identity first, over ALL old rows, before any address-set match is tried:
+    # a row that is present in both documents must not be consumed as some other
+    # row's fuzzy candidate just because that row came first in the list.
+    identical: dict[int, dict[str, Any]] = {}
+    identity_claimed: set[int] = set()
+    for previous in old_rows:
+        for row in new_by_identity.get(_identity_key(previous), []):
+            if id(row) not in matched_new:
+                matched_new.add(id(row))
+                identity_claimed.add(id(row))
+                identical[id(previous)] = row
+                break
+
     for previous in old_rows:
         capability = str(previous.get("capability"))
+        prev_identity = _identity_key(previous)
+        twin = identical.get(id(previous))
+        if twin is not None:
+            causes = _causes(previous, twin)
+            if causes:
+                changed.append(
+                    {
+                        "principal": twin.get("principal"),
+                        "principal_unit": twin.get("principal_unit"),
+                        "capability": capability,
+                        "access_path": twin.get("access_path"),
+                        "raw_before": previous.get("raw_points"),
+                        "raw_after": twin.get("raw_points"),
+                        "caused_by": causes,
+                        "witness_notes": twin.get("witness_notes"),
+                        "matched_by": "row_identity",
+                    }
+                )
+            continue
         candidates: list[dict[str, Any]] = []
+        seen: set[int] = set()
         for key in _keys_for(previous, "principal_unit"):
             for row in new_by_key.get((key, capability), []):
-                if id(row) not in {id(c) for c in candidates}:
-                    candidates.append(row)
+                if id(row) in seen:
+                    continue
+                # A row the identity pass claimed belongs to the old row that IS
+                # it. Offering it to a different old row as a recovery candidate
+                # publishes that row as changed — or split — on the strength of a
+                # shared unit address, and hides the disappearance of the row
+                # that actually went away. It stays available only to an old row
+                # carrying the same identity, which is the one case where two old
+                # rows can both name it.
+                if id(row) in identity_claimed and _identity_key(row) != prev_identity:
+                    continue
+                seen.add(id(row))
+                candidates.append(row)
         if not candidates:
             removed.append(
                 {
                     "principal": previous.get("principal"),
+                    "principal_unit": previous.get("principal_unit"),
                     "capability": capability,
+                    "access_path": previous.get("access_path"),
                     "raw_before": previous.get("raw_points"),
                     "severity_basis": previous.get("severity_basis"),
                     "value_band": previous.get("value_band"),
@@ -139,7 +236,11 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             continue
         for row in candidates:
             matched_new.add(id(row))
-        top = max(candidates, key=lambda r: r.get("raw_points") or 0.0)
+        # The causes belong to the row this one IS, when one of the candidates
+        # carries its identity; ``max`` by raw_points otherwise compares against
+        # a different row and reports movement neither row made.
+        identity_twin = next((r for r in candidates if _identity_key(r) == prev_identity), None)
+        top = identity_twin or max(candidates, key=lambda r: r.get("raw_points") or 0.0)
         causes = _causes(previous, top)
         if len(candidates) > 1:
             split.append(
@@ -158,22 +259,30 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
                         for r in sorted(candidates, key=lambda r: -(r.get("raw_points") or 0.0))
                     ],
                     "cause": "one row per ACCESS PATH: delayed value is charged at the delayed rung",
-                    # Computed against the top row as well: a split that ALSO
+                    # Computed against one named row as well: a split that ALSO
                     # moved weakness, severity or the band must not hide behind
                     # the split label.
                     "caused_by": causes,
                     "arithmetic_changed": bool(causes),
+                    "cause_computed_against": {
+                        "access_path": top.get("access_path"),
+                        "principal": top.get("principal"),
+                        "chosen_by": "row identity" if identity_twin is not None else "highest raw_points",
+                    },
                 }
             )
         elif causes:
             changed.append(
                 {
                     "principal": top.get("principal"),
+                    "principal_unit": top.get("principal_unit"),
                     "capability": capability,
+                    "access_path": top.get("access_path"),
                     "raw_before": previous.get("raw_points"),
                     "raw_after": top.get("raw_points"),
                     "caused_by": causes,
                     "witness_notes": top.get("witness_notes"),
+                    "matched_by": "row_identity" if identity_twin is not None else "unit_address_set",
                 }
             )
 
@@ -192,6 +301,8 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
     ]
 
     return {
+        "oracle_subsumed_rows_source": subsumed_source,
+        "oracle_subsumed_rows_ignored_under_provenance": subsumed_ignored,
         "grade_lambda": {"oracle": oracle.get("grade_lambda"), "scorer": document.grade_lambda},
         "grade_exposure": {"oracle": oracle.get("grade_exposure"), "scorer": document.grade_exposure},
         "confidence_pct": {"oracle": oracle.get("confidence_pct"), "scorer": document.confidence_pct},
