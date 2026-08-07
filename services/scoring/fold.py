@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.orm import Session
 
@@ -280,10 +281,15 @@ class _ComposedMagnitude:
     # today and precisely what this field exists to make visible.
     execution: EX.ProvingExecution
     tied_with: tuple[_ComposedMagnitude, ...] = ()
-    # Which arm of the composition rule this entry took. Three arms plus the
-    # unrecognised-route outcome; ``not_determined`` is the honest value until
-    # the rule that chooses among them is written, because no arm has been taken.
+    # Which arm of the composition rule this entry took, and the two witnesses
+    # the arm was taken from. All three are set by :func:`_admit_composed` after
+    # selection and default to "nothing was decided": a candidate that never
+    # reached the rule publishes ``not_determined`` and no basis, which is what
+    # it is. A PUBLISHED entry always carries ``republished_direct``, because the
+    # other three arms withhold the figure and leave the composed dict.
     arm_taken: str = ARM_NOT_DETERMINED
+    deletability: P.DeletabilityVerdict | None = None
+    route: P.RouteClassification | None = None
 
     def _tie_json(self) -> dict[str, Any] | None:
         if not self.tied_with:
@@ -378,10 +384,17 @@ class _ComposedMagnitude:
                 claimed_target=self.chain[-1].destination if self.chain else None,
                 claimed_selector=self.chain[-1].calling_selector if self.chain else None,
             ),
-            # Which arm of the composition rule produced this entry. Published
-            # beside the comparison it is decided from rather than left to be
-            # inferred from whether a figure is present.
+            # Which arm of the composition rule produced this entry, and what
+            # licensed it. Published beside the comparison it is decided from
+            # rather than left to be inferred from whether a figure is present.
             "arm_taken": self.arm_taken,
+            # The route the proof took is republished as this entry's own only
+            # where the deletability join proved this principal can author the
+            # destination's calldata itself. The basis names the row that proved
+            # it — the setter selector and the ``function_principals`` id — so
+            # the licence can be checked rather than taken on the fold's word.
+            "authority_deletability": (None if self.deletability is None else self.deletability.disclosure()),
+            "route_classification": (None if self.route is None else self.route.as_json()),
             "flow_out_witness": {
                 "state": self.witness_state,
                 "usd": round(self.witnessed_usd, 2),
@@ -598,6 +611,15 @@ class _RowValue:
     # this set is one whose provenance was not established, which is exactly as
     # disqualifying for a floor as a proven attribution.
     non_attributed_entities: frozenset[str] = frozenset()
+    # The composed candidates whose FIGURE the three-arm rule refused, and the
+    # refusal counter keyed on the deletability verdict's ``(state, reason)``.
+    # Carried on the row rather than summed away, because a row that loses EVERY
+    # composed figure publishes an empty ceiling list, and an empty list on such
+    # a row is otherwise indistinguishable from an empty list on the seventy-odd
+    # rows that never composed anything — which launders a typed refusal into
+    # silence.
+    withheld_composed_magnitudes: tuple[_WithheldComposition, ...] = ()
+    refused_composed_magnitudes: dict[str, int] = field(default_factory=dict)
 
 
 def compute_protocol_score(
@@ -630,6 +652,12 @@ def compute_protocol_score(
     conditions = P.load_condition_plane(session, protocol_id)
     conferral = P.load_conferral_plane(session, protocol_id)
     act_as = P.load_act_as_plane(session, protocol_id)
+    # ``load_deletability_plane`` takes NO protocol_id, unlike every loader
+    # around it: it asks about specific (chain, address) contracts, which are
+    # global on-chain identities, and scoping it would drop setter rows on
+    # contracts this protocol does not own — turning our own scoping into an
+    # earned negative about somebody's control.
+    admission = _AdmissionPlanes(P.load_deletability_plane(session), P.load_router_flow_plane(session, protocol_id))
     role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
@@ -728,6 +756,7 @@ def compute_protocol_score(
         conferral,
         act_as,
         _destination_magnitudes(signals),
+        admission,
         units,
         composed_signals,
     )
@@ -1549,6 +1578,7 @@ def _member_weakness(
     conferral: P.ConferralPlane,
     act_as: P.ActAsPlane,
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
+    admission: _AdmissionPlanes,
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
     """A merged unit's weakness, per REACHED ENTITY (inv. 5).
 
@@ -1587,7 +1617,7 @@ def _member_weakness(
         # value map: W2b's per-call magnitude cap scales what a member is charged
         # and can empty ``per_entity`` outright, but it moves no entity out of
         # what the member provably reaches.
-        reached = _row_value(probe, value_plane, closure, conditions, conferral, act_as, magnitudes).reach
+        reached = _row_value(probe, value_plane, closure, conditions, conferral, act_as, magnitudes, admission).reach
         reach_by_member[address] = reached
 
     weakness_by_entity: dict[str, float] = {}
@@ -1647,6 +1677,7 @@ def _aggregate(
     conferral: P.ConferralPlane,
     act_as: P.ActAsPlane,
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
+    admission: _AdmissionPlanes,
     units: _UnitResolver,
     composed_signals: set[tuple[Any, ...]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1656,7 +1687,7 @@ def _aggregate(
         row = rows_by_key[key]
         if not row.instances:
             continue
-        valued = _row_value(row, value_plane, closure, conditions, conferral, act_as, magnitudes)
+        valued = _row_value(row, value_plane, closure, conditions, conferral, act_as, magnitudes, admission)
         composed_signals.update(valued.composed_signals)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
         value_basis = valued.basis
@@ -1703,7 +1734,7 @@ def _aggregate(
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
-            row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes
+            row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes, admission
         )
         severity = max(instance.severity for instance in row.instances)
         band = K.band(value_usd)
@@ -1754,6 +1785,25 @@ def _aggregate(
                 # reach_composed_magnitudes — that list holds every candidate,
                 # including ones an entity's own witness beat.
                 "entities_priced_from_a_composed_ceiling": sorted(valued.ceiling_entities),
+                # Its refusal counterpart, and the reason it is published rather
+                # than left to be counted out of the list above: on a row whose
+                # every composed figure was withheld the ceiling list is EMPTY,
+                # and an empty list there is otherwise the same shape as an
+                # empty list on a row that never composed anything. One is a
+                # typed refusal, the other is a question nobody asked, and
+                # spelling them identically is the collapse three-valued logic
+                # exists to prevent.
+                "entities_withheld_from_a_composed_ceiling": [
+                    {
+                        "entity": record.entity,
+                        "selector": record.selector,
+                        "arm_taken": record.arm,
+                        "withheld_reason": record.reason,
+                        "authority_deletability_state": record.deletability.state,
+                        "authority_deletability_reason": record.deletability.reason,
+                    }
+                    for record in valued.withheld_composed_magnitudes
+                ],
                 # The entities behind the coverage gap, named rather than left to
                 # be inferred from the direction alone.
                 "entities_holding_unpriced_assets": partially_priced,
@@ -1776,6 +1826,14 @@ def _aggregate(
                 # licensed it published beside it (inv. 9 exact decomposition).
                 "reach_composed_magnitudes": [
                     entry.as_json() for _, entry in sorted(valued.composed_magnitudes.items())
+                ],
+                # The other half of the same population: every candidate that
+                # cleared all three composition witnesses and then lost its
+                # FIGURE to the three-arm rule. Each one publishes its gate
+                # claim, its execution record and its typed refusal, and no
+                # dollar figure of any kind.
+                "reach_composed_magnitudes_withheld": [
+                    record.as_json() for record in valued.withheld_composed_magnitudes
                 ],
                 "reach_composition_census": valued.composition_census,
                 # ``witnessed_magnitude_caps`` lists only the calls a witness
@@ -2131,6 +2189,7 @@ def _row_value(
     conferral: P.ConferralPlane,
     act_as: P.ActAsPlane,
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
+    admission: _AdmissionPlanes,
 ) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
@@ -2177,6 +2236,9 @@ def _row_value(
     composition_candidates: dict[str, list[_ComposedMagnitude]] = {}
     composition_census: dict[str, int] = {}
     composition_refusals: dict[str, int] = defaultdict(int)
+    # Every composed candidate whose FIGURE the three-arm rule refused, keyed on
+    # the call it refused so two instances reaching it report one refusal.
+    withheld_composed: dict[tuple[str, str], _WithheldComposition] = {}
     composed_signals: set[tuple[Any, ...]] = set()
     hops: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
@@ -2256,7 +2318,21 @@ def _row_value(
                 # no destination function and has no compositional source; its
                 # magnitude question is a different one and stays where Phase 4
                 # left it.
-                composed, counts, refused = _compose(seeds, walked_hops, act_as, magnitudes, value_plane, conditions)
+                composed, counts, refused, refused_entries = _compose(
+                    seeds,
+                    walked_hops,
+                    act_as,
+                    magnitudes,
+                    value_plane,
+                    conditions,
+                    admission,
+                    row.principal_addresses,
+                )
+                for record in refused_entries:
+                    # Deduped on (entity, selector): two instances of one row
+                    # reaching the same call refused it once, and counting it
+                    # twice would double the refusal a reader is shown.
+                    withheld_composed.setdefault((record.entity, record.selector), record)
                 _pool_composed(composition_candidates, composed)
                 for name, count in counts.items():
                     composition_census[name] = composition_census.get(name, 0) + count
@@ -2314,12 +2390,28 @@ def _row_value(
     # witness state and chain published beside it are the CHOSEN candidate's own
     # and must be taken from it together.
     composition = {key: _select_composed(pool) for key, pool in sorted(composition_candidates.items())}
+    # The rule again, on the row's own selection. The pool holds only entries an
+    # instance-level pass already admitted, so this changes nothing today — it is
+    # here so that the PUBLISHED entry is the one the rule was applied to,
+    # whatever a later edit does to the two selection points.
+    composition, refused_again = _admit_composed(
+        composition, principal_addresses=row.principal_addresses, planes=admission
+    )
+    for record in refused_again:
+        withheld_composed.setdefault((record.entity, record.selector), record)
+    refused_composed: dict[str, int] = defaultdict(int)
+    for record in withheld_composed.values():
+        refused_composed[record.counter_key] += 1
     hop_gaps = [hops[pair] for pair in sorted(hops) if value_plane.canonical(pair[1]) not in reached]
     census["hops_not_determined"] = len(hops)
     census["hops_not_determined_withholding_reach"] = len(hop_gaps)
     withheld_behind = _behind_the_frontier(hop_gaps, closure, conditions, value_plane, reached)
     licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
-    composition_report = _composition_report(composition, composition_census, dict(composition_refusals))
+    refusals_out = dict(sorted(refused_composed.items()))
+    withheld_out = tuple(withheld_composed[key] for key in sorted(withheld_composed))
+    composition_report = _composition_report(
+        composition, composition_census, dict(composition_refusals), withheld_out, refusals_out
+    )
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
         return _RowValue(
@@ -2338,6 +2430,8 @@ def _row_value(
             composition,
             composition_report,
             frozenset(composed_signals),
+            withheld_composed_magnitudes=withheld_out,
+            refused_composed_magnitudes=refusals_out,
         )
     basis = (
         "witnessed reach magnitude over the "
@@ -2369,6 +2463,8 @@ def _row_value(
         frozenset(composed_signals),
         frozenset(ceiling_entities),
         frozenset(non_attributed_entities),
+        withheld_out,
+        refusals_out,
     )
 
 
@@ -2396,17 +2492,31 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
     # across rows would publish an arithmetic artefact as the longest chain the
     # corpus grows.
     maxima = ("longest_composed_chain",)
+    # Census keys whose value is itself a count-per-token map. They roll by
+    # merging the maps, never by summing them into one number: the whole point
+    # of keying a refusal on its reason is that the reasons stay apart.
+    breakdowns = (
+        "composed_withheld_by_deletability",
+        "composed_withheld_by_arm",
+        "composed_withheld_by_reason",
+    )
 
     def roll(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals: dict[str, int] = defaultdict(int)
         longest: dict[str, int] = dict.fromkeys(maxima, 0)
         refused: dict[str, int] = defaultdict(int)
+        broken: dict[str, dict[str, int]] = {key: defaultdict(int) for key in breakdowns}
         entities: set[str] = set()
+        withheld_entities: set[str] = set()
         usd = 0.0
         for row in rows:
             census = row.get("reach_composition_census") or {}
             for key, value in census.items():
                 if key in ("reading", "act_as_refused", "composed", "composed_usd"):
+                    continue
+                if key in broken:
+                    for token, hits in (value or {}).items():
+                        broken[key][token] += int(hits)
                     continue
                 if key in longest:
                     longest[key] = max(longest[key], int(value))
@@ -2417,12 +2527,21 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             for entry in row.get("reach_composed_magnitudes") or []:
                 entities.add(str(entry["entity"]))
                 usd += float(entry["published_usd"])
+            for entry in row.get("reach_composed_magnitudes_withheld") or []:
+                withheld_entities.add(str(entry["entity"]))
         return {
             **dict(sorted(totals.items())),
             **longest,
             "act_as_refused": dict(sorted(refused.items())),
+            **{key: dict(sorted(rows_here.items())) for key, rows_here in broken.items()},
             "rows_composing": sum(1 for row in rows if row.get("reach_composed_magnitudes")),
+            "rows_withholding_every_composed_figure": sum(
+                1
+                for row in rows
+                if row.get("reach_composed_magnitudes_withheld") and not row.get("reach_composed_magnitudes")
+            ),
             "entities_composed": len(entities),
+            "entities_withheld": len(withheld_entities),
             "composed_usd_summed_over_rows": round(usd, 2),
         }
 
@@ -2460,8 +2579,20 @@ def _signal_identity(signal: FunctionSignal) -> tuple[Any, ...]:
     return (signal.contract_id, signal.chain, signal.deployment_address, signal.selector, signal.claim_id)
 
 
+def _counted(values: Iterable[str]) -> dict[str, int]:
+    """A sorted count per distinct token. Empty where nothing was counted."""
+    out: dict[str, int] = defaultdict(int)
+    for value in values:
+        out[value] += 1
+    return dict(sorted(out.items()))
+
+
 def _composition_report(
-    composed: dict[str, _ComposedMagnitude], census: dict[str, int], refusals: dict[str, int]
+    composed: dict[str, _ComposedMagnitude],
+    census: dict[str, int],
+    refusals: dict[str, int],
+    withheld: tuple[_WithheldComposition, ...],
+    refused_magnitudes: dict[str, int],
 ) -> dict[str, Any]:
     """What composition proved, and — in the same object — what it refused.
 
@@ -2479,6 +2610,20 @@ def _composition_report(
         # instances reaching one destination raise them twice.
         "composed": len(composed),
         "composed_usd": round(sum(sorted(entry.usd for entry in composed.values())), 2),
+        # What the three-arm rule refused, in the same per-entity units. Beside
+        # the count of what it admitted and never instead of it: a report that
+        # published only the survivors would read as a coverage figure over a
+        # population the rule had already narrowed.
+        "composed_withheld": len(withheld),
+        # inv. 13's disclosure hook. Keyed on the deletability verdict's STATE
+        # and reason together, so a join that ran and found no row is counted
+        # apart from a join whose authority could not be resolved. A protocol
+        # that makes its gating authority unresolvable lands in the second
+        # bucket and its published figure falls — so the bucket has to be
+        # visible, or obscuring evidence would look like an absent finding.
+        "composed_withheld_by_deletability": refused_magnitudes,
+        "composed_withheld_by_arm": _counted(record.arm for record in withheld),
+        "composed_withheld_by_reason": _counted(record.reason for record in withheld),
         # Chain length is unbounded by the rule and bounded by the corpus, and a
         # reader has no other way to see the day it grows. 1 is a direct call
         # from the seized node; 2 is the first chain that traverses a node the
@@ -2520,7 +2665,13 @@ def _composition_report(
             "tie, the entry names which candidates tied and by what rule the published "
             "selector, destination_function and act_as_chain were picked out of them, under "
             "composed_selector_tie; null there is the proven 'one candidate'. Everything in "
-            "act_as_refused stayed not_determined and is charged to confidence"
+            "act_as_refused stayed not_determined and is charged to confidence. "
+            "composed_withheld is a LATER and different refusal: those candidates cleared every "
+            "witness above and then lost their figure to the composition rule, because the "
+            "route they publish is not the route the proof took and nothing proved this "
+            "principal could have issued the proven call itself. They keep their gate claim and "
+            "their execution record and are listed per row under "
+            "reach_composed_magnitudes_withheld"
         ),
     }
 
@@ -2624,6 +2775,172 @@ def _signal_execution(signal: FunctionSignal) -> EX.ProvingExecution:
     )
 
 
+@dataclass(frozen=True)
+class _AdmissionPlanes:
+    """The two witnesses the composition rule decides an arm from.
+
+    Bundled because they travel together through five call sites and neither is
+    ever consulted without the other: one says whether the principal could have
+    authored the destination's calldata itself, the other says what the body the
+    chain traverses does to that calldata on the way.
+    """
+
+    deletability: P.DeletabilityPlane
+    routes: P.RouterFlowPlane
+
+
+@dataclass(frozen=True)
+class _WithheldComposition:
+    """A composed candidate whose FIGURE the rule refused, and everything else it keeps.
+
+    Arm 2 withholds the magnitude and nothing else. The gate claim transfers —
+    ``isAuthorized(msg.sender, msg.sig)`` reads no argument, so a routing
+    mismatch says nothing about it — and the act-as chain that carries it is
+    published here in full, beside the execution that was actually run and the
+    typed reason the dollars did not survive the difference between them.
+
+    There is no ``published_usd`` and no witnessed figure of any kind. A refusal
+    that still prints the number it refused has published it.
+    """
+
+    entity: str
+    selector: str
+    function: str
+    chain: tuple[P.ActAsStep, ...]
+    execution: EX.ProvingExecution
+    arm: str
+    reason: str
+    route: P.RouteClassification
+    deletability: P.DeletabilityVerdict
+
+    @property
+    def counter_key(self) -> str:
+        """The ``(state, reason)`` pair the refusal counter keys on.
+
+        BOTH halves, never the reason alone: the deletability vocabulary mixes
+        one earned negative (a join that ran and returned no row) with three
+        undetermined kinds, and bucketing them together would put a proven fact
+        and a disclosed unknown under one count — the inv. 1 collapse the whole
+        join exists to prevent, relocated into the counter.
+        """
+        return f"{self.deletability.state}/{self.deletability.reason}"
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "entity": self.entity,
+            "destination_function": self.function,
+            "selector": self.selector,
+            "arm_taken": self.arm,
+            "withheld_reason": self.reason,
+            # Spelled, not omitted: a missing key reads as a field nobody filled
+            # in, and this one is a refusal somebody made.
+            "published_usd": None,
+            "proving_execution": self.execution.as_json(),
+            "route_comparison": EX.route_comparison(
+                self.execution,
+                claimed_caller=self.chain[-1].caller if self.chain else None,
+                claimed_target=self.chain[-1].destination if self.chain else None,
+                claimed_selector=self.chain[-1].calling_selector if self.chain else None,
+            ),
+            # The gate claim, which survives the refusal in full.
+            "act_as_chain": [step.as_json() for step in self.chain],
+            "act_as_chain_length": len(self.chain),
+            "route_classification": self.route.as_json(),
+            "authority_deletability": self.deletability.disclosure(),
+            "reading": (
+                "the destination carries a flow.out magnitude and this principal is witnessed "
+                "able to reach it, and the DOLLARS are still withheld. What was proven is a "
+                "call the probe made directly to the destination; what this entry claims is a "
+                "route through an intermediate, and the two are compared under route_comparison "
+                "rather than assumed equal. The gate claim survives that difference — an "
+                "authorization check reads msg.sender and msg.sig and no argument, so a route "
+                "the proof did not take says nothing about it — and the act_as_chain above is "
+                "published in full. The magnitude does not survive it: route_classification "
+                "names what the traversed body does to the destination's arguments, and "
+                "authority_deletability names whether this principal could have issued the "
+                "proven call itself. Neither answered in favour of the figure, so no figure is "
+                "published. This is a REFUSAL and not a zero: nothing here says the principal "
+                "moves nothing, only that what it moves is not determined by this evidence"
+            ),
+        }
+
+
+def _admit_composed(
+    composed: dict[str, _ComposedMagnitude],
+    *,
+    principal_addresses: Iterable[str],
+    planes: _AdmissionPlanes,
+) -> tuple[dict[str, _ComposedMagnitude], list[_WithheldComposition]]:
+    """The composition rule's three arms, applied to the SELECTED entries.
+
+    Applied to the returned ``composed`` dict and never inside the candidate
+    pool. Filtering the pool lets the selection promote a different candidate at
+    the same entity, so a withheld figure would be replaced by the next one down
+    rather than withheld — the document is not monotone under withholding and
+    dropping ten entries once yielded thirty-six.
+
+    The arms, in the order they are asked:
+
+    1. **The gate claim transfers, always.** It is not one of the branches
+       below: every outcome publishes the act-as chain, because an authorization
+       check reads ``msg.sender`` and ``msg.sig`` and no argument, so the route
+       the proof took is irrelevant to it.
+    2. **The magnitude is withheld** where the figure's own execution could not
+       be reached at all (a transport fault — ``ARM_WITHHELD``), or where the
+       body the chain traverses is witnessed authoring the destination call's
+       arguments (``ARM_GATE_ONLY``, under the route classification's own typed
+       token).
+    3. **The direct path is republished** where the deletability join proves
+       this principal can author the destination's calldata itself. The route
+       published is then the one the probe ran, and the entry names the
+       ``function_principals`` row that licensed it.
+
+    And there is no fourth: a candidate whose route earns neither typed token
+    and whose principal the join did not prove lands on ``ARM_NOT_DETERMINED``
+    with its figure withheld. There is no ``else`` that publishes, and no branch
+    reads a hop count, a selector name or a contract's shape.
+
+    The fault scoping is the load-bearing detail. ``execution_record_not_persisted``
+    is NOT a fault: the record is derivable from the transcript the verdict
+    points at, and refusing on it withholds every figure in the corpus — the
+    blanket refusal already measured and refuted.
+    """
+    kept: dict[str, _ComposedMagnitude] = {}
+    withheld: list[_WithheldComposition] = []
+    addresses = tuple(principal_addresses)
+    for key, entry in sorted(composed.items()):
+        last = entry.chain[-1] if entry.chain else None
+        route = planes.routes.classify(
+            last.caller if last else "",
+            last.calling_selector if last else None,
+            entry.selector,
+        )
+        verdict = P.authority_deletability(planes.deletability, addresses, key, entry.selector)
+        if entry.execution.reason in EX.FAULT_REASONS:
+            arm, reason = ARM_WITHHELD, entry.execution.reason
+        elif verdict.is_deletable:
+            kept[key] = replace(entry, arm_taken=ARM_REPUBLISHED_DIRECT, deletability=verdict, route=route)
+            continue
+        elif route.state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_CALLEE_RESTRICTED):
+            arm, reason = ARM_GATE_ONLY, route.state
+        else:
+            arm, reason = ARM_NOT_DETERMINED, cast(str, route.reason)
+        withheld.append(
+            _WithheldComposition(
+                entity=entry.entity,
+                selector=entry.selector,
+                function=entry.function,
+                chain=entry.chain,
+                execution=entry.execution,
+                arm=arm,
+                reason=reason,
+                route=route,
+                deletability=verdict,
+            )
+        )
+    return kept, withheld
+
+
 def _compose(
     seeds: set[str],
     hops: list[_WalkedHop],
@@ -2631,7 +2948,9 @@ def _compose(
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
     value_plane: P.ValuePlane,
     conditions: P.ConditionPlane,
-) -> tuple[dict[str, _ComposedMagnitude], dict[str, int], dict[str, int]]:
+    admission: _AdmissionPlanes,
+    principal_addresses: Iterable[str],
+) -> tuple[dict[str, _ComposedMagnitude], dict[str, int], dict[str, int], list[_WithheldComposition]]:
     """The gate-control magnitude the destination's own witness supplies (Phase 6).
 
     Phase 4 floored every gate-control magnitude to ``not_determined`` because
@@ -2823,9 +3142,13 @@ def _compose(
             continue
         for hop in hops_here:
             refusals[ACT_AS_CALLER_UNREACHED] += len(hop.licensed)
-    composed = {key: _select_composed(pool) for key, pool in sorted(candidates.items())}
+    selected = {key: _select_composed(pool) for key, pool in sorted(candidates.items())}
+    census["composed_selected"] = len(selected)
+    # The three-arm rule, on the SELECTED entries and never on the pool above.
+    composed, withheld = _admit_composed(selected, principal_addresses=principal_addresses, planes=admission)
     census["composed"] = len(composed)
-    return composed, census, dict(sorted(refusals.items()))
+    census["composed_withheld"] = len(withheld)
+    return composed, census, dict(sorted(refusals.items())), withheld
 
 
 def _instance_contributions(

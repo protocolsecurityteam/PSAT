@@ -43,6 +43,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from tests import composition_admission_fixtures as CA
 from tests.test_effects_harness import RecordingStore, transfer_log
 from utils import execution_record as EX
 from utils.scoring_status import (
@@ -499,7 +500,20 @@ def _value_plane(per_asset, *, per_asset_state=None, contracts=()) -> P.ValuePla
 
 @pytest.fixture()
 def fold(monkeypatch):
-    def _run(signals, *, value=None, closure=None, principals=None, conferral=None, act_as=None):
+    def _run(
+        signals,
+        *,
+        value=None,
+        closure=None,
+        principals=None,
+        conferral=None,
+        act_as=None,
+        deletability=None,
+        routes=None,
+    ):
+        """``deletability`` defaults to the bypass every principal clears: these
+        cases are about the execution record and the two labels, not about the
+        composition rule, and would otherwise all withhold."""
         empty_value = _value_plane({})
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: {})
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or empty_value)
@@ -507,6 +521,8 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: P.ConditionPlane())
         monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or P.ConferralPlane(role_functions={}))
         monkeypatch.setattr(P, "load_act_as_plane", lambda s, p: act_as or P.ActAsPlane())
+        monkeypatch.setattr(P, "load_deletability_plane", lambda s: deletability or CA.admits_every_principal())
+        monkeypatch.setattr(P, "load_router_flow_plane", lambda s, p: routes or P.RouterFlowPlane())
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -908,9 +924,12 @@ def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):
     assert execution["transcript_ptr"] == "job::art"
     assert "caller" not in execution
     assert entry["route_comparison"]["verdict"] == EX.ROUTE_NOT_DETERMINED
-    # No arm has been taken by this fold, and it says so rather than implying one
-    # from the presence of a figure.
-    assert entry["arm_taken"] == FOLD.ARM_NOT_DETERMINED
+    # ``execution_record_not_persisted`` is NOT one of the transport faults, so
+    # the composition rule still decides the arm on the deletability join — which
+    # this fixture's plane answers in the affirmative. The entry keeps its figure
+    # and says which arm gave it one; what it does NOT do is claim a route
+    # comparison it could not make.
+    assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
     assert entry["arm_taken"] in FOLD.COMPOSITION_ARMS
 
 
