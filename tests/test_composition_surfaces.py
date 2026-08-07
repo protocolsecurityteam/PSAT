@@ -1,9 +1,9 @@
 """The two composed-entry surfaces §8 ruled on, and the disclosures beside them.
 
-B2's module. Each case is a *derivation* pinned by two carriers whose data
-differs, never by one carrier against a literal the code could have hard-coded:
-the mutation that de-interpolates a derived string into a constant has to fail
-here, and a test that asserts only that the field exists does not count.
+Each case is a *derivation* pinned by two carriers whose data differs, never by
+one carrier against a literal: the mutation that de-interpolates a derived
+string into a constant has to fail here, and a test that asserts only that the
+field exists does not count.
 """
 
 from __future__ import annotations
@@ -25,9 +25,7 @@ from tests.test_scoring_redteam import (
     COMPOSED_SELECTOR,
     KEY_C,
     KEY_V,
-    _composing_case,
     _composing_principals,
-    _composing_signals,
     _gate_row,
     _tied_case,
     _tied_signals,
@@ -53,36 +51,21 @@ def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _gate_only_document(fold, routes):  # noqa: F811
-    """One withheld entry on the gate-only arm, under the token ``routes`` earns.
-
-    The deletability plane returns no setter row, so arm 3 cannot republish and
-    the route decides the arm — which is what makes the two route fixtures below
-    differ in the token and in nothing else.
-    """
-    return fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY),
-        routes=CA.router_flow_plane(routes),
-        **_composing_case(),
+    """One withheld entry on the gate-only arm: the join returns no setter row so
+    arm 3 cannot republish and the route alone decides the arm."""
+    return CA.composed_document(
+        fold, deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), routes=routes
     )
 
 
-# ---------------------------------------------------------------------------
 # CAP-A §R2 — the token names the field it is earned from
-# ---------------------------------------------------------------------------
 
 
 def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(fold):  # noqa: F811
     """CAP-A §R2. The token is read off ``target_constraint``, which pins the
-    destination call's counterparty ARGUMENT. The callee of that call is an
-    intra-unit AST name and no stored witness restricts it, so a token saying
-    "the callee is restricted" asserted a security property the evidence does not
-    earn — and did so on every carrier it had.
-
-    The state and the boolean it is earned from now share one name, which is the
-    disagreement that found the defect.
-    """
+    destination call's counterparty ARGUMENT; no stored witness restricts the
+    callee, so "the callee is restricted" asserted a property the evidence does
+    not earn. The state and the boolean now share one name."""
     entry = _withheld(_gate_row(_gate_only_document(fold, _CONSTRAINS_THE_TARGET_AT_C)))[0]
     classification = entry["route_classification"]
 
@@ -109,20 +92,14 @@ def test_no_published_route_state_claims_a_restricted_callee(fold, routes):  # n
     assert RETIRED_CALLEE_TOKEN not in row["reach_composition_census"]["reading"]
 
 
-# ---------------------------------------------------------------------------
 # B1-R R2-a — the gate-only arm fires on two tokens and its cause names which
-# ---------------------------------------------------------------------------
 
 
 def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):  # noqa: F811
     """B1-R R2-a. ``ARM_GATE_ONLY`` is taken on either of two route tokens and
-    the census gave both the AUTHORING cause, so a target-constrained carrier
-    read one thing in the census and another in its own ``withheld_reason``, two
-    blocks apart on one row.
-
-    The two documents differ only in the intermediate's stored flow witness. A
-    cause keyed on the arm alone publishes one sentence for both and fails here.
-    """
+    the census gave both the AUTHORING cause. The two documents differ only in
+    the intermediate's stored flow witness, so a cause keyed on the arm alone
+    publishes one sentence for both and fails here."""
     authored = _gate_row(_gate_only_document(fold, _AUTHORS_THE_AMOUNT_AT_C))
     constrained = _gate_row(_gate_only_document(fold, _CONSTRAINS_THE_TARGET_AT_C))
 
@@ -176,9 +153,7 @@ def _a_withheld_record() -> FOLD._WithheldComposition:
     )
 
 
-# ---------------------------------------------------------------------------
 # Ruling 6.2 M4 / §11.2 (k) — chosen_by names what decided THIS tie
-# ---------------------------------------------------------------------------
 
 
 def _tied_pair(**over: Any) -> FOLD._ComposedMagnitude:
@@ -208,13 +183,8 @@ def _tie(entry: FOLD._ComposedMagnitude) -> dict[str, Any]:
 
 def test_chosen_by_names_the_component_that_actually_decided_the_tie():
     """Ruling 6.2 M4. Reciting the whole ladder reads as though every component
-    applied. It did not: the components ahead of the deciding one are equal on
-    every candidate — the figure always is, by the definition of a tie — and the
-    ones behind it are never reached.
-
-    Three ties decided at three different components publish three different
-    strings, which a recital of the ladder cannot do.
-    """
+    applied; three ties decided at three different components publish three
+    different strings, which a recital cannot do."""
     by_state = _tied_pair(witness_state="proven_upper_bound")
     by_selector = _tied_pair(selector="0x22222222")
     by_function = _tied_pair(function="manage")
@@ -238,17 +208,11 @@ def test_chosen_by_names_the_component_that_actually_decided_the_tie():
     ids=["selector_then_function", "state_then_selector", "three_components"],
 )
 def test_chosen_by_names_the_FIRST_differing_component_and_not_a_later_one(rival, first, later):
-    """B2-R SF-1. The published sentence asserts *"in each case the FIRST
-    component on which this entry differs from that candidate"*, and every other
-    fixture here builds a rival differing at exactly ONE component — where first
-    and last are the same index, so the claim is unpinned. A rule returning the
-    LAST differing component is still derived, still moves all twelve published
-    strings, and passed the module.
-
-    These rivals differ at two components (and one at three). The components
-    behind the first are never reached, so naming one of them would be the
-    sentence contradicting itself.
-    """
+    """B2-R SF-1. Every other fixture here builds a rival differing at exactly
+    ONE component, where first and last are the same index — so a rule returning
+    the LAST differing component is still derived, moves all twelve published
+    strings, and passed the module. These rivals differ at two components (one at
+    three)."""
     chosen_by = _tie(_tied_pair(**rival))["chosen_by"]
 
     def as_decider(index):
@@ -281,11 +245,9 @@ def test_chosen_by_counts_the_candidates_each_component_separated():
 
 
 def test_a_tie_the_order_does_not_separate_publishes_that_and_names_no_decider():
-    """The third state, and it is not reachable by reciting the ladder. Two
-    candidates equal under the whole key can still differ in fields the key does
-    not read — here the execution that proved each one — and the order decided
-    nothing between them. Naming a component there credits the rule with a
-    choice the arrival order made."""
+    """The third state: two candidates equal under the whole key still differ in
+    fields the key does not read, and naming a component there credits the rule
+    with a choice the arrival order made."""
     unseparated = replace(
         _tied_pair(),
         tied_with=(
@@ -310,9 +272,8 @@ def test_the_component_names_line_up_with_the_order_they_describe():
 
 
 def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):  # noqa: F811
-    """§11.2 (k). The shipped gloss named five fields and the order's tail is
-    every field ``ActAsStep.as_json`` publishes. Read off the steps in hand, the
-    gloss cannot under-state the key it describes."""
+    """§11.2 (k). The order's tail is every field ``ActAsStep.as_json``
+    publishes, so the gloss is read off the steps in hand."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     tied = [
         entry
@@ -334,20 +295,15 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
     assert "receiver_variable" not in chosen_by
 
 
-# ---------------------------------------------------------------------------
 # CAP-A §B4 — the uncalibrated-arm register
-# ---------------------------------------------------------------------------
 
 
 def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     """CAP-A §B4 / ``SCORER_DISCIPLINE_CONTRACT.md`` §8. Phase A added seven
-    narrower three-states and flagged none of them, so a reader had no way to
-    tell an arm the model was fitted to from one nothing has ever exercised.
-
-    Each disclosure names one state, where the document publishes it, and the
-    test that constructs it. The token and the disclosure are two lists and the
-    register is only a disclosure if every disclosed arm is also flagged.
-    """
+    narrower three-states and flagged none, so a reader could not tell an arm the
+    model was fitted to from one nothing has exercised. The token and the
+    disclosure are two lists, and the register only discloses if every disclosed
+    arm is also flagged."""
     parameters = K.model_parameters()
     flagged = parameters["uncalibrated_arms"]
     block = parameters["uncalibrated_arm_disclosures"]
@@ -379,10 +335,8 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
 
 def test_the_register_counts_no_population_and_points_at_the_document_instead():
     """The register is authored where no data is read, so a population figure in
-    it would be a claim about a corpus it has never seen — the defect class this
-    run exists to remove. It carries a POINTER to the counter instead, and
-    ``null`` there says the document publishes no counter for that state, which
-    is not a zero."""
+    it would be a claim about a corpus it has never seen. It carries a POINTER
+    instead, and ``null`` there is not a zero."""
     block = K.model_parameters()["uncalibrated_arm_disclosures"]
     for entry in block["registered"]:
         for value in entry.values():
@@ -393,9 +347,8 @@ def test_the_register_counts_no_population_and_points_at_the_document_instead():
 
 
 def test_every_test_the_register_names_exists():
-    """The strongest claim in the block is "a constructed fixture exercises this",
-    and it is checkable. A named test that does not exist makes the disclosure a
-    promise rather than a record."""
+    """A named test that does not exist makes the disclosure a promise rather
+    than a record."""
 
     named = [
         node
@@ -423,22 +376,14 @@ def test_every_test_the_register_names_exists():
         assert f"{module}::{rest}" in collected, node
 
 
-# ---------------------------------------------------------------------------
 # Ruling 6.1 — destination_predicates is KEPT, and stays a field-description
-# ---------------------------------------------------------------------------
 
 
 def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  # noqa: F811
     """Ruling 6.1's KEEP, asserted as a property rather than left as an absence
-    of change. §8 proposed cutting the block; it is the only place a reader can
-    check the composed ceiling against the destination's own body, and cutting
-    evidence while publishing nothing in its place makes the fold's ceiling
-    unfalsifiable — so its disappearance is a regression.
-
-    M1 and M2 landed in B1 and A3 respectively; both are re-verified here on the
-    post-Phase-B document, because a modification nobody pins is a modification
-    the next edit removes.
-    """
+    of change: the block is the only place a reader can check the composed
+    ceiling against the destination's own body. M1 and M2 landed in B1 and A3 and
+    are re-verified here on the post-Phase-B document."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entries = _gate_row(document).get("reach_composed_magnitudes") or []
     assert entries
@@ -461,24 +406,14 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  
         assert (block["descriptions"] is None) == (block["state"] != P.PREDICATES_EXTRACTED)
 
 
-# ---------------------------------------------------------------------------
 # CAP-B ruling 1 — the migration block is DATED HISTORY, not a live claim
-# ---------------------------------------------------------------------------
 
 
 def test_the_migration_block_dates_its_composition_figures_to_the_bump_that_measured_them():
-    """CAP-B ruling 1. `model_version_migration` is the only published record of
-    what the 1.0.1 -> 1.1.0 bump measured, and deleting it loses the honest
-    Phase-6-claim refutation with nothing to re-derive it from. But two clauses
-    were written in the present tense and Phase A made both false: composition no
-    longer "composes 13 entities and $46,164,146.29", and the 40 signals it was
-    asked of are no longer 40 answers.
-
-    Both are now anchored — past tense, version-stamped, and pointing at the
-    census for the live count — so the block records a measurement instead of
-    claiming one. The version is INTERPOLATED from `MODEL_VERSION`: a stamp that
-    does not move with the version it stamps is worse than no stamp.
-    """
+    """CAP-B ruling 1. Two clauses of the only published record of the 1.0.1 ->
+    1.1.0 bump were present tense and Phase A made both false. Both are now
+    anchored — past tense, version-stamped, pointing at the census for the live
+    count — and the version is INTERPOLATED from `MODEL_VERSION`."""
     from utils.scoring_status import MODEL_VERSION
 
     block = K.model_parameters()["model_version_migration"]
@@ -498,10 +433,8 @@ def test_the_migration_block_dates_its_composition_figures_to_the_bump_that_meas
 
 
 def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
-    """B1's S1 lesson, applied to CAP-B's stamp. `"1.1.0-provisional"` as a
-    literal reads identically to the interpolation today and drifts silently at
-    the next bump — which is the whole failure the ruling exists to repair, one
-    version later."""
+    """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
+    today and drifts silently at the next bump."""
     from services.scoring import constants as C
 
     shipped = K.model_parameters()["model_version_migration"]["what_composition_did_not_recover"]
@@ -514,16 +447,11 @@ def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
 
 
 def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in_a_spec():
-    """CAP-B ruling 2. `value_at_stake_bound_direction == "ceiling"` has 0 rows
-    before Phase A and 0 after, and its disclosure was carried as a spec deferral
-    — which does not discharge `SCORER_DISCIPLINE_CONTRACT.md` §8, whose
-    obligation is a flag in the DOCUMENT.
-
-    The decisive fact is on the page: `site/src/score/derive.js` allow-lists this
-    direction, so a `<=` badge would render for a state nothing can earn with
-    nothing published saying so. Registering it does NOT reopen its earnability,
-    which stays deferred with ruling 6.3 item 4.
-    """
+    """CAP-B ruling 2. The arm has 0 rows before Phase A and 0 after, and a spec
+    deferral does not discharge §8's obligation to flag it in the DOCUMENT —
+    `site/src/score/derive.js` allow-lists the direction, so a `<=` badge would
+    render for a state nothing can earn. Registering it does not reopen its
+    earnability."""
     parameters = K.model_parameters()
     entry = next(
         item
@@ -541,10 +469,8 @@ def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():
-    """The register is the fix, not the removal. Dropping `ceiling` from
-    `BOUND_DIRECTIONS` would make the page silently null a direction the fold can
-    still compute — `_bound_direction` returns it and two committed tests earn it
-    — which trades an undisclosed badge for an undisclosed blank."""
+    """The register is the fix, not the removal: dropping `ceiling` from
+    `BOUND_DIRECTIONS` trades an undisclosed badge for an undisclosed blank."""
     derive = (ROOT / "site" / "src" / "score" / "derive.js").read_text()
     assert f'"{FOLD.BOUND_DIRECTION_CEILING}"' in derive
     assert "BOUND_DIRECTIONS" in derive
