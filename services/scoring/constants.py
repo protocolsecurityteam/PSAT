@@ -253,6 +253,141 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # Retired for cause rather than calibrated: see the note beside
     # OWNERSHIP_DEFAULT_ADMIN_RULES.
     "retired:timelock_self_gated_delay_credit",
+    # The execution-witness run's own arms. Each is a NARROWER three-state the
+    # run added on purpose, and none of them fired on the corpus the model was
+    # calibrated against — so each is exercised only by a constructed fixture and
+    # none of the published numbers was fitted to it. Disclosed per arm in
+    # UNCALIBRATED_ARM_DISCLOSURES below.
+    "composition_arm:withheld",
+    "composition_arm:not_determined",
+    "gate_claim:not_determined",
+    "authority_deletability:not_determined",
+    "authority_deletability_basis_arm:gating_authority",
+    "route_comparison_verdict:route_match",
+    "retired:destination_callee_is_restricted_by_the_intermediate",
+)
+
+# What each of the run's arms IS, beside the bare token. §8 of
+# SCORER_DISCIPLINE_CONTRACT requires the flag; the flag alone does not say which
+# state is uncalibrated, where the document publishes it, or what exercises it,
+# and a reader cannot check an arm they cannot find.
+#
+# ⚠ Nothing here counts instances, and that is deliberate rather than an
+# omission. This module reads no data, so a population figure authored in it
+# would be a claim about a corpus it has never seen — the defect class this run
+# exists to remove. ``population_census`` names the field of the scored document
+# where the instances ARE counted, and ``null`` there is the honest "this
+# document publishes no counter for that state", not a zero.
+UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
+    {
+        "arm": "composition_arm:withheld",
+        "state": "withheld",
+        "published_at": "reach_composed_magnitudes_withheld[].arm_taken",
+        "population_census": "reach_composition_census.composed_withheld_by_arm",
+        "exercised_by": (
+            "tests/test_three_arm_composition.py::"
+            "test_an_unfetchable_transcript_withholds_even_where_the_join_licenses_it",
+        ),
+        "note": (
+            "the transport-fault arm. Reached BEFORE the route classification and the deletability "
+            "join are consulted, so an entry on it can publish a deletability licence beside its own "
+            "refusal — which is why it is a separate arm and not a shade of the gate-only one"
+        ),
+    },
+    {
+        "arm": "composition_arm:not_determined",
+        "state": "not_determined",
+        "published_at": "reach_composed_magnitudes_withheld[].arm_taken",
+        "population_census": "reach_composition_census.composed_withheld_by_arm",
+        "exercised_by": (
+            "tests/test_three_arm_composition.py::"
+            "test_the_typed_reason_is_read_off_the_traversed_body[neither_conjunct]",
+            "tests/test_three_arm_composition.py::"
+            "test_the_typed_reason_is_read_off_the_traversed_body[no_flow_witness]",
+        ),
+        "note": (
+            "the fall-through an unrecognised route fails to. There is no fourth arm that publishes, "
+            "so this state is what stands between a route nobody classified and a figure"
+        ),
+    },
+    {
+        "arm": "gate_claim:not_determined",
+        "state": "not_determined",
+        "published_at": "reach_composed_magnitudes[].gate_claim.state",
+        "population_census": "reach_composition_census.gate_claim_by_state",
+        "exercised_by": (
+            "tests/test_three_arm_composition.py::test_no_execution_to_compare_a_caller_against_is_its_own_state",
+        ),
+        "note": (
+            "no recorded execution to read a caller off, so the caller conjunct was neither "
+            "corroborated nor refused. Distinct from not_corroborated, which is a comparison that ran"
+        ),
+    },
+    {
+        "arm": "authority_deletability:not_determined",
+        "state": "not_determined",
+        "published_at": "reach_composed_magnitudes_withheld[].authority_deletability.{state,reason}",
+        "population_census": "reach_composition_census.composed_withheld_by_deletability",
+        "exercised_by": (
+            "tests/test_deletability_join.py::test_unresolvable_gating_authority_is_not_determined_never_deletable",
+            "tests/test_deletability_join.py::test_a_tainted_destination_gate_is_not_determined_even_with_a_named_authority",
+            "tests/test_deletability_join.py::test_authority_sources_that_disagree_resolve_to_not_determined",
+            "tests/test_deletability_join.py::test_two_selector_scoped_authorities_are_no_answer",
+            "tests/test_deletability_join.py::test_a_lower_bound_membership_row_is_not_determined_never_deletable",
+        ),
+        "note": (
+            "the undetermined half of the join, carrying its own reason token. Counted apart from "
+            "proven_not_deletable — a join that ran and returned no row is an EARNED negative and an "
+            "unresolvable authority is not, and collapsing them is the inv. 1 failure the join exists "
+            "to prevent"
+        ),
+    },
+    {
+        "arm": "authority_deletability_basis_arm:gating_authority",
+        "state": "gating_authority",
+        "published_at": "reach_composed_magnitudes[].authority_deletability.basis.arm",
+        # No counter: the basis arm is published per entry and rolled up nowhere.
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_deletability_join.py::test_authority_arm_qualifying_row_is_deletable_and_names_its_basis",
+            "tests/test_three_arm_composition.py::"
+            "test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it[gating_authority]",
+        ),
+        "note": (
+            "the host arm is asked first, so a principal holding setters at BOTH the host and the "
+            "gating authority publishes host and this arm never surfaces. It is the arm's own "
+            "sufficiency that is uncalibrated, not its correctness: the join answers on it alone"
+        ),
+    },
+    {
+        "arm": "route_comparison_verdict:route_match",
+        "state": "route_match",
+        "published_at": "reach_composed_magnitudes[].route_comparison.verdict",
+        "population_census": None,
+        "exercised_by": ("tests/test_execution_record.py::test_route_comparison_has_no_fall_through_arm",),
+        "note": (
+            "the positive verdict. No composition arm consumes it — a matched route is not a "
+            "licence and the figure still turns on the deletability join — so it is a disclosure "
+            "and not an input, and it has never been fitted to anything"
+        ),
+    },
+    {
+        "arm": "retired:destination_callee_is_restricted_by_the_intermediate",
+        "state": "destination_callee_is_restricted_by_the_intermediate",
+        # Retired with no producer: the classifier cannot emit it.
+        "published_at": None,
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_composition_surfaces.py::test_no_published_route_state_claims_a_restricted_callee",
+        ),
+        "note": (
+            "EXECUTION_WITNESS_SPEC §7.2's second typed reason as originally named. It has no "
+            "producer: the route classifier earns its second token from target_constraint, which "
+            "constrains the destination call's counterparty ARGUMENT, and no stored witness says an "
+            "intermediate restricts the callee SET. A genuine callee-set restriction — the Manager's "
+            "merkle verification — is not witnessed in this data and is not claimed"
+        ),
+    },
 )
 
 
@@ -576,4 +711,26 @@ def model_parameters() -> dict[str, Any]:
             ),
         },
         "uncalibrated_arms": list(UNCALIBRATED_ARMS),
+        "uncalibrated_arm_disclosures": {
+            "reading": (
+                "one entry per uncalibrated arm this run added, saying WHICH state is uncalibrated, "
+                "where the document publishes it, and which test constructs it — because the flat "
+                "uncalibrated_arms list above is a token and a reader cannot check an arm they "
+                "cannot find. An arm is registered when no instance of its state existed in the "
+                "corpus the model was calibrated against, so nothing in the published numbers was "
+                "fitted to it and its behaviour rests on a constructed fixture alone. This block "
+                "counts NOTHING and makes no claim about the population of THIS document: it is "
+                "authored where no data is read, and a figure written here would be a claim about a "
+                "corpus it has never seen. population_census names the field of this document where "
+                "the instances are counted, and null there says this document publishes no counter "
+                "for that state — which is not a zero. arms_registered_without_a_disclosure is the "
+                "earned remainder: tokens in uncalibrated_arms that predate this shape and carry no "
+                "per-arm record, listed rather than left to be inferred from the difference between "
+                "two lists"
+            ),
+            "registered": [dict(entry) for entry in UNCALIBRATED_ARM_DISCLOSURES],
+            "arms_registered_without_a_disclosure": [
+                arm for arm in UNCALIBRATED_ARMS if arm not in {entry["arm"] for entry in UNCALIBRATED_ARM_DISCLOSURES}
+            ],
+        },
     }

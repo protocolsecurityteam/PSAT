@@ -8,11 +8,15 @@ here, and a test that asserts only that the field exists does not count.
 
 from __future__ import annotations
 
+import pathlib
+import subprocess
+import sys
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
+from services.scoring import constants as K
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from tests import composition_admission_fixtures as CA
@@ -40,6 +44,8 @@ _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_
 # it is the one string this module asserts the ABSENCE of, and a symbol would
 # make the assertion vacuous the day the symbol is deleted.
 RETIRED_CALLEE_TOKEN = "destination_callee_is_restricted_by_the_intermediate"
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -291,3 +297,84 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
     chosen_by = _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
     assert "no candidate here publishes a step at all" in chosen_by
     assert "receiver_variable" not in chosen_by
+
+
+# ---------------------------------------------------------------------------
+# CAP-A §B4 — the uncalibrated-arm register
+# ---------------------------------------------------------------------------
+
+
+def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
+    """CAP-A §B4 / ``SCORER_DISCIPLINE_CONTRACT.md`` §8. Phase A added seven
+    narrower three-states and flagged none of them, so a reader had no way to
+    tell an arm the model was fitted to from one nothing has ever exercised.
+
+    Each disclosure names one state, where the document publishes it, and the
+    test that constructs it. The token and the disclosure are two lists and the
+    register is only a disclosure if every disclosed arm is also flagged.
+    """
+    parameters = K.model_parameters()
+    flagged = parameters["uncalibrated_arms"]
+    block = parameters["uncalibrated_arm_disclosures"]
+    registered = block["registered"]
+
+    assert len(registered) == 7
+    for entry in registered:
+        assert entry["arm"] in flagged, entry["arm"]
+        assert entry["state"] and entry["note"]
+        assert entry["exercised_by"], entry["arm"]
+        # Spelled, never omitted: a missing key reads as a field nobody filled in.
+        assert "published_at" in entry and "population_census" in entry
+
+    # The remainder is DERIVED, not authored: the tokens that predate the
+    # per-arm shape and carry no record are listed rather than left to be
+    # inferred from the difference between two lists.
+    disclosed = {entry["arm"] for entry in registered}
+    assert block["arms_registered_without_a_disclosure"] == [a for a in flagged if a not in disclosed]
+    assert set(block["arms_registered_without_a_disclosure"]).isdisjoint(disclosed)
+
+
+def test_the_register_counts_no_population_and_points_at_the_document_instead():
+    """The register is authored where no data is read, so a population figure in
+    it would be a claim about a corpus it has never seen — the defect class this
+    run exists to remove. It carries a POINTER to the counter instead, and
+    ``null`` there says the document publishes no counter for that state, which
+    is not a zero."""
+    block = K.model_parameters()["uncalibrated_arm_disclosures"]
+    for entry in block["registered"]:
+        for value in entry.values():
+            assert not isinstance(value, (int, float)) or isinstance(value, bool), entry["arm"]
+    censuses = {entry["population_census"] for entry in block["registered"]}
+    assert None in censuses and len(censuses) > 1, "a register where every pointer is null discloses nothing"
+    assert "counts NOTHING" in block["reading"]
+
+
+def test_every_test_the_register_names_exists():
+    """The strongest claim in the block is "a constructed fixture exercises this",
+    and it is checkable. A named test that does not exist makes the disclosure a
+    promise rather than a record."""
+
+    named = [
+        node
+        for entry in K.model_parameters()["uncalibrated_arm_disclosures"]["registered"]
+        for node in entry["exercised_by"]
+    ]
+    assert named
+    collected = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--collect-only",
+            "-m",
+            "not live",
+            *sorted({n.split("::")[0] for n in named}),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    ).stdout
+    for node in named:
+        module, _, rest = node.partition("::")
+        assert f"{module}::{rest}" in collected, node
