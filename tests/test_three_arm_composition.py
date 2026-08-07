@@ -212,8 +212,12 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, de
 
     # The basis, named: the setter selector and the function_principals row id.
     basis = entry["authority_deletability"]["basis"]
-    assert basis["setter_selector"] == CA.SET_AUTHORITY_SELECTOR
     assert basis["setter_function_name"] == setter_name
+    # The selector must be THIS setter's, not the one every fixture row used to
+    # carry: a basis naming setUserRole beside setAuthority's selector is a
+    # licence a reader cannot re-check (B2-R N4).
+    assert basis["setter_selector"] == CA.SETTER_SELECTORS[setter_name]
+    assert (basis["setter_selector"] == CA.SET_AUTHORITY_SELECTOR) == (arm == P.DELETABILITY_ARM_HOST)
     assert isinstance(basis["function_principal_id"], int)
     assert basis["principal_address"] == EOA.lower()
     assert basis["membership_quality"] == "exact"

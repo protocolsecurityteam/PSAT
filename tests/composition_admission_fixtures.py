@@ -23,6 +23,19 @@ from services.scoring import planes as P
 # checkable against the same shape the loader produces.
 SET_AUTHORITY_SELECTOR = "0x7a9e5e4b"
 
+# The real selector of each setter the join asks about. Stamping one selector on
+# every row — which this helper did — meant the whole committed suite carried
+# ``0x7a9e5e4b``, so a producer that hard-coded it passed green while publishing a
+# basis whose selector does not belong to the function beside it (B2-R N4,
+# CAP-B ruling 3). Every live basis on this corpus is ``setAuthority``, so the
+# mutation moves no published node; it is the ARM's own field that goes unpinned.
+SETTER_SELECTORS = {
+    "setAuthority": SET_AUTHORITY_SELECTOR,
+    "transferOwnership": "0xf2fde38b",
+    "setUserRole": "0x67aff484",
+    "setRoleCapability": "0x7d40583d",
+}
+
 
 class _AdmitsEveryPrincipal(P.DeletabilityPlane):
     """Every principal holds ``setAuthority`` at every destination it is asked about."""
@@ -72,13 +85,14 @@ def deletability_plane(
             chain, _, address = entity.partition("::")
             key = (chain, address.lower())
             next_id += 1
+            name = setter or default_setter
             setters.setdefault(key, []).append(
                 P.SetterPrincipal(
                     function_principal_id=next_id,
                     chain=chain,
                     contract_address=address.lower(),
-                    function_name=setter or default_setter,
-                    selector=SET_AUTHORITY_SELECTOR,
+                    function_name=name,
+                    selector=SETTER_SELECTORS[name],
                     principal_address=principal.lower(),
                     membership_quality=membership_quality,
                 )
