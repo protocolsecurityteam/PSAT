@@ -49,6 +49,7 @@ from services.static.claims.registry import (
     resolve_claim_precedence,
 )
 from services.static.claims.types import TIER_PRECEDENCE, Claim
+from utils.execution_record import PROVING_EXECUTION_KEY
 
 # The effects worker runs in its own process and never calls ``build_claims``, so
 # the standard matcher claims (``upgrade.implementation``, ``flow.out``, …) would
@@ -283,6 +284,7 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     )
     summary = {k: raw[k] for k in keep if k in raw}
     summary.update(_reach_summary(verdict))
+    summary.update(_execution_summary(verdict))
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not None:
         summary["current_check_passed"] = verdict.current_check_passed
     return summary
@@ -375,6 +377,22 @@ def _reach_summary(verdict: VerdictLike) -> dict[str, Any]:
     if not isinstance(residue, dict):
         return {}
     return {k: residue[k] for k in _REACH_KEYS if k in residue}
+
+
+# The execution that PROVED the figures above. Forwarded on the SAME projection
+# and from the same column, because a magnitude and the call that proved it are
+# one fact and a consumer that receives the first without the second publishes a
+# number with no account of itself (the F6 defect).
+#
+# CONTRACT: the key's ABSENCE is the third state and is the common one — every
+# verdict written before the record existed carries none. A consumer must read
+# absence as ``not_determined`` (``utils.execution_record``), never as "no caller",
+# never as an unseeded probe, and never as a route that matches.
+def _execution_summary(verdict: VerdictLike) -> dict[str, Any]:
+    residue = getattr(verdict, "observed_residue", None)
+    if not isinstance(residue, dict) or PROVING_EXECUTION_KEY not in residue:
+        return {}
+    return {PROVING_EXECUTION_KEY: residue[PROVING_EXECUTION_KEY]}
 
 
 def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:

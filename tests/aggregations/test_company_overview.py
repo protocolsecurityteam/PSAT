@@ -1492,10 +1492,11 @@ def test_fund_flows_controller_not_admitted_for_non_reach_witness(db_session):
     emitted edge but never admits one.
 
     ``capability_principal`` is in ``CONTROL_EDGE_RELATIONS`` (it may name a
-    hop on a flow another gate emitted) but the scorer excludes it from reach
-    (budget-gated materialization — see planes.UNCONSUMED_REACH_RELATIONS), so
-    admitting the pair here would draw a route the score document does not
-    vouch for.
+    hop on a flow another gate emitted) but the scorer excludes it from reach —
+    it is a FUNCTION-level principal claim, not authority over the anchor entity
+    (see ``planes.UNCONSUMED_REACH_REASONS``, whose earlier budget-gating
+    rationale is withdrawn as refuted) — so admitting the pair here would draw a
+    route the score document does not vouch for.
     """
     p = _add_protocol(db_session, f"nonreach-witness-{uuid.uuid4().hex[:8]}")
 

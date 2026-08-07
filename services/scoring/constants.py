@@ -135,13 +135,32 @@ DELAY_DISCOUNT_FLOOR = 0.25
 DELAY_DISCOUNT_SATURATION_DAYS = 30.0
 
 # --- capability classes -----------------------------------------------------
-# Capabilities whose reach follows the control closure: replacing code or
-# authority at A reaches whatever A itself controls.
-TRANSITIVE_CAPABILITIES = frozenset(
+# Capabilities whose reach follows the control closure. Both classes expand
+# transitively (inv. 7 makes transitivity mandatory); they differ in WHAT BOUNDS
+# the expansion, which is the distinction one table conflated.
+#
+# CODE control replaces what the node DOES. Controlling A's code lets A be made
+# to exercise everything A is authorized to exercise, so the expansion is not
+# scoped to any one role's selectors — but it is still not unconditional: a
+# downstream hop is walked only where the destination's own conditions do not
+# pin their caller to the destination itself (see ``planes.ConditionPlane``).
+CODE_CONTROL_CAPABILITIES = frozenset(
     {
         "upgrade.implementation",
         "exec.arbitrary",
         "delegatecall.execute",
+    }
+)
+
+# GATE control replaces who MAY CALL the node. A's own code still bounds what
+# happens next: holding A's gate does not make A call B, it only lets the holder
+# use the functions A already has. So the expansion is bounded by what the gate
+# confers — at edge-label granularity, an edge whose scope is not determined
+# confers nothing anyone can name, and the hop is published as not_determined
+# rather than walked. The role -> selector join that narrows a DETERMINED scope
+# to the functions a role actually licenses is a separate refinement.
+GATE_CONTROL_CAPABILITIES = frozenset(
+    {
         "authority.replace",
         "ownership.transfer",
         "roles.grant",
@@ -149,6 +168,8 @@ TRANSITIVE_CAPABILITIES = frozenset(
         "authorized_caller.rotate",
     }
 )
+
+TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
 DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
 
@@ -391,6 +412,140 @@ def model_parameters() -> dict[str, Any]:
             "864000s_10d": delay_discount(864000),
         },
         "principal_units": "per (chain, address); no cross-chain collapse (strategy §7.4)",
-        "value_reduction": "MAX per (entity, asset), entity = <chain>::<runtime address>",
+        "value_reduction": (
+            "latest observation per (entity, asset, observed account), summed across DISTINCT "
+            "observed accounts; entity = <chain>::<runtime address>, implementation folded onto "
+            "its proxy except where two proxies share one. MAX across observation heights is "
+            "RETIRED: two readings of one account are one holding read twice, and the maximum "
+            "of them is a high-water mark that was already stale when it was written"
+        ),
+        "reach_classes": {
+            "code_control": sorted(CODE_CONTROL_CAPABILITIES),
+            "gate_control": sorted(GATE_CONTROL_CAPABILITIES),
+            "bound": (
+                "both expand over the control closure; code control over the whole closure of "
+                "the controlled node, gate control only through edges the gate is WITNESSED TO "
+                "CONFER. That is a conferral test, and it replaced the label-presence test that "
+                "walked any edge whose label named a scope at all. A 'roles N' edge is conferred "
+                "where the role -> selector join (function_principals.details.trace[].selector "
+                "joined to effective_functions.selector at the destination) names the functions "
+                "role N licenses there; those functions are published per finding as "
+                "reach_licensed_functions. That branch is a positive witness of what the hop "
+                "delivers. The state-variable branch is NOT, and is weaker: it is a SAME-KIND "
+                "BOUND. The gate's own witnessed function is observed to REWRITE a variable of "
+                "that name on ITS OWN contract (effective_functions.state_writes, origin=body), "
+                "while the edge's label names the authority slot on the DESTINATION's contract, "
+                "so requiring the two to match is a name match across two contracts' storage and "
+                "witnesses no composition step — nothing says that seizing A's owner lets its "
+                "holder exercise A's ownership of B. What the bound does is REFUSE hops of a "
+                "different kind from the one the gate seizes: ownership.transfer is witnessed "
+                "rewriting owner/_owner, authority.replace rewriting authority, and none of the "
+                "five is witnessed rewriting hook, vault, roleRegistry or endpoint, so hops "
+                "running on those are no longer walked. The same-kind hops that survive walk on "
+                "no more evidence than the label-presence test gave them. A refused hop is NOT "
+                "disproved: whether it composes anyway turns on the intermediate node's own "
+                "function surface, and this plane DOES NOT CONSULT IT — the surface usually "
+                "exists, so this is a join not performed rather than a witness that is missing, "
+                "and the join that would decide it is the intermediate node's own functions "
+                "against its outbound targets (effective_functions.sinks/effect_targets and the "
+                "external_call_target edges CONTROL_RELATIONS excludes). It is published as "
+                "not_determined rather than walked or dropped, as are the 55 role edges whose "
+                "label names no role at all, and reach_withheld_behind_hops sizes the subtree "
+                "each withheld frontier hop hides. One "
+                "residual is named rather than assumed away: the role branch asks only what the "
+                "role licenses at the destination and does not additionally require the seizing "
+                "capability to be one that governs role assignment, because the role edge names "
+                "a role and not the authority slot that grants it — there is no witness for that "
+                "half, so what is published is what the role LICENSES, an upper bound on what "
+                "this gate can exercise. Both "
+                "classes are bounded by each destination's own caller conditions. "
+                "provenance.reach_bounds.hop_census counts how many hops each rule walked and "
+                "on what basis, and provenance.reach_bounds.gate_conferral carries the two "
+                "joins' own coverage"
+            ),
+            "magnitude": (
+                "membership is not a magnitude: where no witness proves how much value the "
+                "reach MOVES, the dollar figure is not_determined and the finding keeps the "
+                "unpriced band's floor weight. The entity's balance sheet is never the answer"
+            ),
+        },
+        "model_version_migration": {
+            "from": "1.0.1-provisional",
+            "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+            # Three points, not two: the version floors an unwitnessed magnitude
+            # (lambda RISES) and then composes a witnessed one back (lambda
+            # FALLS), and a before/after pair hides that they move opposite ways.
+            "grade_lambda": [54.1614, 84.0166, 73.2508],
+            "letter": ["C+", "A−", "B+"],
+            "grade_lambda_reading": (
+                "shipped 1.0.1 -> magnitudes floored -> destination witnesses composed back; "
+                "only the first and last are published documents, the middle is this version's "
+                "own intermediate and is quoted so the two halves are not read as one move"
+            ),
+            "confidence_pct": [29.0, 18.6],
+            "exposure_usd": [1227107593.64, 18059003.86],
+            "what_moved": (
+                "a reach whose MAGNITUDE no witness proved stops charging the reached entity's "
+                "balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced "
+                "floor of 0.15, so lambda RISES and exposure collapses without any protocol "
+                "becoming safer. The composition pass then gives part of that class a WITNESSED "
+                "magnitude back - the destination function's own flow.out figure, reached along "
+                "a path every hop of which carries an act-as witness - which pushes lambda back "
+                "down from 84.0166 to 73.2508 and exposure back up from $76.07 to $18,059,003.86 "
+                "on witnesses, not on sheets. The band table carries 1.0.1's cut points forward "
+                "unchanged, so the letter delta is published rather than absorbed by a recut "
+                "nobody calibrated"
+            ),
+            "read_the_confidence_fall_correctly": (
+                "(a) the reach-magnitude term does NOT bind the headline on this corpus - the "
+                "min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; "
+                "(b) the strictest magnitude figure published, "
+                "reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and "
+                "composition is the only thing in this version that moves it: flooring an "
+                "unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the "
+                "40 signals composition answered and on nothing else; (c) the 29.0 -> 18.6 fall "
+                "happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude "
+                "term: the dust third state stopped counting a sheet whose only priced rows are "
+                "storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became "
+                "discovery-fixed, widening 295 -> 468 entities by admitting every recorded "
+                "discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal "
+                "principals — so the term now answers 'what share of {protocol contracts UNION "
+                "signer wallets} did we price', a strictly harder question than the one 33.7 "
+                "answered. The letter improvement here was NOT paid for by a "
+                "confidence fall in this change; both are real, and neither is the other's price"
+            ),
+            "what_composition_did_not_recover": (
+                "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities "
+                "carrying a flow.out magnitude covering 100% of reached priced value - is "
+                "PARTIALLY REFUTED on this corpus, because it counted the destination witness "
+                "and never the act-as step. Of 64 (hop, licensed selector) pairs the walk "
+                "offered, 27 carry an act-as witness and 19 of those also have a destination "
+                "flow.out witness, composing 13 entities and $46,164,146.29 across two findings. "
+                "The rest stay not_determined and are charged to confidence. The single largest "
+                "refusal class is a call site whose receiver is a PARAMETER, which is the whole "
+                "AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER "
+                "admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not "
+                "regain a witnessed magnitude, it and the two EOAs the shipped document "
+                "over-charged all sit at not_determined together"
+            ),
+            "operational_hazard_the_gate_conferral_test_introduces": (
+                "the state-variable branch reads the gate's OWN function through "
+                "function_score_signals.function_id, which is ON DELETE SET NULL against "
+                "effective_functions - and a re-analysis DELETES and reinserts a contract's "
+                "function rows. So a persisted signal that outlives one re-analysis of its "
+                "contract points at nothing, every one of its state-variable hops degrades to "
+                "capability_state_writes_not_extracted, and the row silently loses reach it held "
+                "the day before. The withhold is counted, but its cause would read as an "
+                "extraction that never ran rather than a stale foreign key. A dangling reference "
+                "therefore falls back to the signal's own (deployment entity, selector), which "
+                "the re-analysis preserves, admitted only where every function under that key "
+                "agrees on what it rewrites; the recovery population and the keys two functions "
+                "disagree under are published in "
+                "provenance.reach_bounds.gate_conferral.stale_function_reference_recovery. "
+                "Operators re-folding a protocol whose signals predate its last re-analysis "
+                "should expect that block to be non-zero and should read it before reading a "
+                "reach delta"
+            ),
+        },
         "uncalibrated_arms": list(UNCALIBRATED_ARMS),
     }

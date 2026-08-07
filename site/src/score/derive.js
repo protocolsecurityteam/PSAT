@@ -98,15 +98,26 @@ export function kindWord(kind) {
 
 // ── value ───────────────────────────────────────────────────────────────────
 
+// Which direction the producer proved the total bounds the principal in. Read
+// from the published field only: `value_at_stake_is_floor` is a boolean over a
+// three-sided question and cannot tell a floor from a sum of extraction
+// ceilings, so a document that carries only the boolean gets `null` — no badge
+// — rather than the floor its own flag would claim. `not_determined` is the
+// producer's fall-through and is itself no claim about the figure.
+export const BOUND_DIRECTIONS = ["floor", "ceiling", "not_determined"];
+
 // The value cell. `determined: false` is a third state — the band was never
 // measured — and must not render as $0 or as an empty cell.
 export function valueCell(finding) {
   const band = finding?.value_band;
-  if (!band || band === "not_determined") return { determined: false, text: null, floor: false };
+  if (!band || band === "not_determined") return { determined: false, text: null, direction: null };
+  const direction = finding?.value_at_stake_bound_direction;
   return {
     determined: true,
-    text: String(band).replace(/^>=\s*/, ""),
-    floor: finding?.value_at_stake_is_floor === true,
+    // Both qualifiers are stripped: the direction is carried as a state beside
+    // the band, never as a prefix a reader has to parse.
+    text: String(band).replace(/^[<>]=\s*/, ""),
+    direction: BOUND_DIRECTIONS.includes(direction) ? direction : null,
   };
 }
 
@@ -588,11 +599,18 @@ export const CONFIDENCE_CHANNELS = [
     name: "Value priced",
     desc: "Value-weighted share of the protocol's contracts holding any priced balance at all.",
   },
+  {
+    id: "reach_magnitude_witnessed_pct",
+    name: "Reach magnitude witnessed",
+    desc: "Value-weighted share of the perimeter where the magnitude question is answered or vacuous (an entity proven codeless has none).",
+  },
 ];
 
-// The headline is the MINIMUM of the three; the MIN tag goes on whichever
+// The headline is the MINIMUM of the channels; the MIN tag goes on whichever
 // channel actually is the minimum, so a re-ordering of the channels or a shift
-// in the data can never leave the tag pointing at the wrong one.
+// in the data can never leave the tag pointing at the wrong one. This list must
+// carry EVERY term the producer minimises over, or the tagged minimum and the
+// published confidence_pct can disagree.
 export function confidenceChannels(doc) {
   const detail = doc?.model_parameters?.confidence_detail || {};
   const channels = CONFIDENCE_CHANNELS.map((channel) => {

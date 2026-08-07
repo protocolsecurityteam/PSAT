@@ -63,7 +63,7 @@ from services.scoring.persist import (
     persist_score_document,
 )
 from services.scoring.population import replace_contract_signals
-from services.scoring.schema import FunctionSignal, ScoreDocument, not_determined_signal_defaults
+from services.scoring.schema import FunctionSignal, ScoreDocument, entity_key, not_determined_signal_defaults
 from tests.conftest import DATABASE_URL
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
@@ -1084,3 +1084,367 @@ def test_an_unreadable_document_is_not_reported_as_an_absent_score(fx, api_clien
 
     response = api_client.get(f"/api/company/{fx.protocol.name}/score")
     assert response.status_code == 503, "a body that could not be read is not a missing score"
+
+
+# --------------------------------------------------------------------------
+# W4a — the two conferral joins, read off real rows
+# --------------------------------------------------------------------------
+
+
+def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(fx):
+    """The role -> selector join, against the columns it actually reads.
+
+    ``function_principals.details.trace[]`` says role N at target T licenses
+    selector S; ``effective_functions.selector`` says which function of T that
+    is. A step whose selector names no analysed function of the target licenses
+    something this document cannot name, so it is counted and credited nowhere —
+    otherwise a magnitude would later be attributed to four bytes.
+    """
+    from db.models import FunctionPrincipal
+    from services.scoring import planes as P
+
+    contract = fx.contract()
+    target = fx.function(contract, name="exit")
+    target.selector = "0x18457e61"
+    holder = fx.function(contract, name="setUserRole")
+    fx.session.add(
+        FunctionPrincipal(
+            function_id=holder.id,
+            address="0x" + "5" * 40,
+            principal_type="controller",
+            details={
+                "trace": [
+                    {
+                        "step": "solmate_roles_authority",
+                        "roles": [5, 9],
+                        "target": contract.address,
+                        "selector": "0x18457e61",
+                        "authority": "0x" + "7" * 40,
+                    },
+                    {
+                        "step": "solmate_roles_authority",
+                        "roles": [5],
+                        "target": contract.address,
+                        "selector": "0xdeadbeef",
+                        "authority": "0x" + "7" * 40,
+                    },
+                ]
+            },
+        )
+    )
+    fx.session.commit()
+
+    plane = P.load_conferral_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", contract.address)
+    exit_fn = P.LicensedFunction("0x18457e61", "exit")
+    # Structured, not a formatted string: the selector is the join key back into
+    # effective_functions and a name containing a space breaks no parse.
+    assert exit_fn.as_json() == {"selector": "0x18457e61", "name": "exit"}
+    # Both roles of a multi-role step license the function; the union is the scope.
+    assert plane.licensed_functions(key, (5,)) == (exit_fn,)
+    assert plane.licensed_functions(key, (9,)) == (exit_fn,)
+    assert plane.licensed_functions(key, (5, 9)) == (exit_fn,)
+    # A role nobody witnessed licenses nothing that can be named.
+    assert plane.licensed_functions(key, (4,)) == ()
+    join = plane.provenance["role_selector_join"]
+    assert join["steps_whose_selector_names_no_analysed_function"] == 1
+    assert join["trace_steps_carrying_a_selector"] == 2
+
+
+def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
+    """Two functions of one capability confer differently, and the plane says so.
+
+    ``grant_for`` reads the SPECIFIC function's ``state_writes``; the class-wide
+    union is published beside it and used only by the census. Asking the class
+    for a walk would let one row's reach ride on another row's witness.
+    """
+    from services.scoring import planes as P
+
+    contract = fx.contract()
+    owns = fx.function(contract, name="transferOwnership")
+    owns.claims = [{"claim_id": "ownership.transfer", "tier": "standard_exact", "witness": {}}]
+    owns.state_writes = [{"var": "owner", "origin": "body"}, {"var": "_reentrancy", "origin": "guard"}]
+    other = fx.function(contract, name="transferOwnership2")
+    other.claims = [{"claim_id": "ownership.transfer", "tier": "standard_exact", "witness": {}}]
+    other.state_writes = [{"var": "_owner", "origin": "body"}]
+    fx.session.commit()
+
+    plane = P.load_conferral_plane(fx.session, fx.protocol.id)
+    # A guard-origin write is the modifier's bookkeeping, not what the gate does.
+    assert plane.grant_for("ownership.transfer", owns.id).rewrites == frozenset({"owner"})
+    assert plane.grant_for("ownership.transfer", other.id).rewrites == frozenset({"_owner"})
+    # The class-wide union is strictly wider than either, and is labelled as the
+    # census instrument it is.
+    assert plane.capability_grant("ownership.transfer").rewrites == frozenset({"owner", "_owner"})
+    scope = P.parse_edge_scope("_owner", "controller_value")
+    assert not plane.grant_for("ownership.transfer", owns.id).confers(scope, "ethereum::x").conferred
+    assert plane.grant_for("ownership.transfer", other.id).confers(scope, "ethereum::x").conferred
+    # A function with no extracted state_writes confers nothing and says which.
+    bare = fx.function(contract, name="renounceOwnership")
+    bare.state_writes = None
+    fx.session.commit()
+    grant = P.load_conferral_plane(fx.session, fx.protocol.id).grant_for("ownership.transfer", bare.id)
+    assert not grant.writes_extracted
+    assert grant.confers(scope, "ethereum::x").outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED
+
+
+def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
+    """W1a: the second act-as witness shape, read from where it actually lives.
+
+    The accepting role is at ``function_principals.details.trace[].roles``; a row
+    whose roles sit anywhere else names no role that admits a caller. Such a row
+    is still INDEXED, with empty roles, so the refusal can say "the list names
+    this caller and no role that admits it" rather than "the list does not name
+    this caller" — two different findings. ``membership_quality`` is carried
+    through so the plane can refuse a membership that was never enumerated, and
+    where one triple carries several rows the strongest is the one published.
+    """
+    from db.models import FunctionPrincipal
+    from services.scoring import planes as P
+
+    destination = fx.contract()
+    accepted = fx.function(destination, name="bulkWithdraw")
+    accepted.selector = "0x3e64ce99"
+    unroled = fx.function(destination, name="bulkDeposit")
+    unroled.selector = "0x9d574420"
+    garbled = fx.function(destination, name="refundDeposit")
+    garbled.selector = "0x5d0a5e1f"
+    other_kind = fx.function(destination, name="setAuthority")
+    other_kind.selector = "0x7a9e5e4b"
+    caller = "0x" + "8" * 40
+    fx.session.add_all(
+        [
+            # bounded below first, so a first-wins index would publish it
+            FunctionPrincipal(
+                function_id=accepted.id,
+                address=caller.upper(),
+                principal_type="controller",
+                details={
+                    "trace": [{"step": "solmate_roles_authority", "roles": [12], "selector": "0x3e64ce99"}],
+                    "membership_quality": "lower_bound",
+                },
+            ),
+            FunctionPrincipal(
+                function_id=accepted.id,
+                address=caller.upper(),
+                principal_type="controller",
+                details={
+                    "trace": [
+                        {"step": "solmate_roles_authority", "roles": [12], "selector": "0x3e64ce99"},
+                        {"step": "solmate_roles_authority", "roles": [3], "selector": "0x3e64ce99"},
+                    ],
+                    "membership_quality": "exact",
+                },
+            ),
+            # the shape the spec's table pointed at: roles OUTSIDE the trace
+            FunctionPrincipal(
+                function_id=unroled.id,
+                address=caller,
+                principal_type="controller",
+                details={"roles": [12], "membership_quality": "exact"},
+            ),
+            # JSONB is not a schema: every shape below is something the column
+            # can hold, and none of them is a role number.
+            FunctionPrincipal(
+                function_id=garbled.id,
+                address=caller,
+                principal_type="controller",
+                details={
+                    "trace": ["solmate_roles_authority", {"roles": "12"}, {"roles": [7, "8", None, True]}],
+                    "membership_quality": "exact",
+                },
+            ),
+            # a principal that is not a controller answers a different question
+            FunctionPrincipal(
+                function_id=other_kind.id,
+                address=caller,
+                principal_type="beneficiary",
+                details={
+                    "trace": [{"step": "solmate_roles_authority", "roles": [4]}],
+                    "membership_quality": "exact",
+                },
+            ),
+        ]
+    )
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", destination.address)
+    caller_key = entity_key("ethereum", caller)
+    row = plane.destination_acl[(key, "0x3e64ce99")][caller_key]
+    assert (row.roles, row.membership_quality, row.destination_function) == ((3, 12), "exact", "bulkWithdraw")
+    assert row.enumerated
+    # named, and naming no admitting role — indexed, and never admitted
+    no_role = plane.destination_acl[(key, "0x9d574420")][caller_key]
+    assert no_role.roles == () and no_role.membership_quality == "exact"
+    # only the entries that really are role numbers survive the read
+    assert plane.destination_acl[(key, "0x5d0a5e1f")][caller_key].roles == (7,)
+    assert (key, "0x7a9e5e4b") not in plane.destination_acl
+    acceptance = plane.provenance["destination_acceptance"]
+    assert acceptance["function_principal_rows_returned"] == 4
+    assert acceptance["rows_naming_an_admitting_role"] == 3
+    assert acceptance["membership_quality"] == {"exact": 3, "lower_bound": 1}
+    assert acceptance["principal_type_read"] == "controller"
+
+
+def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
+    """U1/B1: the loader is where the witness is kept or discarded.
+
+    Admission is the address comparison, so every ``controller_values`` row whose
+    read RETURNED an address is indexed whatever ``resolved_type`` calls that
+    address — dropping the non-``contract`` ones discarded stored reads on the
+    strength of a label, and published a coverage gap where the row holds an
+    answer. ``eth_call_error`` is the opposite case: a read the pipeline ISSUED
+    that reverted, carrying no address, indexed in its own map so it can satisfy
+    no receiver test and can never be published as a read that never happened.
+    """
+    from db.models import ControllerValue
+    from services.scoring import planes as P
+
+    holder = fx.contract()
+    held = "0x" + "9" * 40
+    kinds = ("contract", "safe", "timelock", "zero", "eoa", "unknown")
+    rows = [
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id=f"cv-{kind}",
+            source=f"var_{kind}",
+            value=held,
+            resolved_type=kind,
+            observed_via="eth_call",
+            block_number=25_657_731,
+        )
+        for kind in kinds
+    ]
+    rows += [
+        # a read that was attempted and reverted: no value, and the resolver's
+        # own 'unknown' beside it
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-failed",
+            source="boringVault",
+            value=None,
+            resolved_type="unknown",
+            observed_via="eth_call_error",
+            block_number=25_657_731,
+        ),
+        # a row with no classification at all — a third state, not 'contract'
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-null",
+            source="var_unclassified",
+            value=held,
+            resolved_type=None,
+            observed_via="eth_call",
+            block_number=25_657_731,
+        ),
+        # an observation kind that is neither a read nor a failed read
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-poll",
+            source="var_polled",
+            value=held,
+            resolved_type="contract",
+            observed_via="storage_poll",
+            block_number=25_657_731,
+        ),
+    ]
+    fx.session.add_all(rows)
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", holder.address)
+    held_key = entity_key("ethereum", held)
+
+    # every returned read is indexed, whatever the row calls the address...
+    for kind in kinds:
+        assert plane.reads[(key, f"var_{kind}")] == (held_key, "eth_call", 25_657_731), kind
+        assert plane.read_kinds[(key, f"var_{kind}")] == kind, kind
+    # ...including the one nothing classified, which carries no kind rather than
+    # a defaulted one
+    assert plane.reads[(key, "var_unclassified")][0] == held_key
+    assert (key, "var_unclassified") not in plane.read_kinds
+    # the failed read is NOT a read, and is kept where a receiver test cannot
+    # reach it
+    assert (key, "boringVault") not in plane.reads
+    assert plane.read_failures[(key, "boringVault")] == ("eth_call_error", 25_657_731)
+    # ...and an observation that is neither is still admitted as neither
+    assert (key, "var_polled") not in plane.reads
+    assert (key, "var_polled") not in plane.read_failures
+
+    reads = plane.provenance["receiver_reads"]
+    assert reads["state_variables_read_on_chain"] == len(kinds) + 1
+    assert reads["state_variables_whose_read_failed"] == 1
+    assert reads["resolved_type_of_each_read_row"] == {
+        "contract": 1,
+        "safe": 1,
+        "timelock": 1,
+        "zero": 1,
+        "eoa": 1,
+        "unknown": 1,
+        "not_determined": 1,
+    }
+    assert reads["observations_recorded_as_a_failed_read"] == ["eth_call_error"]
+    assert "eth_call_error" not in reads["observations_admitted"]
+
+    # ...and the plane answers with the read, not the label: a 'safe' pointer
+    # holding the destination witnesses the step, a 'zero' one earns its own
+    # proven-absent reason, and the reverted read earns a third that is neither.
+    plane.call_sites = {
+        (key, "0x18457e61"): (
+            ("callSafe", "restricted", "var_safe", True, "0x2ddd62ce"),
+            ("callZero", "restricted", "var_zero", True, "0x2ddd62ce"),
+            ("callFailed", "restricted", "boringVault", True, "0x2ddd62ce"),
+        )
+    }
+    assert plane.acts_as(key, held_key, "0x18457e61").witnessed
+    plane.call_sites[(key, "0x18457e61")] = plane.call_sites[(key, "0x18457e61")][1:]
+    other = entity_key("ethereum", "0x" + "a" * 40)
+    assert plane.acts_as(key, other, "0x18457e61").outcome == P.ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS
+    plane.call_sites[(key, "0x18457e61")] = plane.call_sites[(key, "0x18457e61")][1:]
+    assert plane.acts_as(key, other, "0x18457e61").outcome == P.ACT_AS_RECEIVER_READ_FAILED
+
+
+def test_two_disagreeing_reads_never_become_a_reverted_read(fx):
+    """The disagreement defeats the failure record, not the other way round.
+
+    A variable read twice to two different addresses resolves to nothing — and if
+    a failed read of the same variable were left indexed, the refusal would
+    become "the read reverted on chain", a sharper claim than the evidence
+    supports when reads that DID return are what defeated it.
+    """
+    from db.models import ControllerValue
+    from services.scoring import planes as P
+
+    holder = fx.contract()
+    fx.session.add_all(
+        [
+            ControllerValue(
+                contract_id=holder.id,
+                deployment_address=holder.address,
+                controller_id=f"cv-{i}",
+                source="vault",
+                value=value,
+                resolved_type="contract",
+                observed_via=observed,
+                block_number=1,
+            )
+            for i, (value, observed) in enumerate(
+                (("0x" + "1" * 40, "eth_call"), ("0x" + "2" * 40, "eth_call"), (None, "eth_call_error"))
+            )
+        ]
+    )
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", holder.address)
+    assert (key, "vault") not in plane.reads
+    assert (key, "vault") not in plane.read_failures
+    assert plane.provenance["receiver_reads"]["variables_two_reads_disagree_under"] == 1
+    plane.call_sites = {(key, "0x18457e61"): (("callVault", "restricted", "vault", True, "0x2ddd62ce"),)}
+    verdict = plane.acts_as(key, entity_key("ethereum", "0x" + "1" * 40), "0x18457e61")
+    assert verdict.outcome == P.ACT_AS_RECEIVER_NOT_READ

@@ -19,6 +19,7 @@ yields ``severity = not_determined`` and the row never enters the grade.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -36,12 +37,16 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from utils import execution_record as EX
+from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
     DESTINATION_FREE_CLAIMS,
     DESTINATION_SHAPE_NOT_APPLICABLE,
     DESTINATION_STATE_CONSTRAINED_PROVEN,
     DESTINATION_STATE_NOT_APPLICABLE,
     DESTINATION_STATE_UNCONSTRAINED_PROVEN,
+    MAGNITUDE_STATE_PROVEN_FLOOR,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
     NO_SELECTOR,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
@@ -64,6 +69,8 @@ from utils.scoring_status import (
     WITNESS_TIER_POLICY_DERIVED,
     WITNESS_TIER_STANDARD_EXACT,
 )
+
+logger = logging.getLogger(__name__)
 
 # Gate envelopes every signal carries, so the fold can read them without a
 # ``dict.get`` default standing in for an unread witness.
@@ -107,6 +114,16 @@ _SOLMATE_MUTATOR_SELECTORS: dict[str, str] = {
     "0x4b5159da": "setPublicCapability(bytes4,bool)",
 }
 _TIMELOCK_ENTRYPOINTS = frozenset({"schedule", "scheduleBatch", "execute", "executeBatch"})
+
+# The witness tiers a REPOINT may be admitted on, as an allowlist. A repoint adds
+# a foreign entity to a reach set, so the tier that named it has to be one this
+# scorer can vouch for. Stated positively on purpose: a denylist of
+# ``policy_derived`` admits every tier nobody classified, and an absent or
+# unrecognised ``tier`` token resolves to ``not_determined`` — a witness that
+# proved nothing would have been the easiest of all to pass.
+REPOINT_ADMISSIBLE_TIERS = frozenset(
+    {WITNESS_TIER_BEHAVIORAL_OBSERVED, WITNESS_TIER_STANDARD_EXACT, WITNESS_TIER_IDIOM_STRUCTURAL}
+)
 
 
 def _f(value: Any) -> float | None:
@@ -156,6 +173,16 @@ class _ContractFacts:
     pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
+    # Every entity key this protocol's own ``contracts`` rows name, chain-scoped.
+    # A reach key that names nothing in here names nothing this document can
+    # answer for, and charging it would both invent reach and spend exposure room
+    # belonging to an entity in the perimeter.
+    protocol_entities: set[str] = field(default_factory=set)
+    # How to read a stored transcript, for a verdict whose ``observed_residue``
+    # predates the execution record. ``None`` is the in-memory feeding mode with
+    # no session to read from, which reads as "not derivable here", never as
+    # "there is no execution".
+    transcripts: _TranscriptReader | None = None
 
 
 def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSignal]]:
@@ -190,6 +217,87 @@ def distill_contract_signals(session: Session, contract: Any, *, job_id: Any) ->
 # ---------------------------------------------------------------- plane reads
 
 
+# Transcript bodies, keyed by the ``(job_id, artifact_name)`` a pointer resolves
+# to. An artifact body is immutable once written — the key is the identity of a
+# stored object, not of a mutable row — so caching it across contracts inside one
+# score run cannot make the fold read two different answers to one question
+# (inv. 11). Cleared by :func:`clear_transcript_cache` for tests that stand up a
+# fresh bucket under the same keys.
+_TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def clear_transcript_cache() -> None:
+    """Drop the process-level transcript cache. For tests, which reuse keys."""
+    _TRANSCRIPT_CACHE.clear()
+
+
+class _TranscriptReader:
+    """Reads the execution behind a verdict out of the transcript it points at.
+
+    The record belongs on ``effect_verdicts.observed_residue`` and is written
+    there at production time. Every verdict produced before that write existed
+    carries none — which is not a statement that no call was made, because the
+    transcript the verdict already points at holds that call verbatim. This
+    reader recovers it, so a figure that CAN name its execution does, and the
+    typed refusal is reserved for the ones that genuinely cannot.
+
+    The database is not written. Nothing here backfills; the derivation happens
+    on the read path and is discarded with the score run.
+
+    Every failure to reach the body is its own typed reason, and they are not
+    interchangeable: an artifact row that does not exist, a row naming no
+    storage key, and a transport error are three different things to a reader
+    deciding whether to look again.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def execution(self, *, transcript_ptr: Any, effect_verdict_id: int | None) -> EX.ProvingExecution:
+        parts = EX.pointer_parts(transcript_ptr)
+        if parts is None:
+            return EX.not_determined(
+                EX.REASON_PTR_UNRESOLVABLE,
+                transcript_ptr=transcript_ptr if isinstance(transcript_ptr, str) else None,
+                effect_verdict_id=effect_verdict_id,
+            )
+        blob = self._body(parts)
+        if isinstance(blob, str):
+            return EX.not_determined(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
+        return EX.from_transcript(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
+
+    def _body(self, parts: tuple[str, str]) -> Any:
+        """The transcript body, or the typed reason token it could not be read."""
+        if parts in _TRANSCRIPT_CACHE:
+            return _TRANSCRIPT_CACHE[parts]
+        from db.models import Artifact
+        from db.queue import _artifact_row_to_value
+        from db.storage import StorageKeyAbsent, StorageKeyMissing
+
+        job_id, name = parts
+        try:
+            row = self._session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).one_or_none()
+            if row is None:
+                body: Any = EX.REASON_TRANSCRIPT_UNSTORED
+            else:
+                # The STORED key, never a constructed one: the prefix is per-job
+                # on this data (345 keys under one, 34 under another) and a
+                # reader that builds the key would miss a third of the corpus and
+                # report it as absence.
+                body = _artifact_row_to_value(row)
+        except StorageKeyAbsent:
+            body = EX.REASON_STORAGE_KEY_MISSING
+        except StorageKeyMissing:
+            body = EX.REASON_TRANSCRIPT_UNSTORED
+        except Exception:
+            # A transport failure says nothing about the call, so it is its own
+            # reason and invites a retry rather than asserting an absence.
+            logger.warning("transcript body unreadable for %s::%s", job_id, name, exc_info=True)
+            body = EX.REASON_FETCH_FAILED
+        _TRANSCRIPT_CACHE[parts] = body
+        return body
+
+
 def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _ContractFacts:
     from db.models import ControlGraphNode, ControllerValue, EffectiveFunction, EffectVerdict, FunctionPrincipal
 
@@ -207,6 +315,7 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         chain=chain,
         address=address,
         functions=functions,
+        transcripts=_TranscriptReader(session),
     )
     function_ids = [f.id for f in functions]
     if function_ids:
@@ -245,17 +354,33 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
     )
     facts.pause_unset_principals = _pause_unset_principals(facts)
 
+    from sqlalchemy import func as _sql_func
+
     from db.models import Contract as _Contract
 
-    # Protocol-scoped: another protocol's backlink names an entity outside this
-    # perimeter, and charging its value here would both invent reach and consume
-    # exposure room that belongs to this protocol's own entities.
+    facts.protocol_entities = {
+        entity_key(coalesce_chain(row_chain), row_address)
+        for row_address, row_chain in session.query(_Contract.address, _Contract.chain)
+        .filter(_Contract.protocol_id == contract.protocol_id)
+        .order_by(_Contract.id)
+        .all()
+    }
+
+    # The backlink node is written AT THE GATING CONTRACT'S ADDRESS, on the gated
+    # contract's graph, and its payload names the gated contract. So the node
+    # that licenses THIS contract is the one whose own address is this contract —
+    # matching instead on the payload address selects the nodes whose gated
+    # contract is this one, which is the node's own contract every time and
+    # licenses this contract to reach itself. Protocol-scoped: another protocol's
+    # backlink names an entity outside this perimeter, and charging its value
+    # here would both invent reach and consume exposure room that belongs to this
+    # protocol's own entities.
     backlinks = (
         session.query(ControlGraphNode)
         .join(_Contract, _Contract.id == ControlGraphNode.contract_id)
         .filter(
             _Contract.protocol_id == contract.protocol_id,
-            ControlGraphNode.details["gated_contract_backlink"]["gated_contract_address"].astext == address,
+            _sql_func.lower(ControlGraphNode.address) == address,
         )
         .order_by(ControlGraphNode.id)
         .all()
@@ -325,9 +450,16 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
     """Entities whose value this contract's gated functions may be charged with.
 
     The backlink is a REACHABILITY licence and nothing else: it never types the
-    contract it names, and a mismatch is not an earned negative — the mismatch
-    payload is byte-identical to the never-read one, so only the proven ``true``
-    arm is consumable and everything else stays ``not_determined``.
+    contract it names, it supplies no magnitude, and a mismatch is not an earned
+    negative — the mismatch payload is byte-identical to the never-read one, so
+    only the proven ``true`` arm is consumable and everything else stays
+    ``not_determined``.
+
+    ``backlinks`` are the nodes written AT this contract's address. The payload's
+    ``gated_contract_address`` must name the contract the node belongs to, which
+    is what makes the pair a licence rather than two unrelated facts sharing a
+    row. A licence onto this contract itself is dropped: it names no entity the
+    reach did not already hold.
     """
     from db.models import Contract
 
@@ -337,12 +469,14 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
         backlink = details.get("gated_contract_backlink")
         if not isinstance(backlink, dict):
             continue
-        if _lower(backlink.get("gated_contract_address")) != address:
-            continue
         if backlink.get("declared_vault_matches_gated_contract") is not True:
             continue
         anchor = session.get(Contract, node.contract_id)
         if anchor is None or anchor.protocol_id is None:
+            continue
+        if _lower(backlink.get("gated_contract_address")) != _lower(anchor.address):
+            # The payload names a contract other than the one whose graph the
+            # node sits on. Two facts in one row is not a licence.
             continue
         anchor_chain = coalesce_chain(anchor.chain)
         if anchor_chain != chain:
@@ -350,6 +484,8 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
             # deployments that share an address.
             continue
         key = entity_key(anchor_chain, anchor.address)
+        if key == entity_key(chain, address):
+            continue
         out.setdefault(
             key,
             {
@@ -745,10 +881,21 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             )
         return _Reach(
             state=VALUE_STATE_PROVEN_REACH,
+            # The ENTITY-SET bound, and it is exact here: ``keys`` is every
+            # holder the observation named, not a floor over them. A different
+            # axis from the magnitude state below, which grades the DOLLARS.
             bound=VALUE_BOUND_EXACT,
             entity_keys=keys,
             basis="observed_reach_value_usd(fork-proven)",
-            magnitude=_proven_number("proven_exact", value_usd),
+            # F4. This is the ATTRIBUTION path: the probe moved a compile-time
+            # constant amount and ``recipes._add_reach`` credited the holder's
+            # ENTIRE priced balance for the pair, discarding the transferred
+            # value. Nothing here witnesses that the call moves that balance, so
+            # the figure is an upper bound on what one call moves — exactness is
+            # unearnable in principle on this path. It is not re-pointed at
+            # ``proven_floor`` either: that state's prose means "at least this
+            # much", and this figure bounds the opposite direction.
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_UPPER_BOUND, value_usd),
             notes=("reach_holder_is_not_this_entity",) if holders and acting_key not in keys else (),
         )
 
@@ -761,7 +908,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
                 bound=VALUE_BOUND_FLOOR,
                 entity_keys=(acting_key,),
                 basis="observed_reach_floor_usd(>= floor, reach_indeterminate)",
-                magnitude=_proven_number("proven_floor", floor),
+                magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, floor),
             )
         # A 0.0 floor is "no proven bound": an all-unpriced sheet sums to the
         # same zero as a proven-empty one, and an ungated floor is not the
@@ -784,7 +931,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             bound=VALUE_BOUND_FLOOR,
             entity_keys=keys,
             basis="observed_reach_priced_usd(>= floor)",
-            magnitude=_proven_number("proven_floor", priced),
+            magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, priced),
             notes=("reach_partially_priced",),
         )
     if _is_true(observed.get("contract_balance_seeded")):
@@ -794,19 +941,139 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
     return _no_reach("reach_not_witnessed(not_determined)")
 
 
-def _repointed_entities(witness: dict[str, Any], facts: _ContractFacts) -> tuple[list[str], list[str]]:
-    """Entities the witness itself names as where the value is / what is affected."""
+def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> Tri[dict[str, Any]]:
+    """The execution that proved this signal's magnitude, as a gate envelope.
+
+    The gate answers a question the distiller can ALWAYS answer — "does a
+    persisted execution record exist for this signal?" — which is why both of its
+    states are proven. The record's own three-state answer to the different
+    question ("what execution proved this figure?") rides inside the payload,
+    together with the typed reason where there is none. It has to be spelled that
+    way round: a ``Tri.not_determined()`` envelope may carry no value at all, so
+    routing the negative through it would delete the reason, and a reader could
+    not tell a row that predates the record from a transcript that failed to
+    store.
+
+    Read off the claim witness the effects→claims bridge projects wherever the
+    record is persisted — that is the cheap path and the one every future verdict
+    takes. Where the residue carries none, the verdict's own transcript is read
+    (:class:`_TranscriptReader`), because the call IS in there and "not written
+    to the column" is not "not determined". Every verdict in the reference corpus
+    predates the write, so the fallback is the whole of the corpus's coverage
+    today and the fast path is the whole of it tomorrow. A fault reaching the
+    transcript keeps its own reason and is NOT collapsed into the residue's.
+
+    Which entry is read is :func:`_cited_verdict_entry`'s decision and NOT this
+    function's, so the execution published here and the ``effect_verdict_id`` the
+    signal publishes are the same row by construction rather than by two
+    independent scans that happen to agree. They did not agree before: this
+    function took the FIRST verdict-bearing entry and the signal took the LAST,
+    which on a claim carrying two would have paired one verdict's dollars with
+    another's caller — the failure ``_destination_magnitudes`` forbids one file
+    over. (No signal in the reference corpus carries two, so the disagreement was
+    latent; a comment asserting an invariant the code did not hold is the part
+    that was live.)
+    """
+    entry = _cited_verdict_entry(entries)
+    if entry is None:
+        return Tri.proven(EX.GATE_STATE_NOT_RECORDED, EX.not_determined(EX.REASON_NO_VERDICT).as_json())
+    witness = entry.get("witness") or {}
+    verdict_id = int(witness["effect_verdict_id"])
+    verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == verdict_id), None)
+    if verdict is None:
+        record = EX.not_determined(EX.REASON_VERDICT_NOT_LOCATED, effect_verdict_id=verdict_id)
+    else:
+        observed = witness.get("observed") or {}
+        transcript_ptr = getattr(verdict, "transcript_ptr", None)
+        record = EX.from_residue(
+            observed.get(PROVING_EXECUTION_KEY),
+            transcript_ptr=transcript_ptr,
+            effect_verdict_id=verdict_id,
+        )
+        if not record.is_recorded and facts.transcripts is not None:
+            record = facts.transcripts.execution(transcript_ptr=transcript_ptr, effect_verdict_id=verdict_id)
+    state = EX.GATE_STATE_RECORDED if record.is_recorded else EX.GATE_STATE_NOT_RECORDED
+    return Tri.proven(state, record.as_json())
+
+
+def _verdict_bearing_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every claim entry naming an effect verdict, in stored order."""
+    return [e for e in entries if ((e.get("witness") or {}).get("effect_verdict_id")) is not None]
+
+
+def _cited_verdict_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The ONE entry whose verdict this signal is about, or ``None``.
+
+    The LAST verdict-bearing entry, which is the rule the published
+    ``effect_verdict_id`` already used — preserved rather than replaced, because
+    changing which verdict a signal cites is a claim change and this seam exists
+    to remove a disagreement, not to introduce one.
+
+    A claim carrying TWO verdicts is a genuine ambiguity and is disclosed at the
+    call site rather than resolved silently here: the rule below is stored order,
+    which is not evidence about which verdict the claim is really about.
+    """
+    bearing = _verdict_bearing_entries(entries)
+    return bearing[-1] if bearing else None
+
+
+def _repointed_entities(
+    entry: dict[str, Any], facts: _ContractFacts
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """Entities the witness itself names as where the value is / what is affected.
+
+    A repoint adds a foreign entity to a reach set, which is the same act as the
+    backlink licence one screen up — and it was performed with none of that
+    function's checks: no protocol, no chain, no existence, and no check that the
+    witness naming the entity is a witness that proved anything about value.
+
+    Three admissions, each earned:
+
+    * The witness must be a VALUE witness, and that is tested as an ALLOWLIST of
+      the tiers that are one (``REPOINT_ADMISSIBLE_TIERS``). A denylist of
+      ``policy_derived`` would admit every tier nobody has classified — including
+      the ``not_determined`` an absent or unrecognised ``tier`` token falls to,
+      which is precisely a witness that proved nothing. A ``policy_derived``
+      claim is a static inference — the ``configures`` producer's own docstring
+      concedes that "the written set-var stands in for the spec's 'read by the
+      hook fn'" — and an inference about what a function configures is not
+      evidence about where value sits.
+    * The named address must be a contract of THIS protocol on THIS chain, the
+      same three checks :func:`_licensed_reach_entities` makes.
+    * The burn address is never an entity. It is the graph's single largest
+      fan-out and the sentinel every renunciation writes.
+
+    A repoint never supplies a magnitude and never upgrades ``value_state``:
+    naming a callee proves a call, not that value moves. Refusals are returned
+    rather than dropped, so a reach this scorer declined is visible on the signal
+    instead of being absent from it.
+    """
+    from services.scoring.planes import is_zero_key
+
+    witness = entry.get("witness") or {}
     keys: list[str] = []
     bases: list[str] = []
-    callee = witness.get("callee")
-    if callee:
-        keys.append(entity_key(facts.chain, callee))
-        bases.append("witness.callee")
-    configures = witness.get("configures")
-    if configures:
-        keys.append(entity_key(facts.chain, configures))
-        bases.append("witness.configures")
-    return keys, bases
+    refused: list[dict[str, Any]] = []
+    tier = _tier(entry)
+    for field_name, basis in (("callee", "witness.callee"), ("configures", "witness.configures")):
+        named = witness.get(field_name)
+        if not named:
+            continue
+        key = entity_key(facts.chain, named)
+        if tier == WITNESS_TIER_POLICY_DERIVED:
+            why = "witness_tier_policy_derived(a static inference, not a value witness)"
+        elif tier not in REPOINT_ADMISSIBLE_TIERS:
+            why = f"witness_tier_not_determined({tier}; no tier token this scorer can vouch for)"
+        elif is_zero_key(key):
+            why = "zero_address_is_a_burn_sentinel_not_an_entity"
+        elif key not in facts.protocol_entities:
+            why = "named_entity_is_not_a_contract_of_this_protocol_on_this_chain"
+        else:
+            keys.append(key)
+            bases.append(basis)
+            continue
+        refused.append({"entity_key": key, "basis": basis, "witness_tier": tier, "why": why})
+    return keys, bases, refused
 
 
 # ---------------------------------------------------------------- the signals
@@ -1037,12 +1304,36 @@ def _build_signal(
     extra_keys: list[str] = []
     if reach.state == VALUE_STATE_PROVEN_REACH and licensed:
         extra_keys = [entry["entity_key"] for entry in licensed]
+    if licensed:
+        # ``licensed`` is a fact about the GATE — this contract is the gating
+        # contract of those vaults — and it is stamped whatever this signal's own
+        # reach turned out to be. The licence is consumed as a reach key only
+        # where the signal ALSO proved reach; on every other signal the state
+        # names a witness that was cited and not spent, and reading it as a
+        # consumed reach key is the laundering this field was corrected to stop.
+        citations.append(
+            {
+                "field": "reach_gate_state",
+                "value": REACH_GATE_LICENSED,
+                "licensed_keys_cited": len(licensed),
+                "licensed_keys_consumed": len(extra_keys),
+                "reading": (
+                    "licensed names the gate witness, not a consumed reach key: the keys are "
+                    "added to this signal's reach only where the signal proved reach of its own"
+                ),
+            }
+        )
     keys = tuple(sorted(set(reach.entity_keys) | set(extra_keys)))
     fields["value_state"] = reach.state
     fields["value_bound"] = reach.bound
     fields["value_entity_keys"] = keys if reach.state == VALUE_STATE_PROVEN_REACH else ()
     fields["value_basis"] = reach.basis
     gates["reach_magnitude_usd"] = reach.magnitude.to_json()
+    # F6: the execution that PROVED the figure above, carried BESIDE it. The two
+    # travel together or the fold publishes a number with no account of the call
+    # it came from — which is what every consumer of this magnitude has had until
+    # now, because the caller exists only inside the transcript blob.
+    gates[PROVING_EXECUTION_KEY] = _proving_execution_gate(facts, func, entries).to_json()
     notes.update(reach.notes)
 
     # --- claim-scoped gates -------------------------------------------------
@@ -1051,11 +1342,20 @@ def _build_signal(
     if claim_id == "pause.set":
         gates.update(_pause_gates(facts, func, entries))
 
+    # ONE rule, read once, so the signal's own citation and the execution record
+    # in ``gate_inputs`` name the same verdict by construction. Every
+    # verdict-bearing entry still travels as a citation below — the ambiguity is
+    # disclosed, not collapsed — and a claim naming more than one says so in its
+    # notes rather than letting stored order settle it in silence.
+    cited = _cited_verdict_entry(entries)
+    if cited is not None:
+        fields["effect_verdict_id"] = int((cited.get("witness") or {})["effect_verdict_id"])
+    if len(_verdict_bearing_entries(entries)) > 1:
+        notes.add("multiple_effect_verdicts_on_one_claim")
     for entry in entries:
         witness = entry.get("witness") or {}
         verdict_id = witness.get("effect_verdict_id")
         if verdict_id is not None:
-            fields["effect_verdict_id"] = int(verdict_id)
             verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == int(verdict_id)), None)
             # inv.9: a published verdict carries its transcript pointer, or is
             # published WITHOUT a traceability claim — never as "no transcript".
@@ -1121,15 +1421,20 @@ def _reach_for_claim(
                 best = candidate
         reach = best or _no_reach("reach_not_witnessed(not_determined)")
         for entry in entries:
-            keys, bases = _repointed_entities(entry.get("witness") or {}, facts)
+            keys, bases, refused = _repointed_entities(entry, facts)
+            _cite_refused_repoints(refused, citations)
             if keys and reach.state == VALUE_STATE_PROVEN_REACH:
                 reach = _Reach(
                     state=reach.state,
                     bound=reach.bound,
                     entity_keys=tuple(sorted(set(reach.entity_keys) | set(keys))),
                     basis=reach.basis + "+" + ",".join(bases),
+                    # The magnitude the flow witness proved, unchanged. A repoint
+                    # widens WHERE that one call's value may sit; it does not
+                    # multiply the call, and the per-call cap holds the sum of
+                    # the widened key set to the figure the witness proved.
                     magnitude=reach.magnitude,
-                    notes=reach.notes,
+                    notes=reach.notes + ("reach_repointed_by_witness",),
                 )
                 citations.append({"field": bases[0], "value": keys})
         return reach
@@ -1155,20 +1460,39 @@ def _reach_for_claim(
     repointed: list[str] = []
     bases: list[str] = []
     for entry in entries:
-        keys, entry_bases = _repointed_entities(entry.get("witness") or {}, facts)
+        keys, entry_bases, refused = _repointed_entities(entry, facts)
+        _cite_refused_repoints(refused, citations)
         repointed.extend(keys)
         bases.extend(entry_bases)
-    if claim_id in K.BASE_SEVERITY or repointed:
-        keys = tuple(sorted({acting_key, *repointed}))
-        basis = "acting_entity" + ("+" + ",".join(sorted(set(bases))) if bases else "")
-        return _Reach(
-            state=VALUE_STATE_PROVEN_REACH,
-            bound=VALUE_BOUND_FLOOR,
-            entity_keys=keys,
-            basis=basis,
-            magnitude=Tri[float].not_determined(),
+    if claim_id not in K.BASE_SEVERITY:
+        # A named callee is not a capability. Reading the repoint as one is what
+        # promoted six ``flow.in`` rows from capability_not_scored to
+        # proven_reach purely because a witness named an address — an upgrade of
+        # the reach STATE out of a fact about call structure.
+        return _no_reach("capability_not_scored(not_determined)")
+    keys = tuple(sorted({acting_key, *repointed}))
+    basis = "acting_entity" + ("+" + ",".join(sorted(set(bases))) if bases else "")
+    return _Reach(
+        state=VALUE_STATE_PROVEN_REACH,
+        bound=VALUE_BOUND_FLOOR,
+        entity_keys=keys,
+        basis=basis,
+        magnitude=Tri[float].not_determined(),
+    )
+
+
+def _cite_refused_repoints(refused: list[dict[str, Any]], citations: list[dict[str, Any]]) -> None:
+    """A declined repoint is published, never absent.
+
+    An admitted repoint travels as a citation; a refused one that travelled as
+    nothing would be indistinguishable from a witness that named no entity at
+    all, and the two are opposite facts about how much reach this row is not
+    claiming.
+    """
+    for entry in refused:
+        citations.append(
+            {"field": entry["basis"], "value": entry["entity_key"], "admitted": False, "why": entry["why"]}
         )
-    return _no_reach("capability_not_scored(not_determined)")
 
 
 def _reach_rank(reach: _Reach) -> tuple[int, int]:

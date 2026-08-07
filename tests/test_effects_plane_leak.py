@@ -44,6 +44,7 @@ from services.effects.selection import AssetHolding, Candidate  # noqa: E402
 from services.effects.simulate import SimCallResult, SimResult  # noqa: E402
 from tests.cache_helpers import requires_postgres  # noqa: E402
 from tests.test_effects_harness import RecordingStore, ok, transfer_log  # noqa: E402
+from utils.execution_record import PROVING_EXECUTION_KEY  # noqa: E402
 from utils.logging import degraded_errors_var, stage_metrics_var  # noqa: E402
 from workers.effects_worker import EffectsWorker, _Seams  # noqa: E402
 
@@ -376,12 +377,20 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert RECIPIENT.lower() not in body.lower()
     assert str(REACH_USD) not in body
     assert not any(k.startswith(("observed_reach", "reach_")) for k in (cached.details or {}))
+    # The PROVING EXECUTION is the same class of fact and obeys the same rule: an
+    # impersonated caller at one block is one deployment's observation, and a
+    # cache hit republishing it would name another contract's call as this one's
+    # proof.
+    assert PROVING_EXECUTION_KEY not in (cached.details or {})
+    assert PRINCIPAL.lower() not in body.lower()
     # ...while the code-plane witness the cache exists to carry is intact.
     assert (cached.details or {})["value_moved"] is True
 
     # The observation itself is not lost — it landed on the deployment's own row.
     row = session.query(EffectVerdict).one()
-    assert row.observed_residue == {
+    residue = dict(row.observed_residue or {})
+    execution = residue.pop(PROVING_EXECUTION_KEY)
+    assert residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
         # The reach-determined discriminator and the asset list ride the STATE plane with the figures
@@ -393,6 +402,11 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
         # protocol has no snapshot, so the honest answer is "not checked".
         "reach_tvl_check": "skipped_no_tvl",
     }
+    # The figure and the call that proved it are on the same row, which is the
+    # whole point: a magnitude reaching a consumer without its execution is a
+    # number with no account of itself.
+    assert execution["caller"] == PRINCIPAL.lower()
+    assert execution["target"] == CONTRACT_A.lower()
 
 
 @requires_postgres

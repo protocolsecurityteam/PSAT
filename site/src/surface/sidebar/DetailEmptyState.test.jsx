@@ -68,13 +68,13 @@ describe("DetailEmptyState — score card", () => {
   it("renders the calibrated grade, ledger and fix-first from the published document", async () => {
     setFetchHandler(/\/api\/company\/scored\/score$/, () => SCORE_ETHERFI);
     renderPanel({ companyName: "scored" });
-    await waitFor(() => expect(screen.getByText("C+")).toBeInTheDocument());
-    expect(screen.getByText(/54\.8 \/ 100/)).toBeInTheDocument();
-    expect(screen.getByText(/confidence 20\.7%/)).toBeInTheDocument();
-    expect(screen.getByText(/54\.8 kept/)).toBeInTheDocument();
-    expect(screen.getByText(/across 19 findings/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("B+")).toBeInTheDocument());
+    expect(screen.getByText(/73\.3 \/ 100/)).toBeInTheDocument();
+    expect(screen.getByText(/confidence 18\.6%/)).toBeInTheDocument();
+    expect(screen.getByText(/73\.3 kept/)).toBeInTheDocument();
+    expect(screen.getByText(/across 27 findings/)).toBeInTheDocument();
     // The fix-first sentence is the derivation the score page publishes.
-    expect(screen.getByText(/Move the two EOA authority holes/)).toBeInTheDocument();
+    expect(screen.getByText(/Harden the two Safe authority holes/)).toBeInTheDocument();
     // Audit posture rides the same document — no separate fetch.
     expect(screen.getByText(/64 on file/)).toBeInTheDocument();
     // The #score hash asks the overview's band to open + scroll on arrival.

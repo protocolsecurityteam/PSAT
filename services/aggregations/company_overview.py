@@ -1933,7 +1933,10 @@ def _protocol_reach_edges(
     Mirrors ``services.scoring.planes.load_control_closure`` exactly: every
     ``ControlGraphEdge`` row of the protocol whose relation is in
     ``SCORER_REACH_RELATIONS`` (reversed to authority direction), plus the
-    ``Contract.admin`` column pairs. Deliberately NOT restricted to the
+    ``Contract.admin`` AND ``Contract.beacon`` column pairs — the two column
+    witnesses the loader admits, kept in step here so the surface graph cannot
+    route a path the score document does not hold, or miss one it does.
+    Deliberately NOT restricted to the
     contracts that make this payload's list — the scorer isn't either, so a
     score-document reach can route through an implementation or an orphaned
     contract row this page never renders, and the surface graph must carry
@@ -1966,9 +1969,9 @@ def _protocol_reach_edges(
         rows.append((_coalesce_chain(chain), holder, subject, edge.relation, edge.label or None))
     for contract in session.query(Contract).filter(Contract.protocol_id.in_(id_list)).order_by(Contract.id).all():
         address = (contract.address or "").lower()
-        admin = (contract.admin or "").lower()
-        if address and admin and admin != address and _ZERO_ADDR not in (address, admin):
-            rows.append((_coalesce_chain(contract.chain), admin, address, None, None))
+        for column in ((contract.admin or "").lower(), (contract.beacon or "").lower()):
+            if address and column and column != address and _ZERO_ADDR not in (address, column):
+                rows.append((_coalesce_chain(contract.chain), column, address, None, None))
     return rows
 
 
