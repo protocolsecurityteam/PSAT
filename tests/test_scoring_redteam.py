@@ -3973,26 +3973,30 @@ def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
 def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floor(fold):
     """The row header published BOTH directions of one bound.
 
-    Every dollar of this row's value is a composed figure, and each of them is
-    disclosed per entry as ``principal_extraction_bound: ceiling`` riding on a
-    ``caller_holding_precondition`` that is not_determined. The header said
-    ``value_at_stake_is_floor`` and the band said ``">= "``, so the same row
-    published a floor over a sum of ceilings — and the UI painted the badge.
-    Ceilings do not become a floor by being summed, and the coverage gaps mean
-    the total is not a ceiling on the row either.
+    Every dollar of this row's value is a composed figure, and the row names
+    which entities those are. The header said ``value_at_stake_is_floor`` and
+    the band said ``">= "``, so the same row published a floor over a sum of
+    ceilings — and the UI painted the badge. Ceilings do not become a floor by
+    being summed, and the coverage gaps mean the total is not a ceiling on the
+    row either.
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
     row = _gate_row(document)
     assert row["value_at_stake_usd"] == 1_000_000.0
     assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
-    assert [c["principal_extraction_bound"] for c in row["reach_composed_magnitudes"]] == ["ceiling"]
+    # The per-entry bound label and the caller-holding block are DELETED, not
+    # corrected: one asserted a direction the entry never derived, the other was
+    # one constant string false on 30% of what carried it.
+    entry = row["reach_composed_magnitudes"][0]
+    assert "principal_extraction_bound" not in entry
+    assert "caller_holding_precondition" not in entry
     assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert row["value_at_stake_is_floor"] is False
     assert row["value_band"] == "$1M-$10M"
     basis = row["value_at_stake_basis"]
     assert "NEITHER" in basis and "CEILING" in basis
     # The basis POINTS at the per-entry disclosure rather than restating it.
-    assert "reach_composed_magnitudes[].principal_extraction_bound" in basis
+    assert "reach_composed_magnitudes[]" in basis
     assert not basis.startswith(">=")
 
 
@@ -4641,35 +4645,28 @@ def test_w2_case1_the_two_hop_chain_composes_through_both_links(fold):
     assert KEY_T not in {e["entity"] for e in row["reach_composed_magnitudes"]}
 
 
-def test_w2_the_composed_figure_is_published_as_a_ceiling_with_its_precondition(fold):
-    """Ruling 3. The number bounds the destination, not the principal.
+def test_w2_the_composed_figure_carries_no_authored_precondition_block(fold):
+    """F3, cut. The block that hedged the figure was one constant string.
 
-    The flow.out witness is a fork proof of what one call MOVES; nothing in it
-    models who calls or what they hold, and the chain's last admitted call
-    spends a quantity its caller must already have. That quantity is
-    not_determined here, so the figure is a ceiling and the entry says so — and
-    the caller's own sheet is published beside it as CONTEXT, never as the
-    bound: a $0 spot balance is not a proof that the chain moves nothing.
+    ``caller_holding_precondition`` was 1,222 characters, identical on all forty
+    entries of the reference corpus, and its central clause — that the last
+    admitted call spends a quantity the caller must hold — is FALSE on the
+    twelve whose destination is ``manage``. It is deleted rather than reworded,
+    and with it ``principal_extraction_bound``, which named a direction the
+    entry derived from nothing. What survives is what the entry can account for:
+    the figure, the sheet that bounded it, and the execution that proved it.
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_two_hop_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
-    assert entry["principal_extraction_bound"] == "ceiling"
+    assert "caller_holding_precondition" not in entry
+    assert "principal_extraction_bound" not in entry
+    assert not hasattr(FOLD, "_CallerHoldingPrecondition")
+    assert not hasattr(FOLD, "COMPOSED_BOUND_CALLER_ARGUMENTS")
     # The witness was READ from one function's row and measures the entity.
     assert entry["witness_granularity"] == "entity"
-
-    precondition = entry["caller_holding_precondition"]
-    assert precondition["state"] == "not_determined"
-    assert precondition["bound_kind"] == FOLD.COMPOSED_BOUND_CALLER_ARGUMENTS
-    # The caller the DESTINATION's list admitted — the entity whose msg.sender
-    # identity the destination's own preconditions are written against — and
-    # not the principal and not the intermediate.
-    assert precondition["caller"] == KEY_C
-    assert (precondition["caller_sheet_usd"], precondition["caller_sheet_state"]) == (None, P.SHEET_NO_ROWS)
-    for fragment in ("CEILING", "never a floor", "NOT the bound", "same transaction"):
-        assert fragment in precondition["reading"], fragment
-    # ...and the unwitnessed precondition did NOT become a bound: an absence
-    # priced as zero would be the mirror of the defect this run repairs.
+    # ...and deleting the hedge did not delete the figure or its account.
     assert entry["published_usd"] == 1_000_000.0
+    assert entry["proving_execution"]["state"] in ("recorded", "not_determined")
 
 
 def test_w2_case2_the_condition_disproved_hop_is_not_resurrected_by_composition(fold):
@@ -5610,7 +5607,6 @@ def _candidate(
         usd=usd,
         sheet_usd=None,
         chain=chain,
-        caller_holding=FOLD._CallerHoldingPrecondition(chain[-1].caller, "caller_supplied_arguments", None, "no_rows"),
         predicates=P.DestinationPredicates(P.PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0),
         execution=EX.not_determined(EX.REASON_NOT_PERSISTED),
     )
@@ -5629,7 +5625,6 @@ def _identity(entry: Any) -> tuple[Any, ...]:
         entry.function,
         entry.witness_state,
         tuple(tuple(sorted((k, repr(v)) for k, v in s.as_json().items())) for s in entry.chain),
-        entry.caller_holding.caller,
     )
 
 
@@ -5788,13 +5783,12 @@ def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
     # all stay, which is why the block is not readable as unmet conditions.
     assert AUTH_GUARD in block["descriptions"] and SSA_MARKER in block["descriptions"]
     assert block["evaluated"] is False
-    for fragment in ("WITHOUT POLARITY", "EVALUATES", "authorization guard", "caller_holding_precondition"):
+    for fragment in ("WITHOUT POLARITY", "EVALUATES", "authorization guard"):
         assert fragment in block["reading"], fragment
-    # A sibling of caller_holding_precondition, never folded into it: the two
-    # answer different questions and merging them would republish an unpolarised
-    # string set as a bound.
+    # The reading's clause (4) pointed at caller_holding_precondition, which is
+    # cut — a dangling cross-reference is a claim that a field exists.
+    assert "caller_holding_precondition" not in block["reading"]
     assert "bound_kind" not in block
-    assert entry["caller_holding_precondition"]["bound_kind"] == FOLD.COMPOSED_BOUND_CALLER_ARGUMENTS
 
 
 def test_u3_the_predicates_ride_on_both_act_as_witness_shapes(fold):
