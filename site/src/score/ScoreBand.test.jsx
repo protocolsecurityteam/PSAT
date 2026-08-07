@@ -71,16 +71,16 @@ describe("ScoreBand — states", () => {
 describe("ScoreBand — computed grade", () => {
   it("renders the letter, λ, ledger and stats from the document", () => {
     const { container } = renderBand({ score: ETHERFI });
-    expect(screen.getByText("C+")).toBeInTheDocument();
-    expect(screen.getByText("54.8")).toBeInTheDocument();
-    expect(screen.getByText(/provisional · confidence 20.7%/)).toBeInTheDocument();
-    expect(screen.getByText("54.8 kept")).toBeInTheDocument();
-    expect(screen.getByText("71.7")).toBeInTheDocument();
-    expect(screen.getByText("+41 subsumed")).toBeInTheDocument();
+    expect(screen.getByText("B+")).toBeInTheDocument();
+    expect(screen.getByText("73.3")).toBeInTheDocument();
+    expect(screen.getByText(/provisional · confidence 18.6%/)).toBeInTheDocument();
+    expect(screen.getByText("73.3 kept")).toBeInTheDocument();
+    expect(screen.getByText("99.6")).toBeInTheDocument();
+    expect(screen.getByText("+55 subsumed")).toBeInTheDocument();
     // kept + 6 deduction segments + the sub-0.4pt tail
     expect(container.querySelectorAll(".sc-ledger-seg")).toHaveLength(8);
     expect(container.querySelector(".sc-ledger-seg.sc-ded").getAttribute("title")).toBe(
-      "EOA · authority.replace · −20.25",
+      "Safe 4/6 · authority.replace · −14.70",
     );
   });
 
@@ -97,22 +97,27 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
-    const tail = screen.getByRole("button", { name: /11 more/ });
-    expect(tail.textContent).toContain("−0.12 combined");
-    expect(tail.textContent).toContain("8 with value not determined");
+    const tail = screen.getByRole("button", { name: /19 more/ });
+    expect(tail.textContent).toContain("−0.18 combined");
+    expect(tail.textContent).toContain("18 with value not determined");
     await userEvent.setup().click(tail);
-    expect(container.querySelectorAll(".sc-frow")).toHaveLength(19);
+    expect(container.querySelectorAll(".sc-frow")).toHaveLength(27);
   });
 
-  it("tags a floor band and italicises an undetermined one — never $0", async () => {
+  it("tags a bound the producer proved and italicises an undetermined one — never $0", async () => {
+    // The corpus carries NO floor row: the producer withdrew the direction from
+    // every row that had one, because a total summed out of extraction ceilings
+    // is not an at-least. What each priced row wears is the fall-through badge,
+    // which is a published state and not a missing field.
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
-    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
     const cells = [...container.querySelectorAll(".sc-val")];
-    const floor = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
-    expect(within(floor).getByText("floor")).toBeInTheDocument();
+    expect(cells.some((c) => within(c).queryByText("floor"))).toBe(false);
+    const priced = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
+    expect(within(priced).getByText("bound not determined")).toBeInTheDocument();
     const nd = cells.filter((c) => c.querySelector(".sc-nd"));
-    expect(nd).toHaveLength(8);
+    expect(nd).toHaveLength(23);
     expect(nd[0].textContent).toBe("value not determined");
     expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
   });
@@ -137,7 +142,7 @@ describe("ScoreBand — computed grade", () => {
       <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={doc} error={null} />,
     );
     await openBreakdown();
-    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
     const cells = [...container.querySelectorAll(".sc-val")].filter((c) =>
       c.textContent.includes("$1M-$10M"),
     );
@@ -147,14 +152,14 @@ describe("ScoreBand — computed grade", () => {
       expect(cell.textContent).not.toContain("<=");
       return cell.querySelector(".sc-fl")?.textContent ?? null;
     });
-    // The document's fourth $1M-$10M row is untouched and keeps its floor.
-    expect(badges.sort()).toEqual(["bound not determined", "ceiling", "floor", null]);
+    // The rows the case did not touch keep whatever the producer published.
+    expect(badges.sort()).toEqual(["bound not determined", "ceiling", null]);
   });
 
   it("marks unwitnessed reach differently from proven reach", async () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
-    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
     const targets = [...container.querySelectorAll(".sc-targets")];
     const unwitnessed = targets.filter((t) => t.textContent.includes("reach not witnessed"));
     expect(unwitnessed.length).toBeGreaterThan(0);
@@ -169,21 +174,22 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     const firstRow = container.querySelector(".sc-frow .sc-targets");
-    expect(within(firstRow).getByRole("button", { name: /\+5 more/ })).toBeInTheDocument();
-    await user.click(within(firstRow).getByRole("button", { name: /\+5 more/ }));
+    const more = /\+\d+ more/;
+    expect(within(firstRow).getByRole("button", { name: more })).toBeInTheDocument();
+    await user.click(within(firstRow).getByRole("button", { name: more }));
     expect(within(firstRow).getByRole("button", { name: "less" })).toBeInTheDocument();
     expect(firstRow.textContent).toContain("0xeda6…4e70");
     await user.click(within(firstRow).getByRole("button", { name: "less" }));
-    expect(within(firstRow).getByRole("button", { name: /\+5 more/ })).toBeInTheDocument();
+    expect(within(firstRow).getByRole("button", { name: more })).toBeInTheDocument();
   });
 
   it("renders the modeled fix-first recovery from a re-fold", async () => {
     renderBand({ score: ETHERFI });
     await openBreakdown();
     const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
-    expect(fix.textContent).toContain("Move the two EOA authority holes");
-    expect(fix.textContent).toContain("9.6 points");
-    expect(fix.textContent).toContain("λ 54.8 → 64.3");
+    expect(fix.textContent).toContain("Harden the two Safe authority holes");
+    expect(fix.textContent).toContain("10.8 points");
+    expect(fix.textContent).toContain("λ 73.3 → 84.0");
     expect(fix.textContent).toContain("ownership.transfer");
     expect(fix.textContent).toContain("fixing setAuthority alone does not release them");
   });
@@ -193,11 +199,11 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     expect(screen.getByText(/each dollar weighted by how dangerous/)).toBeInTheDocument();
     const saved = [...container.querySelectorAll(".sc-prot-saved")].map((n) => n.textContent);
-    expect(saved).toEqual(["+41.8", "+23.3", "+11.1", "+11.1"]);
+    expect(saved).toEqual(["+27.3", "+17.8", "+0.9", "+0.9"]);
     expect(screen.getByText("64 reports on file")).toBeInTheDocument();
     expect(screen.getByText(/12 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
     const byContract = screen.getByText(/contracts matched to an audit/);
-    expect(byContract.textContent).toContain("54 / 210");
+    expect(byContract.textContent).toContain("57 / 234");
     expect(byContract.textContent).toContain("35");
   });
 
@@ -231,20 +237,20 @@ describe("ScoreBand — computed grade", () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
     const channels = [...container.querySelectorAll(".sc-channel")];
-    // Four terms: the fourth (reach magnitude witnessed) is absent from this
-    // fixture, so it renders unmeasured and can never carry the tag.
+    // Four terms, all four measured on this document; the tag follows whichever
+    // is actually lowest rather than the one that happened to be first.
     expect(channels).toHaveLength(4);
-    expect(channels[0].querySelector(".sc-hd").textContent).toBe("min");
+    expect(channels[0].querySelector(".sc-hd")).toBeNull();
     expect(channels[1].querySelector(".sc-hd")).toBeNull();
-    expect(channels[2].querySelector(".sc-hd")).toBeNull();
+    expect(channels[2].querySelector(".sc-hd").textContent).toBe("min");
     expect(channels[3].querySelector(".sc-hd")).toBeNull();
     expect(screen.getByText(/it measures how much of the protocol the grade is built on/)).toBeInTheDocument();
   });
 
   it("renders λ with no letter when the model version has no band table", () => {
     renderBand({ score: { ...ETHERFI, model_version: "9.9.9-unreleased" } });
-    expect(screen.getByText("54.8")).toBeInTheDocument();
-    expect(screen.queryByText("C+")).not.toBeInTheDocument();
+    expect(screen.getByText("73.3")).toBeInTheDocument();
+    expect(screen.queryByText("B+")).not.toBeInTheDocument();
     expect(screen.getByText(/bands uncalibrated for this model version/)).toBeInTheDocument();
   });
 
@@ -278,7 +284,7 @@ describe("ScoreBand — withheld grade", () => {
   it("publishes no letter, no λ and no ledger", () => {
     const { container } = renderBand({ score: WITHHELD });
     expect(screen.getByText("The grade is withheld.")).toBeInTheDocument();
-    expect(screen.queryByText("C+")).not.toBeInTheDocument();
+    expect(screen.queryByText("B+")).not.toBeInTheDocument();
     expect(container.querySelector(".sc-ledger-bar")).toBeNull();
     expect(container.querySelector(".sc-grade-letter")).toBeNull();
   });
@@ -294,7 +300,7 @@ describe("ScoreBand — withheld grade", () => {
     const { container } = renderBand({ score: WITHHELD });
     await openBreakdown();
     const points = [...container.querySelectorAll(".sc-pts")].map((n) => n.textContent);
-    expect(points[0]).toBe("20.25");
+    expect(points[0]).toBe("14.70");
     expect(points.some((p) => p.startsWith("−"))).toBe(false);
     expect(container.querySelector(".sc-shield")).toBeNull();
     expect(container.querySelector(".sc-prot")).toBeNull();
@@ -323,7 +329,7 @@ describe("ScoreBand — withheld grade", () => {
   it("summarises the tail as not-determined rather than −0.00 combined", async () => {
     renderBand({ score: WITHHELD });
     await openBreakdown();
-    const tail = screen.getByRole("button", { name: /11 more/ });
+    const tail = screen.getByRole("button", { name: /19 more/ });
     expect(tail.textContent).toContain("combined points not determined");
     expect(tail.textContent).not.toContain("0.00");
     expect(tail.textContent).not.toContain("−");
@@ -345,22 +351,33 @@ describe("ScoreBand — an unwitnessed raw", () => {
     const { container } = renderBand({ score: BLANK_RAW });
     await openBreakdown();
     const points = [...container.querySelectorAll(".sc-pts")].map((n) => n.textContent);
-    expect(points).toEqual(["−20.25", "not determined"]);
+    expect(points).toEqual(["−14.70", "not determined"]);
     expect(points.some((p) => p.includes("0.00"))).toBe(false);
     expect(container.querySelectorAll(".sc-pts .sc-nd")).toHaveLength(1);
   });
 });
 
 describe("ScoreBand — entities select on the surface", () => {
-  // Row 0 of the corpus: EOA 0x2322…, setAuthority, reaching BoringVault first.
-  const CONTROLLER = "0x2322ba43eff1542b6a7baed35e66099ea0d12bd1";
+  // Row 5 of the corpus: EOA 0xf855…, setAuthority on a single host, reaching
+  // BoringVault first through the control graph. The shape these cases need is
+  // one host and a reach set wider than it — the row that HAS that shape moves
+  // whenever the ranking does, so it is selected by index here and the index is
+  // asserted against the principal below.
+  const ROW = 5;
+  const CONTROLLER = "0xf8553c8552f906c19286f21711721e206ee4909e";
   const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
-  const HOST = "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198";
+  const HOST = "0x989468982b08aefa46e37cd0086142a86fa466d7";
+
+  it("is pinned to the row it says it is", () => {
+    expect(ETHERFI.findings[ROW].principal).toBe(`EOA ${CONTROLLER}`);
+    expect(ETHERFI.findings[ROW].host_entities).toEqual([`ethereum::${HOST}`]);
+    expect(ETHERFI.findings[ROW].reach_entities).toContain(`ethereum::${FIRST_TARGET}`);
+  });
 
   async function openRowZero(onSelectEntity) {
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
-    return container.querySelector(".sc-frow");
+    return container.querySelectorAll(".sc-frow")[ROW];
   }
 
   it("asks for the example function on its published host contract", async () => {
@@ -369,7 +386,7 @@ describe("ScoreBand — entities select on the surface", () => {
     const button = within(row).getByRole("button", { name: "setAuthority" });
     await userEvent.setup().click(button);
     // host_entities publishes the contract the function was witnessed on —
-    // row 0's single host is AtomicQueue, never the first reach entity
+    // this row's single host is the solver, never the first reach entity
     // (BoringVault, whose own setAuthority is someone else's gate).
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
@@ -386,13 +403,13 @@ describe("ScoreBand — entities select on the surface", () => {
   it("selects the controller named in the principal string, not a unit member", async () => {
     const onSelectEntity = vi.fn();
     const row = await openRowZero(onSelectEntity);
-    await userEvent.setup().click(within(row).getByRole("button", { name: /0x2322…2bd1/ }));
+    await userEvent.setup().click(within(row).getByRole("button", { name: /0xf855…909e/ }));
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
       address: CONTROLLER,
       label: CONTROLLER,
     });
-    expect(ETHERFI.findings[0].principal).toContain(CONTROLLER);
+    expect(ETHERFI.findings[ROW].principal).toContain(CONTROLLER);
   });
 
   it("selects a target contract with no function", async () => {
@@ -435,7 +452,7 @@ describe("ScoreBand — entities select on the surface", () => {
     const onSelectEntity = vi.fn();
     const row = await openRowZero(onSelectEntity);
     const host = row.querySelector(".sc-targets .sc-host");
-    await userEvent.setup().click(within(host).getByRole("button", { name: /0x7c12…7198/ }));
+    await userEvent.setup().click(within(host).getByRole("button", { name: /0x9894…66d7/ }));
     expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("reachedFrom");
   });
 
@@ -445,32 +462,38 @@ describe("ScoreBand — entities select on the surface", () => {
     await openBreakdown();
     const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
     await userEvent.setup().click(within(fix).getByRole("button", { name: "setAuthority" }));
+    // The fix-first group's worst row is witnessed on SIXTY hosts, so there is
+    // no one contract the callout's function click can land on. It asks for the
+    // function and the pair and names no address — which is the third state,
+    // not a default to the first host in the list.
+    expect(ETHERFI.findings[0].host_entities.length).toBe(60);
     expect(onSelectEntity).toHaveBeenCalledWith(
       expect.objectContaining({
         functionSignature: "setAuthority",
         chain: "ethereum",
-        // The fix-first group's worst row has one host, so the callout's
-        // function click lands there directly, pair and all.
-        address: HOST,
-        highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
+        highlight: {
+          functionSignature: "setAuthority",
+          controller: ETHERFI.findings[0].principal.match(/0x[0-9a-f]{40}/)[0],
+        },
       }),
     );
+    expect(onSelectEntity.mock.calls[0][0]).not.toHaveProperty("address");
   });
 
   it("hints the example function it displays, never the n it only counts", async () => {
-    // Row 4 charges 60 functions and displays one of them. The hint has to be
+    // Row 0 charges 60 functions and displays one of them. The hint has to be
     // the one the user read: naming the other 59 would mark rows the row never
     // showed, and naming none would drop the mark the click was for.
     const onSelectEntity = vi.fn();
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
-    const row = container.querySelectorAll(".sc-frow")[4];
+    const row = container.querySelectorAll(".sc-frow")[0];
     expect(row.textContent).toContain("60 functions");
     const targets = row.querySelector(".sc-targets");
     await userEvent.setup().click(within(targets).getAllByRole("button")[0]);
     const { highlight } = onSelectEntity.mock.calls[0][0];
     expect(highlight.functionSignature).toBe("setAuthority");
-    expect(highlight.controller).toBe(ETHERFI.findings[4].principal.match(/0x[0-9a-f]{40}/)[0]);
+    expect(highlight.controller).toBe(ETHERFI.findings[0].principal.match(/0x[0-9a-f]{40}/)[0]);
   });
 
   it("activates from the keyboard, as the role it carries promises", async () => {
@@ -485,7 +508,7 @@ describe("ScoreBand — entities select on the surface", () => {
     const onSelectEntity = vi.fn();
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
     await openBreakdown();
-    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
     const lists = [...container.querySelectorAll(".sc-targets")];
     const unwitnessed = lists.filter((el) => el.textContent.includes("reach not witnessed"));
     expect(unwitnessed.length).toBeGreaterThan(0);
@@ -517,6 +540,12 @@ describe("ScoreBand — entities select on the surface", () => {
     }
   });
 
+  // The keyset-overlap caution rides on the 3/7 Safe, which is not among this
+  // document's four strongest protections. It is put there by scoring the two
+  // rows alone rather than by hunting for a corpus row that happens to carry
+  // both — the caution's rendering is what these cases are about.
+  const KEYSET = { ...ETHERFI, findings: [ETHERFI.findings[0], ETHERFI.findings[9]] };
+
   it("makes every protection principal and every Safe named in a caution selectable", async () => {
     const onSelectEntity = vi.fn();
     const { container } = renderBand({ score: ETHERFI, onSelectEntity });
@@ -529,11 +558,14 @@ describe("ScoreBand — entities select on the surface", () => {
     await userEvent.setup().click(rows[0].querySelector(".sc-kchip"));
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
-      address: "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
-      label: "Timelock 10d",
+      address: "0xcea8039076e35a825854c5c2f85659430b06ec96",
+      label: "Safe 4/6",
     });
+    container.remove();
 
-    const caution = [...container.querySelectorAll(".sc-caut")].find((el) =>
+    const keyset = renderBand({ score: KEYSET, onSelectEntity });
+    await openBreakdown();
+    const caution = [...keyset.container.querySelectorAll(".sc-caut")].find((el) =>
       el.textContent.includes("not an independent key set"),
     );
     onSelectEntity.mockClear();
@@ -548,7 +580,7 @@ describe("ScoreBand — entities select on the surface", () => {
   });
 
   it("leaves the protections column inert with no handler wired", async () => {
-    const { container } = renderBand({ score: ETHERFI });
+    const { container } = renderBand({ score: KEYSET });
     await openBreakdown();
     for (const chip of container.querySelectorAll(".sc-prot .sc-kchip")) {
       expect(chip).not.toHaveAttribute("role");
@@ -566,12 +598,12 @@ describe("ScoreBand — entities select on the surface", () => {
   it("renders the same text as plain elements with no handler wired", async () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
-    const row = container.querySelector(".sc-frow");
-    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0x2322…2bd1");
+    const row = container.querySelectorAll(".sc-frow")[ROW];
+    expect(row.querySelector(".sc-addr").textContent).toBe("setAuthority · 0xf855…909e");
     // Only controls that can act are buttons: the capability's glossary "?"
     // and the target expander. Entity references degrade to plain spans.
     const buttons = [...row.querySelectorAll("button")].map((b) => b.textContent);
-    expect(buttons).toEqual(["?", "+5 more"]);
+    expect(buttons).toEqual(["?", "+9 more"]);
   });
 
   it("keeps the wired row's text identical to the unwired one", async () => {
