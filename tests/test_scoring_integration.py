@@ -1186,3 +1186,102 @@ def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
     grant = P.load_conferral_plane(fx.session, fx.protocol.id).grant_for("ownership.transfer", bare.id)
     assert not grant.writes_extracted
     assert grant.confers(scope, "ethereum::x").outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED
+
+
+def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
+    """W1a: the second act-as witness shape, read from where it actually lives.
+
+    The accepting role is at ``function_principals.details.trace[].roles``; a row
+    whose roles sit anywhere else names no role that admits a caller. Such a row
+    is still INDEXED, with empty roles, so the refusal can say "the list names
+    this caller and no role that admits it" rather than "the list does not name
+    this caller" — two different findings. ``membership_quality`` is carried
+    through so the plane can refuse a membership that was never enumerated, and
+    where one triple carries several rows the strongest is the one published.
+    """
+    from db.models import FunctionPrincipal
+    from services.scoring import planes as P
+
+    destination = fx.contract()
+    accepted = fx.function(destination, name="bulkWithdraw")
+    accepted.selector = "0x3e64ce99"
+    unroled = fx.function(destination, name="bulkDeposit")
+    unroled.selector = "0x9d574420"
+    garbled = fx.function(destination, name="refundDeposit")
+    garbled.selector = "0x5d0a5e1f"
+    other_kind = fx.function(destination, name="setAuthority")
+    other_kind.selector = "0x7a9e5e4b"
+    caller = "0x" + "8" * 40
+    fx.session.add_all(
+        [
+            # bounded below first, so a first-wins index would publish it
+            FunctionPrincipal(
+                function_id=accepted.id,
+                address=caller.upper(),
+                principal_type="controller",
+                details={
+                    "trace": [{"step": "solmate_roles_authority", "roles": [12], "selector": "0x3e64ce99"}],
+                    "membership_quality": "lower_bound",
+                },
+            ),
+            FunctionPrincipal(
+                function_id=accepted.id,
+                address=caller.upper(),
+                principal_type="controller",
+                details={
+                    "trace": [
+                        {"step": "solmate_roles_authority", "roles": [12], "selector": "0x3e64ce99"},
+                        {"step": "solmate_roles_authority", "roles": [3], "selector": "0x3e64ce99"},
+                    ],
+                    "membership_quality": "exact",
+                },
+            ),
+            # the shape the spec's table pointed at: roles OUTSIDE the trace
+            FunctionPrincipal(
+                function_id=unroled.id,
+                address=caller,
+                principal_type="controller",
+                details={"roles": [12], "membership_quality": "exact"},
+            ),
+            # JSONB is not a schema: every shape below is something the column
+            # can hold, and none of them is a role number.
+            FunctionPrincipal(
+                function_id=garbled.id,
+                address=caller,
+                principal_type="controller",
+                details={
+                    "trace": ["solmate_roles_authority", {"roles": "12"}, {"roles": [7, "8", None, True]}],
+                    "membership_quality": "exact",
+                },
+            ),
+            # a principal that is not a controller answers a different question
+            FunctionPrincipal(
+                function_id=other_kind.id,
+                address=caller,
+                principal_type="beneficiary",
+                details={
+                    "trace": [{"step": "solmate_roles_authority", "roles": [4]}],
+                    "membership_quality": "exact",
+                },
+            ),
+        ]
+    )
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", destination.address)
+    caller_key = entity_key("ethereum", caller)
+    row = plane.destination_acl[(key, "0x3e64ce99")][caller_key]
+    assert (row.roles, row.membership_quality, row.destination_function) == ((3, 12), "exact", "bulkWithdraw")
+    assert row.enumerated
+    # named, and naming no admitting role — indexed, and never admitted
+    no_role = plane.destination_acl[(key, "0x9d574420")][caller_key]
+    assert no_role.roles == () and no_role.membership_quality == "exact"
+    # only the entries that really are role numbers survive the read
+    assert plane.destination_acl[(key, "0x5d0a5e1f")][caller_key].roles == (7,)
+    assert (key, "0x7a9e5e4b") not in plane.destination_acl
+    acceptance = plane.provenance["destination_acceptance"]
+    assert acceptance["function_principal_rows_returned"] == 4
+    assert acceptance["rows_naming_an_admitting_role"] == 3
+    assert acceptance["membership_quality"] == {"exact": 3, "lower_bound": 1}
+    assert acceptance["principal_type_read"] == "controller"

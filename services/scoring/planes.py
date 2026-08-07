@@ -1922,6 +1922,25 @@ ACT_AS_RECEIVER_NOT_READ = "caller_state_variable_never_read_on_chain"
 ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS = "caller_state_variable_holds_a_different_address"
 ACT_AS_CALL_SITE_IS_PUBLIC = "the_call_site_needs_no_gate"
 ACT_AS_CALL_SITE_GATE_NOT_DELEGATED = "call_site_caller_gate_is_not_witnessed_delegated_to_an_authority"
+ACT_AS_NO_DESTINATION_ACL = "destination_does_not_accept_this_caller_for_this_selector"
+ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE = "destination_access_control_row_names_no_admitting_role"
+ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE = "destination_access_control_membership_is_not_enumerable"
+
+# Which of the two witness shapes admitted a step. Published on every step so a
+# reader is never left to infer from the basis sentence which evidence was read.
+ACT_AS_WITNESS_CALLER_STATE_VARIABLE = "caller_state_variable"
+ACT_AS_WITNESS_DESTINATION_ACL = "destination_access_control_list"
+
+# The membership quality a destination-side ACL row must carry to witness
+# acceptance: the resolver enumerated the accepted set. A ``lower_bound`` row
+# names SOME accepted callers and does not bound the set, so it cannot witness
+# that this caller's presence is the whole answer.
+_ENUMERATED_MEMBERSHIP = "exact"
+
+# The only principal kind whose acceptance of a caller is an ACL fact: a
+# ``controller`` row is the resolver's answer to "who may invoke this function".
+# The other kinds answer a different question and are not read here.
+_ACCEPTING_PRINCIPAL_TYPE = "controller"
 
 # The method a guard calls when a function's caller set is decided by an
 # external authority contract rather than by the function's own code. 748 guard
@@ -1931,13 +1950,57 @@ _DELEGATED_GUARD_METHOD = "cancall"
 
 
 @dataclass(frozen=True)
+class DestinationAcceptance:
+    """One ``function_principals`` row: D's own ACL naming a caller of a selector.
+
+    ``roles`` are the role numbers the resolver walked to reach the caller, and
+    is EMPTY when the row reached the caller by some route it did not express as
+    a role. Such a row is still indexed: it is the difference between "the
+    destination's list does not name this caller" and "it names it, and names no
+    role that admits it", and a reader is owed which of the two was found.
+    ``membership_quality`` is whether the resolver enumerated the accepted set or
+    only bounded it below. ``function_principal_id`` names the row so the
+    published basis points at the evidence rather than restating it.
+    """
+
+    roles: tuple[int, ...]
+    membership_quality: str
+    destination_function: str
+    function_principal_id: int
+
+    @property
+    def enumerated(self) -> bool:
+        return self.membership_quality == _ENUMERATED_MEMBERSHIP
+
+    @property
+    def strength(self) -> tuple[bool, bool]:
+        """How much of the acceptance this row witnesses, for picking between
+        two rows that name the same caller at the same selector."""
+        return (bool(self.roles), self.enumerated)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "source": "function_principals",
+            "function_principal_id": self.function_principal_id,
+            "destination_function": self.destination_function,
+            "accepting_roles": list(self.roles),
+            "membership_quality": self.membership_quality,
+        }
+
+
+@dataclass(frozen=True)
 class ActAsStep:
     """One witnessed "N can be made to call ``selector`` at D" step.
 
     Every field names a witness, not an inference. ``calling_function`` is the
-    function of N whose compiled body carries the call site; ``receiver_variable``
-    is the state variable that call site's receiver is bound to; ``receiver_*``
-    is the on-chain read that proved that variable holds D.
+    function of N whose compiled body carries the call site. ``witness_kind``
+    says which of the two admissible shapes proved the step lands at D, and the
+    fields of the other shape are ``None``: for
+    ``ACT_AS_WITNESS_CALLER_STATE_VARIABLE`` the ``receiver_*`` fields are the
+    state variable the receiver binds to and the on-chain read that proved it
+    holds D; for ``ACT_AS_WITNESS_DESTINATION_ACL`` the receiver is
+    parameter-bound — nothing in N's storage names D, and ``acceptance`` is D's
+    own access-control row naming N.
     """
 
     caller: str
@@ -1945,9 +2008,31 @@ class ActAsStep:
     selector: str
     calling_function: str
     calling_function_openness: str
-    receiver_variable: str
-    receiver_observed_via: str
-    receiver_block: int | None
+    witness_kind: str = ACT_AS_WITNESS_CALLER_STATE_VARIABLE
+    receiver_variable: str | None = None
+    receiver_observed_via: str | None = None
+    receiver_block: int | None = None
+    acceptance: DestinationAcceptance | None = None
+
+    def _basis(self) -> str:
+        if self.witness_kind == ACT_AS_WITNESS_DESTINATION_ACL and self.acceptance is not None:
+            return (
+                f"{self.calling_function} is a restricted function of {self.caller} whose caller "
+                f"gate is witnessed delegated to an authority, and whose body calls "
+                f"{self.selector} at an address the CALLER of that function supplies — the "
+                f"receiver is parameter-bound, so no state variable of {self.caller} names it. "
+                f"{self.destination}'s own access-control list is what names the address from the "
+                f"other end: function_principals row {self.acceptance.function_principal_id} on "
+                f"{self.acceptance.destination_function} accepts {self.caller} as a caller of "
+                f"{self.selector} by role(s) {list(self.acceptance.roles)}, with "
+                f"membership_quality '{self.acceptance.membership_quality}'"
+            )
+        return (
+            f"{self.calling_function} is a restricted function of {self.caller} whose body "
+            f"calls {self.selector} on its own state variable '{self.receiver_variable}', and "
+            f"'{self.receiver_variable}' was read {self.receiver_observed_via} at block "
+            f"{self.receiver_block} holding {self.destination}"
+        )
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -1956,15 +2041,12 @@ class ActAsStep:
             "selector": self.selector,
             "calling_function": self.calling_function,
             "calling_function_openness": self.calling_function_openness,
+            "witness_kind": self.witness_kind,
             "receiver_variable": self.receiver_variable,
             "receiver_observed_via": self.receiver_observed_via,
             "receiver_block": self.receiver_block,
-            "basis": (
-                f"{self.calling_function} is a restricted function of {self.caller} whose body "
-                f"calls {self.selector} on its own state variable '{self.receiver_variable}', and "
-                f"'{self.receiver_variable}' was read {self.receiver_observed_via} at block "
-                f"{self.receiver_block} holding {self.destination}"
-            ),
+            "destination_acceptance": (self.acceptance.as_json() if self.acceptance is not None else None),
+            "basis": self._basis(),
         }
 
 
@@ -1994,20 +2076,39 @@ class ActAsPlane:
     functions is witnessed calling D. Pricing the hop on the licence alone is
     the membership-as-capability error one level up from the sheet-as-reach one.
 
-    Two witnesses, joined:
+    The CALL SITE is always required — ``effective_functions.sinks``, an
+    ``external_call`` entry carrying the called ``selector`` and the receiver it
+    is bound to, compiled from N's own verified source. What names the ADDRESS
+    that call site lands on has two admissible shapes, and a step is witnessed
+    under either:
 
-    * the CALL SITE — ``effective_functions.sinks``, an ``external_call`` entry
-      carrying the called ``selector`` and the receiver it is bound to. This is
-      compiled from N's own verified source.
-    * the RECEIVER — ``controller_values``, the on-chain read (``eth_call`` at a
-      recorded block) of the state variable that receiver is bound to. The row
-      says N's ``vault`` IS D; nothing else in the schema says which address a
-      call site lands on.
+    * the CALLER'S RECEIVER — ``controller_values``, the on-chain read
+      (``eth_call`` at a recorded block) of the state variable that receiver is
+      bound to. The row says N's ``vault`` IS D.
+    * the DESTINATION'S ACL — ``function_principals``, D's own resolved
+      access-control list naming N as an accepted caller of that selector by an
+      enumerated role. This is the only shape available when the receiver is a
+      PARAMETER: the callee is chosen at call time, so the binding cannot live
+      in N's storage, and D's own list of accepted callers is what bounds which
+      choices D honours. It is admitted only when the row names a role AND the
+      membership is ``exact`` — a row naming no role reached N by a route it did
+      not state, and a ``lower_bound`` membership names some accepted callers
+      without bounding the set. Each is refused under its own reason, because
+      "the list does not name N", "it names N and no role that admits it" and
+      "it names a role and does not bound the set" are three different findings
+      and collapsing them publishes one of them as the others.
 
-    A call site whose receiver is a parameter, a local, or an unresolved head is
-    REFUSED, not credited: whoever calls N chooses that address, so the code
-    witnesses a call at an address nobody named. It is a plausible path and it is
-    not a witnessed one, and the difference is the whole discipline.
+    A parameter-bound call site with NEITHER witness is REFUSED, not credited:
+    whoever calls N chooses that address and no evidence at either end names it,
+    so the code witnesses a call at an address nobody named. It is a plausible
+    path and it is not a witnessed one, and the difference is the whole
+    discipline.
+
+    The destination-ACL shape is a MAGNITUDE admission only. It says D accepts a
+    call from N; it says nothing about which entities the principal reaches, and
+    it is never consulted by the closure walk. It also does not witness that the
+    call SUCCEEDS: the same ``function_principals`` row carries D's own business
+    preconditions and this plane consults none of them.
 
     The calling function must itself be ``restricted`` AND its caller gate must
     be witnessed DELEGATED — a guard-origin sink calling ``canCall`` on an
@@ -2034,10 +2135,13 @@ class ActAsPlane:
     call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool], ...]] = field(default_factory=dict)
     # (caller entity, state variable) -> (address it was read holding, observed_via, block)
     reads: dict[tuple[str, str], tuple[str, str, int | None]] = field(default_factory=dict)
+    # (destination entity, selector) -> {caller entity: the ACL row accepting it}
+    destination_acl: dict[tuple[str, str], dict[str, DestinationAcceptance]] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
 
     def acts_as(self, caller: str, destination: str, selector: str) -> ActAsVerdict:
-        sites = self.call_sites.get((caller, _lower(selector)))
+        token = _lower(selector)
+        sites = self.call_sites.get((caller, token))
         if not sites:
             return ActAsVerdict(ACT_AS_NO_CALL_SITE)
         outcome = ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE
@@ -2063,27 +2167,62 @@ class ActAsPlane:
                 ActAsStep(
                     caller=caller,
                     destination=destination,
-                    selector=_lower(selector),
+                    selector=token,
                     calling_function=name,
                     calling_function_openness=openness,
+                    witness_kind=ACT_AS_WITNESS_CALLER_STATE_VARIABLE,
                     receiver_variable=variable,
                     receiver_observed_via=observed_via,
                     receiver_block=block,
                 ),
             )
-        return ActAsVerdict(outcome)
+        # No state variable of the caller names the destination. The second
+        # shape: a call site whose callee the caller's own caller supplies, with
+        # the destination's ACL naming this caller from the other end. Sorted so
+        # a caller with several such sites names one function deterministically.
+        parameter_bound = sorted(site for site in sites if not site[2] and site[1] == "restricted" and site[3])
+        if not parameter_bound:
+            return ActAsVerdict(outcome)
+        accepted = self.destination_acl.get((destination, token), {}).get(caller)
+        if accepted is None:
+            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_NO_DESTINATION_ACL))
+        if not accepted.roles:
+            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE))
+        if not accepted.enumerated:
+            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE))
+        name, openness, _variable, _delegated = parameter_bound[0]
+        return ActAsVerdict(
+            ACT_AS_WITNESSED,
+            ActAsStep(
+                caller=caller,
+                destination=destination,
+                selector=token,
+                calling_function=name,
+                calling_function_openness=openness,
+                witness_kind=ACT_AS_WITNESS_DESTINATION_ACL,
+                acceptance=accepted,
+            ),
+        )
 
 
 # How far a call site GOT before it was refused, so a caller with several call
 # sites for one selector reports the sharpest shortfall rather than whichever it
-# happened to look at last.
+# happened to look at last. Lower is further. The three destination-ACL refusals
+# rank ahead of "the receiver is not a state variable": that reason is what a
+# parameter-bound site reports when there is nothing left to consult, and a site
+# whose destination ACL WAS consulted got past it. Among the three, a row that
+# names a role but bounds its membership only below got further than one that
+# names no role at all, which got further than no row at all.
 _ACT_AS_RANK = {
     ACT_AS_CALL_SITE_GATE_NOT_DELEGATED: 0,
     ACT_AS_CALL_SITE_IS_PUBLIC: 1,
     ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS: 2,
     ACT_AS_RECEIVER_NOT_READ: 3,
-    ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE: 4,
-    ACT_AS_NO_CALL_SITE: 5,
+    ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE: 4,
+    ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE: 5,
+    ACT_AS_NO_DESTINATION_ACL: 6,
+    ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE: 7,
+    ACT_AS_NO_CALL_SITE: 8,
 }
 
 
@@ -2092,8 +2231,9 @@ def _rank_outcome(current: str, candidate: str) -> str:
 
 
 def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
-    """The call-site and receiver witnesses, indexed for the composition walk."""
-    from db.models import Contract, ControllerValue, EffectiveFunction
+    """The call-site, receiver and destination-acceptance witnesses, indexed for
+    the composition walk."""
+    from db.models import Contract, ControllerValue, EffectiveFunction, FunctionPrincipal
 
     call_sites: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = defaultdict(list)
     sinks_read = external_calls = selector_bearing = state_variable_bound = delegated_gates = 0
@@ -2179,9 +2319,68 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
     for key in ambiguous:
         reads.pop(key, None)
 
+    destination_acl: dict[tuple[str, str], dict[str, DestinationAcceptance]] = defaultdict(dict)
+    acl_rows_keyed = acl_rows_naming_a_role = 0
+    quality_histogram: dict[str, int] = defaultdict(int)
+    acl_rows = (
+        session.query(
+            FunctionPrincipal.id,
+            FunctionPrincipal.address,
+            FunctionPrincipal.details,
+            EffectiveFunction.selector,
+            EffectiveFunction.function_name,
+            EffectiveFunction.deployment_address,
+            Contract.address,
+            Contract.chain,
+        )
+        .join(EffectiveFunction, EffectiveFunction.id == FunctionPrincipal.function_id)
+        .join(Contract, Contract.id == EffectiveFunction.contract_id)
+        .filter(Contract.protocol_id == protocol_id)
+        .filter(FunctionPrincipal.principal_type == _ACCEPTING_PRINCIPAL_TYPE)
+        .order_by(FunctionPrincipal.id)
+        .all()
+    )
+    for row_id, principal, details, selector, function_name, deployment, address, chain in acl_rows:
+        token = _lower(str(selector or ""))
+        holder = _lower(str(principal or ""))
+        if not token.startswith("0x") or not holder.startswith("0x") or not isinstance(details, dict):
+            continue
+        acl_rows_keyed += 1
+        roles: set[int] = set()
+        trace = details.get("trace")
+        if isinstance(trace, list):
+            for step in trace:
+                if not isinstance(step, dict):
+                    continue
+                named = step.get("roles")
+                if isinstance(named, list):
+                    roles.update(role for role in named if isinstance(role, int) and not isinstance(role, bool))
+        if roles:
+            acl_rows_naming_a_role += 1
+        quality = str(details.get("membership_quality") or "not_determined")
+        quality_histogram[quality] += 1
+        chain_key = coalesce_chain(chain)
+        accepting = DestinationAcceptance(
+            roles=tuple(sorted(roles)),
+            membership_quality=quality,
+            destination_function=str(function_name),
+            function_principal_id=int(row_id),
+        )
+        # Both ends keyed on the destination's own chain: an ACL is a fact about
+        # one deployment, and a same-address caller on another chain is a
+        # different contract.
+        bucket = destination_acl[(entity_key(chain_key, deployment or address), token)]
+        previous = bucket.get(entity_key(chain_key, holder))
+        # Several rows can name one caller at one selector. Keep the one that
+        # witnesses the most, so a row bounded below or naming no role never
+        # displaces one that names an enumerated role for the same pair.
+        if previous is None or accepting.strength > previous.strength:
+            bucket[entity_key(chain_key, holder)] = accepting
+
     plane = ActAsPlane(
         call_sites={key: tuple(sorted(set(rows))) for key, rows in sorted(call_sites.items())},
         reads=reads,
+        destination_acl={key: dict(sorted(callers.items())) for key, callers in sorted(destination_acl.items())},
     )
     plane.provenance = {
         "call_sites": {
@@ -2197,15 +2396,40 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "variables_two_reads_disagree_under": len(ambiguous),
             "observations_admitted": sorted(_READ_OBSERVATIONS),
         },
+        "destination_acceptance": {
+            "function_principal_rows_returned": len(acl_rows),
+            "rows_naming_a_selector_and_a_caller_address": acl_rows_keyed,
+            "rows_naming_an_admitting_role": acl_rows_naming_a_role,
+            "destination_selectors_with_an_indexed_caller": len(destination_acl),
+            "indexed_callers": sum(len(callers) for callers in destination_acl.values()),
+            "membership_quality": dict(sorted(quality_histogram.items())),
+            "principal_type_read": _ACCEPTING_PRINCIPAL_TYPE,
+            "membership_quality_admitted": _ENUMERATED_MEMBERSHIP,
+        },
         "reading": (
-            "the two witnesses a composed magnitude needs on top of a licence: the CALL SITE "
-            "(effective_functions.sinks, an external_call carrying the called selector and the "
-            "receiver it binds to, compiled from the caller's own source) and the RECEIVER "
-            "(controller_values, an on-chain read at a recorded block proving that state "
-            "variable holds the destination). A receiver bound to a parameter, a local or an "
-            "unresolved head is refused: the caller of the function picks that address, so the "
-            "code witnesses a call at an address nobody named. sinks_naming_a_selector minus "
-            "sinks_whose_receiver_is_a_state_variable is the size of that refusal. "
+            "the witnesses a composed magnitude needs on top of a licence. The CALL SITE is "
+            "always required (effective_functions.sinks, an external_call carrying the called "
+            "selector and the receiver it binds to, compiled from the caller's own source). "
+            "What names the ADDRESS it lands on has two shapes and either witnesses the step: "
+            "the RECEIVER (controller_values, an on-chain read at a recorded block proving that "
+            "state variable holds the destination), or — when the receiver is bound to a "
+            "parameter, a local or an unresolved head, where no storage of the caller CAN name "
+            "it because the callee is chosen at call time — the DESTINATION'S OWN ACL "
+            "(function_principals, a principal_type='controller' row naming this caller as an "
+            "accepted caller of that selector by an enumerated role). The second shape is "
+            "admitted only for a restricted call site whose gate is delegated, only on a row "
+            "whose trace names at least one role, only where membership_quality is 'exact', and "
+            "only for MAGNITUDE: it is never read into reach, and it does not witness that the "
+            "call succeeds — the same row carries the destination's own preconditions and none "
+            "of them are consulted. Each shortfall is published as its own reason rather than "
+            "collapsed into one: no row naming this caller at all is "
+            "destination_does_not_accept_this_caller_for_this_selector; a row that names the "
+            "caller but expresses no role that admits it is "
+            "destination_access_control_row_names_no_admitting_role — the destination's list "
+            "reached this caller by a route it did not state as a role, which is not the same "
+            "fact as the list not naming it; and a row that names a role without bounding the "
+            "accepted set is destination_access_control_membership_is_not_enumerable, because "
+            "naming some accepted callers is not the same fact as bounding which they are. "
             "THE RESIDUAL THIS PLANE DOES NOT CLOSE: the calling function's guard is witnessed "
             "consulting AN authority (a canCall call), never that it is the same authority the "
             "finding's gate seizes — the guard's receiver is a local and no read pins it. The "
@@ -2672,11 +2896,16 @@ def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
 __all__ = [
     "ACT_AS_CALL_SITE_GATE_NOT_DELEGATED",
     "ACT_AS_CALL_SITE_IS_PUBLIC",
+    "ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE",
+    "ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE",
     "ACT_AS_NO_CALL_SITE",
+    "ACT_AS_NO_DESTINATION_ACL",
     "ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS",
     "ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE",
     "ACT_AS_RECEIVER_NOT_READ",
     "ACT_AS_WITNESSED",
+    "ACT_AS_WITNESS_CALLER_STATE_VARIABLE",
+    "ACT_AS_WITNESS_DESTINATION_ACL",
     "ASSET_BELOW_RESOLUTION",
     "ASSET_PRICED",
     "ASSET_PROVEN_ZERO",
@@ -2711,6 +2940,7 @@ __all__ = [
     "ConferralVerdict",
     "ControlClosure",
     "ControlEdge",
+    "DestinationAcceptance",
     "EdgeScope",
     "GateGrant",
     "LicensedFunction",
