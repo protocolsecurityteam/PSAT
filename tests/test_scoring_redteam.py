@@ -35,6 +35,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from tests import composition_admission_fixtures as CA
 from utils import execution_record as EX
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
@@ -317,14 +318,25 @@ def fold(monkeypatch):
         conditions=None,
         conferral=None,
         act_as=None,
+        deletability=None,
+        routes=None,
     ):
-        """``signals=None`` drives the PERSISTED path, through the population read."""
+        """``signals=None`` drives the PERSISTED path, through the population read.
+
+        ``deletability`` defaults to the bypass every principal clears
+        (``CA.admits_every_principal``), because these cases are about the axes
+        AROUND the composition rule — ties, chain shapes, predicate blocks — and
+        would otherwise all withhold. The rule's own arms are pinned in
+        ``tests/test_three_arm_composition.py``.
+        """
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
         monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
         monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or conferral_plane())
         monkeypatch.setattr(P, "load_act_as_plane", lambda s, p: act_as or act_as_plane())
+        monkeypatch.setattr(P, "load_deletability_plane", lambda s: deletability or CA.admits_every_principal())
+        monkeypatch.setattr(P, "load_router_flow_plane", lambda s, p: routes or P.RouterFlowPlane())
         monkeypatch.setattr(P, "load_proven_eoa_entities", lambda s, p: eoas or set())
         monkeypatch.setattr(P, "load_role_holder_floors", lambda s, p: role_floors or {})
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
@@ -5368,7 +5380,8 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
         call_sites={(KEY_T, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True, HOP1_SELECTOR),)},
         reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
     )
-    composed, _census, refused = FOLD._compose(
+    admission = FOLD._AdmissionPlanes(CA.admits_every_principal(), P.RouterFlowPlane())
+    composed, _census, refused, _withheld = FOLD._compose(
         _SeedsThatDisownOneMember({KEY_C, KEY_T}, KEY_T),
         [
             FOLD._WalkedHop(
@@ -5379,12 +5392,14 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
         {(KEY_V, COMPOSED_SELECTOR): magnitude},
         value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C, KEY_T)),
         condition_plane(),
+        admission,
+        {SAFE},
     )
     assert composed == {}
     assert refused == {P.ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION: 1}
     # ...and the same node, genuinely a seed, gets the hop-1 question and the
     # $5M — so the refusal above is the empty CONSTRAINT and not a broken case.
-    as_seed, _census, _refused = FOLD._compose(
+    as_seed, _census, _refused, _withheld_seed = FOLD._compose(
         {KEY_C, KEY_T},
         [
             FOLD._WalkedHop(
@@ -5395,6 +5410,8 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
         {(KEY_V, COMPOSED_SELECTOR): magnitude},
         value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C, KEY_T)),
         condition_plane(),
+        admission,
+        {SAFE},
     )
     assert as_seed[KEY_V].usd == 5_000_000.0
 
