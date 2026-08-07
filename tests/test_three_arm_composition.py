@@ -123,21 +123,54 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # no
     assert {e["entity"] for e in _withheld(row)} == {KEY_V}
 
 
-def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  # noqa: F811
+# The authority arm's own qualifying row: a setter on the RESOLVED authority the
+# vault's ``exit`` is witnessed consulting, with NO host setter anywhere. The
+# host arm is asked first, so this is the only way a composed entry publishes
+# ``basis.arm == "gating_authority"`` — and without it the shape ships covered at
+# the join and uncovered in the document (CAP-A §R1.3).
+_DELETES_THE_GATING_AUTHORITYS_ROLES = ((f"ethereum::{_GATING_AUTHORITY}", EOA, "setUserRole"),)
+
+
+@pytest.mark.parametrize(
+    "deletability,arm,setter_name",
+    [
+        (
+            CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+            P.DELETABILITY_ARM_HOST,
+            "setAuthority",
+        ),
+        (
+            CA.deletability_plane(
+                authority=_DELETES_THE_GATING_AUTHORITYS_ROLES,
+                gating=_VAULT_CONSULTS_AN_AUTHORITY,
+            ),
+            P.DELETABILITY_ARM_GATING_AUTHORITY,
+            "setUserRole",
+        ),
+    ],
+    ids=["host", "gating_authority"],
+)
+def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, deletability, arm, setter_name):  # noqa: F811
     """POSITIVE ARM, mandatory. Length 2 and the figure survives.
 
     The chain traverses a node the principal seized nothing on, and the body it
     traverses authors the destination's amount — so a route-only rule would
     withhold. It does not, because the deletability join returns a row proving
-    this principal can point the vault at an authority it controls, which makes
-    the direct call the probe ran a call it can issue itself.
+    this principal can author the destination's calldata itself: either by
+    pointing the vault at an authority it controls (the HOST arm) or by writing
+    its own role at the authority the vault already consults (the GATING
+    AUTHORITY arm).
 
-    A hop-count implementation withholds this entry.
+    A hop-count implementation withholds this entry under either arm.
+
+    Parametrised over both arms per CAP-A §R1.3: each arm is exercised alone at
+    the join, but only the host arm reached a composed entry, so the *published*
+    ``basis.arm == "gating_authority"`` had no carrier anywhere.
     """
     row = _gate_row(
         CA.composed_document(
             fold,
-            deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+            deletability=deletability,
             routes=_AUTHORS_THE_AMOUNT_AT_T,
             case=_two_hop_case(),
         )
@@ -155,12 +188,18 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  
     # The basis, named: the setter selector and the function_principals row id.
     basis = entry["authority_deletability"]["basis"]
     assert basis["setter_selector"] == CA.SET_AUTHORITY_SELECTOR
-    assert basis["setter_function_name"] == "setAuthority"
+    assert basis["setter_function_name"] == setter_name
     assert isinstance(basis["function_principal_id"], int)
     assert basis["principal_address"] == EOA.lower()
     assert basis["membership_quality"] == "exact"
     assert entry["authority_deletability"]["state"] == P.DELETABILITY_DELETABLE
-    assert basis["arm"] == P.DELETABILITY_ARM_HOST
+    assert basis["arm"] == arm
+    # The arm names the contract the licensing row sits on, which is the one
+    # thing the two arms do not share — a basis that named the destination under
+    # both would make the arm unfalsifiable.
+    assert basis["setter_contract"] == (KEY_V if arm == P.DELETABILITY_ARM_HOST else f"ethereum::{_GATING_AUTHORITY}")
+    witness = entry["authority_deletability"]["gating_authority_witness"]
+    assert witness["selector_scoped"] == ([] if arm == P.DELETABILITY_ARM_HOST else [_GATING_AUTHORITY])
 
     # The execution record travels with the figure it accounts for.
     assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED

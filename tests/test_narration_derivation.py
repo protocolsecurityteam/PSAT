@@ -705,11 +705,17 @@ def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
     assert FOLD.ARM_REPUBLISHED_DIRECT not in arms
 
 
-def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries():
+def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries(monkeypatch):
     """B1-R S4. "no duration term" is false beside the `auto_expiry` rung in the
     same dict, which `distill.py` applies only under a witnessed
     `duration_bound_seconds` ceiling. Both thresholds are read from the constants
-    so the sentence moves with them."""
+    so the sentence moves with them.
+
+    B1-R R2-N2: asserting ``str(K.FREEZE_AUTO_EXPIRY) in note`` against the
+    shipped values is a tautology — a hard-coded ``"(0.02)"`` passes it and then
+    drifts silently the day the constant moves. The thresholds are moved here and
+    the note re-read, so only a live interpolation survives.
+    """
     from services.scoring import constants as K
 
     note = K.model_parameters()["freeze_ladder"]["note"]
@@ -718,3 +724,13 @@ def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries():
     assert "GATE on one rung and a term in none" in note
     assert "no duration term" not in note
     assert "is not_determined wherever populated" not in note
+
+    shipped_rung, shipped_seconds = K.FREEZE_AUTO_EXPIRY, K.FREEZE_AUTO_EXPIRY_MAX_SECONDS
+    monkeypatch.setattr(K, "FREEZE_AUTO_EXPIRY", 0.99)
+    monkeypatch.setattr(K, "FREEZE_AUTO_EXPIRY_MAX_SECONDS", 7 * 86400)
+    moved = K.model_parameters()["freeze_ladder"]["note"]
+    assert moved != note
+    assert "0.99" in moved and str(7 * 86400) in moved
+    # ...and the shipped values are gone from it, so a literal that happens to
+    # match today cannot pass.
+    assert str(shipped_rung) not in moved and str(shipped_seconds) not in moved
