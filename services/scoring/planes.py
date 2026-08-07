@@ -1917,10 +1917,28 @@ def load_conferral_plane(session: Session, protocol_id: int) -> ConferralPlane:
 
 ACT_AS_WITNESSED = "witnessed"
 ACT_AS_NO_CALL_SITE = "no_function_of_the_caller_calls_this_selector"
-ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE = "call_site_receiver_is_not_a_state_variable"
+# No read of this variable was ever recorded: the reader never attempted it.
+# Says nothing about what the variable holds, and must never be published for a
+# variable whose read was attempted — that is a different fact, below.
 ACT_AS_RECEIVER_NOT_READ = "caller_state_variable_never_read_on_chain"
+# The read was ISSUED and reverted. A not_determined, distinct from both
+# proven-absent and from "never read": the row exists, with an observation kind
+# and a block, and calling that a coverage gap of the reader misstates it.
+ACT_AS_RECEIVER_READ_FAILED = "caller_state_variable_read_reverted_on_chain"
 ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS = "caller_state_variable_holds_a_different_address"
+# Two earned negatives the plain address comparison would publish as the weaker
+# "holds a different address". The pointer is renounced (address(0), which holds
+# no code and never can), or it holds an address proven codeless by an empty
+# eth_getCode. Kept apart: an EOA can become a contract at the same address via
+# CREATE2, and the zero address cannot, so they are not the same proof.
+ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS = "caller_state_variable_holds_the_renounced_zero_address"
+ACT_AS_RECEIVER_HOLDS_A_NON_CONTRACT = "caller_state_variable_holds_an_address_proven_to_hold_no_code"
 ACT_AS_CALL_SITE_IS_PUBLIC = "the_call_site_needs_no_gate"
+# The third state of the openness field, and never spelled as either of the
+# other two: the pipeline did not determine this function's gate. Publishing it
+# as ACT_AS_CALL_SITE_IS_PUBLIC would mint the positive claim "this function
+# needs no gate" out of a field nobody read.
+ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED = "call_site_caller_gate_openness_is_not_determined"
 ACT_AS_CALL_SITE_GATE_NOT_DELEGATED = "call_site_caller_gate_is_not_witnessed_delegated_to_an_authority"
 ACT_AS_NO_DESTINATION_ACL = "destination_does_not_accept_this_caller_for_this_selector"
 # Asked only by a composition walk past its first hop, which constrains the
@@ -2032,25 +2050,55 @@ class ActAsStep:
     receiver_observed_via: str | None = None
     receiver_block: int | None = None
     acceptance: DestinationAcceptance | None = None
+    # A fact about this SITE, not about its hop: true exactly when the step was
+    # admitted and its calling function carries no delegation witness, which only
+    # the hops past the first permit. FALSE means the witness IS present, whether
+    # or not this hop required it — so the stored fact is recoverable from the
+    # published one at every hop, and a hop-2 step that happens to be delegated
+    # is never published as a step that was let through without one. Named for
+    # the site because a hop-shaped name ("not required at this hop") would read
+    # as false on exactly those steps: the requirement was lifted there and the
+    # witness was present anyway, and one field cannot say both.
+    admitted_without_a_delegation_witness: bool = False
+
+    def _not_delegation_tested(self) -> str:
+        """Named on the basis only where it applies, so no step that carries the
+        delegation witness acquires a sentence about not having one."""
+        if not self.admitted_without_a_delegation_witness:
+            return ""
+        return (
+            f" This step is past the first hop, where the licence is the selector the previous hop "
+            f"admitted rather than the seized authority pointer, so no witness that "
+            f"{self.calling_function}'s own caller gate is delegated to an authority was required — "
+            f"and none is claimed: this call site carries none."
+        )
 
     def _basis(self) -> str:
         if self.witness_kind == ACT_AS_WITNESS_DESTINATION_ACL and self.acceptance is not None:
+            gate = (
+                f"{self.calling_function} is a restricted function of {self.caller} entered under "
+                f"the selector the previous hop admitted"
+                if self.admitted_without_a_delegation_witness
+                else (
+                    f"{self.calling_function} is a restricted function of {self.caller} whose caller "
+                    f"gate is witnessed delegated to an authority"
+                )
+            )
             return (
-                f"{self.calling_function} is a restricted function of {self.caller} whose caller "
-                f"gate is witnessed delegated to an authority, and whose body calls "
+                f"{gate}, and whose body calls "
                 f"{self.selector} at an address the CALLER of that function supplies — the "
                 f"receiver is parameter-bound, so no state variable of {self.caller} names it. "
                 f"{self.destination}'s own access-control list is what names the address from the "
                 f"other end: function_principals row {self.acceptance.function_principal_id} on "
                 f"{self.acceptance.destination_function} accepts {self.caller} as a caller of "
                 f"{self.selector} by role(s) {list(self.acceptance.roles)}, with "
-                f"membership_quality '{self.acceptance.membership_quality}'"
+                f"membership_quality '{self.acceptance.membership_quality}'" + self._not_delegation_tested()
             )
         return (
             f"{self.calling_function} is a restricted function of {self.caller} whose body "
             f"calls {self.selector} on its own state variable '{self.receiver_variable}', and "
             f"'{self.receiver_variable}' was read {self.receiver_observed_via} at block "
-            f"{self.receiver_block} holding {self.destination}"
+            f"{self.receiver_block} holding {self.destination}" + self._not_delegation_tested()
         )
 
     def as_json(self) -> dict[str, Any]:
@@ -2066,23 +2114,48 @@ class ActAsStep:
             "receiver_observed_via": self.receiver_observed_via,
             "receiver_block": self.receiver_block,
             "destination_acceptance": (self.acceptance.as_json() if self.acceptance is not None else None),
+            "admitted_without_a_delegation_witness": self.admitted_without_a_delegation_witness,
             "basis": self._basis(),
         }
 
 
 @dataclass(frozen=True)
 class ActAsVerdict:
+    """The answer, and — where the answer is an earned negative about what a
+    receiver holds — the ``resolved_type`` of the address that was read, so the
+    refusal carries WHAT it held and not only that it was something else."""
+
     outcome: str
     step: ActAsStep | None = None
+    receiver_resolved_type: str | None = None
 
     @property
     def witnessed(self) -> bool:
         return self.outcome == ACT_AS_WITNESSED
 
 
-# An on-chain read of the caller's own storage. ``eth_call_error`` is excluded:
-# it is the record of a read that FAILED, and its resolved_type is 'unknown'.
+# An on-chain read of the caller's own storage that RETURNED an address.
 _READ_OBSERVATIONS = frozenset({"eth_call", "eth_call_impl_fallback", "beacon_owner", "event_log"})
+# A read that was issued and FAILED. Indexed separately and never as a read: it
+# carries no address, so it can satisfy no receiver test — but it is a record of
+# an attempt, which is not the same fact as no attempt.
+_READ_FAILURE_OBSERVATIONS = frozenset({"eth_call_error"})
+
+# The two ``controller_values.resolved_type`` classifications that carry a fact
+# BEYOND the address itself. ``zero`` is the renounced pointer; ``eoa`` is an
+# address proven codeless by an empty ``eth_getCode`` (an RPC failure classifies
+# as ``contract`` and is not cached, so this is an earned witness). Every other
+# value — ``contract``, ``safe``, ``timelock``, ``unknown``, NULL — is a
+# classification of an address the row already carries, and the receiver test
+# reads the address.
+_RESOLVED_RENOUNCED = "zero"
+_RESOLVED_CODELESS = "eoa"
+
+# ``effective_functions.authority_openness``: the only value that witnesses a
+# gate, and the value that witnesses its proven absence. Everything else is the
+# third state.
+_OPENNESS_RESTRICTED = "restricted"
+_OPENNESS_PUBLIC = "open"
 
 
 @dataclass
@@ -2104,7 +2177,17 @@ class ActAsPlane:
 
     * the CALLER'S RECEIVER — ``controller_values``, the on-chain read
       (``eth_call`` at a recorded block) of the state variable that receiver is
-      bound to. The row says N's ``vault`` IS D.
+      bound to. The row says N's ``vault`` IS D. The WITNESS is the read and the
+      address comparison; ``resolved_type`` is a classification of the address
+      the row already carries, and admission does not branch on it — a pointer
+      classified ``safe`` or ``timelock`` that holds D witnesses the step, and
+      refusing it would discard a read on the strength of a label. Where the
+      address is NOT D the classification sharpens the earned negative: ``zero``
+      is a renounced pointer and ``eoa`` an address proven codeless, each
+      published under its own reason rather than as "holds a different address".
+      A read that was ISSUED AND FAILED is indexed apart from both and satisfies
+      nothing: it is a not_determined, and publishing it as "never read on
+      chain" would assert a coverage gap of the reader that the row disproves.
     * the DESTINATION'S ACL — ``function_principals``, D's own resolved
       access-control list naming N as an accepted caller of that selector by an
       enumerated role. This is the only shape available when the receiver is a
@@ -2138,9 +2221,22 @@ class ActAsPlane:
     ``authority_roles`` is the proven-empty ``[]`` and it carries no ``canCall``
     guard. Seizing the manager's authority pointer opens
     ``manageVaultWithMerkleVerification`` and does not open that one, and without
-    the guard witness the two are indistinguishable. A public call site is
-    refused for the opposite reason: it needs no gate at all, so the dollars it
-    moves belong to its own finding and not to a gate that conferred nothing.
+    the guard witness the two are indistinguishable. That conjunct is required at
+    the FIRST hop and only there: past it the principal has seized nothing on the
+    intermediate and arrives as whoever the previous hop admitted, the via rule
+    has already pinned the intermediate's calling function to that admitted
+    selector, and an intermediate gated by a direct ``msg.sender ==`` check is
+    exactly the shape such a chain runs through — so past hop 1 the delegation
+    test asks after a mechanism the principal is not using, and refusing on it
+    would discard a witnessed path.
+
+    A public call site is refused at EVERY hop, and not because the rule is
+    conservative: an open function is one anyone can call, so the value it moves
+    is not conferred by the seized gate and belongs to that function's own
+    finding. That is attribution, not caution, and it is the same attribution at
+    hop k as at hop 1. An openness the pipeline did NOT determine is neither of
+    those two facts and carries its own refusal — a gate nobody read is not a
+    gate proven absent.
 
     What this plane still does NOT witness is that the authority the guard
     consults is the same one the finding's gate seizes: the ``canCall`` receiver
@@ -2155,6 +2251,15 @@ class ActAsPlane:
     call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool, str | None], ...]] = field(default_factory=dict)
     # (caller entity, state variable) -> (address it was read holding, observed_via, block)
     reads: dict[tuple[str, str], tuple[str, str, int | None]] = field(default_factory=dict)
+    # The resolved_type beside each read, kept out of ``reads`` so the receiver
+    # test reads the address and never the label. Absent where the row carried
+    # no classification, which is a third state and not 'contract'.
+    read_kinds: dict[tuple[str, str], str] = field(default_factory=dict)
+    # (caller entity, state variable) -> (observed_via, block) for a read that
+    # was ISSUED AND FAILED. Never a read: it carries no address and witnesses
+    # no receiver. Separate from ``reads`` so "the read reverted" cannot be
+    # published as "the read never happened".
+    read_failures: dict[tuple[str, str], tuple[str, int | None]] = field(default_factory=dict)
     # (destination entity, selector) -> {caller entity: the ACL row accepting it}
     destination_acl: dict[tuple[str, str], dict[str, DestinationAcceptance]] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -2170,7 +2275,8 @@ class ActAsPlane:
         is in it is considered, every other site is not looked at, and a caller
         with no site under any of them is refused rather than answered from a
         site the constraint excludes. ``via=None`` is the unconstrained question
-        the first hop asks.
+        the first hop asks — and it is the ONLY thing that distinguishes hop 1
+        from hop k, which is why the delegation conjunct is keyed on it.
         """
         token = _lower(selector)
         sites = self.call_sites.get((caller, token))
@@ -2184,23 +2290,54 @@ class ActAsPlane:
             sites = tuple(site for site in sites if site[4] is not None and site[4] in admitted)
             if not sites:
                 return ActAsVerdict(ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION)
-        outcome = ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE
+        # The sharpest shortfall any call site reported, and — where that
+        # shortfall is a statement about what a receiver holds — the resolved
+        # type of the address that was read, so the refusal carries WHAT it held.
+        # First site in the deterministic site order wins a reason it shares.
+        outcome: str | None = None
+        held_types: dict[str, str] = {}
+
+        def refuse(reason: str | None) -> ActAsVerdict:
+            if reason is None:
+                # Every site is either state-variable-bound (reported by the loop
+                # below) or parameter-bound (reported by the arm after it), and a
+                # caller with no site at all has already returned. Arriving here
+                # with nothing reported is a broken invariant, not an answer, and
+                # a refusal invented to cover it would be published as evidence.
+                raise AssertionError(f"act_as refusal with no reported shortfall: {caller} -> {destination}.{token}")
+            return ActAsVerdict(reason, receiver_resolved_type=held_types.get(reason))
+
         for name, openness, variable, delegated, calling_selector in sites:
             if not variable:
                 continue
             read = self.reads.get((caller, variable))
             if read is None:
-                outcome = _rank_outcome(outcome, ACT_AS_RECEIVER_NOT_READ)
+                # A read that was issued and reverted is not a read, and it is
+                # not the absence of one either.
+                attempted = (caller, variable) in self.read_failures
+                outcome = _rank_outcome(outcome, ACT_AS_RECEIVER_READ_FAILED if attempted else ACT_AS_RECEIVER_NOT_READ)
                 continue
             held, observed_via, block = read
+            kind = self.read_kinds.get((caller, variable))
             if held != destination:
-                outcome = _rank_outcome(outcome, ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS)
+                # The comparison is the answer; the classification says what the
+                # pointer holds instead, and two of its values are sharper
+                # negatives than "some other address".
+                if kind == _RESOLVED_RENOUNCED:
+                    shortfall = ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS
+                elif kind == _RESOLVED_CODELESS:
+                    shortfall = ACT_AS_RECEIVER_HOLDS_A_NON_CONTRACT
+                else:
+                    shortfall = ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS
+                held_types.setdefault(shortfall, kind or "not_determined")
+                outcome = _rank_outcome(outcome, shortfall)
                 continue
-            if openness != "restricted":
-                outcome = _rank_outcome(outcome, ACT_AS_CALL_SITE_IS_PUBLIC)
-                continue
-            if not delegated:
-                outcome = _rank_outcome(outcome, ACT_AS_CALL_SITE_GATE_NOT_DELEGATED)
+            # The read holds the destination. What the row CALLS that address is
+            # not consulted: a 'safe' or 'timelock' pointer holding D witnesses
+            # the step exactly as a 'contract' one does.
+            gate = self._gate_shortfall(openness, delegated, via=via)
+            if gate is not None:
+                outcome = _rank_outcome(outcome, gate)
                 continue
             return ActAsVerdict(
                 ACT_AS_WITNESSED,
@@ -2215,67 +2352,120 @@ class ActAsPlane:
                     receiver_variable=variable,
                     receiver_observed_via=observed_via,
                     receiver_block=block,
+                    admitted_without_a_delegation_witness=via is not None and not delegated,
                 ),
             )
         # No state variable of the caller names the destination. The second
         # shape: a call site whose callee the caller's own caller supplies, with
         # the destination's ACL naming this caller from the other end. Sorted so
         # a caller with several such sites names one function deterministically.
-        parameter_bound = sorted(
-            (site for site in sites if not site[2] and site[1] == "restricted" and site[3]),
-            key=_call_site_order,
-        )
+        # The gate conjuncts are NOT in this filter: a site excluded by one of
+        # them would leave the arm reporting that the receiver is parameter-bound
+        # — the precondition for this shape, not a shortfall of it — and publish
+        # the receiver binding as the failure when the gate is what failed.
+        parameter_bound = sorted((site for site in sites if not site[2]), key=_call_site_order)
         if not parameter_bound:
-            return ActAsVerdict(outcome)
+            return refuse(outcome)
+        # Acceptance is a fact about the DESTINATION and is the same under every
+        # call site, so it is consulted once, before any per-site gate reason.
         accepted = self.destination_acl.get((destination, token), {}).get(caller)
         if accepted is None:
-            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_NO_DESTINATION_ACL))
+            return refuse(_rank_outcome(outcome, ACT_AS_NO_DESTINATION_ACL))
         if not accepted.roles:
-            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE))
+            return refuse(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE))
         if not accepted.enumerated:
-            return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE))
-        name, openness, _variable, _delegated, calling_selector = parameter_bound[0]
-        return ActAsVerdict(
-            ACT_AS_WITNESSED,
-            ActAsStep(
-                caller=caller,
-                destination=destination,
-                selector=token,
-                calling_function=name,
-                calling_function_openness=openness,
-                calling_selector=calling_selector,
-                witness_kind=ACT_AS_WITNESS_DESTINATION_ACL,
-                acceptance=accepted,
-            ),
-        )
+            return refuse(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE))
+        for name, openness, _variable, delegated, calling_selector in parameter_bound:
+            gate = self._gate_shortfall(openness, delegated, via=via)
+            if gate is not None:
+                outcome = _rank_outcome(outcome, gate)
+                continue
+            return ActAsVerdict(
+                ACT_AS_WITNESSED,
+                ActAsStep(
+                    caller=caller,
+                    destination=destination,
+                    selector=token,
+                    calling_function=name,
+                    calling_function_openness=openness,
+                    calling_selector=calling_selector,
+                    witness_kind=ACT_AS_WITNESS_DESTINATION_ACL,
+                    acceptance=accepted,
+                    admitted_without_a_delegation_witness=via is not None and not delegated,
+                ),
+            )
+        return refuse(outcome)
+
+    @staticmethod
+    def _gate_shortfall(openness: str, delegated: bool, *, via: frozenset[str] | None) -> str | None:
+        """Which conjunct this call site's caller gate fails, or ``None`` if it
+        clears every one that applies at this hop.
+
+        Openness is three-valued and each value has its own answer: ``open`` is a
+        gate proven absent, ``restricted`` is a gate proven present, and anything
+        else is a field the pipeline did not determine — which is not a gate, and
+        is not the proven absence of one either.
+
+        Delegation is required at the FIRST hop and only there. At hop 1 the
+        principal's leverage IS the seized authority pointer, so only an
+        authority-delegated gate is opened by seizing it. Past hop 1 the licence
+        is the previous hop's admitted selector, which ``via`` has already pinned,
+        and the delegation of this function's own gate tests a mechanism the
+        principal is not using.
+        """
+        if openness == _OPENNESS_PUBLIC:
+            return ACT_AS_CALL_SITE_IS_PUBLIC
+        if openness != _OPENNESS_RESTRICTED:
+            return ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED
+        if via is None and not delegated:
+            return ACT_AS_CALL_SITE_GATE_NOT_DELEGATED
+        return None
 
 
 # How far a call site GOT before it was refused, so a caller with several call
 # sites for one selector reports the sharpest shortfall rather than whichever it
-# happened to look at last. Lower is further. The three destination-ACL refusals
-# rank ahead of "the receiver is not a state variable": that reason is what a
-# parameter-bound site reports when there is nothing left to consult, and a site
-# whose destination ACL WAS consulted got past it. Among the three, a row that
-# names a role but bounds its membership only below got further than one that
-# names no role at all, which got further than no row at all.
+# happened to look at last. Lower is further.
+#
+# The two proven-absent receiver reasons rank first because each ANSWERS the
+# question rather than falling short of it: a renounced pointer holds an address
+# that has no code and never can, and a codeless one holds an address proven to
+# hold none today. The three gate reasons come next — a site whose receiver
+# resolved and whose destination ACL was consulted got as far as its own gate.
+# They rank ahead of the three destination-ACL reasons, which report on the
+# destination rather than on this site. Among the ACL three, a row that names a
+# role but bounds its membership only below got further than one that names no
+# role at all, which got further than no row at all. Among the read reasons, an
+# address that was read and is somebody else got further than a read that was
+# issued and reverted, which got further than a read never attempted.
+#
+# Every constant that ``acts_as`` can rank MUST appear here: ``_rank_outcome``
+# indexes this map, so an unregistered outcome raises at runtime.
 _ACT_AS_RANK = {
-    ACT_AS_CALL_SITE_GATE_NOT_DELEGATED: 0,
-    ACT_AS_CALL_SITE_IS_PUBLIC: 1,
-    ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS: 2,
-    ACT_AS_RECEIVER_NOT_READ: 3,
-    ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE: 4,
-    ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE: 5,
-    ACT_AS_NO_DESTINATION_ACL: 6,
-    ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE: 7,
+    ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS: 0,
+    ACT_AS_RECEIVER_HOLDS_A_NON_CONTRACT: 1,
+    ACT_AS_CALL_SITE_GATE_NOT_DELEGATED: 2,
+    ACT_AS_CALL_SITE_IS_PUBLIC: 3,
+    ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED: 4,
+    ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS: 5,
+    ACT_AS_RECEIVER_READ_FAILED: 6,
+    ACT_AS_RECEIVER_NOT_READ: 7,
+    ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE: 8,
+    ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE: 9,
+    ACT_AS_NO_DESTINATION_ACL: 10,
     # A call site exists and the multi-hop constraint excluded every one of
     # them, so nothing about the receiver was ever consulted — further than no
     # call site at all, and short of every reason that did consult one.
-    ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION: 8,
-    ACT_AS_NO_CALL_SITE: 9,
+    ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION: 11,
+    ACT_AS_NO_CALL_SITE: 12,
 }
 
 
-def _rank_outcome(current: str, candidate: str) -> str:
+def _rank_outcome(current: str | None, candidate: str) -> str:
+    """``current`` is ``None`` until some call site has reported. Nothing is not
+    a shortfall, so the first candidate wins outright rather than competing with
+    a sentinel that would be published if no site reported at all."""
+    if current is None:
+        return candidate
     return candidate if _ACT_AS_RANK[candidate] < _ACT_AS_RANK[current] else current
 
 
@@ -2343,6 +2533,9 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             )
 
     reads: dict[tuple[str, str], tuple[str, str, int | None]] = {}
+    read_kinds: dict[tuple[str, str], str] = {}
+    read_failures: dict[tuple[str, str], tuple[str, int | None]] = {}
+    resolved_type_histogram: dict[str, int] = defaultdict(int)
     ambiguous: set[tuple[str, str]] = set()
     rows = (
         session.query(
@@ -2361,12 +2554,25 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
         .all()
     )
     for source, value, resolved_type, observed_via, block, deployment, address, chain in rows:
-        if not source or resolved_type != "contract" or observed_via not in _READ_OBSERVATIONS:
+        if not source:
+            continue
+        key = (entity_key(coalesce_chain(chain), deployment or address), str(source))
+        if observed_via in _READ_FAILURE_OBSERVATIONS:
+            # The reader tried and the call reverted. Indexed so the refusal can
+            # say so; never a read, because it carries no address.
+            read_failures.setdefault(key, (str(observed_via), int(block) if block is not None else None))
+            continue
+        if observed_via not in _READ_OBSERVATIONS:
             continue
         held = _lower(str(value or ""))
         if not held.startswith("0x"):
             continue
-        key = (entity_key(coalesce_chain(chain), deployment or address), str(source))
+        # Every read that RETURNED an address is indexed, whatever the row calls
+        # that address. resolved_type is a classification of a value the row
+        # already carries, and the receiver test is the address comparison; a
+        # pointer dropped for its label is a read discarded on a name.
+        kind = str(resolved_type) if resolved_type else ""
+        resolved_type_histogram[kind or "not_determined"] += 1
         held_key = entity_key(coalesce_chain(chain), held)
         previous = reads.get(key)
         if previous is not None and previous[0] != held_key:
@@ -2376,8 +2582,19 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             ambiguous.add(key)
             continue
         reads.setdefault(key, (held_key, str(observed_via), int(block) if block is not None else None))
+        if kind:
+            read_kinds.setdefault(key, kind)
     for key in ambiguous:
         reads.pop(key, None)
+        read_kinds.pop(key, None)
+        # The failure record goes with them. A variable read twice to two
+        # different addresses AND carrying a failed read would otherwise be
+        # refused as caller_state_variable_read_reverted_on_chain — a sharper
+        # claim than the evidence supports, since the reads that DID return are
+        # what defeated it. It falls back to never_read_on_chain, which is the
+        # standing (registered) mislabel for the disagreement case and awaits its
+        # own reason; this must not make it a second, more specific one.
+        read_failures.pop(key, None)
 
     destination_acl: dict[tuple[str, str], dict[str, DestinationAcceptance]] = defaultdict(dict)
     acl_rows_keyed = acl_rows_naming_a_role = 0
@@ -2440,6 +2657,8 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
     plane = ActAsPlane(
         call_sites={key: tuple(sorted(set(rows), key=_call_site_order)) for key, rows in sorted(call_sites.items())},
         reads=reads,
+        read_kinds=read_kinds,
+        read_failures=read_failures,
         destination_acl={key: dict(sorted(callers.items())) for key, callers in sorted(destination_acl.items())},
     )
     plane.provenance = {
@@ -2453,9 +2672,18 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "call_sites_naming_their_own_selector": call_sites_naming_their_own_selector,
         },
         "receiver_reads": {
-            "state_variables_read_on_chain_holding_a_contract": len(reads),
+            # Not "…holding_a_contract": admission no longer branches on what the
+            # row calls the address, so the count is every VARIABLE read to an
+            # address. The histogram beside it counts ROWS — one variable read
+            # twice contributes twice, and a variable dropped for disagreeing
+            # reads still contributes — so the two do not sum to each other and
+            # the names say which unit each is in.
+            "state_variables_read_on_chain": len(reads),
+            "state_variables_whose_read_failed": len(read_failures),
+            "resolved_type_of_each_read_row": dict(sorted(resolved_type_histogram.items())),
             "variables_two_reads_disagree_under": len(ambiguous),
             "observations_admitted": sorted(_READ_OBSERVATIONS),
+            "observations_recorded_as_a_failed_read": sorted(_READ_FAILURE_OBSERVATIONS),
         },
         "destination_acceptance": {
             "function_principal_rows_returned": len(acl_rows),
@@ -2472,17 +2700,44 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "always required (effective_functions.sinks, an external_call carrying the called "
             "selector and the receiver it binds to, compiled from the caller's own source). "
             "What names the ADDRESS it lands on has two shapes and either witnesses the step: "
-            "the RECEIVER (controller_values, an on-chain read at a recorded block proving that "
-            "state variable holds the destination), or — when the receiver is bound to a "
+            "the RECEIVER (controller_values, an on-chain read at a recorded block, compared "
+            "against the destination address) — the READ and the comparison are the witness, and "
+            "controller_values.resolved_type is context, not a filter: a pointer classified "
+            "'safe' or 'timelock' that holds the destination witnesses the step exactly as a "
+            "'contract' one does, because what the pointer holds is the question and what the "
+            "row calls it is not. Where the address read is NOT the destination the "
+            "classification sharpens the earned negative into one of three: "
+            "caller_state_variable_holds_the_renounced_zero_address (the pointer is renounced, "
+            "and address(0) holds no code and never can), "
+            "caller_state_variable_holds_an_address_proven_to_hold_no_code (an empty "
+            "eth_getCode, which an RPC failure does not produce), and otherwise "
+            "caller_state_variable_holds_a_different_address. A read that was ISSUED AND "
+            "REVERTED is none of those: it is indexed apart as "
+            "caller_state_variable_read_reverted_on_chain, a not_determined, and is never "
+            "published as caller_state_variable_never_read_on_chain — the row exists, with an "
+            "observation kind and a block, and calling it a read that never happened asserts a "
+            "coverage gap the evidence disproves. The second shape is — when the receiver is "
+            "bound to a "
             "parameter, a local or an unresolved head, where no storage of the caller CAN name "
             "it because the callee is chosen at call time — the DESTINATION'S OWN ACL "
             "(function_principals, a principal_type='controller' row naming this caller as an "
             "accepted caller of that selector by an enumerated role). The second shape is "
-            "admitted only for a restricted call site whose gate is delegated, only on a row "
-            "whose trace names at least one role, only where membership_quality is 'exact', and "
+            "admitted only on a row whose trace names at least one role, only where "
+            "membership_quality is 'exact', and "
             "only for MAGNITUDE: it is never read into reach, and it does not witness that the "
             "call succeeds — the same row carries the destination's own preconditions and none "
-            "of them are consulted. Each shortfall is published as its own reason rather than "
+            "of them are consulted. UNDER BOTH SHAPES the call site's own caller gate is tested, "
+            "and its three states are published as three reasons: authority_openness 'restricted' "
+            "passes, 'open' is refused as the_call_site_needs_no_gate — a proven-absent gate, and "
+            "the refusal is ATTRIBUTION rather than caution, since a function anyone can call "
+            "moves value that no seized gate conferred and that belongs to that function's own "
+            "finding — and anything else, not_determined included, is refused as "
+            "call_site_caller_gate_openness_is_not_determined, never collapsed into either: a "
+            "gate the pipeline did not read is not a gate proven absent. The gate reasons and the "
+            "destination-ACL reasons are ranked, not merged, so a parameter-bound site reports "
+            "the conjunct that actually failed rather than the fact that its receiver is "
+            "parameter-bound — which is the PRECONDITION for this shape and never a shortfall of "
+            "it. Each shortfall is published as its own reason rather than "
             "collapsed into one: no row naming this caller at all is "
             "destination_does_not_accept_this_caller_for_this_selector; a row that names the "
             "caller but expresses no role that admits it is "
@@ -2496,7 +2751,22 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "function's OWN selector because a function name does not identify a function; "
             "a caller with no call site under any admitted function is refused as "
             "intermediate_calling_function_is_not_the_selector_admitted_at_the_previous_hop "
-            "rather than answered from a site that constraint excludes. "
+            "rather than answered from a site that constraint excludes. That admitted selector "
+            "is also what REPLACES the delegation conjunct past the first hop: the calling "
+            "function's gate must be witnessed delegated to an authority at hop 1, where the "
+            "principal's leverage IS the seized authority pointer and only a delegated gate is "
+            "opened by seizing it, and it is NOT required past hop 1, where the principal has "
+            "seized nothing on the intermediate and arrives as whoever the previous hop admitted "
+            "— an intermediate gated by a direct msg.sender check is exactly the shape such a "
+            "chain runs through, and refusing it would discard a witnessed path over a mechanism "
+            "the principal is not using. A step admitted with no delegation witness carries "
+            "admitted_without_a_delegation_witness: true and says so in its basis. The field is "
+            "a fact about the SITE and not about the hop: false on a step past the first hop "
+            "means the requirement was lifted there and that call site carries the delegation "
+            "witness anyway — a different fact from a step let through without one, and "
+            "published as one. The "
+            "openness conjunct is NOT relaxed with it and applies at every hop, for the "
+            "attribution reason above and not because it is conservative. "
             "THE RESIDUAL THIS PLANE DOES NOT CLOSE: the calling function's guard is witnessed "
             "consulting AN authority (a canCall call), never that it is the same authority the "
             "finding's gate seizes — the guard's receiver is a local and no read pins it. The "
@@ -2963,14 +3233,17 @@ def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
 __all__ = [
     "ACT_AS_CALL_SITE_GATE_NOT_DELEGATED",
     "ACT_AS_CALL_SITE_IS_PUBLIC",
+    "ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED",
     "ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE",
     "ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE",
     "ACT_AS_NO_CALL_SITE",
     "ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION",
     "ACT_AS_NO_DESTINATION_ACL",
+    "ACT_AS_RECEIVER_HOLDS_A_NON_CONTRACT",
     "ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS",
-    "ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE",
+    "ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS",
     "ACT_AS_RECEIVER_NOT_READ",
+    "ACT_AS_RECEIVER_READ_FAILED",
     "ACT_AS_WITNESSED",
     "ACT_AS_WITNESS_CALLER_STATE_VARIABLE",
     "ACT_AS_WITNESS_DESTINATION_ACL",

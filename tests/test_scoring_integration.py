@@ -1285,3 +1285,166 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
     assert acceptance["rows_naming_an_admitting_role"] == 3
     assert acceptance["membership_quality"] == {"exact": 3, "lower_bound": 1}
     assert acceptance["principal_type_read"] == "controller"
+
+
+def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
+    """U1/B1: the loader is where the witness is kept or discarded.
+
+    Admission is the address comparison, so every ``controller_values`` row whose
+    read RETURNED an address is indexed whatever ``resolved_type`` calls that
+    address — dropping the non-``contract`` ones discarded stored reads on the
+    strength of a label, and published a coverage gap where the row holds an
+    answer. ``eth_call_error`` is the opposite case: a read the pipeline ISSUED
+    that reverted, carrying no address, indexed in its own map so it can satisfy
+    no receiver test and can never be published as a read that never happened.
+    """
+    from db.models import ControllerValue
+    from services.scoring import planes as P
+
+    holder = fx.contract()
+    held = "0x" + "9" * 40
+    kinds = ("contract", "safe", "timelock", "zero", "eoa", "unknown")
+    rows = [
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id=f"cv-{kind}",
+            source=f"var_{kind}",
+            value=held,
+            resolved_type=kind,
+            observed_via="eth_call",
+            block_number=25_657_731,
+        )
+        for kind in kinds
+    ]
+    rows += [
+        # a read that was attempted and reverted: no value, and the resolver's
+        # own 'unknown' beside it
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-failed",
+            source="boringVault",
+            value=None,
+            resolved_type="unknown",
+            observed_via="eth_call_error",
+            block_number=25_657_731,
+        ),
+        # a row with no classification at all — a third state, not 'contract'
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-null",
+            source="var_unclassified",
+            value=held,
+            resolved_type=None,
+            observed_via="eth_call",
+            block_number=25_657_731,
+        ),
+        # an observation kind that is neither a read nor a failed read
+        ControllerValue(
+            contract_id=holder.id,
+            deployment_address=holder.address,
+            controller_id="cv-poll",
+            source="var_polled",
+            value=held,
+            resolved_type="contract",
+            observed_via="storage_poll",
+            block_number=25_657_731,
+        ),
+    ]
+    fx.session.add_all(rows)
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", holder.address)
+    held_key = entity_key("ethereum", held)
+
+    # every returned read is indexed, whatever the row calls the address...
+    for kind in kinds:
+        assert plane.reads[(key, f"var_{kind}")] == (held_key, "eth_call", 25_657_731), kind
+        assert plane.read_kinds[(key, f"var_{kind}")] == kind, kind
+    # ...including the one nothing classified, which carries no kind rather than
+    # a defaulted one
+    assert plane.reads[(key, "var_unclassified")][0] == held_key
+    assert (key, "var_unclassified") not in plane.read_kinds
+    # the failed read is NOT a read, and is kept where a receiver test cannot
+    # reach it
+    assert (key, "boringVault") not in plane.reads
+    assert plane.read_failures[(key, "boringVault")] == ("eth_call_error", 25_657_731)
+    # ...and an observation that is neither is still admitted as neither
+    assert (key, "var_polled") not in plane.reads
+    assert (key, "var_polled") not in plane.read_failures
+
+    reads = plane.provenance["receiver_reads"]
+    assert reads["state_variables_read_on_chain"] == len(kinds) + 1
+    assert reads["state_variables_whose_read_failed"] == 1
+    assert reads["resolved_type_of_each_read_row"] == {
+        "contract": 1,
+        "safe": 1,
+        "timelock": 1,
+        "zero": 1,
+        "eoa": 1,
+        "unknown": 1,
+        "not_determined": 1,
+    }
+    assert reads["observations_recorded_as_a_failed_read"] == ["eth_call_error"]
+    assert "eth_call_error" not in reads["observations_admitted"]
+
+    # ...and the plane answers with the read, not the label: a 'safe' pointer
+    # holding the destination witnesses the step, a 'zero' one earns its own
+    # proven-absent reason, and the reverted read earns a third that is neither.
+    plane.call_sites = {
+        (key, "0x18457e61"): (
+            ("callSafe", "restricted", "var_safe", True, "0x2ddd62ce"),
+            ("callZero", "restricted", "var_zero", True, "0x2ddd62ce"),
+            ("callFailed", "restricted", "boringVault", True, "0x2ddd62ce"),
+        )
+    }
+    assert plane.acts_as(key, held_key, "0x18457e61").witnessed
+    plane.call_sites[(key, "0x18457e61")] = plane.call_sites[(key, "0x18457e61")][1:]
+    other = entity_key("ethereum", "0x" + "a" * 40)
+    assert plane.acts_as(key, other, "0x18457e61").outcome == P.ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS
+    plane.call_sites[(key, "0x18457e61")] = plane.call_sites[(key, "0x18457e61")][1:]
+    assert plane.acts_as(key, other, "0x18457e61").outcome == P.ACT_AS_RECEIVER_READ_FAILED
+
+
+def test_two_disagreeing_reads_never_become_a_reverted_read(fx):
+    """The disagreement defeats the failure record, not the other way round.
+
+    A variable read twice to two different addresses resolves to nothing — and if
+    a failed read of the same variable were left indexed, the refusal would
+    become "the read reverted on chain", a sharper claim than the evidence
+    supports when reads that DID return are what defeated it.
+    """
+    from db.models import ControllerValue
+    from services.scoring import planes as P
+
+    holder = fx.contract()
+    fx.session.add_all(
+        [
+            ControllerValue(
+                contract_id=holder.id,
+                deployment_address=holder.address,
+                controller_id=f"cv-{i}",
+                source="vault",
+                value=value,
+                resolved_type="contract",
+                observed_via=observed,
+                block_number=1,
+            )
+            for i, (value, observed) in enumerate(
+                (("0x" + "1" * 40, "eth_call"), ("0x" + "2" * 40, "eth_call"), (None, "eth_call_error"))
+            )
+        ]
+    )
+    fx.session.commit()
+
+    plane = P.load_act_as_plane(fx.session, fx.protocol.id)
+    key = entity_key("ethereum", holder.address)
+    assert (key, "vault") not in plane.reads
+    assert (key, "vault") not in plane.read_failures
+    assert plane.provenance["receiver_reads"]["variables_two_reads_disagree_under"] == 1
+    plane.call_sites = {(key, "0x18457e61"): (("callVault", "restricted", "vault", True, "0x2ddd62ce"),)}
+    verdict = plane.acts_as(key, entity_key("ethereum", "0x" + "1" * 40), "0x18457e61")
+    assert verdict.outcome == P.ACT_AS_RECEIVER_NOT_READ
