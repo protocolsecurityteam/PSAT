@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -242,6 +242,21 @@ class _CallerHoldingPrecondition:
         }
 
 
+# How much a magnitude witness state CLAIMS, lowest first. Read only to settle a
+# tie between two candidates at the same figure: the state published is the
+# least-claiming of them, because an exactness that one tied candidate does not
+# support would be exactness minted by whichever candidate the iteration reached
+# first.
+_WITNESS_STATE_CLAIM = {"proven_floor": 1, "proven_exact": 2}
+# A state this map cannot rank is ranked so that it can never WIN a tie. Sorting
+# it with the weakest would be the fail-open: "we do not know what this claims"
+# would beat a state proven to claim little, and an unrankable string would be
+# published in preference to a witness. Losing every tie means it is published
+# only where it is the sole candidate — where it is the only thing there is to
+# publish and no comparison was made.
+_WITNESS_STATE_UNRANKED = len(_WITNESS_STATE_CLAIM) + 1
+
+
 @dataclass(frozen=True)
 class _ComposedMagnitude:
     """A destination function's own magnitude witness, reached along a witnessed path.
@@ -253,6 +268,19 @@ class _ComposedMagnitude:
     available to bound it with at all. Both of those bounds are ceilings and so
     is their min; ``caller_holding`` names the precondition that keeps the whole
     figure a ceiling on THIS PRINCIPAL rather than a floor.
+
+    ``tied_with`` is the other candidates this entity offered at the SAME figure,
+    which this one was chosen over by :func:`_composed_order`. Empty is the
+    proven "one candidate, nothing was decided by the rule", and it publishes as
+    ``composed_selector_tie: null`` rather than as a missing field.
+
+    ``predicates`` is the destination function's own stored condition texts, a
+    disclosure carried so the entry can point at them; nothing in this class or
+    anywhere downstream evaluates one. It is REQUIRED, with no default: the
+    lookup answers in three states of its own and a default would have to spell
+    one of them, putting "nobody asked" and "asked, and no function of this
+    entity carries that selector" under one name — inside the very block whose
+    reading argues those must stay apart.
     """
 
     entity: str
@@ -264,6 +292,86 @@ class _ComposedMagnitude:
     sheet_usd: float | None
     chain: tuple[P.ActAsStep, ...]
     caller_holding: _CallerHoldingPrecondition
+    predicates: P.DestinationPredicates
+    tied_with: tuple[_ComposedMagnitude, ...] = ()
+
+    def _tie_json(self) -> dict[str, Any] | None:
+        if not self.tied_with:
+            return None
+        return {
+            "tied_at_usd": round(self.usd, 2),
+            "candidates": [
+                {
+                    "selector": entry.selector,
+                    "destination_function": entry.function,
+                    "witness_state": entry.witness_state,
+                    "witnessed_usd": round(entry.witnessed_usd, 2),
+                    "chosen": entry is self,
+                }
+                for entry in sorted((self, *self.tied_with), key=_composed_order)
+            ],
+            "chosen_by": (
+                "the weakest witness state; then the lowest selector; then the lowest "
+                "destination function; then the chain's calling selectors; then "
+                "the chain's own identity — each step's caller, selector, calling selector, "
+                "receiver variable and receiver block. Total over every field the entry "
+                "publishes, so nothing is left to the order the candidates were built in"
+            ),
+            "reading": (
+                "this entity carries more than one call at the same PUBLISHED figure, and "
+                "which of them names the published selector, destination_function and "
+                "act_as_chain is decided by that rule and not by evidence. The published "
+                "dollars are the same under every one of them, so nothing about the figure "
+                "rests on the choice — but the candidates are not therefore equally "
+                "witnessed: witnessed_usd is each one's OWN flow.out figure and they can "
+                "differ where the destination's sheet is what capped them to the same number. "
+                "The witness state published is the WEAKEST of the tied candidates, so no "
+                "exactness is claimed that a tied candidate does not support"
+            ),
+        }
+
+    def _predicates_json(self) -> dict[str, Any]:
+        found = self.predicates
+        reading = (
+            "the predicate texts extracted from the DESTINATION function's compiled body, "
+            "published verbatim and in stored order so this entry's ceiling can be checked "
+            "against the evidence rather than taken on the fold's word. Four things about "
+            "them. (1) They are stored WITHOUT POLARITY: the same text is a require-condition "
+            "in one function and a revert-condition in another, so nothing here can tell "
+            "whether any one of them must hold or must not. (2) The scorer therefore EVALUATES "
+            "NONE of them and no published figure, band, refusal or count is affected by any "
+            "one of them — removing this block changes no number. (3) The list is not a list of "
+            "unmet business conditions: it includes the authorization guard that this step's "
+            "own act-as witness proves satisfied, and it may include transfer post-conditions "
+            "and compiler or decompiler artefacts, all of which the extractor labels 'business' "
+            "alike — which is why the label is not read and the list is not filtered. (4) It "
+            "answers a DIFFERENT question from caller_holding_precondition beside it: that one "
+            "is what the caller must already hold, this one is what the destination's own body "
+            "tests, and neither bounds the other. state is three-valued and the three are not "
+            "interchangeable: 'extracted' is a read (count 0 under it means the extractor ran "
+            "and found no predicate), 'column_holds_no_array' is an extraction that never ran, "
+            "and 'destination_function_not_located' is a join that found no function of this "
+            "entity under this selector — under the last two, descriptions is null and not an "
+            "empty list, because nothing was read. function_name is the row the selector join "
+            "landed on, published so a reader can check it against destination_function above "
+            "rather than take the join on the fold's word"
+        )
+        return {
+            "source": "effective_functions.conditions",
+            "state": found.state,
+            "function_id": found.function_id,
+            # The name of the row the join reached, NOT this entry's
+            # ``destination_function`` restated: the first comes from
+            # ``effective_functions``, the second from the flow.out signal, and
+            # printing one twice would hide the day they disagree.
+            "function_name": found.function_name,
+            "functions_matching_selector": found.functions_matching,
+            "count": (None if found.descriptions is None else len(found.descriptions)),
+            "entries_stored": found.entries_stored,
+            "descriptions": (None if found.descriptions is None else list(found.descriptions)),
+            "evaluated": False,
+            "reading": reading,
+        }
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -298,6 +406,14 @@ class _ComposedMagnitude:
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
             "caller_holding_precondition": self.caller_holding.as_json(),
+            # Beside caller_holding_precondition and never inside it: that one
+            # names what the CALLER must already hold, this one is what the
+            # DESTINATION's body tests, and folding the second into the first
+            # would republish an unpolarised string set as a bound.
+            "destination_predicates": self._predicates_json(),
+            # ``null`` is the proven "one candidate — the order decided nothing
+            # here", which is a different fact from a field nobody filled in.
+            "composed_selector_tie": self._tie_json(),
             "reading": (
                 "the dollars are the DESTINATION function's own flow.out witness, not this "
                 "row's and not the destination's balance sheet, and as a claim about what this "
@@ -313,9 +429,103 @@ class _ComposedMagnitude:
                 "admitted, matched on that function's own selector — compare each step's "
                 "calling_selector against the selector of the step before it — because no hop "
                 "inherits its predecessor's authority and a function name does not identify a "
-                "function. Remove any one of those witnesses and this figure is not_determined"
+                "function. Remove any one of those witnesses and this figure is not_determined. "
+                "Two further blocks say what this entry does NOT rest on. "
+                "composed_selector_tie, where more than one call at this entity carried the "
+                "same published figure and a stated rule rather than evidence picked which of "
+                "them names the fields above — null there is the proven 'one candidate, and "
+                "the rule decided nothing', never an unasked question. And "
+                "destination_predicates, the destination function's own stored condition "
+                "texts, published verbatim and evaluated by nothing here"
             ),
         }
+
+
+def _composed_order(entry: _ComposedMagnitude) -> tuple[Any, ...]:
+    """The total, evidence-first order a composed candidate is chosen by.
+
+    Dollars first and highest: two selectors at one entity are two INDEPENDENT
+    calls, the row asks what the principal can move, and a max of ceilings is a
+    ceiling. (That is not the lower-of-two rule at
+    :func:`_destination_magnitudes`, which settles two distillations of ONE
+    quantity.) Everything after the figure breaks a tie between candidates that
+    carry the same dollars, where the remaining published fields — the witness
+    state, the selector, the destination function and the chain — are not
+    dollars and are not interchangeable. The witness state goes to the weakest;
+    the rest is arbitrary, and being arbitrary is exactly why it is stated here
+    and published on the entry rather than left to the order instances arrive
+    in.
+
+    The tail is TOTAL over everything the entry publishes, and that is the point
+    rather than a nicety. Two candidates can agree on the figure, the state, the
+    selector, the function and the chain's shape and still differ in the raw
+    destination the walk anchored on, the calling function's name, the witness
+    kind, the observation the pointer was read under or the destination's
+    acceptance row — all of which are rendered into ``act_as_chain`` and every
+    step ``basis``. A key that stopped short would hand that difference back to
+    the order the candidates were built in, which is the defect this ordering
+    exists to remove, one level down.
+
+    So the tail is the step's OWN published identity, taken from
+    :meth:`P.ActAsStep.as_json` rather than from a hand-written list of fields.
+    That is what makes it total by construction, and what keeps it total on the
+    day a field is added to the step: a list written out here would silently
+    stop covering the entry the moment the step published something new. Values
+    are rendered to text because the published shape is not orderable as it
+    stands — ``destination_acceptance`` is a nested object on one step and
+    ``None`` on the next, and comparing those two directly raises.
+    """
+    return (
+        -entry.usd,
+        _WITNESS_STATE_CLAIM.get(entry.witness_state, _WITNESS_STATE_UNRANKED),
+        entry.selector,
+        entry.function,
+        # Length needs no component of its own: two chains whose calling
+        # selectors compare equal are the same length by construction.
+        tuple(step.calling_selector or "" for step in entry.chain),
+        tuple(tuple(sorted((key, repr(value)) for key, value in step.as_json().items())) for step in entry.chain),
+    )
+
+
+def _select_composed(candidates: list[_ComposedMagnitude]) -> _ComposedMagnitude:
+    """The one candidate published for an entity, carrying the ones it beat.
+
+    The WHOLE candidate is selected, never a field of it: ``selector``,
+    ``function``, ``witness_state``, ``caller_holding`` and ``chain`` are one
+    call's account of itself, and a chain taken from a different candidate than
+    the selector would publish a path that does not end at the function named
+    beside it.
+
+    Candidates tied at the published figure are retained on the winner so the
+    entry can say that its selector, destination function and chain were decided
+    by a stated rule rather than by evidence. Candidates BELOW the figure are
+    dropped: they lost on dollars, which is a decision the evidence made, and
+    keeping them would spell a resolved comparison as a tie.
+    """
+    ordered = sorted(candidates, key=_composed_order)
+    best = ordered[0]
+    tied = tuple(other for other in ordered[1:] if other.usd == best.usd)
+    return replace(best, tied_with=tuple(replace(other, tied_with=()) for other in tied))
+
+
+def _pool_composed(into: dict[str, list[_ComposedMagnitude]], published: dict[str, _ComposedMagnitude]) -> None:
+    """Fold one composition's published entries back into a candidate pool.
+
+    A published entry carries the candidates it was chosen over, so re-selecting
+    over ``entry`` plus ``entry.tied_with`` reaches the same answer as selecting
+    over the whole population at once — which is what lets the two selection
+    points (one per :func:`_compose`, one across a row's instances) compose
+    without the second inheriting the first's tie-break as if it were evidence.
+
+    Duplicates are dropped on the entry's own fields: the same call reached by
+    two instances of one row is one candidate, and counting it twice would
+    publish a tie where nothing was ever ambiguous.
+    """
+    for key, entry in published.items():
+        pool = into.setdefault(key, [])
+        for candidate in (replace(entry, tied_with=()), *entry.tied_with):
+            if candidate not in pool:
+                pool.append(candidate)
 
 
 @dataclass
@@ -1736,7 +1946,11 @@ def _row_value(
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
     unbounded_floors: list[dict[str, Any]] = []
-    composition: dict[str, _ComposedMagnitude] = {}
+    # Every candidate every instance offered per entity, kept rather than
+    # collapsed on arrival: the merge below has to choose between candidates
+    # that tie on dollars, and a running MAX destroys the losers before the tie
+    # can be seen, let alone published.
+    composition_candidates: dict[str, list[_ComposedMagnitude]] = {}
     composition_census: dict[str, int] = {}
     composition_refusals: dict[str, int] = defaultdict(int)
     composed_signals: set[tuple[Any, ...]] = set()
@@ -1818,11 +2032,8 @@ def _row_value(
                 # no destination function and has no compositional source; its
                 # magnitude question is a different one and stays where Phase 4
                 # left it.
-                composed, counts, refused = _compose(seeds, walked_hops, act_as, magnitudes, value_plane)
-                for key, entry in composed.items():
-                    previous = composition.get(key)
-                    if previous is None or entry.usd > previous.usd:
-                        composition[key] = entry
+                composed, counts, refused = _compose(seeds, walked_hops, act_as, magnitudes, value_plane, conditions)
+                _pool_composed(composition_candidates, composed)
                 for name, count in counts.items():
                     composition_census[name] = composition_census.get(name, 0) + count
                 for reason, hits in refused.items():
@@ -1859,6 +2070,11 @@ def _row_value(
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
 
+    # One selection over every instance's candidates, not a running MAX: the
+    # figure is the same either way, but the selector, destination function,
+    # witness state and chain published beside it are the CHOSEN candidate's own
+    # and must be taken from it together.
+    composition = {key: _select_composed(pool) for key, pool in sorted(composition_candidates.items())}
     hop_gaps = [hops[pair] for pair in sorted(hops) if value_plane.canonical(pair[1]) not in reached]
     census["hops_not_determined"] = len(hops)
     census["hops_not_determined_withholding_reach"] = len(hop_gaps)
@@ -2040,16 +2256,30 @@ def _composition_report(
             "own access-control list naming this caller as an accepted caller of that selector "
             "by an enumerated role. Past the first hop the calling function must additionally "
             "be one the previous hop admitted, matched on that function's own selector, "
-            "because no hop inherits its predecessor's authority: the finding's seized gate "
-            "is spent at hop 1 and only there, and the restricted-and-delegated conjuncts the "
-            "plane applies at every hop are NOT the licence past it — they are kept only "
-            "because they are conservative, and an open intermediate function is refused "
-            "under them although it would be easier to reach. destination_magnitude_witnessed "
+            "because no hop inherits its predecessor's authority: the finding's seized gate is "
+            "spent at hop 1 and only there. The two per-site conjuncts do NOT both survive "
+            "that boundary and neither is conservative-only. The DELEGATION conjunct is not "
+            "applied past hop 1 — the licence there is the previous hop's admitted selector, "
+            "and a direct msg.sender gate on the intermediate is exactly the shape such a "
+            "chain runs through; a step admitted without the delegation witness says so on "
+            "itself, under admitted_without_a_delegation_witness, so the published basis "
+            "names the conjunct that was not applied rather than dropping it silently. A call "
+            "site whose calling function needs no gate is refused "
+            "at EVERY hop, and not because the rule is conservative: an open function is one "
+            "anyone can call, so the value it moves is not conferred by the seized gate and "
+            "belongs to that function's own finding. destination_magnitude_witnessed "
             "is the subset of those "
             "whose destination function also carries its own flow.out witness. composed is the "
             "distinct entities that cleared every one, and every figure they carry is a ceiling "
-            "on one call rather than a floor. Everything in act_as_refused stayed "
-            "not_determined and is charged to confidence"
+            "on one call rather than a floor. One entity may clear all three under MORE THAN "
+            "ONE selector, and composed counts it once: two selectors at one entity are two "
+            "independent calls, so the dollars published are the largest of them — a max of "
+            "ceilings, never their sum and never the lower of the two, which is the rule for "
+            "two distillations of one quantity and not for two calls. Where the largest is a "
+            "tie, the entry names which candidates tied and by what rule the published "
+            "selector, destination_function and act_as_chain were picked out of them, under "
+            "composed_selector_tie; null there is the proven 'one candidate'. Everything in "
+            "act_as_refused stayed not_determined and is charged to confidence"
         ),
     }
 
@@ -2126,6 +2356,7 @@ def _compose(
     act_as: P.ActAsPlane,
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
     value_plane: P.ValuePlane,
+    conditions: P.ConditionPlane,
 ) -> tuple[dict[str, _ComposedMagnitude], dict[str, int], dict[str, int]]:
     """The gate-control magnitude the destination's own witness supplies (Phase 6).
 
@@ -2175,9 +2406,24 @@ def _compose(
     function is one hop k admitted, matched on that function's OWN selector
     because a function name does not identify a function. ``chains`` holds those
     admitted functions per node, keyed by that selector, each with the path that
-    admitted it. (The plane still applies its ``restricted`` + delegated
-    conjuncts at every hop; past hop 1 they are conservative-only and are not
-    what licenses the step.)
+    admitted it.
+
+    The plane's two per-site conjuncts are NOT symmetric past hop 1, and neither
+    is "conservative-only". The DELEGATION conjunct is not applied there: the
+    licence is the previous hop's admitted selector, and a direct ``msg.sender``
+    gate on the intermediate is exactly the shape such a chain runs through. A
+    step admitted without that witness carries
+    ``admitted_without_a_delegation_witness: true``, so the conjunct that was
+    not applied is named on the step rather than dropped silently. The OPENNESS
+    conjunct IS applied at every hop, and not out of caution — an open function
+    is one anyone can call, so the value it moves is not conferred by the seized
+    gate and belongs to that function's own finding.
+
+    Where one entity offers more than one licensed selector carrying a
+    magnitude, the entry published is chosen by :func:`_composed_order` and the
+    losers tied at the same figure are published beside it: the dollars are a
+    max of ceilings, but the selector, function, witness state and chain are one
+    call's account of itself and are taken from the chosen candidate together.
     """
     census: dict[str, int] = dict.fromkeys(
         (
@@ -2196,7 +2442,7 @@ def _compose(
             census["licensed_hops"] += 1
             by_caller[hop.caller].append(hop)
 
-    composed: dict[str, _ComposedMagnitude] = {}
+    candidates: dict[str, list[_ComposedMagnitude]] = {}
     # Per node, every function of it a hop admitted — keyed by that function's
     # own SELECTOR — and the chain that admitted it. A node entered under two
     # functions carries two chains, and each licensed hop out of it is published
@@ -2254,9 +2500,19 @@ def _compose(
                     # R4: the witness bounds the call, the sheet bounds what is
                     # there to move. Neither alone, and never their sum.
                     usd = min(magnitude.usd, sheet) if sheet is not None else magnitude.usd
-                    previous = composed.get(key)
-                    if previous is None or usd > previous.usd:
-                        composed[key] = _ComposedMagnitude(
+                    # Every candidate is kept. Collapsing here on a running MAX
+                    # would decide the selector, destination function, witness
+                    # state and chain by whichever licensed selector the loop
+                    # reached first whenever two of them tie on dollars, and
+                    # would delete the losing candidate before that could be
+                    # seen. The choice is made once, by a stated rule, below.
+                    #
+                    # The predicate lookup is keyed at the RAW destination and
+                    # the licensed selector — the same pair the magnitude was
+                    # read at — so the texts are the body of exactly the
+                    # function this figure was read from.
+                    candidates.setdefault(key, []).append(
+                        _ComposedMagnitude(
                             entity=key,
                             selector=licensed.selector,
                             function=magnitude.function,
@@ -2266,7 +2522,9 @@ def _compose(
                             sheet_usd=sheet,
                             chain=chain,
                             caller_holding=_caller_holding(chain, value_plane),
+                            predicates=conditions.predicates(hop.destination, licensed.selector),
                         )
+                    )
         frontier = sorted(nxt)
     # Hops the BFS never offered because it never reached their CALLER. Without
     # a name they leave the largest negative result on this corpus published as
@@ -2279,6 +2537,7 @@ def _compose(
             continue
         for hop in hops_here:
             refusals[ACT_AS_CALLER_UNREACHED] += len(hop.licensed)
+    composed = {key: _select_composed(pool) for key, pool in sorted(candidates.items())}
     census["composed"] = len(composed)
     return composed, census, dict(sorted(refusals.items()))
 

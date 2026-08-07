@@ -1249,6 +1249,56 @@ class DestinationFunction:
     name: str
     caller_pinned_to_self: tuple[str, ...] = ()
     analysed: bool = False
+    # This function's own selector, so a consumer can join to it on the four
+    # bytes a licence names rather than on a name — 32 ``(entity, name)`` pairs
+    # on the reference corpus carry more than one selector. ``None`` is a
+    # function whose selector was never extracted, and it matches nothing.
+    selector: str | None = None
+    # Every predicate text the column holds, in stored order, verbatim and
+    # UNFILTERED. ``caller_pinned_to_self`` above is the one recognised shape;
+    # this is the whole population it was recognised out of, kept so a
+    # disclosure can point at the evidence. Nothing here is evaluated: the text
+    # carries no polarity (see ``_SELF_PIN``), so it is not readable as a
+    # condition that must hold or must not.
+    predicates: tuple[str, ...] = ()
+    # Entries the stored array held. Larger than ``len(predicates)`` when an
+    # entry carried no string ``description``, which is a shortfall in the
+    # disclosure and not a predicate that is absent.
+    predicate_entries_stored: int = 0
+
+
+# The three states a predicate lookup can land in, kept apart because "the
+# column held an empty array" is an extraction that RAN and found nothing, "the
+# column holds no array" is one that never ran, and "no function of this entity
+# carries that selector" is a join that missed. Collapsing any two of them would
+# publish a coverage gap as a proven absence of predicates.
+PREDICATES_EXTRACTED = "extracted"
+PREDICATES_COLUMN_HOLDS_NO_ARRAY = "column_holds_no_array"
+PREDICATES_FUNCTION_NOT_LOCATED = "destination_function_not_located"
+
+
+@dataclass(frozen=True)
+class DestinationPredicates:
+    """The verbatim predicate texts one destination function's body carries.
+
+    A DISCLOSURE and nothing else. The texts are stored without polarity — the
+    same string is a require-condition in one function and a revert-condition in
+    another — so no consumer of this can tell whether any of them must hold or
+    must not, and none of them is evaluated anywhere. It exists so a reader can
+    see the evidence a claim about that function was NOT made against.
+
+    ``functions_matching`` is published because a selector is not guaranteed
+    unique within an entity: an entity that folds a proxy and its implementation
+    can carry two rows under one selector, and a reader is owed the fact that
+    the texts below are one of them rather than the whole surface.
+    """
+
+    state: str
+    function_id: int | None
+    function_name: str | None
+    descriptions: tuple[str, ...] | None
+    entries_stored: int | None
+    functions_matching: int
 
 
 @dataclass(frozen=True)
@@ -1278,6 +1328,49 @@ class ConditionPlane:
     by_entity: dict[str, tuple[DestinationFunction, ...]] = field(default_factory=dict)
     licensed: dict[tuple[str, str], tuple[DestinationFunction, ...]] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
+
+    def predicates(self, destination: str, selector: str) -> DestinationPredicates:
+        """Every predicate text stored for ``destination``'s function ``selector``.
+
+        Read-only, from ``effective_functions.conditions`` — the CANONICAL
+        column, which is the one this plane loads. It is never read from
+        ``function_principals.details.conditions``: that copy disagrees with the
+        column on 270 of 1593 protocol-1 controller rows and nothing reconciles
+        them, so a consumer that read it would be publishing a second, unowned
+        extraction as this one.
+
+        Nothing here filters, orders, evaluates or classifies. ``kind`` on the
+        stored entry is not read: the label is applied to every entry the
+        extractor emits — authorization guards, transfer post-conditions and
+        decompiler temporaries all arrive as ``business`` — so branching on it
+        would sort by a field that carries no information.
+        """
+        wanted = (selector or "").lower()
+        # A function whose own selector was never extracted matches nothing:
+        # four bytes nobody recorded do not name a function, and joining on the
+        # empty string would hand back an arbitrary row's predicates.
+        matching = (
+            [fn for fn in self.by_entity.get(destination, ()) if fn.selector and fn.selector.lower() == wanted]
+            if wanted
+            else []
+        )
+        if not matching:
+            return DestinationPredicates(PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0)
+        # Lowest ``function_id`` where a selector is carried twice: arbitrary,
+        # deterministic, and disclosed through ``functions_matching``.
+        function = min(matching, key=lambda fn: fn.function_id)
+        if not function.analysed:
+            return DestinationPredicates(
+                PREDICATES_COLUMN_HOLDS_NO_ARRAY, function.function_id, function.name, None, None, len(matching)
+            )
+        return DestinationPredicates(
+            PREDICATES_EXTRACTED,
+            function.function_id,
+            function.name,
+            function.predicates,
+            function.predicate_entries_stored,
+            len(matching),
+        )
 
     def hop(self, caller: str, destination: str) -> HopConditions:
         """Whether ``destination``'s own guards permit ``caller`` to act there.
@@ -1356,6 +1449,25 @@ def _caller_self_pins(conditions: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _stored_predicates(conditions: Any) -> tuple[tuple[str, ...], int]:
+    """Every stored predicate text, verbatim and in stored order, and the entry count.
+
+    The whole array, unfiltered: this is the population ``_caller_self_pins``
+    recognises one shape out of, kept so a disclosure can point at what was not
+    read rather than assert it was not read. An entry carrying no string
+    ``description`` contributes to the count and not to the texts, so the two
+    disagreeing is visible instead of silent.
+    """
+    if not isinstance(conditions, list):
+        return (), 0
+    texts = [
+        entry["description"]
+        for entry in conditions
+        if isinstance(entry, dict) and isinstance(entry.get("description"), str)
+    ]
+    return tuple(texts), len(conditions)
+
+
 def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
     """The destination-side caller guards the closure walk is bounded by."""
     from db.models import Contract, EffectiveFunction, FunctionPrincipal
@@ -1369,6 +1481,7 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
             EffectiveFunction.function_name,
             EffectiveFunction.conditions,
             EffectiveFunction.deployment_address,
+            EffectiveFunction.selector,
             Contract.address,
             Contract.chain,
         )
@@ -1379,10 +1492,12 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
     )
     pinned_functions = 0
     analysed_functions = 0
-    for function_id, name, conditions, deployment, address, chain in functions:
+    stored_predicates = 0
+    for function_id, name, conditions, deployment, selector, address, chain in functions:
         chain_name = coalesce_chain(chain)
         key = entity_key(chain_name, deployment or address)
         pins = _caller_self_pins(conditions)
+        texts, entries = _stored_predicates(conditions)
         # An ARRAY is an extraction that ran, empty or not. Anything else — a SQL
         # null, the jsonb scalar null a Python ``None`` write stores — is one
         # that never did, and the two are indistinguishable downstream unless
@@ -1390,7 +1505,18 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
         analysed = isinstance(conditions, list)
         pinned_functions += 1 if pins else 0
         analysed_functions += 1 if analysed else 0
-        by_entity[key].append(DestinationFunction(int(function_id), str(name), pins, analysed))
+        stored_predicates += entries
+        by_entity[key].append(
+            DestinationFunction(
+                int(function_id),
+                str(name),
+                pins,
+                analysed,
+                (str(selector).lower() if selector else None),
+                texts,
+                entries,
+            )
+        )
         entity_of[int(function_id)] = (key, chain_name)
     plane.by_entity = {key: tuple(rows) for key, rows in sorted(by_entity.items())}
 
@@ -1425,6 +1551,12 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
         "functions_with_conditions_extracted": analysed_functions,
         "functions_with_no_conditions_recorded": len(functions) - analysed_functions,
         "functions_pinning_caller_to_self": pinned_functions,
+        # The whole predicate population the recogniser above ran over, counted
+        # so the one shape it recognises is readable against a denominator. None
+        # of these is evaluated anywhere; they are retained per function only so
+        # a composed magnitude can point a reader at the destination body's own
+        # guards instead of asserting they were not read.
+        "predicate_entries_stored": stored_predicates,
         "caller_licensed_pairs": len(plane.licensed),
         "recognised_shape": (
             "a caller-or-initiator identity compared against address(this), read verbatim from "
@@ -2987,6 +3119,9 @@ __all__ = [
     "CONTROL_RELATIONS",
     "EDGE_WITNESS_ADMIN_COLUMN",
     "EDGE_WITNESS_CONTROL_GRAPH",
+    "PREDICATES_COLUMN_HOLDS_NO_ARRAY",
+    "PREDICATES_EXTRACTED",
+    "PREDICATES_FUNCTION_NOT_LOCATED",
     "REFUSAL_ZERO_ANCHOR",
     "REFUSAL_ZERO_PRINCIPAL",
     "SCOPE_NOT_DETERMINED",
@@ -3009,6 +3144,7 @@ __all__ = [
     "ControlClosure",
     "ControlEdge",
     "DestinationAcceptance",
+    "DestinationPredicates",
     "EdgeScope",
     "GateGrant",
     "LicensedFunction",
