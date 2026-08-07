@@ -326,6 +326,12 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
         # Spelled, never omitted: a missing key reads as a field nobody filled in.
         assert "published_at" in entry and "population_census" in entry
 
+    # One sentence per arm, and they cannot collapse: a registry whose entries
+    # all read the same is a constant wearing a dict, and the register would then
+    # say nothing about any particular arm.
+    assert len({entry["note"] for entry in registered}) == len(registered)
+    assert len({entry["arm"] for entry in registered}) == len(registered)
+
     # The remainder is DERIVED, not authored: the tokens that predate the
     # per-arm shape and carry no record are listed rather than left to be
     # inferred from the difference between two lists.
@@ -378,3 +384,41 @@ def test_every_test_the_register_names_exists():
     for node in named:
         module, _, rest = node.partition("::")
         assert f"{module}::{rest}" in collected, node
+
+
+# ---------------------------------------------------------------------------
+# Ruling 6.1 — destination_predicates is KEPT, and stays a field-description
+# ---------------------------------------------------------------------------
+
+
+def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  # noqa: F811
+    """Ruling 6.1's KEEP, asserted as a property rather than left as an absence
+    of change. §8 proposed cutting the block; it is the only place a reader can
+    check the composed ceiling against the destination's own body, and cutting
+    evidence while publishing nothing in its place makes the fold's ceiling
+    unfalsifiable — so its disappearance is a regression.
+
+    M1 and M2 landed in B1 and A3 respectively; both are re-verified here on the
+    post-Phase-B document, because a modification nobody pins is a modification
+    the next edit removes.
+    """
+    document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
+    entries = _gate_row(document).get("reach_composed_magnitudes") or []
+    assert entries
+    for entry in entries:
+        block = entry["destination_predicates"]
+        assert block["evaluated"] is False
+        assert block["source"] == "effective_functions.conditions"
+        reading = block["reading"]
+        # M1: modal, so the sentence claims nothing about THIS row's list.
+        assert "it may include the authorization guard" in reading
+        assert "it includes the authorization guard" not in reading
+        # M2: clause (4) and the block it cross-referenced are both gone, and the
+        # promise counts the clauses that remain.
+        assert "Three things about them" in reading
+        assert "(1)" in reading and "(2)" in reading and "(3)" in reading and "(4)" not in reading
+        assert "caller_holding_precondition" not in reading
+        # The three-state read is intact: descriptions is null where nothing was
+        # read and a list where something was, never an empty list standing in
+        # for an extraction that never ran.
+        assert (block["descriptions"] is None) == (block["state"] != P.PREDICATES_EXTRACTED)

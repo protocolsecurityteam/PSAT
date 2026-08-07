@@ -691,6 +691,13 @@ logic §12 ruling 5 must rule on is `def _reach_rank` **:1303** and `bound_rank`
 - **Transcript logs are dropped** (`harness.py::_result_dict`) — one function, and it forecloses
   every future log-derived question.
 - **E6** — `observed_reach_value_usd` is balance attribution, not a call magnitude.
+- **The `ceiling` bound-direction arm is still not flagged.** Ruling 6.3 item 4 ruled it deliberately
+  unearnable (0 rows before Phase A, 0 after) and pointed at `SCORER_DISCIPLINE_CONTRACT.md` §8's
+  uncalibrated-arm flagging as the right disclosure. B2's register carries the **seven arms Phase A
+  added**, per CAP-A §5; `value_at_stake_bound_direction == "ceiling"` predates them and is not in
+  it. One token plus one disclosure entry, owned by whoever closes ruling 6.3.
+- **`destination_predicates` is duplicated per entry** — ruling 6.1 M3, registered at
+  `COMPOSITION_WITNESS_SHAPE_SPEC.md` §11.2 (o). A size deferral, not a correctness defect.
 - **Holder witness** — deferred a third time.
 - Everything in `COMPOSITION_WITNESS_SHAPE_SPEC.md` §11.2 not resolved here, unchanged.
 

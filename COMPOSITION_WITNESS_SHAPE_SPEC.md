@@ -676,7 +676,14 @@ storage-read observation; exact-branch / undetermined-sheet disclosure parity; t
   at all** (270 non-identical total). Nothing reconciles them, no provenance reports the drift,
   and no consumer declaration says the column is authoritative — the scorer reads only the
   column (enforced in U3), but other consumers may read the copy.
-- **(k) The `composed_selector_tie.chosen_by` gloss is under-inclusive.** The shipped string
+- **(k) — CLOSED by the execution-witness run (B2).** The gloss now reads the chain component's
+  field names off `ActAsStep.as_json()` on the candidates in hand, so it cannot under-state the key
+  again. The fix went past the textual one this item asked for: reciting the whole ladder also read
+  as though every component applied, when on a tie the components ahead of the deciding one hold the
+  same value on every candidate and the ones behind it are never reached. `chosen_by` now names the
+  component that actually separated the entry from each candidate it was chosen over, and a tie the
+  order separates at no component publishes that as its own state. 12 carriers, 2 distinct strings on
+  the reference corpus, 0 numbers moved. **Original text, for the record:**
   glosses the chain-identity component as "each step's caller, selector, calling selector,
   receiver variable and receiver block", but `_composed_order`'s tail is every field of
   `ActAsStep.as_json()` — `witness_kind`, `basis`, `destination_acceptance`,
@@ -709,6 +716,13 @@ storage-read observation; exact-branch / undetermined-sheet disclosure parity; t
   invisible to `differential` — correct for its purpose (attributing score movement), but a
   claim-only repair leaves no trace there, so document-level claim diffs need the exact
   node-level diff, not the CLI.
+- **(o) `destination_predicates` is published per ENTRY and the predicates are per DESTINATION
+  FUNCTION.** Ruling 6.1 M3, registered rather than fixed. Identical text is republished up to 11×
+  per row and 40× per document, because every composed entry at one destination carries its own copy
+  of that function's stored condition list. Not a correctness defect — each copy is true of the entry
+  carrying it and the block is the only place a reader can check the composed ceiling against the
+  destination's own body — but a size deferral, and the natural fix (one keyed table under
+  `provenance` with entries pointing into it) is a shape change nobody has ruled.
 - **(n) A failed `eth_getCode` classifies as `"contract"`.** The resolver returns
   `("contract", …, had_rpc_error=True)` on a getCode failure — never cached, but returned, so a
   `controller_values.resolved_type = "contract"` row can in principle record a probe that
