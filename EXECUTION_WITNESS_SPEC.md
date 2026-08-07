@@ -408,7 +408,7 @@ MANAGE-12 will miss the gate with no diagnostic telling it why.
 | composed entries | 40 | **28** |
 | rows keeping a composed figure | 10 | 6 |
 | `grade_exposure` | 99.55 | **99.582** (`COMPOSITION_WITNESS_SHAPE_SPEC.md:482`) |
-| both Safe rows | priced | **priced, unchanged** |
+| both "Safe rows" (⚠ label imprecise — CAP-A §1, B2-R: $44,351,347.32 is the Safe row; the second figure, $1,812,798.97, is the `base::0x183fe888…` row, **not** a second Safe. The figures were always right; only this table's label was wrong) | priced | **priced, unchanged** |
 | `confidence_pct` | 18.6 | **18.6 — unchanged.** Do not chase it |
 | `reach_magnitude_witnessed_pct` | 37.9 | **must fall** — report the figure |
 | `reach_magnitude_witnessed_of_reaching_pct` | 26.5 | **must fall** — report the figure |
@@ -496,6 +496,11 @@ until that fixture is regenerated. Regenerating it is part of whoever owns `site
 **B1's scope is 17 paths minus what A3 already deleted** — `caller_holding_precondition.reading`
 appears twice in the 17 and A3 removes the whole block, so B1 inherits **15**, not 17. Confirm the
 count against the post-Phase-A document rather than this number.
+⚠ **Superseded by measurement (B1 / B1-R round 2, confirmed by CAP-B):** every pre-run sizing of
+this sweep — the "17", the "15", V0-b's "9", CAP-A's "12" — undercounted. The landed sweep is
+**16 emission sites / 17 canonical paths / 177 changed nodes** (CAP-A's 12 + B1's 2 self-found +
+B1-R's 2 fix-round closures), every node `str → str`, zero numeric. The instruction that survives
+is the method, not any count: enumerate from the document by the ruling-7 AST test.
 
 **⚠ U4's `ceiling` arm belongs to Phase A, not Phase B.** Once WITHHELD-12's figures are gone, four
 rows lose every composed figure and `ceiling_entities` empties on them — that **moves numbers**.
@@ -696,9 +701,39 @@ logic §12 ruling 5 must rule on is `def _reach_rank` **:1303** and `bound_rank`
   uncalibrated-arm flagging as the right disclosure. B2's register carries the **seven arms Phase A
   added**, per CAP-A §5; `value_at_stake_bound_direction == "ceiling"` predates them and is not in
   it. One token plus one disclosure entry, owned by whoever closes ruling 6.3.
+  **CAP-B ruling:** §8's obligation is a *document-internal* flag, and the register shape B2 built
+  is exactly the mechanism — a spec deferral does not discharge it. The token joins
+  `UNCALIBRATED_ARMS` plus one disclosure entry in the CAP-B-ordered B2 micro-round (claims-only);
+  the arm's *earnability* stays deferred with ruling 6.3.
 - **`destination_predicates` is duplicated per entry** — ruling 6.1 M3, registered at
   `COMPOSITION_WITNESS_SHAPE_SPEC.md` §11.2 (o). A size deferral, not a correctness defect.
 - **Holder witness** — deferred a third time.
+- **The score document depends on artifact storage at read time, and an outage MOVES λ** (CAP-A,
+  Phase B constraint 2). All 40 `proving_execution` blocks are derived by fetching transcript
+  bodies when the document is scored; a fetch fault takes the `withheld` arm and withholds the
+  figure regardless of the deletability licence — correct per the invariant, but it means a down
+  or slow MinIO silently produces different numbers. **Every measurement run must assert
+  `proving_execution.state == "recorded"` on 40/40 and 0 fault reasons before attributing any
+  numeric delta to code.** Registered as an operating constraint; no offline cache is built.
+- **Trap 16 operates in the withholding direction too** (CAP-A §8): under maximal setter
+  suppression the withheld population is **52**, not 40 — `_compose` surfaces candidates that
+  never reached selection in the honest document. Consumers diffing scans must compare census
+  *buckets*, never totals.
+- **The deletability join matches setter arms by `function_name`, and a name is not a witness**
+  (A2-R N6). A contract declaring a function *named* `setAuthority` that does something else would
+  read as control — the one place invariant 16 can be argued at. Mitigations shipped: the basis
+  publishes the matched row's selector so a reader can check, and tightening to selectors was
+  correctly declined (it could move the partition; `transferOwnership` alone has two live
+  selectors on this corpus, `0xf2fde38b` ×122 / `0x078dfbe7` ×4). Registered, not fixed.
+- **The setter fixture helper stamps one selector on every row** (B2-R N4, CAP-B ruling: deferral).
+  `tests/composition_admission_fixtures.py` uses `SET_AUTHORITY_SELECTOR` for every
+  `function_name`, so the 3b `[gating_authority]` fixture asserts `setter_selector == 0x7a9e5e4b`
+  on a `setUserRole` row and cannot catch a producer hard-coding a wrong-family selector. Zero
+  live impact (all 28 corpus bases are `setAuthority`, so the mutation moves 0 published nodes on
+  this corpus — weaker than the SF-1 shape that did get fixed). Fix when next touched: a
+  per-function selector map (`setAuthority 0x7a9e5e4b / setUserRole 0x67aff484 /
+  setRoleCapability 0x7d40583d / transferOwnership 0xf2fde38b`) and assert the family-correct
+  selector in the `[gating_authority]` case.
 - Everything in `COMPOSITION_WITNESS_SHAPE_SPEC.md` §11.2 not resolved here, unchanged.
 
 ---
