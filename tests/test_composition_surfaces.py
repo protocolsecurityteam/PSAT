@@ -457,3 +457,55 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  
         # read and a list where something was, never an empty list standing in
         # for an extraction that never ran.
         assert (block["descriptions"] is None) == (block["state"] != P.PREDICATES_EXTRACTED)
+
+
+# ---------------------------------------------------------------------------
+# CAP-B ruling 1 — the migration block is DATED HISTORY, not a live claim
+# ---------------------------------------------------------------------------
+
+
+def test_the_migration_block_dates_its_composition_figures_to_the_bump_that_measured_them():
+    """CAP-B ruling 1. `model_version_migration` is the only published record of
+    what the 1.0.1 -> 1.1.0 bump measured, and deleting it loses the honest
+    Phase-6-claim refutation with nothing to re-derive it from. But two clauses
+    were written in the present tense and Phase A made both false: composition no
+    longer "composes 13 entities and $46,164,146.29", and the 40 signals it was
+    asked of are no longer 40 answers.
+
+    Both are now anchored — past tense, version-stamped, and pointing at the
+    census for the live count — so the block records a measurement instead of
+    claiming one. The version is INTERPOLATED from `MODEL_VERSION`: a stamp that
+    does not move with the version it stamps is worse than no stamp.
+    """
+    from utils.scoring_status import MODEL_VERSION
+
+    block = K.model_parameters()["model_version_migration"]
+    recovered = block["what_composition_did_not_recover"]
+    confidence = block["read_the_confidence_fall_correctly"]
+
+    # Past tense, stamped with the version whose measurement it reports.
+    assert f"At this bump's own measurement ({MODEL_VERSION}, before the execution-witness pass)" in recovered
+    assert "those composed 13 entities and $46,164,146.29" in recovered
+    # The present-tense forms are gone.
+    assert "composing 13 entities" not in recovered
+    assert "40 signals composition answered" not in confidence
+    # ...and the live count is delegated to the census rather than restated.
+    assert "counted in reach_composition_census rather than asserted here" in recovered
+    assert "40 signals composition was asked of" in confidence
+    assert "28 of them publish a composed figure and 12 are withheld" in confidence
+
+
+def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
+    """B1's S1 lesson, applied to CAP-B's stamp. `"1.1.0-provisional"` as a
+    literal reads identically to the interpolation today and drifts silently at
+    the next bump — which is the whole failure the ruling exists to repair, one
+    version later."""
+    from services.scoring import constants as C
+
+    shipped = K.model_parameters()["model_version_migration"]["what_composition_did_not_recover"]
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    moved = K.model_parameters()["model_version_migration"]["what_composition_did_not_recover"]
+
+    assert moved != shipped
+    assert "(9.9.9-fictional, before the execution-witness pass)" in moved
+    assert "1.1.0-provisional" not in moved
