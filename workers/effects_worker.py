@@ -84,6 +84,7 @@ from services.effects.seeding import SimulateSeeder, input_seeding_enabled
 from services.effects.seeding import budget_of as seeding_budget_of
 from services.effects.selection import Candidate, JobScope, record_empty_planning, select_candidates
 from utils.chains import UnknownChainError, chain_by_id
+from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -247,6 +248,13 @@ _RESIDUE_JSON_KEYS = (
     # would otherwise be republished as every bytecode twin's own count.
     "backing_inflow_transfers",
     "backing_mint_transfers",
+    # The call that PROVED the figure — caller, target, selector, raw calldata,
+    # pinned height, seeded-or-not. Per-deployment by construction (an
+    # impersonated caller at one block), so it rides the state plane with the
+    # reach figures it accounts for and never the behavioral cache. Dropping it
+    # here would leave the magnitude published with no execution behind it,
+    # which is the whole defect it exists to close.
+    PROVING_EXECUTION_KEY,
 )
 
 
