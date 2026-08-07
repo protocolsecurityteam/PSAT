@@ -128,9 +128,12 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):  # no
     assert entry["act_as_chain"][0]["destination"] == KEY_V
     assert entry["act_as_chain"][0]["witness_kind"]
 
-    # The execution record is published, with its own typed state.
-    assert entry["proving_execution"]["state"] in (EX.EXECUTION_RECORDED, EX.EXECUTION_NOT_DETERMINED)
-    assert entry["route_comparison"]["verdict"] in EX.ROUTE_VERDICTS
+    # The execution record is published, with the exact state this fixture
+    # produces — a disjunction over the whole domain would assert only that the
+    # field exists.
+    assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED
+    assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
+    assert entry["route_comparison"]["verdict"] == EX.ROUTE_NOT_DETERMINED
 
     # ...and NO figure of any kind, under any name.
     assert entry["published_usd"] is None
@@ -185,7 +188,8 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold):  
     assert basis["arm"] == P.DELETABILITY_ARM_HOST
 
     # The execution record travels with the figure it accounts for.
-    assert entry["proving_execution"]["state"] in (EX.EXECUTION_RECORDED, EX.EXECUTION_NOT_DETERMINED)
+    assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED
+    assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
     # The body still authors the amount; the licence is what overrode it, and
     # the entry publishes both rather than hiding the one it did not act on.
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
@@ -341,7 +345,8 @@ def test_case6_a_refusal_does_not_move_confidence(fold):  # noqa: F811
     # The refusal DOES cost witnessed magnitude — that is the term it belongs in
     # — while the published headline binds on whichever term is lowest.
     assert refused_detail["reach_magnitude_witnessed_pct"] <= detail["reach_magnitude_witnessed_pct"]
-    assert "refused" not in str(sorted(refused_detail)[:0]) or True
+    # …and the refusal reaches NONE of the four terms the headline is a min over.
+    assert "refused" not in refused_detail
 
 
 # ---------------------------------------------------------------------------
@@ -820,3 +825,188 @@ def test_an_unresolvable_pointer_never_reaches_object_storage():
     record = reader.execution(transcript_ptr="not-a-pointer", effect_verdict_id=7)
     assert record.reason == EX.REASON_PTR_UNRESOLVABLE
     assert record.reason in EX.FAULT_REASONS
+
+
+# ---------------------------------------------------------------------------
+# §7.2 arm 1's CALLER conjunct — "gate claims transfer ON CALLER MATCH"
+# ---------------------------------------------------------------------------
+
+# The bare address the one-hop case's last act-as step names as its caller, and
+# an address that is not it.
+_CLAIMED_CALLER = KEY_C.partition("::")[2]
+_OTHER_CALLER = "0x" + "9" * 40
+
+
+def _signals_proved_by(caller: str) -> list[Any]:
+    """The composing case with the destination's magnitude proved by a RECORDED
+    execution issued from ``caller``."""
+    signals = _composing_signals()
+    destination = signals[-1]
+    gates = dict(destination.gate_inputs)
+    gates[EX.PROVING_EXECUTION_KEY] = Tri.proven(
+        EX.GATE_STATE_RECORDED,
+        EX.residue_payload(
+            caller=caller,
+            target=KEY_V.partition("::")[2],
+            calldata=COMPOSED_SELECTOR + "00" * 32,
+            probe_label="value_probe",
+            succeeded=True,
+            block_number=25_658_245,
+            block_source="invocation_pin",
+            chain_id=1,
+            tier="tier1",
+            input_seeded=False,
+            contract_balance_seeded=False,
+        ),
+    ).to_json()
+    signals[-1] = replace(destination, gate_inputs=gates)
+    return signals
+
+
+def _arm1_case(caller: str, **over: Any) -> tuple[dict[str, Any], list[Any]]:
+    """``(fold kwargs, signals)`` for the one-hop case proved by ``caller``."""
+    case: dict[str, Any] = {
+        "principals": _composing_principals(),
+        "routes": CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+        **over,
+    }
+    return case, _signals_proved_by(caller)
+
+
+def test_a_gate_claim_the_proof_was_admitted_for_publishes_corroborated(fold):  # noqa: F811
+    """The conjunct SATISFIED. The probe was admitted at the destination as the
+    very address the chain's last step names, so the destination's authorization
+    check was exercised for that address — and the route it took to get there is
+    irrelevant, because the check reads no argument."""
+    case, signals = _arm1_case(_CLAIMED_CALLER)
+    document = fold(signals, deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), **case)
+    entry = _entries(_gate_row(document))[0]
+    claim = entry["gate_claim"]
+    assert claim["state"] == EX.GATE_CLAIM_CORROBORATED
+    assert claim["reason"] == EX.GATE_CLAIM_REASON_SAME_CALLER
+    assert claim["proven_caller"] == _CLAIMED_CALLER
+    assert claim["claimed_caller"] == KEY_C
+    # The route still does NOT match — which is the whole point: routing is
+    # irrelevant to the gate claim, the caller is not.
+    assert entry["route_comparison"]["caller_matches"] is True
+    assert entry["route_comparison"]["verdict"] == EX.ROUTE_MISMATCH
+    assert "UNCORROBORATED" not in claim["reading"]
+
+
+def test_a_gate_claim_the_proof_used_another_caller_for_is_qualified_not_asserted(fold):  # noqa: F811
+    """The conjunct FAILED, and the entry says so rather than publishing an
+    unqualified gate claim.
+
+    ``isAuthorized(msg.sender, msg.sig)`` reads no ARGUMENT, which is why a
+    route the proof did not take says nothing about the claim. It reads
+    ``msg.sender`` exactly, which is why a caller the proof did not use says
+    everything about it: the execution establishes the destination's check for
+    the address it impersonated and for no other. The act-as chain is not
+    retracted — it is the act-as plane's own witness — but what the execution
+    adds to it is nothing, and that is published.
+    """
+    case, signals = _arm1_case(_OTHER_CALLER)
+    document = fold(signals, deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), **case)
+    row = _gate_row(document)
+    entry = _entries(row)[0]
+    claim = entry["gate_claim"]
+
+    assert claim["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
+    assert claim["reason"] == EX.GATE_CLAIM_REASON_OTHER_CALLER
+    # BOTH addresses are named — "a different caller" is a claim about this row
+    # and a constant sentence could not say which one.
+    assert claim["proven_caller"] == _OTHER_CALLER
+    assert claim["claimed_caller"] == KEY_C
+    assert _OTHER_CALLER in claim["reading"] and KEY_C in claim["reading"]
+    assert "UNCORROBORATED" in claim["reading"]
+    # The chain is qualified, never deleted: it has a witness of its own.
+    assert entry["act_as_chain"][0]["caller"] == KEY_C
+    assert "act-as witness alone" in claim["reading"]
+    # …and the figure is untouched by the conjunct. The caller mismatch costs the
+    # gate claim its corroboration, not the magnitude its arm.
+    assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
+    assert entry["published_usd"] == 1_000_000.0
+
+    # Counted, so "the gate claim transferred" is never a silent default.
+    assert row["reach_composition_census"]["gate_claim_by_state"] == {EX.GATE_CLAIM_NOT_CORROBORATED: 1}
+
+
+def test_a_withheld_entry_carries_the_caller_conjunct_too(fold):  # noqa: F811
+    """Arm 2 keeps the gate claim, so arm 2 owes the conjunct as well. An entry
+    that lost its figure and publishes an UNqualified gate claim would be making
+    the broader of the two claims it had evidence for."""
+    case, signals = _arm1_case(_OTHER_CALLER)
+    document = fold(signals, deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), **case)
+    row = _gate_row(document)
+    entry = _withheld(row)[0]
+    assert entry["arm_taken"] == FOLD.ARM_GATE_ONLY
+    assert entry["gate_claim"]["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
+    assert entry["gate_claim"]["proven_caller"] == _OTHER_CALLER
+    assert entry["published_usd"] is None
+    assert row["reach_composition_census"]["gate_claim_by_state"] == {EX.GATE_CLAIM_NOT_CORROBORATED: 1}
+
+
+def test_no_execution_to_compare_a_caller_against_is_its_own_state(fold):  # noqa: F811
+    """Three states, not two. An entry whose execution names no caller has not
+    failed the conjunct — it has not been asked, and reading that absence as
+    either answer is the collapse three-valued logic exists to prevent."""
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+    )
+    claim = _entries(_gate_row(document))[0]["gate_claim"]
+    assert claim["state"] == EX.GATE_CLAIM_NOT_DETERMINED
+    assert claim["reason"] == EX.GATE_CLAIM_REASON_NOT_COMPARED
+    assert claim["proven_caller"] is None
+    assert claim["state"] not in (EX.GATE_CLAIM_CORROBORATED, EX.GATE_CLAIM_NOT_CORROBORATED)
+    assert len(set(EX.GATE_CLAIM_STATES)) == 3
+
+
+@pytest.mark.parametrize(
+    "caller,state",
+    [(_CLAIMED_CALLER, EX.GATE_CLAIM_CORROBORATED), (_OTHER_CALLER, EX.GATE_CLAIM_NOT_CORROBORATED)],
+    ids=["corroborated", "not_corroborated"],
+)
+def test_the_caller_conjunct_holds_on_a_subsumed_row_too(fold, caller, state):  # noqa: F811
+    """Case 7's clause, on the conjunct. Twenty-one of the forty entries live
+    under ``provenance.subsumed_rows`` and four of the ten caller mismatches are
+    among them."""
+    weaker = sig(
+        claim_id="ownership.transfer",
+        function_name="transferOwnership",
+        selector="0xf2fde38b",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+    )
+    document = fold(
+        [*_signals_proved_by(caller), weaker],
+        principals=_composing_principals(),
+        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+    )
+    subsumed = [r for r in (document.provenance.get("subsumed_rows") or []) if _entries(r) or _withheld(r)]
+    assert subsumed, "the case must exercise a subsumed row, not two findings"
+    for row in subsumed:
+        for entry in _entries(row) + _withheld(row):
+            assert entry["gate_claim"]["state"] == state
+        assert row["reach_composition_census"]["gate_claim_by_state"] == {state: len(_entries(row) + _withheld(row))}
+
+
+def test_the_conjunct_is_read_from_the_execution_and_not_defaulted():
+    """inv. 16 on the conjunct's own source: the outcome is derived from the two
+    callers and nothing else, and there is no branch that assumes a match."""
+    body = inspect.getsource(EX.gate_claim).split('"""')[-1]
+    assert "_addr_matches" in body
+    for banned in ("True  #", "or True", "default"):
+        assert banned not in body, banned
+    # All three states are constructible from the function, none by falling off
+    # the end of it.
+    assert body.count("return {") == 3
