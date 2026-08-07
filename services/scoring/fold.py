@@ -48,9 +48,15 @@ from services.scoring.schema import (
     Tri,
     entity_key,
 )
+from utils import execution_record as EX
+from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
+    MAGNITUDE_STATE_PROVEN_EXACT,
+    MAGNITUDE_STATE_PROVEN_FLOOR,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+    MAGNITUDE_STATES_ATTRIBUTION_DERIVED,
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
@@ -73,7 +79,21 @@ ANYONE = "anyone"
 GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
     "exact_empty_credit": ("earned",),
     "latch_witness": ("witnessed",),
-    "reach_magnitude_usd": ("proven_exact", "proven_floor"),
+    # F4: ``proven_upper_bound`` is the ATTRIBUTION path's own state and MUST be
+    # listed. ``_malformed_gates`` withholds any row whose gate state is neither
+    # ``not_determined`` nor a member here, and ``_gate`` degrades it — so
+    # omitting it would take every attribution-derived magnitude out at once,
+    # which is a number movement dressed as a vocabulary omission.
+    "reach_magnitude_usd": (
+        MAGNITUDE_STATE_PROVEN_EXACT,
+        MAGNITUDE_STATE_PROVEN_FLOOR,
+        MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+    ),
+    # Both states are PROVEN: the distiller always performed the lookup, and the
+    # earned negative carries the typed reason there is no record. The
+    # execution's own three-state answer lives inside the payload — see
+    # ``utils.execution_record``.
+    PROVING_EXECUTION_KEY: EX.GATE_STATES,
     "token_identity": ("proven",),
     "asset_class": ("proven",),
     "input_seeded": ("proven",),
@@ -100,6 +120,7 @@ GATE_PAYLOAD_SHAPES: dict[str, str] = {
     "latch_witness": "object",
     "asset_identity": "object",
     "reach_magnitude_usd": "number",
+    PROVING_EXECUTION_KEY: "object",
     "token_identity": "bool",
     "input_seeded": "bool",
     "contract_balance_seeded": "bool",
@@ -122,6 +143,18 @@ REQUIRED_GATES_BY_CLAIM: dict[str, tuple[str, ...]] = {
 }
 
 SINGLE_ASSET_CLASSES = frozenset({"erc20_only", "mixed"})
+
+# The composition rule's arms, as a closed vocabulary. Named here so the entry
+# can PUBLISH which one it took rather than leave a reader to infer it from
+# whether a figure is present — and so an unrecognised route has a token of its
+# own to fail to. There is no default arm and no ``else`` that republishes: a
+# candidate whose route earns none of the typed outcomes is ``not_determined``
+# and its figure is withheld.
+ARM_GATE_ONLY = "gate_only"
+ARM_WITHHELD = "withheld"
+ARM_REPUBLISHED_DIRECT = "republished_direct"
+ARM_NOT_DETERMINED = NOT_DETERMINED
+COMPOSITION_ARMS = (ARM_GATE_ONLY, ARM_WITHHELD, ARM_REPUBLISHED_DIRECT, ARM_NOT_DETERMINED)
 
 
 @dataclass
@@ -247,7 +280,19 @@ class _CallerHoldingPrecondition:
 # least-claiming of them, because an exactness that one tied candidate does not
 # support would be exactness minted by whichever candidate the iteration reached
 # first.
-_WITNESS_STATE_CLAIM = {"proven_floor": 1, "proven_exact": 2}
+# ``proven_upper_bound`` ranks WITH ``proven_exact`` rather than below it, and
+# that is a deliberate hold rather than a judgement about how much it claims. The
+# rank exists only to settle a tie between two candidates at the same figure, so
+# moving it moves which candidate is published — a number-shaped change that
+# belongs with the composition ruling, not with the relabel. Ranking it apart
+# from the map (``_WITNESS_STATE_UNRANKED``) would be worse than either: that
+# slot is reserved for states this fold cannot rank, and a KNOWN state parked
+# there launders a known fact into the unknown bucket.
+_WITNESS_STATE_CLAIM = {
+    MAGNITUDE_STATE_PROVEN_FLOOR: 1,
+    MAGNITUDE_STATE_PROVEN_EXACT: 2,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND: 2,
+}
 # A state this map cannot rank is ranked so that it can never WIN a tie. Sorting
 # it with the weakest would be the fail-open: "we do not know what this claims"
 # would beat a state proven to claim little, and an unrankable string would be
@@ -293,7 +338,17 @@ class _ComposedMagnitude:
     chain: tuple[P.ActAsStep, ...]
     caller_holding: _CallerHoldingPrecondition
     predicates: P.DestinationPredicates
+    # The call that PROVED ``witnessed_usd`` at the destination. REQUIRED, with
+    # no default: the invariant is that a published magnitude carries its
+    # execution, and a default would let an entry ship the figure while silently
+    # claiming nothing about the call — which is the state every entry is in
+    # today and precisely what this field exists to make visible.
+    execution: EX.ProvingExecution
     tied_with: tuple[_ComposedMagnitude, ...] = ()
+    # Which arm of the composition rule this entry took. Three arms plus the
+    # unrecognised-route outcome; ``not_determined`` is the honest value until
+    # the rule that chooses among them is written, because no arm has been taken.
+    arm_taken: str = ARM_NOT_DETERMINED
 
     def _tie_json(self) -> dict[str, Any] | None:
         if not self.tied_with:
@@ -378,6 +433,22 @@ class _ComposedMagnitude:
             "entity": self.entity,
             "destination_function": self.function,
             "selector": self.selector,
+            # The invariant, published: a magnitude names the execution that
+            # produced it, and every claim attached to it is derived from that
+            # record. Where the record is not_determined the block says so with
+            # a typed reason and publishes no caller — an unread execution is
+            # never a matching one.
+            "proving_execution": self.execution.as_json(),
+            "route_comparison": EX.route_comparison(
+                self.execution,
+                claimed_caller=self.chain[-1].caller if self.chain else None,
+                claimed_target=self.chain[-1].destination if self.chain else None,
+                claimed_selector=self.chain[-1].calling_selector if self.chain else None,
+            ),
+            # Which arm of the composition rule produced this entry. Published
+            # beside the comparison it is decided from rather than left to be
+            # inferred from whether a figure is present.
+            "arm_taken": self.arm_taken,
             "flow_out_witness": {
                 "state": self.witness_state,
                 "usd": round(self.witnessed_usd, 2),
@@ -595,6 +666,15 @@ class _RowValue:
     # composed candidate was built for, including ones whose own witness beat it
     # in the per-entity MAX, and the header's question is which figures WON.
     ceiling_entities: frozenset[str] = frozenset()
+    # F5: the entities whose STANDING figure is PROVEN not to be
+    # attribution-derived. An earned positive and NOT the complement of
+    # ``ceiling_entities`` — that one says which BRANCH supplied a figure, this
+    # one says what the WITNESS behind it claims, and the two are orthogonal (an
+    # attribution-derived figure bounds from above whether it arrived through
+    # composition or through the instance's own witness). An entity missing from
+    # this set is one whose provenance was not established, which is exactly as
+    # disqualifying for a floor as a proven attribution.
+    non_attributed_entities: frozenset[str] = frozenset()
 
 
 def compute_protocol_score(
@@ -1680,6 +1760,7 @@ def _aggregate(
                 or valued.withheld_behind_hops.get("hops")
                 or valued.withheld_behind_hops.get("entities")
             ),
+            valued.non_attributed_entities,
         )
         # Only a row that HAS a total and carries a ceiling in it has a
         # direction to explain. A row whose value is not_determined publishes
@@ -1989,6 +2070,7 @@ def _bound_direction(
     ceiling_entities: frozenset[str],
     coverage_gap: bool,
     withheld_reach: bool,
+    non_attributed_entities: frozenset[str],
 ) -> str:
     """Which direction the row's published total bounds this principal in.
 
@@ -2004,6 +2086,22 @@ def _bound_direction(
     Summing ceilings does not make a floor, so ``floor`` requires that NO
     contributing entity's figure came through the composed branch — the
     invariant that keeps a genuinely witnessed floor exactly where it was.
+
+    The composed branch is not the only ceiling in the building, which is the
+    F5 correction. An ATTRIBUTION-DERIVED contribution — a holder's whole priced
+    balance credited off a constant-amount probe — bounds this principal from
+    above too, and it arrives through the instance's OWN witness, where the
+    ceiling test above never looks. So ``floor`` additionally requires that
+    every contributing entity's standing figure be PROVEN not attribution-derived.
+
+    That conjunct is written as a membership test and not as "no contribution is
+    attributed", deliberately. A universal over contributions is VACUOUSLY TRUE
+    on a row with no contributions at all, and a row that lost every figure would
+    then earn a floor over an empty sum — today that is unreachable only because
+    :func:`_row_value` returns early with ``value_usd = None`` when ``per_entity``
+    empties, i.e. because of a guard in a different function. An earned positive
+    does not depend on a guard somewhere else: ``entities`` must be non-empty and
+    every one of its members must be in the proven-not-attributed set.
 
     ``ceiling`` is the mirror and is earned no more cheaply: EVERY contributing
     entity's figure must be a composed ceiling (one ungraded contribution and
@@ -2024,7 +2122,11 @@ def _bound_direction(
         if ceiling_entities == entities and not coverage_gap and not withheld_reach:
             return BOUND_DIRECTION_CEILING
         return BOUND_DIRECTION_NOT_DETERMINED
-    return BOUND_DIRECTION_FLOOR if coverage_gap else BOUND_DIRECTION_NOT_DETERMINED
+    if not coverage_gap:
+        return BOUND_DIRECTION_NOT_DETERMINED
+    if entities and entities <= non_attributed_entities:
+        return BOUND_DIRECTION_FLOOR
+    return BOUND_DIRECTION_NOT_DETERMINED
 
 
 def _ceiling_bearing_basis(
@@ -2137,6 +2239,9 @@ def _row_value(
     # extraction ceiling. Maintained beside the MAX rather than after it: which
     # branch produced a figure is only knowable where the figure is chosen.
     ceiling_entities: set[str] = set()
+    # Maintained beside the MAX for the same reason ``ceiling_entities`` is: the
+    # witness behind a figure is only knowable where that figure is chosen.
+    non_attributed_entities: set[str] = set()
     reached: set[str] = set()
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
@@ -2243,7 +2348,7 @@ def _row_value(
         # unproven one is missing is the whole error this fold is being repaired
         # for. Priced or not, the row reaches these entities.
         reached.update(value_plane.canonical(key) for key in keys)
-        contributions, gaps, cap, unbounded, from_ceilings = _instance_contributions(
+        contributions, gaps, cap, unbounded, from_ceilings, non_attributed = _instance_contributions(
             instance, keys, value_plane, transitive=transitive, composed=composed
         )
         unbounded_floors.extend(unbounded)
@@ -2266,11 +2371,20 @@ def _row_value(
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
                 ceiling_entities.discard(canonical)
+                non_attributed_entities.discard(canonical)
             # The bound travels with the figure that stands, and a tie is
             # settled by the weaker of the two claims: an extraction ceiling
             # equal to a witnessed figure is still only a ceiling.
             if canonical in from_ceilings and contribution >= per_entity[canonical]:
                 ceiling_entities.add(canonical)
+            # Same rule, same direction: an attribution-derived figure tying the
+            # standing one revokes the grade, because either candidate may be
+            # the number published.
+            if contribution >= per_entity[canonical]:
+                if canonical in non_attributed:
+                    non_attributed_entities.add(canonical)
+                else:
+                    non_attributed_entities.discard(canonical)
 
     # One selection over every instance's candidates, not a running MAX: the
     # figure is the same either way, but the selector, destination function,
@@ -2331,6 +2445,7 @@ def _row_value(
         composition_report,
         frozenset(composed_signals),
         frozenset(ceiling_entities),
+        frozenset(non_attributed_entities),
     )
 
 
@@ -2489,11 +2604,35 @@ def _composition_report(
 
 @dataclass(frozen=True)
 class _DestinationMagnitude:
-    """A ``flow.out`` witness at one destination function, as the fold received it."""
+    """A ``flow.out`` witness at one destination function, as the fold received it.
+
+    ``execution`` is the call that PROVED ``usd`` — caller, target, selector, raw
+    calldata, pinned height, seeded-or-not — read off the destination signal's own
+    gate rather than reconstructed here. It travels WITH the figure because the
+    two are one fact: a magnitude whose execution is not_determined is a number
+    with no account of itself, and the composition rule that decides whether the
+    figure survives a route the proof never took cannot be written without it.
+
+    ``attribution_derived`` is a property rather than a stored field so the state
+    stays the single source of truth: an attribution-derived figure is exactly one
+    whose magnitude state says so, and a second copy of that fact could disagree
+    with the first.
+    """
 
     state: str
     usd: float
     function: str
+    execution: EX.ProvingExecution
+
+    @property
+    def attribution_derived(self) -> bool:
+        """Whether the figure bounds its principal from ABOVE and never below.
+
+        True on the attribution path, where a constant-amount probe credited a
+        holder's whole priced balance. A row summing such contributions has not
+        earned a ">=" band, whatever its coverage looks like.
+        """
+        return self.state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED
 
 
 def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, str], _DestinationMagnitude]:
@@ -2519,10 +2658,47 @@ def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, st
         usd = float(magnitude.value)  # type: ignore[arg-type]  # _is_number narrows it
         previous = out.get(key)
         # Two signals on one selector are the same function distilled twice; the
-        # LOWER figure is the one both witnesses support.
+        # LOWER figure is the one both witnesses support. The execution is taken
+        # from the SAME signal as the figure, never merged across the two: it is
+        # that call's account of itself, and pairing one signal's dollars with
+        # another's caller would publish an execution that proved a different
+        # number.
         if previous is None or usd < previous.usd:
-            out[key] = _DestinationMagnitude(magnitude.state, usd, signal.function_name)
+            out[key] = _DestinationMagnitude(magnitude.state, usd, signal.function_name, _signal_execution(signal))
     return out
+
+
+def _signal_execution(signal: FunctionSignal) -> EX.ProvingExecution:
+    """The execution this signal's magnitude was proven by, or the typed reason
+    there is none.
+
+    A gate this fold cannot read is not an execution it may assume. ``_gate``
+    already degrades an unrecognised token to ``not_determined``, and a
+    ``not_determined`` envelope carries no payload — so both of those land on
+    :data:`EX.REASON_NOT_PERSISTED`, the same state a row written before the
+    record existed lands on. Absence never becomes a match, an empty caller, or
+    an unseeded probe.
+    """
+    gate = _gate(signal, PROVING_EXECUTION_KEY)
+    payload = gate.value if isinstance(gate.value, dict) else {}
+    ptr = payload.get("transcript_ptr")
+    verdict_id = payload.get("effect_verdict_id")
+    # The two POINTERS survive the negative branch. They are the row's own
+    # identity, not part of the record, and they are exactly what a reader needs
+    # in order to go and look at the transcript the record is missing from —
+    # dropping them would turn a traceable gap into an untraceable one.
+    if gate.state != EX.GATE_STATE_RECORDED:
+        reason = payload.get("reason")
+        return EX.not_determined(
+            reason if reason in EX.NOT_DETERMINED_REASONS else EX.REASON_NOT_PERSISTED,
+            transcript_ptr=ptr if isinstance(ptr, str) else None,
+            effect_verdict_id=verdict_id if isinstance(verdict_id, int) else None,
+        )
+    return EX.from_residue(
+        payload,
+        transcript_ptr=ptr if isinstance(ptr, str) else None,
+        effect_verdict_id=verdict_id if isinstance(verdict_id, int) else None,
+    )
 
 
 def _caller_holding(chain: tuple[P.ActAsStep, ...], value_plane: P.ValuePlane) -> _CallerHoldingPrecondition:
@@ -2733,6 +2909,12 @@ def _compose(
                             chain=chain,
                             caller_holding=_caller_holding(chain, value_plane),
                             predicates=conditions.predicates(hop.destination, licensed.selector),
+                            # The destination witness's OWN execution, carried
+                            # through unchanged. Composition joins an existing
+                            # witness to a reach that was already proven; it
+                            # observes nothing itself, so it has no execution of
+                            # its own to name and must not invent one.
+                            execution=magnitude.execution,
                         )
                     )
         frontier = sorted(nxt)
@@ -2765,6 +2947,7 @@ def _instance_contributions(
     dict[str, Any] | None,
     list[dict[str, Any]],
     frozenset[str],
+    frozenset[str],
 ]:
     """One call's per-entity contributions, bounded by the one magnitude it proved.
 
@@ -2772,6 +2955,14 @@ def _instance_contributions(
     witness, which bounds this principal from above only. It is a subset of the
     returned map's keys: a key the cap below emptied contributes nothing and
     carries no bound either.
+
+    The SIXTH names the keys whose standing figure is PROVEN not to be
+    attribution-derived — an earned positive, not the complement of the fifth.
+    A key is in it only where a registered magnitude state said so, so a
+    contribution whose provenance this fold cannot grade appears in neither set
+    and cannot help a row earn a floor. Kept beside the per-key MAX for the same
+    reason ``ceilings`` is: which witness produced the figure that STANDS is only
+    knowable where the figure is chosen.
 
     A witnessed magnitude is a per-CALL quantity: ``withdraw`` proven to move
     $28.1M moves $28.1M whichever of the keys it reached holds it. Charging it
@@ -2795,8 +2986,9 @@ def _instance_contributions(
     gaps: list[dict[str, Any]] = []
     unbounded: list[dict[str, Any]] = []
     ceilings: set[str] = set()
+    non_attributed: set[str] = set()
     for key in sorted(keys):
-        contribution, why, note, from_composed = _entity_contribution(
+        contribution, why, note, from_composed, state = _entity_contribution(
             instance, key, value_plane, transitive=transitive, composed=composed
         )
         if note is not None:
@@ -2817,17 +3009,42 @@ def _instance_contributions(
         if previous is None or contribution > previous:
             per_key[canonical] = contribution
             ceilings.discard(canonical)
+            # The provenance travels with the figure that replaced the previous
+            # one; a stale grade left standing beside a new figure is the same
+            # class of error as a stale bound.
+            non_attributed.discard(canonical)
         # A tie between a composed ceiling and a witnessed figure publishes the
         # ceiling's bound: the weaker claim is the one both candidates support.
         if from_composed and contribution >= per_key[canonical]:
             ceilings.add(canonical)
+        # Symmetrically weak on a tie: a figure equal to the standing one that is
+        # attribution-derived REVOKES the grade, because the row may then be
+        # publishing the attributed candidate's number.
+        if contribution >= per_key[canonical]:
+            if state is not None and state not in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+                non_attributed.add(canonical)
+            else:
+                non_attributed.discard(canonical)
 
     magnitude = _witnessed_magnitude(instance)
     if magnitude is None or len(per_key) < 2:
-        return per_key, gaps, None, unbounded, frozenset(ceilings & set(per_key))
+        return (
+            per_key,
+            gaps,
+            None,
+            unbounded,
+            frozenset(ceilings & set(per_key)),
+            frozenset(non_attributed & set(per_key)),
+        )
 
     uncapped = round(sum(sorted(per_key.values())), 6)
-    if instance.magnitude.state != "proven_exact":
+    # Only an EXACT witness apportions as a budget. A floor and an
+    # attribution-derived upper bound both fail this test and both take the
+    # refusal below, for reasons that happen to converge: a floor says nothing
+    # about how the amount divides, and an upper bound split across two entities
+    # with no apportionment witness would attribute up to the whole bound at
+    # each. Neither may join the exact side of this comparison.
+    if instance.magnitude.state != MAGNITUDE_STATE_PROVEN_EXACT:
         for key in sorted(per_key):
             gaps.append(
                 {
@@ -2855,9 +3072,17 @@ def _instance_contributions(
             },
             unbounded,
             frozenset(),
+            frozenset(),
         )
     if uncapped <= magnitude:
-        return per_key, gaps, None, unbounded, frozenset(ceilings & set(per_key))
+        return (
+            per_key,
+            gaps,
+            None,
+            unbounded,
+            frozenset(ceilings & set(per_key)),
+            frozenset(non_attributed & set(per_key)),
+        )
 
     capped: dict[str, float] = {}
     exhausted: list[str] = []
@@ -2899,6 +3124,7 @@ def _instance_contributions(
         },
         unbounded,
         frozenset(ceilings & set(capped)),
+        frozenset(non_attributed & set(capped)),
     )
 
 
@@ -2917,13 +3143,23 @@ def _entity_contribution(
     *,
     transitive: bool,
     composed: dict[str, _ComposedMagnitude] | None = None,
-) -> tuple[float | None, str, dict[str, Any] | None, bool]:
+) -> tuple[float | None, str, dict[str, Any] | None, bool, str | None]:
     """The dollars this call is PROVEN to move against one entity, or ``None``.
 
     The fourth member says the figure came from the composed branch, which is
     the one branch whose number bounds this principal from ABOVE and never from
     below. It is returned rather than parsed back out of the basis string: the
     row header's bound direction turns on it, and a prose prefix is not a field.
+
+    The FIFTH member is the magnitude state the figure came from — the witness's
+    own token, handed back rather than reduced to a boolean here. Two axes read
+    it and they are not the same question: the composed flag above says WHICH
+    BRANCH supplied the number, and this says what the WITNESS behind it claims.
+    An attribution-derived figure (a constant-amount probe crediting a holder's
+    whole priced balance) bounds from above whether it arrived through the
+    composed branch or through the instance's own witness, so a row cannot grade
+    its direction off the branch alone. ``None`` where no figure was produced —
+    there is no state to report about a contribution that does not exist.
 
     There is exactly one source of a number here: a magnitude witness. Reach
     membership answers "can this principal act on that entity"; it does not
@@ -2954,13 +3190,13 @@ def _entity_contribution(
     against a proxy picked by sort order publishes the other proxy's sheet.
     """
     if key in value_plane.alias_ambiguous:
-        return None, "shared_implementation_folds_onto_no_proxy(not_determined)", None, False
+        return None, "shared_implementation_folds_onto_no_proxy(not_determined)", None, False, None
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.
         native = P.native_value_state(value_plane, key)
         if not native.is_determined:
-            return None, "native_only_flow+absent_native_row(not_determined)", None, False
+            return None, "native_only_flow+absent_native_row(not_determined)", None, False, None
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
         basis = "native_only_flow x native_balance"
@@ -2970,7 +3206,8 @@ def _entity_contribution(
 
     magnitude = _witnessed_magnitude(instance)
     if magnitude is not None:
-        if instance.magnitude.state == "proven_exact":
+        state = instance.magnitude.state
+        if state == MAGNITUDE_STATE_PROVEN_EXACT:
             # The witness bounds what this call moves; the entity's sheet bounds
             # what is there to move. Neither alone is the answer, and the sheet
             # alone is the balance-sheet-as-a-reach error.
@@ -2979,25 +3216,31 @@ def _entity_contribution(
                 f"witnessed_reach(exact) x {basis}",
                 None,
                 False,
+                state,
             )
         if held is not None:
-            return min(held, magnitude), f"witnessed_reach(floor) x {basis}", None, False
+            return min(held, magnitude), f"witnessed_reach({_state_word(state)}) x {basis}", None, False, state
+        # NEITHER a floor NOR an upper bound may be charged against an entity
+        # whose priced sheet is not_determined without saying so. The arithmetic
+        # is the same on both — nothing was available to bound the figure with —
+        # but the two disclosures are opposite claims and are published under
+        # opposite names: a floor says the call moves AT LEAST this much
+        # somewhere, an upper bound says the whole figure is a ceiling that no
+        # witness says the call reaches. Writing an upper bound under
+        # ``witnessed_floor_usd`` would republish it as the one thing it is not.
         return (
             magnitude,
-            "witnessed_reach(floor)+sheet_not_determined",
+            f"witnessed_reach({_state_word(state)})+sheet_not_determined",
             {
                 "function": instance.signal.function_name,
                 "capability": instance.signal.claim_id,
                 "entity": key,
-                "witnessed_floor_usd": magnitude,
-                "reading": (
-                    "a floor witness charged against an entity whose priced sheet is "
-                    "not_determined: nothing here says the entity holds this much, only that "
-                    "the call moves at least this much somewhere, and no sheet was available "
-                    "to bound it against this entity"
-                ),
+                "witness_state": state,
+                **_unbounded_figure(state, magnitude),
+                "reading": _unbounded_reading(state),
             },
             False,
+            state,
         )
     supplied = (composed or {}).get(value_plane.canonical(key))
     if supplied is not None:
@@ -3012,7 +3255,8 @@ def _entity_contribution(
                 "function": instance.signal.function_name,
                 "capability": instance.signal.claim_id,
                 "entity": supplied.entity,
-                "witnessed_floor_usd": supplied.usd,
+                "witness_state": supplied.witness_state,
+                **_unbounded_figure(supplied.witness_state, supplied.usd),
                 "reading": (
                     "a composed magnitude charged against an entity whose priced sheet is "
                     f"not_determined: {supplied.function} at {supplied.entity} is witnessed "
@@ -3020,19 +3264,70 @@ def _entity_contribution(
                 ),
             }
         )
-        return supplied.usd, f"composed_reach_magnitude({supplied.function}) x {basis}", note, True
+        return (
+            supplied.usd,
+            f"composed_reach_magnitude({supplied.function}) x {basis}",
+            note,
+            True,
+            supplied.witness_state,
+        )
     if held is None:
         return (
             None,
             ("entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"),
             None,
             False,
+            None,
         )
     return (
         None,
         ("reach_magnitude_not_witnessed(not_determined) x " + basis + ("+closure" if transitive else "")),
         None,
         False,
+        None,
+    )
+
+
+def _state_word(state: str) -> str:
+    """The magnitude state as the one word the basis prose uses.
+
+    Derived from the token rather than written per branch, so a state that joins
+    the vocabulary cannot silently keep publishing another state's word. An
+    unregistered token prints as itself: a reader who sees a raw token knows the
+    prose was not written for it, which is better than seeing "floor".
+    """
+    return state.removeprefix("proven_")
+
+
+def _unbounded_figure(state: str, usd: float) -> dict[str, float]:
+    """The disclosed figure, under the name its DIRECTION earns.
+
+    A floor and an upper bound charged against an unpriced sheet are the same
+    arithmetic and opposite claims, so they are published under different keys —
+    a consumer reading ``witnessed_floor_usd`` must never pick up a ceiling. A
+    state with no registered direction publishes the figure under a name that
+    claims neither.
+    """
+    if state == MAGNITUDE_STATE_PROVEN_FLOOR:
+        return {"witnessed_floor_usd": usd}
+    if state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+        return {"witnessed_upper_bound_usd": usd}
+    return {"witnessed_usd": usd}
+
+
+def _unbounded_reading(state: str) -> str:
+    if state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+        return (
+            "an attribution-derived magnitude charged against an entity whose priced sheet is "
+            "not_determined: the figure is a holder's whole priced balance credited off a "
+            "constant-amount probe, so it bounds this call from ABOVE and nothing here says "
+            "the call moves it — and no sheet was available to bound it against this entity"
+        )
+    return (
+        "a floor witness charged against an entity whose priced sheet is "
+        "not_determined: nothing here says the entity holds this much, only that "
+        "the call moves at least this much somewhere, and no sheet was available "
+        "to bound it against this entity"
     )
 
 
