@@ -869,29 +869,55 @@ def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict
     ``effect_verdicts.observed_residue`` precisely so this layer does not have to
     reach into object storage to learn who called.
 
-    The FIRST entry carrying an ``effect_verdict_id`` decides, matching the
-    ``effect_verdict_id`` the signal itself publishes one screen down — one
-    signal names one verdict, and picking a different one here would publish an
-    execution belonging to a row the signal does not cite.
+    Which entry is read is :func:`_cited_verdict_entry`'s decision and NOT this
+    function's, so the execution published here and the ``effect_verdict_id`` the
+    signal publishes are the same row by construction rather than by two
+    independent scans that happen to agree. They did not agree before: this
+    function took the FIRST verdict-bearing entry and the signal took the LAST,
+    which on a claim carrying two would have paired one verdict's dollars with
+    another's caller — the failure ``_destination_magnitudes`` forbids one file
+    over. (No signal in the reference corpus carries two, so the disagreement was
+    latent; a comment asserting an invariant the code did not hold is the part
+    that was live.)
     """
-    for entry in entries:
-        witness = entry.get("witness") or {}
-        raw_id = witness.get("effect_verdict_id")
-        if raw_id is None:
-            continue
-        verdict_id = int(raw_id)
-        verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == verdict_id), None)
-        ptr = getattr(verdict, "transcript_ptr", None) if verdict is not None else None
-        if verdict is None:
-            record = EX.not_determined(EX.REASON_VERDICT_NOT_LOCATED, effect_verdict_id=verdict_id)
-        else:
-            observed = witness.get("observed") or {}
-            record = EX.from_residue(
-                observed.get(PROVING_EXECUTION_KEY), transcript_ptr=ptr, effect_verdict_id=verdict_id
-            )
-        state = EX.GATE_STATE_RECORDED if record.is_recorded else EX.GATE_STATE_NOT_RECORDED
-        return Tri.proven(state, record.as_json())
-    return Tri.proven(EX.GATE_STATE_NOT_RECORDED, EX.not_determined(EX.REASON_NO_VERDICT).as_json())
+    entry = _cited_verdict_entry(entries)
+    if entry is None:
+        return Tri.proven(EX.GATE_STATE_NOT_RECORDED, EX.not_determined(EX.REASON_NO_VERDICT).as_json())
+    witness = entry.get("witness") or {}
+    verdict_id = int(witness["effect_verdict_id"])
+    verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == verdict_id), None)
+    if verdict is None:
+        record = EX.not_determined(EX.REASON_VERDICT_NOT_LOCATED, effect_verdict_id=verdict_id)
+    else:
+        observed = witness.get("observed") or {}
+        record = EX.from_residue(
+            observed.get(PROVING_EXECUTION_KEY),
+            transcript_ptr=getattr(verdict, "transcript_ptr", None),
+            effect_verdict_id=verdict_id,
+        )
+    state = EX.GATE_STATE_RECORDED if record.is_recorded else EX.GATE_STATE_NOT_RECORDED
+    return Tri.proven(state, record.as_json())
+
+
+def _verdict_bearing_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every claim entry naming an effect verdict, in stored order."""
+    return [e for e in entries if ((e.get("witness") or {}).get("effect_verdict_id")) is not None]
+
+
+def _cited_verdict_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The ONE entry whose verdict this signal is about, or ``None``.
+
+    The LAST verdict-bearing entry, which is the rule the published
+    ``effect_verdict_id`` already used — preserved rather than replaced, because
+    changing which verdict a signal cites is a claim change and this seam exists
+    to remove a disagreement, not to introduce one.
+
+    A claim carrying TWO verdicts is a genuine ambiguity and is disclosed at the
+    call site rather than resolved silently here: the rule below is stored order,
+    which is not evidence about which verdict the claim is really about.
+    """
+    bearing = _verdict_bearing_entries(entries)
+    return bearing[-1] if bearing else None
 
 
 def _repointed_entities(
@@ -1219,11 +1245,20 @@ def _build_signal(
     if claim_id == "pause.set":
         gates.update(_pause_gates(facts, func, entries))
 
+    # ONE rule, read once, so the signal's own citation and the execution record
+    # in ``gate_inputs`` name the same verdict by construction. Every
+    # verdict-bearing entry still travels as a citation below — the ambiguity is
+    # disclosed, not collapsed — and a claim naming more than one says so in its
+    # notes rather than letting stored order settle it in silence.
+    cited = _cited_verdict_entry(entries)
+    if cited is not None:
+        fields["effect_verdict_id"] = int((cited.get("witness") or {})["effect_verdict_id"])
+    if len(_verdict_bearing_entries(entries)) > 1:
+        notes.add("multiple_effect_verdicts_on_one_claim")
     for entry in entries:
         witness = entry.get("witness") or {}
         verdict_id = witness.get("effect_verdict_id")
         if verdict_id is not None:
-            fields["effect_verdict_id"] = int(verdict_id)
             verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == int(verdict_id)), None)
             # inv.9: a published verdict carries its transcript pointer, or is
             # published WITHOUT a traceability claim — never as "no transcript".
