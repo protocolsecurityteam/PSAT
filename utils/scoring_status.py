@@ -88,6 +88,38 @@ VALUE_BOUND_FLOOR = "floor"
 VALUE_BOUND_NOT_DETERMINED = "not_determined"
 VALUE_BOUNDS = (VALUE_BOUND_EXACT, VALUE_BOUND_FLOOR, VALUE_BOUND_NOT_DETERMINED)
 
+# --- magnitude state -------------------------------------------------------
+# A DIFFERENT axis from ``VALUE_BOUND_*`` above, and the two are routinely
+# confused because both spell "exact" and "floor". ``VALUE_BOUND_*`` grades the
+# ENTITY SET — is ``value_entity_keys`` the whole reach or a proven floor over
+# it — and is CHECK-constrained in the database. This one grades the DOLLAR
+# FIGURE and lives inside the free-form ``gate_inputs->'reach_magnitude_usd'``
+# envelope, where it is validated by the fold's own allow-list and nothing else.
+#
+# Three members, because the second and third are opposite directions:
+#   * ``proven_exact`` — the witness measured the call's own magnitude.
+#   * ``proven_floor`` — the call moves AT LEAST this much (a partly priced
+#     sheet, a gated indeterminate reach). The truth is at or above it.
+#   * ``proven_upper_bound`` — the ATTRIBUTION path: a probe moved a
+#     compile-time constant amount and the holder's whole priced balance was
+#     credited for the pair. The truth is at or BELOW it. It is not exact (no
+#     witness says the call moves the whole balance) and it is emphatically not
+#     a floor (``proven_floor``'s prose means "at least this much", which this
+#     figure does not support in that direction).
+MAGNITUDE_STATE_PROVEN_EXACT = "proven_exact"
+MAGNITUDE_STATE_PROVEN_FLOOR = "proven_floor"
+MAGNITUDE_STATE_PROVEN_UPPER_BOUND = "proven_upper_bound"
+MAGNITUDE_STATES = (
+    MAGNITUDE_STATE_PROVEN_EXACT,
+    MAGNITUDE_STATE_PROVEN_FLOOR,
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+)
+# The states whose figure bounds the principal from ABOVE and never from below,
+# so a row summing them has not earned a ">=" band. Named as a set rather than
+# tested against one token, so a future upper-bounding state joins the rule by
+# being registered here instead of by being remembered at each consumer.
+MAGNITUDE_STATES_ATTRIBUTION_DERIVED = (MAGNITUDE_STATE_PROVEN_UPPER_BOUND,)
+
 # --- destination lattice ---------------------------------------------------
 # ``not_applicable`` is a fourth member and a genuinely different fact from
 # ``not_determined``: ``pause.set`` has no destination to constrain, whereas an
