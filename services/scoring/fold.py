@@ -2074,28 +2074,49 @@ def _aggregate(
     return findings, subsumed, warnings
 
 
-def _order_tie_reading(shared_entities: list[str]) -> str:
+def _order_tie_reading(shared_entities: list[str], position_in_tie: int) -> str:
     """What the tie-break string decided on THIS row, read off what the row holds.
 
     The λ half is true of every carrier — a tied row's index is that string's
-    doing whatever else is true — so it is constant. The exposure half is not:
-    the order splits a budget only where an entity is actually held in common,
-    and a row that shares none has no split. Publishing the split sentence there
-    asserts an apportionment that provably did not happen, which is the same
-    defect one level down from the figures.
+    doing whatever else is true — so it is constant. Two things after it are
+    not, and both are published in the same block a line away.
+
+    ``shared_entities``: the order splits a budget only where an entity is
+    actually held in common, and a row that shares none has no split. Publishing
+    the split sentence there asserts an apportionment that provably did not
+    happen, which is the same defect one level down from the figures.
+
+    ``position_in_tie``: which SIDE of the split this row is on. The first row in
+    a tie group has no tied row ahead of it and is charged FIRST; saying it "is
+    charged the remainder" is false of exactly the carrier the field beside it
+    identifies. The two directions are the same fact told from two ends, and
+    naming the wrong end inverts who the order cost.
     """
-    position = "this row's λ position is decided by that string, not by evidence"
+    lam = "this row's λ position is decided by that string, not by evidence"
     if not shared_entities:
         return (
-            position + "; and it holds NO entity in common with the tied rows — shared_entities is "
+            lam + "; and it holds NO entity in common with the tied rows — shared_entities is "
             "an asked-and-empty, not an unasked question — so no exposure budget was split by the "
             "order here and none of this row's dollars is an order-determined apportionment"
         )
+    shared_clause = (
+        f"{lam}, and so is its share of the {len(shared_entities)} entity(ies) it holds in "
+        "common with the tied rows (named under shared_entities): "
+    )
+    if position_in_tie == 0:
+        charged = (
+            "this row is FIRST in the tie (position_in_tie 0), so it consumes that shared exposure "
+            "budget before any row tied with it and the rows behind it are charged the remainder"
+        )
+    else:
+        charged = (
+            f"the {position_in_tie} row(s) ahead of this one in the tie (position_in_tie "
+            f"{position_in_tie}) consume that shared exposure budget first and this row is charged "
+            "what is left of it"
+        )
     return (
-        f"{position}, and so is its share of the {len(shared_entities)} entity(ies) it holds in "
-        "common with the tied rows (named under shared_entities): the earlier row consumes the "
-        "exposure budget first and this row is charged the remainder, so the split among them is "
-        "order-determined and is not a measurement of who reaches what"
+        shared_clause + charged + ", so the split among them is order-determined and is not a "
+        "measurement of who reaches what"
     )
 
 
@@ -2129,7 +2150,7 @@ def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
                 "shared_entities": shared,
                 "position_in_tie": position,
                 "basis": "equal raw_points and capability; the remaining order is the principal_unit string",
-                "reading": _order_tie_reading(shared),
+                "reading": _order_tie_reading(shared, position),
             }
 
 
@@ -2765,6 +2786,53 @@ def _counted(values: Iterable[str]) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
+# Why each arm withheld, one clause per arm, for the CENSUS's account of
+# ``composed_withheld``. The sentence these replace gave a single cause for a
+# counter three different arms feed — "because the route they publish is not the
+# route the proof took and nothing proved this principal could have issued the
+# proven call itself" — and both halves are the two clauses B1-N1 removed from
+# the per-entry reading, failing on the same carriers: there is no proven route
+# to differ from on the transport-fault arm, no typed route finding either way
+# on the unclassified arm, and the fault arm is reached BEFORE the join is
+# consulted, so it can publish ``deletable`` beside its own refusal. Rolling
+# three findings into one cause at the aggregate is the same collapse the
+# per-entry fix removed, one level up.
+_WITHHELD_ARM_CAUSES = {
+    ARM_GATE_ONLY: (
+        "a route witnessed AUTHORING what the destination call carries, so the destination's own "
+        "figure is not a figure for this route"
+    ),
+    ARM_WITHHELD: (
+        "an execution that could not be READ at all — which is a finding about neither the route "
+        "nor the join: both were computed before this arm was reached and are published, and a "
+        "deletability licence standing among them does not release the figure"
+    ),
+    ARM_NOT_DETERMINED: (
+        "a route that earned no typed finding in either direction, with no arm left to fall through to"
+    ),
+}
+
+
+def _withheld_cause_clause(withheld: tuple["_WithheldComposition", ...]) -> str:
+    """The census's account of ``composed_withheld``, derived from the arms that
+    actually fired on THIS row rather than authored once for all of them."""
+    counts = _counted(record.arm for record in withheld)
+    fired = [(arm, counts[arm]) for arm in COMPOSITION_ARMS if counts.get(arm)]
+    if not fired:
+        return (
+            "composed_withheld is 0 here: no candidate that cleared the witnesses above lost its "
+            "figure to the composition rule, which is a count of nothing and not a claim that the "
+            "rule was not asked"
+        )
+    return (
+        "composed_withheld is a LATER and different refusal: those candidates cleared every "
+        "witness above and then lost their figure to the composition rule — "
+        + "; ".join(f"{hits} to {_WITHHELD_ARM_CAUSES[arm]}" for arm, hits in fired)
+        + ". The three are not interchangeable and composed_withheld_by_arm beside this keeps "
+        "them apart"
+    )
+
+
 def _composition_report(
     composed: dict[str, _ComposedMagnitude],
     census: dict[str, int],
@@ -2850,11 +2918,11 @@ def _composition_report(
             "selector, destination_function and act_as_chain were picked out of them, under "
             "composed_selector_tie; null there is the proven 'one candidate'. Everything in "
             "act_as_refused stayed not_determined and is charged to confidence. "
-            "composed_withheld is a LATER and different refusal: those candidates cleared every "
-            "witness above and then lost their figure to the composition rule, because the "
-            "route they publish is not the route the proof took and nothing proved this "
-            "principal could have issued the proven call itself. They keep their gate claim and "
-            "their execution record and are listed per row under "
+            + _withheld_cause_clause(withheld)
+            + ". Each keeps its act-as chain and publishes its gate_claim and proving_execution "
+            "blocks whatever state those reached — a withheld figure retracts neither question, "
+            "and where either could not be answered the block carries its own typed reason rather "
+            "than going quiet. They are listed per row under "
             "reach_composed_magnitudes_withheld. gate_claim_by_state is a DIFFERENT axis again and "
             "cuts across both populations: it says, per entry, whether the execution that proved "
             "the destination's figure was admitted for the caller this entry's chain names. Where "
