@@ -212,69 +212,6 @@ class _WalkedHop:
     licensed: frozenset[P.LicensedFunction]
 
 
-@dataclass(frozen=True)
-class _CallerHoldingPrecondition:
-    """What the chain's admitted call SPENDS, and the fact that nothing bounds it.
-
-    The destination's ``flow.out`` witness is a fork proof of how much ONE call
-    to that function moves. It carries no model of who makes the call or what
-    they already hold, and the act-as chain proves only that the call can be
-    made — so the last admitted call spends a quantity its caller must hold or
-    supply (vault shares, for a share-burning withdrawal) that nothing in this
-    pipeline witnesses. That is why the published figure is a CEILING on what
-    this principal extracts and never a floor on it — an axis distinct from
-    ``flow.out``'s own ``proven_exact`` / ``proven_floor``, which grades the
-    pricing of one call and says nothing about who can make it.
-
-    A second, narrower fact points the same way and is NOT published here: the
-    distilled signal's ``witness_notes`` carry ``target_constraint``, which on
-    nine of this corpus's twelve vault ``flow.out`` rows is ``not_determined``.
-    It is dropped at :class:`_DestinationMagnitude`, which keeps only the state
-    and the figure, so it cannot be cited per entry — and it would not carry
-    this claim anyway: it names the constraint on the flow's TARGET parameter,
-    not on the caller. Plumbing it through is a registered deferral.
-
-    ``caller_sheet_usd`` is CONTEXT and emphatically not the bound: a zero spot
-    balance at one observed height does not prove the chain moves nothing,
-    because the quantity can be acquired inside the same transaction from third
-    parties whose outstanding requests nothing here witnesses. Publishing that
-    sheet as the bound would mint an earned negative out of an absence.
-    """
-
-    caller: str
-    bound_kind: str
-    caller_sheet_usd: float | None
-    caller_sheet_state: str
-
-    def as_json(self) -> dict[str, Any]:
-        return {
-            "state": NOT_DETERMINED,
-            "bound_kind": self.bound_kind,
-            "caller": self.caller,
-            "caller_sheet_usd": (round(self.caller_sheet_usd, 2) if self.caller_sheet_usd is not None else None),
-            "caller_sheet_state": self.caller_sheet_state,
-            "reading": (
-                "the published figure bounds ONE call to the destination function — "
-                "flow_out_witness.state says whether that dollar figure is exact or a priced "
-                "floor FOR THAT CALL, which is a different axis from this one. As a statement "
-                "about what THIS PRINCIPAL can extract it is a CEILING and never a floor: the "
-                "destination's witness bounds the function whoever calls it and carries no "
-                "model of who calls it or what they hold, and the chain's last admitted call "
-                "spends a quantity the caller must already hold or supply — for a share-burning "
-                "withdrawal, the caller's vault shares. No witness in this pipeline bounds that "
-                "quantity, so this precondition is not_determined. The caller's observed sheet "
-                "is published beside it as context and is NOT the bound: a zero spot balance "
-                "does not prove the chain moves nothing, because the quantity can be acquired "
-                "in the same transaction from third parties whose outstanding requests are "
-                "unwitnessed, and pricing that absence at zero would mint an earned negative "
-                "out of it. bound_kind names the precondition only as far as the evidence "
-                "loaded here names it — the destination's own argument semantics ride on the "
-                "same function_principals row this fold reads only for acceptance, a "
-                "registered deferral"
-            ),
-        }
-
-
 # How much a magnitude witness state CLAIMS, lowest first. Read only to settle a
 # tie between two candidates at the same figure: the state published is the
 # least-claiming of them, because an exactness that one tied candidate does not
@@ -311,8 +248,7 @@ class _ComposedMagnitude:
     the destination's own sheet; the published ``bounded_by`` says which of the
     two bound it, and ``sheet_not_determined`` marks the case where no sheet was
     available to bound it with at all. Both of those bounds are ceilings and so
-    is their min; ``caller_holding`` names the precondition that keeps the whole
-    figure a ceiling on THIS PRINCIPAL rather than a floor.
+    is their min.
 
     ``tied_with`` is the other candidates this entity offered at the SAME figure,
     which this one was chosen over by :func:`_composed_order`. Empty is the
@@ -336,7 +272,6 @@ class _ComposedMagnitude:
     usd: float
     sheet_usd: float | None
     chain: tuple[P.ActAsStep, ...]
-    caller_holding: _CallerHoldingPrecondition
     predicates: P.DestinationPredicates
     # The call that PROVED ``witnessed_usd`` at the destination. REQUIRED, with
     # no default: the invariant is that a published magnitude carries its
@@ -399,10 +334,8 @@ class _ComposedMagnitude:
             "unmet business conditions: it includes the authorization guard that this step's "
             "own act-as witness proves satisfied, and it may include transfer post-conditions "
             "and compiler or decompiler artefacts, all of which the extractor labels 'business' "
-            "alike — which is why the label is not read and the list is not filtered. (4) It "
-            "answers a DIFFERENT question from caller_holding_precondition beside it: that one "
-            "is what the caller must already hold, this one is what the destination's own body "
-            "tests, and neither bounds the other. state is three-valued and the three are not "
+            "alike — which is why the label is not read and the list is not filtered. state is "
+            "three-valued and the three are not "
             "interchangeable: 'extracted' is a read (count 0 under it means the extractor ran "
             "and found no predicate), 'column_holds_no_array' is an extraction that never ran, "
             "and 'destination_function_not_located' is a join that found no function of this "
@@ -462,12 +395,9 @@ class _ComposedMagnitude:
             "witness_granularity": "entity",
             "destination_sheet_usd": (round(self.sheet_usd, 2) if self.sheet_usd is not None else None),
             "published_usd": round(self.usd, 2),
-            # Which direction the figure bounds the PRINCIPAL in. ``bounded_by``
-            # below is a different question — which of the two ceilings was the
-            # binding one — and neither is flow_out_witness.state, which says
-            # whether the destination's own dollar figure for one call is exact
-            # or a priced floor.
-            "principal_extraction_bound": "ceiling",
+            # Which of the two ceilings was the binding one. Not
+            # flow_out_witness.state, which says whether the destination's own
+            # dollar figure for one call is exact or a priced floor.
             "bounded_by": (
                 "flow.out witness"
                 if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
@@ -476,20 +406,13 @@ class _ComposedMagnitude:
             "sheet_not_determined": self.sheet_usd is None,
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
-            "caller_holding_precondition": self.caller_holding.as_json(),
-            # Beside caller_holding_precondition and never inside it: that one
-            # names what the CALLER must already hold, this one is what the
-            # DESTINATION's body tests, and folding the second into the first
-            # would republish an unpolarised string set as a bound.
             "destination_predicates": self._predicates_json(),
             # ``null`` is the proven "one candidate — the order decided nothing
             # here", which is a different fact from a field nobody filled in.
             "composed_selector_tie": self._tie_json(),
             "reading": (
                 "the dollars are the DESTINATION function's own flow.out witness, not this "
-                "row's and not the destination's balance sheet, and as a claim about what this "
-                "principal can extract they are a CEILING — caller_holding_precondition says "
-                "what the figure does not bound. Every hop from the seized node to it carries "
+                "row's and not the destination's balance sheet. Every hop from the seized node to it carries "
                 "its own act-as witness, in one of two admissible shapes named per step under "
                 "witness_kind: "
                 "the CALLER'S OWN state variable, read on-chain holding the next node, or — "
@@ -562,7 +485,7 @@ def _select_composed(candidates: list[_ComposedMagnitude]) -> _ComposedMagnitude
     """The one candidate published for an entity, carrying the ones it beat.
 
     The WHOLE candidate is selected, never a field of it: ``selector``,
-    ``function``, ``witness_state``, ``caller_holding`` and ``chain`` are one
+    ``function``, ``witness_state``, ``execution`` and ``chain`` are one
     call's account of itself, and a chain taken from a different candidate than
     the selector would publish a path that does not end at the function named
     beside it.
@@ -2079,9 +2002,9 @@ def _bound_direction(
     nothing and entities holding assets the priced sheet never covered leave
     value out of the sum, so what is in it is a floor. The BOUND axis is the
     other one: a composed figure is the DESTINATION function's witness for one
-    call, published as a ceiling on what this principal extracts because the
-    call's caller-holding precondition is not_determined
-    (``reach_composed_magnitudes[].principal_extraction_bound``).
+    call, and it is a ceiling on what this principal extracts because the
+    witness bounds the FUNCTION whoever calls it and carries no model of who
+    calls it.
 
     Summing ceilings does not make a floor, so ``floor`` requires that NO
     contributing entity's figure came through the composed branch — the
@@ -2156,9 +2079,9 @@ def _ceiling_bearing_basis(
     n_entities = len(per_entity)
     counted = f"{len(ceiling_entities)} of {n_entities} entity(ies)"
     ceilings = (
-        "priced from a composed extraction CEILING "
-        "(see reach_composed_magnitudes[].principal_extraction_bound and its "
-        "caller_holding_precondition, which is not_determined)"
+        "priced from a composed extraction CEILING — the DESTINATION function's own flow.out "
+        "witness, which bounds one call to that function whoever makes it (see "
+        "reach_composed_magnitudes[])"
     )
     if direction == BOUND_DIRECTION_CEILING:
         return (
@@ -2167,7 +2090,7 @@ def _ceiling_bearing_basis(
             "cover, and no hop of this row was left undetermined or withheld behind one — so "
             "nothing this row reaches is missing from the sum and the total bounds this "
             "principal from ABOVE. Each composed figure bounds ONE call to the destination "
-            "function and rides on a caller_holding_precondition that is not_determined"
+            "function"
         ) + (f"; {len(proven_no_reach)} instance(s) proven_no_reach" if proven_no_reach else "")
 
     # Why it is not a ceiling either, counted rather than asserted: value this
@@ -2701,34 +2624,6 @@ def _signal_execution(signal: FunctionSignal) -> EX.ProvingExecution:
     )
 
 
-def _caller_holding(chain: tuple[P.ActAsStep, ...], value_plane: P.ValuePlane) -> _CallerHoldingPrecondition:
-    """Whose unwitnessed holding the composed figure quietly assumes.
-
-    A destination writes its preconditions against its own ``msg.sender``, so
-    the caller named here is the one the destination's own access-control list
-    admitted — the last step whose witness is that list. Where no step carried
-    one, no list named a caller and the entity that issues the final call is the
-    last step's own caller.
-
-    THIS IS CALIBRATED ON THE SHAPES THIS CORPUS GROWS, and it is a choice, not
-    a witness: on ``A -> B (state variable) -> C (ACL) -> D (state variable)``
-    the ``msg.sender`` at D is C, while the rule below names B, the caller the
-    ACL admitted at C. Both are entities whose holdings nothing bounds, and the
-    named one is the one the only ACL on the chain is a statement about; a
-    corpus that grows that shape needs the precondition published per step
-    rather than per entry.
-    """
-    acl = [step for step in chain if step.witness_kind == P.ACT_AS_WITNESS_DESTINATION_ACL]
-    caller = (acl[-1] if acl else chain[-1]).caller
-    # ``total`` and ``sheet_state`` canonicalize their own argument.
-    return _CallerHoldingPrecondition(
-        caller=caller,
-        bound_kind=COMPOSED_BOUND_CALLER_ARGUMENTS,
-        caller_sheet_usd=value_plane.total(caller),
-        caller_sheet_state=value_plane.sheet_state(caller),
-    )
-
-
 def _compose(
     seeds: set[str],
     hops: list[_WalkedHop],
@@ -2907,7 +2802,6 @@ def _compose(
                             usd=usd,
                             sheet_usd=sheet,
                             chain=chain,
-                            caller_holding=_caller_holding(chain, value_plane),
                             predicates=conditions.predicates(hop.destination, licensed.selector),
                             # The destination witness's OWN execution, carried
                             # through unchanged. Composition joins an existing
@@ -3336,12 +3230,6 @@ def _unbounded_reading(state: str) -> str:
 # hop that carried no act-as witness. Not an act-as refusal at this hop — the
 # question was never asked here — and named separately for exactly that reason.
 ACT_AS_CALLER_UNREACHED = "caller_not_reachable_from_the_seized_node"
-
-# What a composed figure does NOT bound, named as far as the evidence this fold
-# loads names it: the destination's own argument semantics ride on the same
-# function_principals row the act-as plane reads only for acceptance, so the
-# general shape is published rather than a specific quantity nothing witnessed.
-COMPOSED_BOUND_CALLER_ARGUMENTS = "caller_supplied_arguments"
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"
 HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"
