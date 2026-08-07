@@ -66,10 +66,41 @@ describe("derive — principals", () => {
 });
 
 describe("derive — value cell", () => {
-  it("strips the floor prefix and tags the floor separately", () => {
-    expect(valueCell(F[0])).toEqual({ determined: true, text: "$1M-$10M", floor: true });
-    expect(valueCell(F[6])).toEqual({ determined: true, text: "<$100k", floor: false });
-    expect(valueCell(F[5])).toEqual({ determined: true, text: ">$1B", floor: true });
+  it("strips the band qualifier and carries the direction separately", () => {
+    expect(valueCell(F[0])).toEqual({ determined: true, text: "$1M-$10M", direction: "floor" });
+    expect(valueCell(F[5])).toEqual({ determined: true, text: ">$1B", direction: "floor" });
+    // A row the document publishes no direction for gets none invented for it.
+    expect(valueCell(F[6])).toEqual({ determined: true, text: "<$100k", direction: null });
+  });
+
+  it("reads a ceiling and a two-sided unknown as their own directions, never as a floor", () => {
+    // A total composed entirely of extraction ceilings publishes "<= " and must
+    // never reach the cell as an at-least.
+    expect(valueCell({ value_band: "<= $10M-$100M", value_at_stake_bound_direction: "ceiling" })).toEqual({
+      determined: true,
+      text: "$10M-$100M",
+      direction: "ceiling",
+    });
+    // Ceilings under a coverage gap: bounded in neither direction, band
+    // unqualified, and the old boolean says false — which is not "exact".
+    expect(
+      valueCell({
+        value_band: "$10M-$100M",
+        value_at_stake_bound_direction: "not_determined",
+        value_at_stake_is_floor: false,
+      }),
+    ).toEqual({ determined: true, text: "$10M-$100M", direction: "not_determined" });
+  });
+
+  it("refuses to infer a direction from the boolean a document carries alone", () => {
+    // The boolean is a two-valued answer to a three-sided question: a document
+    // that predates the direction field cannot distinguish a proven floor from
+    // a sum of ceilings, so the cell claims neither.
+    expect(valueCell({ value_band: ">= $1M-$10M", value_at_stake_is_floor: true }).direction).toBeNull();
+    expect(valueCell({ value_band: "$1M-$10M", value_at_stake_bound_direction: "sideways" }).direction).toBeNull();
+    // "exact" is not in the producer's vocabulary: a total with no coverage gap
+    // and no ceiling in it is published as not_determined, not as two-sided.
+    expect(valueCell({ value_band: "$1M-$10M", value_at_stake_bound_direction: "exact" }).direction).toBeNull();
   });
 
   it("keeps not_determined as a third state — never $0, never blank", () => {

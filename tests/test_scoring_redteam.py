@@ -2616,9 +2616,12 @@ def test_s5_an_entity_holding_unpriced_assets_makes_the_value_a_floor(fold):
     document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane)
     finding = document.findings[0]
     assert finding["undetermined_instances"] == []
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
     assert finding["value_at_stake_is_floor"] is True
     assert finding["entities_holding_unpriced_assets"] == [KEY_C]
     assert finding["value_band"].startswith(">= ")
+    # No contribution came through composition, so the floor is the row's own.
+    assert finding["entities_priced_from_a_composed_ceiling"] == []
 
 
 def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold):
@@ -2652,11 +2655,13 @@ def test_s5_one_priced_asset_beside_unanswered_ones_is_not_a_priced_entity(fold)
     finding = document.findings[0]
     assert plane.sheet_state(KEY_C) == P.SHEET_PRICED
     assert finding["undetermined_instances"] == []
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
     assert finding["value_at_stake_is_floor"] is True
     # A reading at the storage floor is a holding the total does not carry, so
     # it is the same shortfall as one nobody priced.
     assert finding["entities_holding_unpriced_assets"] == sorted([KEY_C, KEY_V])
     assert finding["value_band"].startswith(">= ")
+    assert finding["entities_priced_from_a_composed_ceiling"] == []
 
 
 def test_s5_a_fully_priced_entity_earns_its_hard_band(fold):
@@ -2677,6 +2682,44 @@ def test_s5_a_fully_priced_entity_earns_its_hard_band(fold):
     assert finding["value_at_stake_is_floor"] is False
     assert finding["entities_holding_unpriced_assets"] == []
     assert not finding["value_band"].startswith(">= ")
+    # No magnitude witness, so there is no total — and a row with no total
+    # claims no direction for it either.
+    assert finding["value_at_stake_usd"] is None
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+
+
+def test_b7_two_absent_coverage_signals_do_not_add_up_to_an_exact_total(fold):
+    """The fall-through, and why it is not a fourth claim.
+
+    Neither coverage signal fires here: no instance is undetermined and the
+    entity's sheet covers everything it holds. That says nothing about the
+    DIRECTION of the figures summed — this call's own witness is a proven FLOOR,
+    trimmed to the sheet — so publishing "exact" would mint a two-sided claim
+    out of the absence of two unrelated signals, which is the B7 defect on a new
+    arm. The band carries no qualifier, exactly as it did before this field
+    existed, and the direction says what was established: nothing.
+    """
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_floor", 1_000_000.0).to_json()},
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
+    finding = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
+    assert finding["value_at_stake_usd"] == 1_000_000.0
+    assert finding["undetermined_instances"] == []
+    assert finding["entities_holding_unpriced_assets"] == []
+    assert finding["entities_priced_from_a_composed_ceiling"] == []
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert finding["value_at_stake_is_floor"] is False
+    assert finding["value_band"] == "$1M-$10M"
+    # The fall-through leaves the row's own basis alone: it is not a bound
+    # claim, so it is not rewritten into one.
+    assert "NEITHER" not in finding["value_at_stake_basis"]
+    assert not hasattr(FOLD, "BOUND_DIRECTION_EXACT")
 
 
 def test_r21_a_reach_key_outside_the_perimeter_is_disclosed(fold):
@@ -3924,6 +3967,128 @@ def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
         assert composed["published_usd"] <= composed["flow_out_witness"]["usd"]
         assert composed["published_usd"] <= sheet
         assert row["value_at_stake_usd"] == expected
+
+
+def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floor(fold):
+    """The row header published BOTH directions of one bound.
+
+    Every dollar of this row's value is a composed figure, and each of them is
+    disclosed per entry as ``principal_extraction_bound: ceiling`` riding on a
+    ``caller_holding_precondition`` that is not_determined. The header said
+    ``value_at_stake_is_floor`` and the band said ``">= "``, so the same row
+    published a floor over a sum of ceilings — and the UI painted the badge.
+    Ceilings do not become a floor by being summed, and the coverage gaps mean
+    the total is not a ceiling on the row either.
+    """
+    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
+    row = _gate_row(document)
+    assert row["value_at_stake_usd"] == 1_000_000.0
+    assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
+    assert [c["principal_extraction_bound"] for c in row["reach_composed_magnitudes"]] == ["ceiling"]
+    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert row["value_at_stake_is_floor"] is False
+    assert row["value_band"] == "$1M-$10M"
+    basis = row["value_at_stake_basis"]
+    assert "NEITHER" in basis and "CEILING" in basis
+    # The basis POINTS at the per-entry disclosure rather than restating it.
+    assert "reach_composed_magnitudes[].principal_extraction_bound" in basis
+    assert not basis.startswith(">=")
+
+
+def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling(fold):
+    """The second arm, which the reference corpus never reaches.
+
+    Aliasing the seized node onto the vault leaves the row ONE priced entity,
+    whose whole figure is composed: no instance is undetermined and no entity
+    holds an unpriced asset, so nothing is missing from the sum and the total
+    bounds the principal from above. Implemented and asserted rather than left
+    as a branch nobody has executed.
+    """
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        **_composing_case(
+            value=value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C,), alias={KEY_C: KEY_V}),
+        ),
+    )
+    row = _gate_row(document)
+    assert row["undetermined_instances"] == []
+    assert row["entities_holding_unpriced_assets"] == []
+    assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
+    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert row["value_at_stake_is_floor"] is False
+    assert row["value_band"].startswith("<= ")
+    assert row["value_at_stake_basis"].startswith("<= ")
+
+
+def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(fold):
+    """The MIXED shape, end to end: one ceiling beside one figure of its own.
+
+    A second call on the same row carries its own magnitude witness, so its
+    entity is priced from that and never from composition. The row's total is
+    then part extraction ceiling and part figure this fold does not grade for
+    direction — an at-most over the sum would claim a bound the second half does
+    not support, and the basis has to count which half is which rather than say
+    "every one of them".
+    """
+    witnessed = sig(
+        claim_id="authority.replace",
+        function_name="setAuthorityAlso",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates={"reach_magnitude_usd": Tri.proven("proven_exact", 500_000.0).to_json()},
+        **proven(0.75),
+        **reaches(KEY_C),
+    )
+    document = fold(
+        [*_composing_signals(), witnessed],
+        principals=_composing_principals(),
+        **_composing_case(
+            value=value_plane({KEY_V: {"usdc": 5_000_000.0}, KEY_C: {"usdc": 3_000_000.0}}, contracts=(KEY_C,)),
+        ),
+    )
+    row = _gate_row(document)
+    assert set(row["value_by_entity"]) == {KEY_C, KEY_V}
+    assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
+    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert row["value_at_stake_is_floor"] is False
+    assert not row["value_band"].startswith((">= ", "<= "))
+    basis = row["value_at_stake_basis"]
+    assert "1 of 2 entity(ies)" in basis
+    assert "1 entity(ies) whose figure is not a composed ceiling and is graded in no direction" in basis
+
+
+def test_b7_a_direction_is_published_only_where_one_was_proven():
+    """Two claims and a fall-through, each earned separately.
+
+    ``floor`` needs a coverage gap and NO composed figure; ``ceiling`` needs
+    EVERY figure composed and nothing missing from the sum — a gap, a mixed
+    contribution or a withheld hop each defeat it, and each for the same reason:
+    what is absent from the total can only push the truth up, which an at-least
+    survives and an at-most does not.
+    """
+    both, one = frozenset({KEY_C, KEY_V}), frozenset({KEY_V})
+    direction = FOLD._bound_direction
+
+    assert direction(1.0, both, frozenset(), True, False) == FOLD.BOUND_DIRECTION_FLOOR
+    # A withheld hop is value the row reaches and the sum does not carry: it
+    # cannot lower the truth, so the floor stands.
+    assert direction(1.0, both, frozenset(), True, True) == FOLD.BOUND_DIRECTION_FLOOR
+    assert direction(1.0, one, one, False, False) == FOLD.BOUND_DIRECTION_CEILING
+
+    # Every way of failing the ceiling, one at a time.
+    assert direction(1.0, one, one, True, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert direction(1.0, one, one, False, True) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # MIXED: one entity's figure is a ceiling and the other's is graded in no
+    # direction, so their sum bounds the principal in neither.
+    assert direction(1.0, both, one, False, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # Neither signal fired, which is not a proof that the sum is two-sided.
+    assert direction(1.0, both, frozenset(), False, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # No total, no direction — and never a floor over a figure that is absent.
+    assert direction(None, frozenset(), frozenset(), True, False) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # Only the two proven directions qualify the band.
+    assert FOLD._BAND_PREFIX == {FOLD.BOUND_DIRECTION_FLOOR: ">= ", FOLD.BOUND_DIRECTION_CEILING: "<= "}
 
 
 def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold):

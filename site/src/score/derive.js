@@ -98,15 +98,26 @@ export function kindWord(kind) {
 
 // ── value ───────────────────────────────────────────────────────────────────
 
+// Which direction the producer proved the total bounds the principal in. Read
+// from the published field only: `value_at_stake_is_floor` is a boolean over a
+// three-sided question and cannot tell a floor from a sum of extraction
+// ceilings, so a document that carries only the boolean gets `null` — no badge
+// — rather than the floor its own flag would claim. `not_determined` is the
+// producer's fall-through and is itself no claim about the figure.
+export const BOUND_DIRECTIONS = ["floor", "ceiling", "not_determined"];
+
 // The value cell. `determined: false` is a third state — the band was never
 // measured — and must not render as $0 or as an empty cell.
 export function valueCell(finding) {
   const band = finding?.value_band;
-  if (!band || band === "not_determined") return { determined: false, text: null, floor: false };
+  if (!band || band === "not_determined") return { determined: false, text: null, direction: null };
+  const direction = finding?.value_at_stake_bound_direction;
   return {
     determined: true,
-    text: String(band).replace(/^>=\s*/, ""),
-    floor: finding?.value_at_stake_is_floor === true,
+    // Both qualifiers are stripped: the direction is carried as a state beside
+    // the band, never as a prefix a reader has to parse.
+    text: String(band).replace(/^[<>]=\s*/, ""),
+    direction: BOUND_DIRECTIONS.includes(direction) ? direction : null,
   };
 }
 

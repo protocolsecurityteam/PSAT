@@ -117,6 +117,40 @@ describe("ScoreBand — computed grade", () => {
     expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
   });
 
+  it("never paints a floor on a total the producer bounds the other way", async () => {
+    // The producer's two claims and its fall-through, on three rows of one
+    // document: the ceiling and the undetermined bound must not read as an
+    // at-least, and a row whose document names no direction — the boolean
+    // alone cannot answer it — wears no badge at all.
+    const doc = structuredClone(ETHERFI);
+    const [ceiling, unbounded, silent] = doc.findings;
+    Object.assign(ceiling, { value_band: "<= $1M-$10M", value_at_stake_bound_direction: "ceiling" });
+    Object.assign(unbounded, {
+      value_band: "$1M-$10M",
+      value_at_stake_bound_direction: "not_determined",
+      value_at_stake_is_floor: false,
+    });
+    // No direction field at all — the shape every pre-existing document has.
+    delete silent.value_at_stake_bound_direction;
+    Object.assign(silent, { value_band: "$1M-$10M", value_at_stake_is_floor: true });
+    const { container } = render(
+      <ScoreBand companyName="etherfi" contracts={CONTRACTS} score={doc} error={null} />,
+    );
+    await openBreakdown();
+    await userEvent.setup().click(screen.getByRole("button", { name: /11 more/ }));
+    const cells = [...container.querySelectorAll(".sc-val")].filter((c) =>
+      c.textContent.includes("$1M-$10M"),
+    );
+    const badges = cells.map((cell) => {
+      // The qualifier is carried as a badge, never left on the band text.
+      expect(cell.textContent).not.toContain(">=");
+      expect(cell.textContent).not.toContain("<=");
+      return cell.querySelector(".sc-fl")?.textContent ?? null;
+    });
+    // The document's fourth $1M-$10M row is untouched and keeps its floor.
+    expect(badges.sort()).toEqual(["bound not determined", "ceiling", "floor", null]);
+  });
+
   it("marks unwitnessed reach differently from proven reach", async () => {
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();

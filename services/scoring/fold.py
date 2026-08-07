@@ -528,6 +528,29 @@ def _pool_composed(into: dict[str, list[_ComposedMagnitude]], published: dict[st
                 pool.append(candidate)
 
 
+# Which direction the row's own ``value_at_stake_usd`` bounds the principal in.
+# A DIFFERENT axis from ``VALUE_BOUND_*`` on a signal (whether the entity SET is
+# the whole reach or a floor over it) and from ``flow_out_witness.state`` (which
+# grades the pricing of one call), and the three are not interchangeable.
+#
+# Three states, and only two of them are claims. ``not_determined`` is the third
+# and it is the fall-through, because a direction is a positive fact about a SUM
+# and this fold does not grade every contribution for direction: a total with no
+# coverage gap and no composed ceiling in it is still summed out of figures that
+# may each be a priced floor, so "neither signal fired" is not a proof that the
+# figure is two-sided. It publishes the bare band, exactly as before this field
+# existed, and says in the basis what it did not establish — but only where a
+# ceiling is what defeated the claim: the no-ceiling fall-through leaves the
+# row's own basis untouched, because that basis was never a bound claim to
+# correct and rewriting it would move prose on rows nothing moved on.
+BOUND_DIRECTION_FLOOR = "floor"
+BOUND_DIRECTION_CEILING = "ceiling"
+BOUND_DIRECTION_NOT_DETERMINED = NOT_DETERMINED
+# The band label's qualifier, written only for the two proven directions. A
+# qualifier that cannot be earned is not written at all.
+_BAND_PREFIX = {BOUND_DIRECTION_FLOOR: ">= ", BOUND_DIRECTION_CEILING: "<= "}
+
+
 @dataclass
 class _RowValue:
     """What one row's instances proved about value, and what they did not."""
@@ -565,6 +588,13 @@ class _RowValue:
     composed_magnitudes: dict[str, _ComposedMagnitude] = field(default_factory=dict)
     composition_census: dict[str, Any] = field(default_factory=dict)
     composed_signals: frozenset[tuple[Any, ...]] = frozenset()
+    # Entities whose PUBLISHED figure in ``per_entity`` came through
+    # :func:`_entity_contribution`'s composed branch, so that figure is a ceiling
+    # on what this principal extracts and not a floor. Threaded rather than
+    # re-derived from ``composed_magnitudes``: that map holds every entity a
+    # composed candidate was built for, including ones whose own witness beat it
+    # in the per-entity MAX, and the header's question is which figures WON.
+    ceiling_entities: frozenset[str] = frozenset()
 
 
 def compute_protocol_score(
@@ -1634,7 +1664,40 @@ def _aggregate(
         # never covered is a FLOOR over that entity, not its value: an instance
         # that answered is not the same fact as an entity that was answered.
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
-        is_floor = bool(value_usd is not None and (undetermined or partially_priced))
+        # Coverage alone decides nothing about direction. A contribution that is
+        # itself an extraction ceiling cannot be summed into a floor because
+        # OTHER contributions are missing, so the two axes are read together.
+        direction = _bound_direction(
+            value_usd,
+            frozenset(per_entity),
+            valued.ceiling_entities,
+            bool(undetermined or partially_priced),
+            # The withheld-reach block is ALWAYS a dict — it carries its own
+            # reading even when nothing was withheld — so its counts are what is
+            # read here and never its truthiness.
+            bool(
+                valued.hops_not_determined
+                or valued.withheld_behind_hops.get("hops")
+                or valued.withheld_behind_hops.get("entities")
+            ),
+        )
+        # Only a row that HAS a total and carries a ceiling in it has a
+        # direction to explain. A row whose value is not_determined publishes
+        # that word as its basis, and a proven_no_reach row publishes an earned
+        # negative consumers branch on by name — neither is a bound claim.
+        if valued.ceiling_entities:
+            value_basis = _ceiling_bearing_basis(
+                direction,
+                per_entity,
+                valued.ceiling_entities,
+                undetermined,
+                partially_priced,
+                valued.proven_no_reach,
+                row.zero_reach_stripped,
+                valued.hops_not_determined,
+                valued.withheld_behind_hops,
+            )
+        is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
             row, per_entity, value_plane, closure, conditions, conferral, act_as, magnitudes
         )
@@ -1672,12 +1735,26 @@ def _aggregate(
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
                 "value_by_entity": {k: round(v, 2) for k, v in sorted(per_entity.items())},
                 "value_at_stake_basis": value_basis,
+                # Which direction the total bounds the principal in, and the
+                # reason the flag below is no longer the whole answer: a sum of
+                # composed extraction ceilings is not an at-least. Three-valued,
+                # and ``not_determined`` is the fall-through — a direction is
+                # published only where one was proven.
+                "value_at_stake_bound_direction": direction,
+                # Retained, and now derived: it is TRUE only where the direction
+                # is a floor, so a consumer reading the boolean alone can no
+                # longer read a ceiling as an at-least.
                 "value_at_stake_is_floor": is_floor,
-                # The entities behind the floor flag, named rather than left to
-                # be inferred from the flag alone.
+                # The entities whose published figure is a composed extraction
+                # ceiling, named rather than left to be counted out of
+                # reach_composed_magnitudes — that list holds every candidate,
+                # including ones an entity's own witness beat.
+                "entities_priced_from_a_composed_ceiling": sorted(valued.ceiling_entities),
+                # The entities behind the coverage gap, named rather than left to
+                # be inferred from the direction alone.
                 "entities_holding_unpriced_assets": partially_priced,
                 "value_band": (
-                    ((">= " + K.band_label(value_usd)) if is_floor else K.band_label(value_usd))
+                    (_BAND_PREFIX.get(direction, "") + K.band_label(value_usd))
                     if value_usd is not None
                     else NOT_DETERMINED
                 ),
@@ -1906,6 +1983,121 @@ def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> lis
     return sorted(partial)
 
 
+def _bound_direction(
+    value_usd: float | None,
+    entities: frozenset[str],
+    ceiling_entities: frozenset[str],
+    coverage_gap: bool,
+    withheld_reach: bool,
+) -> str:
+    """Which direction the row's published total bounds this principal in.
+
+    Two independent axes, and the header used to publish only one of them. The
+    COVERAGE axis is what ``is_floor`` was designed for: instances that answered
+    nothing and entities holding assets the priced sheet never covered leave
+    value out of the sum, so what is in it is a floor. The BOUND axis is the
+    other one: a composed figure is the DESTINATION function's witness for one
+    call, published as a ceiling on what this principal extracts because the
+    call's caller-holding precondition is not_determined
+    (``reach_composed_magnitudes[].principal_extraction_bound``).
+
+    Summing ceilings does not make a floor, so ``floor`` requires that NO
+    contributing entity's figure came through the composed branch — the
+    invariant that keeps a genuinely witnessed floor exactly where it was.
+
+    ``ceiling`` is the mirror and is earned no more cheaply: EVERY contributing
+    entity's figure must be a composed ceiling (one ungraded contribution and
+    the sum is not bounded above by these), nothing may be missing from the sum
+    (a coverage gap or a withheld hop is value this row reaches that the total
+    does not carry, and either one breaks an at-most while leaving an at-least
+    intact), and the two are checked here rather than asserted in the prose.
+
+    Everything else is ``not_determined``, including a total with no gap and no
+    ceiling in it: the contributions are then a mix this fold does not grade for
+    direction — a priced floor bounded by a sheet is not an exact figure — and
+    the absence of the two signals above is not a witness that the sum is
+    two-sided. It publishes the bare band and claims nothing.
+    """
+    if value_usd is None:
+        return BOUND_DIRECTION_NOT_DETERMINED
+    if ceiling_entities:
+        if ceiling_entities == entities and not coverage_gap and not withheld_reach:
+            return BOUND_DIRECTION_CEILING
+        return BOUND_DIRECTION_NOT_DETERMINED
+    return BOUND_DIRECTION_FLOOR if coverage_gap else BOUND_DIRECTION_NOT_DETERMINED
+
+
+def _ceiling_bearing_basis(
+    direction: str,
+    per_entity: dict[str, float],
+    ceiling_entities: frozenset[str],
+    undetermined: list[dict[str, Any]],
+    partially_priced: list[str],
+    proven_no_reach: list[dict[str, Any]],
+    zero_reach_stripped: list[dict[str, Any]],
+    hops_not_determined: list[dict[str, Any]],
+    withheld_behind_hops: dict[str, Any],
+) -> str:
+    """The basis for a row some of whose figures are extraction ceilings.
+
+    Written here rather than in :func:`_row_value` because the coverage half of
+    the question is only complete once the zero-reach instances and the partly
+    priced entities are known. The floor basis is left untouched: a row whose
+    direction did not move must not have its prose move either.
+
+    Every clause names the population it counted. The ceiling arm in particular
+    may not say "nothing is missing" as an unchecked flourish — the hops this
+    row could not establish and the graph withheld behind them are value the sum
+    does not carry, and they are named here because they were consulted in
+    :func:`_bound_direction` before the arm was taken.
+    """
+    n_entities = len(per_entity)
+    counted = f"{len(ceiling_entities)} of {n_entities} entity(ies)"
+    ceilings = (
+        "priced from a composed extraction CEILING "
+        "(see reach_composed_magnitudes[].principal_extraction_bound and its "
+        "caller_holding_precondition, which is not_determined)"
+    )
+    if direction == BOUND_DIRECTION_CEILING:
+        return (
+            f"<= the sum over {n_entities} entity(ies), every one of them {ceilings}; "
+            "no instance is not_determined, no entity holds assets the priced sheet does not "
+            "cover, and no hop of this row was left undetermined or withheld behind one — so "
+            "nothing this row reaches is missing from the sum and the total bounds this "
+            "principal from ABOVE. Each composed figure bounds ONE call to the destination "
+            "function and rides on a caller_holding_precondition that is not_determined"
+        ) + (f"; {len(proven_no_reach)} instance(s) proven_no_reach" if proven_no_reach else "")
+
+    # Why it is not a ceiling either, counted rather than asserted: value this
+    # row reaches that the sum does not carry, plus contributions that are not
+    # ceilings and that this fold does not grade for direction at all.
+    missing: list[str] = []
+    if undetermined:
+        clause = f"{len(undetermined)} instance(s) not_determined"
+        if zero_reach_stripped:
+            clause += f" (of which {len(zero_reach_stripped)} reached only the refused zero address)"
+        missing.append(clause)
+    if partially_priced:
+        missing.append(f"{len(partially_priced)} entity(ies) holding assets the priced sheet does not cover")
+    if hops_not_determined:
+        missing.append(f"{len(hops_not_determined)} hop(s) not_determined withholding reach")
+    behind = withheld_behind_hops.get("entities") or 0
+    if behind:
+        missing.append(f"{behind} entity(ies) withheld behind those hops (see reach_withheld_behind_hops)")
+    ungraded = n_entities - len(ceiling_entities)
+    if ungraded:
+        missing.append(f"{ungraded} entity(ies) whose figure is not a composed ceiling and is graded in no direction")
+    basis = (
+        f"bounded in NEITHER direction: {counted} {ceilings} — a ceiling does not become a floor "
+        "by being summed, and the precondition can put the true extraction below it; "
+        + ", ".join(missing)
+        + " leave the sum short of a ceiling on the row too"
+    )
+    if proven_no_reach:
+        basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
+    return basis
+
+
 def _row_value(
     row: _Row,
     value_plane: P.ValuePlane,
@@ -1941,6 +2133,10 @@ def _row_value(
     reach on another row's witness.
     """
     per_entity: dict[str, float] = {}
+    # The entities whose standing figure in ``per_entity`` is a composed
+    # extraction ceiling. Maintained beside the MAX rather than after it: which
+    # branch produced a figure is only knowable where the figure is chosen.
+    ceiling_entities: set[str] = set()
     reached: set[str] = set()
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
@@ -2047,7 +2243,7 @@ def _row_value(
         # unproven one is missing is the whole error this fold is being repaired
         # for. Priced or not, the row reaches these entities.
         reached.update(value_plane.canonical(key) for key in keys)
-        contributions, gaps, cap, unbounded = _instance_contributions(
+        contributions, gaps, cap, unbounded, from_ceilings = _instance_contributions(
             instance, keys, value_plane, transitive=transitive, composed=composed
         )
         unbounded_floors.extend(unbounded)
@@ -2069,6 +2265,12 @@ def _row_value(
             previous = per_entity.get(canonical)
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
+                ceiling_entities.discard(canonical)
+            # The bound travels with the figure that stands, and a tie is
+            # settled by the weaker of the two claims: an extraction ceiling
+            # equal to a witnessed figure is still only a ceiling.
+            if canonical in from_ceilings and contribution >= per_entity[canonical]:
+                ceiling_entities.add(canonical)
 
     # One selection over every instance's candidates, not a running MAX: the
     # figure is the same either way, but the selector, destination function,
@@ -2128,6 +2330,7 @@ def _row_value(
         composition,
         composition_report,
         frozenset(composed_signals),
+        frozenset(ceiling_entities),
     )
 
 
@@ -2556,8 +2759,19 @@ def _instance_contributions(
     *,
     transitive: bool,
     composed: dict[str, _ComposedMagnitude] | None = None,
-) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, Any] | None, list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, float],
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    list[dict[str, Any]],
+    frozenset[str],
+]:
     """One call's per-entity contributions, bounded by the one magnitude it proved.
+
+    The fifth member names the keys whose figure came from a composed DESTINATION
+    witness, which bounds this principal from above only. It is a subset of the
+    returned map's keys: a key the cap below emptied contributes nothing and
+    carries no bound either.
 
     A witnessed magnitude is a per-CALL quantity: ``withdraw`` proven to move
     $28.1M moves $28.1M whichever of the keys it reached holds it. Charging it
@@ -2580,8 +2794,9 @@ def _instance_contributions(
     per_key: dict[str, float] = {}
     gaps: list[dict[str, Any]] = []
     unbounded: list[dict[str, Any]] = []
+    ceilings: set[str] = set()
     for key in sorted(keys):
-        contribution, why, note = _entity_contribution(
+        contribution, why, note, from_composed = _entity_contribution(
             instance, key, value_plane, transitive=transitive, composed=composed
         )
         if note is not None:
@@ -2601,10 +2816,15 @@ def _instance_contributions(
         previous = per_key.get(canonical)
         if previous is None or contribution > previous:
             per_key[canonical] = contribution
+            ceilings.discard(canonical)
+        # A tie between a composed ceiling and a witnessed figure publishes the
+        # ceiling's bound: the weaker claim is the one both candidates support.
+        if from_composed and contribution >= per_key[canonical]:
+            ceilings.add(canonical)
 
     magnitude = _witnessed_magnitude(instance)
     if magnitude is None or len(per_key) < 2:
-        return per_key, gaps, None, unbounded
+        return per_key, gaps, None, unbounded, frozenset(ceilings & set(per_key))
 
     uncapped = round(sum(sorted(per_key.values())), 6)
     if instance.magnitude.state != "proven_exact":
@@ -2634,9 +2854,10 @@ def _instance_contributions(
                 ),
             },
             unbounded,
+            frozenset(),
         )
     if uncapped <= magnitude:
-        return per_key, gaps, None, unbounded
+        return per_key, gaps, None, unbounded, frozenset(ceilings & set(per_key))
 
     capped: dict[str, float] = {}
     exhausted: list[str] = []
@@ -2677,6 +2898,7 @@ def _instance_contributions(
             ),
         },
         unbounded,
+        frozenset(ceilings & set(capped)),
     )
 
 
@@ -2695,8 +2917,13 @@ def _entity_contribution(
     *,
     transitive: bool,
     composed: dict[str, _ComposedMagnitude] | None = None,
-) -> tuple[float | None, str, dict[str, Any] | None]:
+) -> tuple[float | None, str, dict[str, Any] | None, bool]:
     """The dollars this call is PROVEN to move against one entity, or ``None``.
+
+    The fourth member says the figure came from the composed branch, which is
+    the one branch whose number bounds this principal from ABOVE and never from
+    below. It is returned rather than parsed back out of the basis string: the
+    row header's bound direction turns on it, and a prose prefix is not a field.
 
     There is exactly one source of a number here: a magnitude witness. Reach
     membership answers "can this principal act on that entity"; it does not
@@ -2727,13 +2954,13 @@ def _entity_contribution(
     against a proxy picked by sort order publishes the other proxy's sheet.
     """
     if key in value_plane.alias_ambiguous:
-        return None, "shared_implementation_folds_onto_no_proxy(not_determined)", None
+        return None, "shared_implementation_folds_onto_no_proxy(not_determined)", None, False
     if instance.native_only:
         # A provably native-only flow may only be valued against the native
         # holding, and an absent native row is not_determined, never $0.
         native = P.native_value_state(value_plane, key)
         if not native.is_determined:
-            return None, "native_only_flow+absent_native_row(not_determined)", None
+            return None, "native_only_flow+absent_native_row(not_determined)", None, False
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
         basis = "native_only_flow x native_balance"
@@ -2747,9 +2974,14 @@ def _entity_contribution(
             # The witness bounds what this call moves; the entity's sheet bounds
             # what is there to move. Neither alone is the answer, and the sheet
             # alone is the balance-sheet-as-a-reach error.
-            return (min(held, magnitude) if held is not None else magnitude), f"witnessed_reach(exact) x {basis}", None
+            return (
+                (min(held, magnitude) if held is not None else magnitude),
+                f"witnessed_reach(exact) x {basis}",
+                None,
+                False,
+            )
         if held is not None:
-            return min(held, magnitude), f"witnessed_reach(floor) x {basis}", None
+            return min(held, magnitude), f"witnessed_reach(floor) x {basis}", None, False
         return (
             magnitude,
             "witnessed_reach(floor)+sheet_not_determined",
@@ -2765,6 +2997,7 @@ def _entity_contribution(
                     "to bound it against this entity"
                 ),
             },
+            False,
         )
     supplied = (composed or {}).get(value_plane.canonical(key))
     if supplied is not None:
@@ -2787,13 +3020,19 @@ def _entity_contribution(
                 ),
             }
         )
-        return supplied.usd, f"composed_reach_magnitude({supplied.function}) x {basis}", note
+        return supplied.usd, f"composed_reach_magnitude({supplied.function}) x {basis}", note, True
     if held is None:
-        return None, ("entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"), None
+        return (
+            None,
+            ("entity_value_not_determined" if not transitive else "closure_entity_value_not_determined"),
+            None,
+            False,
+        )
     return (
         None,
         ("reach_magnitude_not_witnessed(not_determined) x " + basis + ("+closure" if transitive else "")),
         None,
+        False,
     )
 
 
