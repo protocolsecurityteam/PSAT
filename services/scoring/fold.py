@@ -180,6 +180,69 @@ class _WalkedHop:
 
 
 @dataclass(frozen=True)
+class _CallerHoldingPrecondition:
+    """What the chain's admitted call SPENDS, and the fact that nothing bounds it.
+
+    The destination's ``flow.out`` witness is a fork proof of how much ONE call
+    to that function moves. It carries no model of who makes the call or what
+    they already hold, and the act-as chain proves only that the call can be
+    made — so the last admitted call spends a quantity its caller must hold or
+    supply (vault shares, for a share-burning withdrawal) that nothing in this
+    pipeline witnesses. That is why the published figure is a CEILING on what
+    this principal extracts and never a floor on it — an axis distinct from
+    ``flow.out``'s own ``proven_exact`` / ``proven_floor``, which grades the
+    pricing of one call and says nothing about who can make it.
+
+    A second, narrower fact points the same way and is NOT published here: the
+    distilled signal's ``witness_notes`` carry ``target_constraint``, which on
+    nine of this corpus's twelve vault ``flow.out`` rows is ``not_determined``.
+    It is dropped at :class:`_DestinationMagnitude`, which keeps only the state
+    and the figure, so it cannot be cited per entry — and it would not carry
+    this claim anyway: it names the constraint on the flow's TARGET parameter,
+    not on the caller. Plumbing it through is a registered deferral.
+
+    ``caller_sheet_usd`` is CONTEXT and emphatically not the bound: a zero spot
+    balance at one observed height does not prove the chain moves nothing,
+    because the quantity can be acquired inside the same transaction from third
+    parties whose outstanding requests nothing here witnesses. Publishing that
+    sheet as the bound would mint an earned negative out of an absence.
+    """
+
+    caller: str
+    bound_kind: str
+    caller_sheet_usd: float | None
+    caller_sheet_state: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "state": NOT_DETERMINED,
+            "bound_kind": self.bound_kind,
+            "caller": self.caller,
+            "caller_sheet_usd": (round(self.caller_sheet_usd, 2) if self.caller_sheet_usd is not None else None),
+            "caller_sheet_state": self.caller_sheet_state,
+            "reading": (
+                "the published figure bounds ONE call to the destination function — "
+                "flow_out_witness.state says whether that dollar figure is exact or a priced "
+                "floor FOR THAT CALL, which is a different axis from this one. As a statement "
+                "about what THIS PRINCIPAL can extract it is a CEILING and never a floor: the "
+                "destination's witness bounds the function whoever calls it and carries no "
+                "model of who calls it or what they hold, and the chain's last admitted call "
+                "spends a quantity the caller must already hold or supply — for a share-burning "
+                "withdrawal, the caller's vault shares. No witness in this pipeline bounds that "
+                "quantity, so this precondition is not_determined. The caller's observed sheet "
+                "is published beside it as context and is NOT the bound: a zero spot balance "
+                "does not prove the chain moves nothing, because the quantity can be acquired "
+                "in the same transaction from third parties whose outstanding requests are "
+                "unwitnessed, and pricing that absence at zero would mint an earned negative "
+                "out of it. bound_kind names the precondition only as far as the evidence "
+                "loaded here names it — the destination's own argument semantics ride on the "
+                "same function_principals row this fold reads only for acceptance, a "
+                "registered deferral"
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class _ComposedMagnitude:
     """A destination function's own magnitude witness, reached along a witnessed path.
 
@@ -187,7 +250,9 @@ class _ComposedMagnitude:
     order. ``usd`` is the destination witness's figure after the R4 bound against
     the destination's own sheet; the published ``bounded_by`` says which of the
     two bound it, and ``sheet_not_determined`` marks the case where no sheet was
-    available to bound it with at all.
+    available to bound it with at all. Both of those bounds are ceilings and so
+    is their min; ``caller_holding`` names the precondition that keeps the whole
+    figure a ceiling on THIS PRINCIPAL rather than a floor.
     """
 
     entity: str
@@ -198,6 +263,7 @@ class _ComposedMagnitude:
     usd: float
     sheet_usd: float | None
     chain: tuple[P.ActAsStep, ...]
+    caller_holding: _CallerHoldingPrecondition
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -210,8 +276,19 @@ class _ComposedMagnitude:
                 "function": self.function,
                 "entity": self.entity,
             },
+            # The figure was READ from the row destination_function/selector
+            # name, and what it measures is the ENTITY's: every selector at a
+            # vault on the reference corpus carries the identical number. Named
+            # so the pair is not read as a per-function decomposition.
+            "witness_granularity": "entity",
             "destination_sheet_usd": (round(self.sheet_usd, 2) if self.sheet_usd is not None else None),
             "published_usd": round(self.usd, 2),
+            # Which direction the figure bounds the PRINCIPAL in. ``bounded_by``
+            # below is a different question — which of the two ceilings was the
+            # binding one — and neither is flow_out_witness.state, which says
+            # whether the destination's own dollar figure for one call is exact
+            # or a priced floor.
+            "principal_extraction_bound": "ceiling",
             "bounded_by": (
                 "flow.out witness"
                 if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
@@ -219,12 +296,24 @@ class _ComposedMagnitude:
             ),
             "sheet_not_determined": self.sheet_usd is None,
             "act_as_chain": [step.as_json() for step in self.chain],
+            "act_as_chain_length": len(self.chain),
+            "caller_holding_precondition": self.caller_holding.as_json(),
             "reading": (
                 "the dollars are the DESTINATION function's own flow.out witness, not this "
-                "row's and not the destination's balance sheet. Every hop from the seized "
-                "node to it carries an act-as witness: a restricted function of the caller "
-                "whose body calls that selector on a state variable read on-chain holding the "
-                "next node. Remove any one of those witnesses and this figure is not_determined"
+                "row's and not the destination's balance sheet, and as a claim about what this "
+                "principal can extract they are a CEILING — caller_holding_precondition says "
+                "what the figure does not bound. Every hop from the seized node to it carries "
+                "its own act-as witness, in one of two admissible shapes named per step under "
+                "witness_kind: "
+                "the CALLER'S OWN state variable, read on-chain holding the next node, or — "
+                "where the call site takes its callee as a parameter, so no storage of the "
+                "caller CAN name it — the next node's OWN access-control list naming this "
+                "caller as an accepted caller of that selector by an enumerated role. Beyond "
+                "the first hop the calling function must also be one the previous hop "
+                "admitted, matched on that function's own selector — compare each step's "
+                "calling_selector against the selector of the step before it — because no hop "
+                "inherits its predecessor's authority and a function name does not identify a "
+                "function. Remove any one of those witnesses and this figure is not_determined"
             ),
         }
 
@@ -1846,8 +1935,14 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
     paid for twice.
     """
 
+    # Per-row counts sum; a per-row MAXIMUM does not, and summing chain lengths
+    # across rows would publish an arithmetic artefact as the longest chain the
+    # corpus grows.
+    maxima = ("longest_composed_chain",)
+
     def roll(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals: dict[str, int] = defaultdict(int)
+        longest: dict[str, int] = dict.fromkeys(maxima, 0)
         refused: dict[str, int] = defaultdict(int)
         entities: set[str] = set()
         usd = 0.0
@@ -1855,6 +1950,9 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             census = row.get("reach_composition_census") or {}
             for key, value in census.items():
                 if key in ("reading", "act_as_refused", "composed", "composed_usd"):
+                    continue
+                if key in longest:
+                    longest[key] = max(longest[key], int(value))
                     continue
                 totals[key] += int(value)
             for reason, hits in (census.get("act_as_refused") or {}).items():
@@ -1864,6 +1962,7 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
                 usd += float(entry["published_usd"])
         return {
             **dict(sorted(totals.items())),
+            **longest,
             "act_as_refused": dict(sorted(refused.items())),
             "rows_composing": sum(1 for row in rows if row.get("reach_composed_magnitudes")),
             "entities_composed": len(entities),
@@ -1923,16 +2022,34 @@ def _composition_report(
         # instances reaching one destination raise them twice.
         "composed": len(composed),
         "composed_usd": round(sum(sorted(entry.usd for entry in composed.values())), 2),
+        # Chain length is unbounded by the rule and bounded by the corpus, and a
+        # reader has no other way to see the day it grows. 1 is a direct call
+        # from the seized node; 2 is the first chain that traverses a node the
+        # principal seized nothing on.
+        "longest_composed_chain": max((len(entry.chain) for entry in composed.values()), default=0),
         "act_as_refused": dict(sorted(refusals.items())),
         "reading": (
             "licensed_selectors counts every (hop, licensed function) pair the walk offered "
-            "composition. act_as_witnessed is the subset where a restricted function of the "
-            "CALLER is witnessed calling that selector on a state variable read on-chain "
-            "holding the destination — the step a licence does not imply and without which a "
-            "magnitude is priced on membership alone. destination_magnitude_witnessed is the "
-            "subset of those whose destination function also carries its own flow.out witness. "
-            "composed is the distinct entities that cleared every one. Everything in "
-            "act_as_refused stayed not_determined and is charged to confidence"
+            "composition. act_as_witnessed is the subset where the CALLER is witnessed able to "
+            "be made to call that selector at that destination — the step a licence does not "
+            "imply and without which a magnitude is priced on membership alone. It is witnessed "
+            "under either of two shapes, named per step: a restricted, authority-gated function "
+            "of the caller calling that selector on a state variable of its own read on-chain "
+            "holding the destination, or — where that call site takes its callee as a "
+            "parameter, so no storage of the caller CAN name the address — the destination's "
+            "own access-control list naming this caller as an accepted caller of that selector "
+            "by an enumerated role. Past the first hop the calling function must additionally "
+            "be one the previous hop admitted, matched on that function's own selector, "
+            "because no hop inherits its predecessor's authority: the finding's seized gate "
+            "is spent at hop 1 and only there, and the restricted-and-delegated conjuncts the "
+            "plane applies at every hop are NOT the licence past it — they are kept only "
+            "because they are conservative, and an open intermediate function is refused "
+            "under them although it would be easier to reach. destination_magnitude_witnessed "
+            "is the subset of those "
+            "whose destination function also carries its own flow.out witness. composed is the "
+            "distinct entities that cleared every one, and every figure they carry is a ceiling "
+            "on one call rather than a floor. Everything in act_as_refused stayed "
+            "not_determined and is charged to confidence"
         ),
     }
 
@@ -1975,6 +2092,34 @@ def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, st
     return out
 
 
+def _caller_holding(chain: tuple[P.ActAsStep, ...], value_plane: P.ValuePlane) -> _CallerHoldingPrecondition:
+    """Whose unwitnessed holding the composed figure quietly assumes.
+
+    A destination writes its preconditions against its own ``msg.sender``, so
+    the caller named here is the one the destination's own access-control list
+    admitted — the last step whose witness is that list. Where no step carried
+    one, no list named a caller and the entity that issues the final call is the
+    last step's own caller.
+
+    THIS IS CALIBRATED ON THE SHAPES THIS CORPUS GROWS, and it is a choice, not
+    a witness: on ``A -> B (state variable) -> C (ACL) -> D (state variable)``
+    the ``msg.sender`` at D is C, while the rule below names B, the caller the
+    ACL admitted at C. Both are entities whose holdings nothing bounds, and the
+    named one is the one the only ACL on the chain is a statement about; a
+    corpus that grows that shape needs the precondition published per step
+    rather than per entry.
+    """
+    acl = [step for step in chain if step.witness_kind == P.ACT_AS_WITNESS_DESTINATION_ACL]
+    caller = (acl[-1] if acl else chain[-1]).caller
+    # ``total`` and ``sheet_state`` canonicalize their own argument.
+    return _CallerHoldingPrecondition(
+        caller=caller,
+        bound_kind=COMPOSED_BOUND_CALLER_ARGUMENTS,
+        caller_sheet_usd=value_plane.total(caller),
+        caller_sheet_state=value_plane.sheet_state(caller),
+    )
+
+
 def _compose(
     seeds: set[str],
     hops: list[_WalkedHop],
@@ -1997,23 +2142,42 @@ def _compose(
     2. the destination's ``flow.out`` MAGNITUDE — a fork-proven figure for that
        selector, reused, never re-derived;
     3. the ACT-AS step, at EVERY hop from the seized node to the destination —
-       a restricted function of the caller whose body calls that selector on a
-       state variable read on-chain holding the next node.
+       the caller is witnessed able to be made to call that selector THERE,
+       under either of the two shapes :class:`P.ActAsPlane` admits: a state
+       variable of the caller read on-chain holding the next node, or — where
+       the call site takes its callee as a parameter, so no storage of the
+       caller can name it — the next node's own access-control list naming this
+       caller as an accepted caller of that selector by an enumerated role.
 
     (3) is the one the licence does not imply and the one this pass exists to
     enforce. A role saying N MAY call D says nothing about whether the principal
     can make N do it: seizing an authority pointer on N buys N's own restricted
     functions, and unless one of those is witnessed calling D, the path stops at
-    N. Pricing on membership alone is the banned move at one remove, and the
-    reference corpus has a live instance of exactly it — an EOA over
-    AtomicSolverV3 walks roles 12 to five Tellers whose call sites take the
-    callee as a PARAMETER, so nothing witnesses which address they land on and
-    the magnitude stays not_determined.
+    N. Pricing on membership alone is the banned move at one remove. What that
+    costs on the reference corpus is visible in the census rather than in any
+    one shape: the two rows seized at a RolesAuthority carry eleven and three
+    licensed hops and publish ``caller_not_reachable_from_the_seized_node`` on
+    all of them — the walk never reaches those hops' callers, so no witness
+    shape is ever asked, and their magnitude stays not_determined for a reason
+    upstream of this pass.
 
     The path is walked breadth-first from the seeds, which are act-as reachable
     by definition (they are the entities the finding's own signal was witnessed
     on). A destination inherits reachability only through a hop that carries its
     own act-as witness, so a chain is only ever as strong as its weakest step.
+
+    MULTI-HOP: no hop inherits its predecessor's authority. The finding's seized
+    gate is spent at hop 1 and only there — at a SEED, never at a node some hop
+    was witnessed reaching — which is where the plane's ``restricted`` +
+    delegated conjuncts are the licence. Past it the principal has seized
+    nothing on the intermediate; it arrives as whoever the previous hop
+    admitted, so the licence at hop k+1 is that the intermediate's calling
+    function is one hop k admitted, matched on that function's OWN selector
+    because a function name does not identify a function. ``chains`` holds those
+    admitted functions per node, keyed by that selector, each with the path that
+    admitted it. (The plane still applies its ``restricted`` + delegated
+    conjuncts at every hop; past hop 1 they are conservative-only and are not
+    what licenses the step.)
     """
     census: dict[str, int] = dict.fromkeys(
         (
@@ -2033,23 +2197,53 @@ def _compose(
             by_caller[hop.caller].append(hop)
 
     composed: dict[str, _ComposedMagnitude] = {}
-    chains: dict[str, tuple[P.ActAsStep, ...]] = {key: () for key in sorted(seeds)}
+    # Per node, every function of it a hop admitted — keyed by that function's
+    # own SELECTOR — and the chain that admitted it. A node entered under two
+    # functions carries two chains, and each licensed hop out of it is published
+    # with the one whose entry function that hop is issued from: the chain must
+    # BE the path, not a path. A SEED's map is never READ — a hop landing on a
+    # seed still records its entry, but a seed is entered by the finding's own
+    # seized gate, so both the via constraint and the prefix lookup below skip
+    # it.
+    chains: dict[str, dict[str, tuple[P.ActAsStep, ...]]] = {key: {} for key in sorted(seeds)}
+    # Nodes already placed on a frontier. A node reached again from a longer
+    # path is not re-expanded, so a function admitted only on that path is never
+    # offered — conservative on dollars AND on the refusal reason, since a
+    # refusal is published only once every admitted function has been tried.
+    visited: set[str] = set(seeds)
     frontier = sorted(seeds)
     while frontier:
         nxt: list[str] = []
         for caller in frontier:
-            prefix = chains[caller]
+            entries = chains[caller]
+            # Ruling 4 rule 2: the seized gate is spent at hop 1 and ONLY there,
+            # so a seed is never constrained — not even by a hop some sibling
+            # seed was witnessed making into it. Past hop 1 the plane is asked
+            # the narrower question, and answers it over EVERY call site the
+            # constraint admits rather than the first one it happens to hold.
+            admitted = None if caller in seeds else (frozenset(entries) or None)
             for hop in by_caller.get(caller, ()):
-                step_for_hop: P.ActAsStep | None = None
                 for licensed in sorted(hop.licensed):
                     census["licensed_selectors"] += 1
-                    verdict = act_as.acts_as(caller, hop.destination, licensed.selector)
+                    verdict = act_as.acts_as(caller, hop.destination, licensed.selector, via=admitted)
                     if not verdict.witnessed or verdict.step is None:
                         refusals[verdict.outcome] += 1
                         continue
                     census["act_as_witnessed"] += 1
-                    step_for_hop = step_for_hop or verdict.step
+                    # The chain that admitted THIS step's own calling function.
+                    # Indexed, not ``get``: ``via`` admitted the step only if
+                    # its calling selector is one of these keys, so a miss is a
+                    # broken invariant and must not publish a truncated chain.
+                    prefix = () if caller in seeds else entries[verdict.step.calling_selector or ""]
                     chain = prefix + (verdict.step,)
+                    # This licensed function of the destination is now one the
+                    # principal can be made to enter it through, along this
+                    # chain. First witnessed path wins, so the published chain
+                    # is the shortest one the walk proved.
+                    chains.setdefault(hop.destination, {}).setdefault(licensed.selector, chain)
+                    if hop.destination not in visited:
+                        visited.add(hop.destination)
+                        nxt.append(hop.destination)
                     magnitude = magnitudes.get((hop.destination, licensed.selector))
                     if magnitude is None:
                         refusals["destination_carries_no_flow_out_magnitude_witness"] += 1
@@ -2071,10 +2265,8 @@ def _compose(
                             usd=usd,
                             sheet_usd=sheet,
                             chain=chain,
+                            caller_holding=_caller_holding(chain, value_plane),
                         )
-                if step_for_hop is not None and hop.destination not in chains:
-                    chains[hop.destination] = prefix + (step_for_hop,)
-                    nxt.append(hop.destination)
         frontier = sorted(nxt)
     # Hops the BFS never offered because it never reached their CALLER. Without
     # a name they leave the largest negative result on this corpus published as
@@ -2083,7 +2275,7 @@ def _compose(
     # to tell that from a walk that found no licensed hop at all. Counted in the
     # same (hop, licensed function) units as every other refusal.
     for caller, hops_here in sorted(by_caller.items()):
-        if caller in chains:
+        if caller in visited:
             continue
         for hop in hops_here:
             refusals[ACT_AS_CALLER_UNREACHED] += len(hop.licensed)
@@ -2344,6 +2536,12 @@ def _entity_contribution(
 # hop that carried no act-as witness. Not an act-as refusal at this hop — the
 # question was never asked here — and named separately for exactly that reason.
 ACT_AS_CALLER_UNREACHED = "caller_not_reachable_from_the_seized_node"
+
+# What a composed figure does NOT bound, named as far as the evidence this fold
+# loads names it: the destination's own argument semantics ride on the same
+# function_principals row the act-as plane reads only for acceptance, so the
+# general shape is published rather than a specific quantity nothing witnessed.
+COMPOSED_BOUND_CALLER_ARGUMENTS = "caller_supplied_arguments"
 
 HOP_REFUSED_SCOPE = "gate_scope_not_determined"
 HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"

@@ -1923,6 +1923,13 @@ ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS = "caller_state_variable_holds_a_different_ad
 ACT_AS_CALL_SITE_IS_PUBLIC = "the_call_site_needs_no_gate"
 ACT_AS_CALL_SITE_GATE_NOT_DELEGATED = "call_site_caller_gate_is_not_witnessed_delegated_to_an_authority"
 ACT_AS_NO_DESTINATION_ACL = "destination_does_not_accept_this_caller_for_this_selector"
+# Asked only by a composition walk past its first hop, which constrains the
+# question to "…entering this caller through the function the previous hop
+# admitted". The caller does call the selector; it does not call it from that
+# function, so nothing witnesses the principal can cause this call.
+ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION = (
+    "intermediate_calling_function_is_not_the_selector_admitted_at_the_previous_hop"
+)
 ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE = "destination_access_control_row_names_no_admitting_role"
 ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE = "destination_access_control_membership_is_not_enumerable"
 
@@ -1947,6 +1954,12 @@ _ACCEPTING_PRINCIPAL_TYPE = "controller"
 # sinks on the reference corpus carry it; it is the witness that seizing that
 # authority is what opens the function.
 _DELEGATED_GUARD_METHOD = "cancall"
+
+
+def _call_site_order(site: tuple[str, str, str, bool, str | None]) -> tuple[str, str, str, bool, str]:
+    """A total order over call sites. ``calling_selector`` is nullable, and
+    ordering tuples that mix ``None`` and ``str`` at one position raises."""
+    return (site[0], site[1], site[2], site[3], site[4] or "")
 
 
 @dataclass(frozen=True)
@@ -1993,7 +2006,12 @@ class ActAsStep:
     """One witnessed "N can be made to call ``selector`` at D" step.
 
     Every field names a witness, not an inference. ``calling_function`` is the
-    function of N whose compiled body carries the call site. ``witness_kind``
+    function of N whose compiled body carries the call site, and
+    ``calling_selector`` is THAT function's own selector — the join key a
+    multi-hop walk needs, because a function NAME does not identify a function:
+    32 ``(entity, name)`` pairs on the reference corpus carry more than one
+    selector, ``manage`` at the BoringVaults among them. ``None`` is a function
+    whose selector was never extracted, and it matches nothing. ``witness_kind``
     says which of the two admissible shapes proved the step lands at D, and the
     fields of the other shape are ``None``: for
     ``ACT_AS_WITNESS_CALLER_STATE_VARIABLE`` the ``receiver_*`` fields are the
@@ -2008,6 +2026,7 @@ class ActAsStep:
     selector: str
     calling_function: str
     calling_function_openness: str
+    calling_selector: str | None = None
     witness_kind: str = ACT_AS_WITNESS_CALLER_STATE_VARIABLE
     receiver_variable: str | None = None
     receiver_observed_via: str | None = None
@@ -2041,6 +2060,7 @@ class ActAsStep:
             "selector": self.selector,
             "calling_function": self.calling_function,
             "calling_function_openness": self.calling_function_openness,
+            "calling_selector": self.calling_selector,
             "witness_kind": self.witness_kind,
             "receiver_variable": self.receiver_variable,
             "receiver_observed_via": self.receiver_observed_via,
@@ -2132,20 +2152,40 @@ class ActAsPlane:
 
     # (caller entity, selector) -> ((calling function, openness, receiver variable,
     # whether that function's caller gate is delegated to an authority), ...)
-    call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool], ...]] = field(default_factory=dict)
+    call_sites: dict[tuple[str, str], tuple[tuple[str, str, str, bool, str | None], ...]] = field(default_factory=dict)
     # (caller entity, state variable) -> (address it was read holding, observed_via, block)
     reads: dict[tuple[str, str], tuple[str, str, int | None]] = field(default_factory=dict)
     # (destination entity, selector) -> {caller entity: the ACL row accepting it}
     destination_acl: dict[tuple[str, str], dict[str, DestinationAcceptance]] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
 
-    def acts_as(self, caller: str, destination: str, selector: str) -> ActAsVerdict:
+    def acts_as(
+        self, caller: str, destination: str, selector: str, *, via: frozenset[str] | None = None
+    ) -> ActAsVerdict:
+        """Whether ``caller`` is witnessed able to be made to call ``selector`` at
+        ``destination``, optionally only from the functions ``via`` names.
+
+        ``via`` is the multi-hop constraint and is a SET because a node can be
+        admitted under several of its functions; a call site whose own selector
+        is in it is considered, every other site is not looked at, and a caller
+        with no site under any of them is refused rather than answered from a
+        site the constraint excludes. ``via=None`` is the unconstrained question
+        the first hop asks.
+        """
         token = _lower(selector)
         sites = self.call_sites.get((caller, token))
         if not sites:
             return ActAsVerdict(ACT_AS_NO_CALL_SITE)
+        if via is not None:
+            admitted = frozenset(_lower(entry) for entry in via)
+            # A site whose own selector was never extracted matches nothing: not
+            # determined is not a match, and treating it as one would walk a hop
+            # on an unread field.
+            sites = tuple(site for site in sites if site[4] is not None and site[4] in admitted)
+            if not sites:
+                return ActAsVerdict(ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION)
         outcome = ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE
-        for name, openness, variable, delegated in sites:
+        for name, openness, variable, delegated, calling_selector in sites:
             if not variable:
                 continue
             read = self.reads.get((caller, variable))
@@ -2170,6 +2210,7 @@ class ActAsPlane:
                     selector=token,
                     calling_function=name,
                     calling_function_openness=openness,
+                    calling_selector=calling_selector,
                     witness_kind=ACT_AS_WITNESS_CALLER_STATE_VARIABLE,
                     receiver_variable=variable,
                     receiver_observed_via=observed_via,
@@ -2180,7 +2221,10 @@ class ActAsPlane:
         # shape: a call site whose callee the caller's own caller supplies, with
         # the destination's ACL naming this caller from the other end. Sorted so
         # a caller with several such sites names one function deterministically.
-        parameter_bound = sorted(site for site in sites if not site[2] and site[1] == "restricted" and site[3])
+        parameter_bound = sorted(
+            (site for site in sites if not site[2] and site[1] == "restricted" and site[3]),
+            key=_call_site_order,
+        )
         if not parameter_bound:
             return ActAsVerdict(outcome)
         accepted = self.destination_acl.get((destination, token), {}).get(caller)
@@ -2190,7 +2234,7 @@ class ActAsPlane:
             return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE))
         if not accepted.enumerated:
             return ActAsVerdict(_rank_outcome(outcome, ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE))
-        name, openness, _variable, _delegated = parameter_bound[0]
+        name, openness, _variable, _delegated, calling_selector = parameter_bound[0]
         return ActAsVerdict(
             ACT_AS_WITNESSED,
             ActAsStep(
@@ -2199,6 +2243,7 @@ class ActAsPlane:
                 selector=token,
                 calling_function=name,
                 calling_function_openness=openness,
+                calling_selector=calling_selector,
                 witness_kind=ACT_AS_WITNESS_DESTINATION_ACL,
                 acceptance=accepted,
             ),
@@ -2222,7 +2267,11 @@ _ACT_AS_RANK = {
     ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE: 5,
     ACT_AS_NO_DESTINATION_ACL: 6,
     ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE: 7,
-    ACT_AS_NO_CALL_SITE: 8,
+    # A call site exists and the multi-hop constraint excluded every one of
+    # them, so nothing about the receiver was ever consulted — further than no
+    # call site at all, and short of every reason that did consult one.
+    ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION: 8,
+    ACT_AS_NO_CALL_SITE: 9,
 }
 
 
@@ -2235,13 +2284,15 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
     the composition walk."""
     from db.models import Contract, ControllerValue, EffectiveFunction, FunctionPrincipal
 
-    call_sites: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = defaultdict(list)
+    call_sites: dict[tuple[str, str], list[tuple[str, str, str, bool, str | None]]] = defaultdict(list)
     sinks_read = external_calls = selector_bearing = state_variable_bound = delegated_gates = 0
+    call_sites_naming_their_own_selector = 0
     functions = (
         session.query(
             EffectiveFunction.function_name,
             EffectiveFunction.authority_openness,
             EffectiveFunction.sinks,
+            EffectiveFunction.selector,
             EffectiveFunction.deployment_address,
             Contract.address,
             Contract.chain,
@@ -2251,7 +2302,7 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
         .order_by(EffectiveFunction.id)
         .all()
     )
-    for name, openness, sinks, deployment, address, chain in functions:
+    for name, openness, sinks, own_selector, deployment, address, chain in functions:
         if not isinstance(sinks, list):
             # SQL NULL is "the effects stage did not run here", which is a
             # different fact from a function proven to call nothing. Neither
@@ -2266,6 +2317,12 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             for sink in sinks
         )
         delegated_gates += 1 if delegated else 0
+        # The calling function's OWN selector, so a multi-hop walk can ask which
+        # function of this caller a step is issued from. A fallback or receive
+        # names none, and stays None rather than being spelled as an empty match.
+        calling_selector = _lower(str(own_selector)) if own_selector else None
+        if calling_selector is not None and not calling_selector.startswith("0x"):
+            calling_selector = None
         for sink in sinks:
             if not isinstance(sink, dict) or sink.get("kind") != "external_call":
                 continue
@@ -2280,7 +2337,10 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
                 variable = str((receiver or {}).get("variable") or "")
                 if variable:
                     state_variable_bound += 1
-            call_sites[(key, selector)].append((str(name), str(openness or "not_determined"), variable, delegated))
+            call_sites_naming_their_own_selector += 1 if calling_selector is not None else 0
+            call_sites[(key, selector)].append(
+                (str(name), str(openness or "not_determined"), variable, delegated, calling_selector)
+            )
 
     reads: dict[tuple[str, str], tuple[str, str, int | None]] = {}
     ambiguous: set[tuple[str, str]] = set()
@@ -2378,7 +2438,7 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             bucket[entity_key(chain_key, holder)] = accepting
 
     plane = ActAsPlane(
-        call_sites={key: tuple(sorted(set(rows))) for key, rows in sorted(call_sites.items())},
+        call_sites={key: tuple(sorted(set(rows), key=_call_site_order)) for key, rows in sorted(call_sites.items())},
         reads=reads,
         destination_acl={key: dict(sorted(callers.items())) for key, callers in sorted(destination_acl.items())},
     )
@@ -2390,6 +2450,7 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "sinks_naming_a_selector": selector_bearing,
             "sinks_whose_receiver_is_a_state_variable": state_variable_bound,
             "functions_whose_caller_gate_is_delegated_to_an_authority": delegated_gates,
+            "call_sites_naming_their_own_selector": call_sites_naming_their_own_selector,
         },
         "receiver_reads": {
             "state_variables_read_on_chain_holding_a_contract": len(reads),
@@ -2430,6 +2491,12 @@ def load_act_as_plane(session: Session, protocol_id: int) -> ActAsPlane:
             "fact as the list not naming it; and a row that names a role without bounding the "
             "accepted set is destination_access_control_membership_is_not_enumerable, because "
             "naming some accepted callers is not the same fact as bounding which they are. "
+            "A composition walk past its first hop additionally constrains the question to "
+            "the functions of the caller a previous hop admitted, matched on the calling "
+            "function's OWN selector because a function name does not identify a function; "
+            "a caller with no call site under any admitted function is refused as "
+            "intermediate_calling_function_is_not_the_selector_admitted_at_the_previous_hop "
+            "rather than answered from a site that constraint excludes. "
             "THE RESIDUAL THIS PLANE DOES NOT CLOSE: the calling function's guard is witnessed "
             "consulting AN authority (a canCall call), never that it is the same authority the "
             "finding's gate seizes — the guard's receiver is a local and no read pins it. The "
@@ -2899,6 +2966,7 @@ __all__ = [
     "ACT_AS_DESTINATION_ACL_NAMES_NO_ADMITTING_ROLE",
     "ACT_AS_DESTINATION_ACL_NOT_ENUMERABLE",
     "ACT_AS_NO_CALL_SITE",
+    "ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION",
     "ACT_AS_NO_DESTINATION_ACL",
     "ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS",
     "ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE",
