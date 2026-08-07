@@ -2221,7 +2221,14 @@ def _compose(
             # seed was witnessed making into it. Past hop 1 the plane is asked
             # the narrower question, and answers it over EVERY call site the
             # constraint admits rather than the first one it happens to hold.
-            admitted = None if caller in seeds else (frozenset(entries) or None)
+            # ``frozenset(entries)``, never ``… or None``: an EMPTY admitted set
+            # and hop 1 are different questions, and spelling them identically
+            # would hand a non-seed node the unconstrained question — the via
+            # rule gone and the seized gate spent a second time. Empty reaches
+            # the plane as a constraint nothing satisfies and is refused under
+            # ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION, which is what it
+            # is. Only ``caller in seeds`` may produce the hop-1 question.
+            admitted = None if caller in seeds else frozenset(entries)
             for hop in by_caller.get(caller, ()):
                 for licensed in sorted(hop.licensed):
                     census["licensed_selectors"] += 1
