@@ -157,6 +157,74 @@ ARM_REPUBLISHED_DIRECT = "republished_direct"
 ARM_NOT_DETERMINED = NOT_DETERMINED
 COMPOSITION_ARMS = (ARM_GATE_ONLY, ARM_WITHHELD, ARM_REPUBLISHED_DIRECT, ARM_NOT_DETERMINED)
 
+# True on every withheld entry whatever arm withheld it: the candidate reached
+# the rule at all, which is what a destination magnitude plus a witnessed reach
+# buys, and the figure is gone anyway.
+_WITHHELD_OPENING = (
+    "the destination carries a flow.out magnitude and this principal is witnessed able to reach "
+    "it, and the DOLLARS are still withheld"
+)
+
+# One middle per arm, because the three arms withhold for three different
+# reasons and a single sentence for all of them is false on at least one. The
+# transport-fault arm is the sharp case: :func:`_admit_composed` computes the
+# route classification and the deletability verdict BEFORE the fault branch, so
+# a faulted entry can publish ``authority_deletability.state == "deletable"`` —
+# and a sentence saying "neither answered in favour of the figure" is then false
+# beside the block that disproves it. Naming the arm's own reason is the fix;
+# softening the sentence until it is true everywhere would trade a false claim
+# for an unfalsifiable one.
+_WITHHELD_ARM_READINGS = {
+    ARM_WITHHELD: (
+        ". The figure's own execution could not be READ at all: proving_execution above carries "
+        "the typed transport fault that stopped it, so there is no proven call here for "
+        "route_comparison to compare this entry's claimed route against, and it reports that "
+        "rather than a match. The act_as_chain is published above in full — it is the act-as "
+        "plane's witness and is established without any transcript — and whether the proof was "
+        "admitted for THIS caller is answered separately under gate_claim, which has no recorded "
+        "caller to read. route_classification and authority_deletability were both computed "
+        "before this arm was reached and are published above unchanged: a deletability licence "
+        "standing beside this refusal does NOT release it, because an execution that could not "
+        "be read is not a proven call to republish"
+    ),
+    ARM_GATE_ONLY: (
+        ". What was proven is the call recorded under proving_execution; what this entry claims "
+        "is a route through an intermediate, and the two are compared under route_comparison "
+        "rather than assumed equal. The gate claim survives that difference — an authorization "
+        "check reads msg.sender and msg.sig and no ARGUMENT, so a route the proof did not take "
+        "says nothing about it — and the act_as_chain above is published in full. Whether the "
+        "proof was admitted for THIS caller is a separate question and is answered separately, "
+        "under gate_claim: a different caller is not covered by that argument, because "
+        "msg.sender is what the check reads. The MAGNITUDE does not survive it: "
+        "route_classification witnesses the traversed body acting on what the destination call "
+        "carries, under the typed finding withheld_reason names, and authority_deletability did "
+        "not prove this principal could have issued the proven call itself. The refusal is the "
+        "route's; what the join answered — a proven negative or an undetermined one — is "
+        "published beside it either way and is not collapsed into it"
+    ),
+    ARM_NOT_DETERMINED: (
+        ". What was proven is the call recorded under proving_execution; what this entry claims "
+        "is a route through an intermediate, and the two are compared under route_comparison "
+        "rather than assumed equal. The gate claim survives that difference — an authorization "
+        "check reads msg.sender and msg.sig and no ARGUMENT, so a route the proof did not take "
+        "says nothing about it — and the act_as_chain above is published in full. Whether the "
+        "proof was admitted for THIS caller is a separate question and is answered separately, "
+        "under gate_claim: a different caller is not covered by that argument, because "
+        "msg.sender is what the check reads. The MAGNITUDE is refused by neither question and "
+        "carried by neither: route_classification earned no typed finding about the traversed "
+        "body and stands at not_determined, and authority_deletability did not prove this "
+        "principal could have issued the proven call itself. There is no fourth arm that "
+        "publishes on an unanswered route"
+    ),
+}
+
+# A field-description: it says what a consumer may not conclude and asserts
+# nothing about the entry carrying it.
+_WITHHELD_CLOSING = (
+    ". This is a REFUSAL and not a zero: nothing here says the principal moves nothing, only "
+    "that what it moves is not determined by this evidence"
+)
+
 
 @dataclass
 class _Instance:
@@ -239,6 +307,44 @@ _WITNESS_STATE_CLAIM = {
 # publish and no comparison was made.
 _WITNESS_STATE_UNRANKED = len(_WITNESS_STATE_CLAIM) + 1
 
+# Where the published dollars came from, one sentence per value of
+# ``bounded_by``. A single sentence for both is a claim about the row and it is
+# FALSE on one of them: the entry's figure is the MIN of the destination
+# function's own flow.out witness and the destination entity's balance sheet, so
+# on every entry the sheet won, "not the destination's balance sheet" names as
+# excluded the very thing that capped the figure — and ``destination_sheet_usd``
+# beside it equals ``published_usd``, so the document contradicts itself in two
+# adjacent keys. Neither sentence asserts which ceiling is the smaller in
+# general; each says which one bound THIS figure and points at the other.
+_COMPOSED_SOURCE_READINGS = {
+    "flow.out witness": (
+        "the dollars are the DESTINATION function's own flow.out witness, and not this row's "
+        "balance sheet. The destination entity's own sheet did not bind them here — bounded_by "
+        "beside destination_sheet_usd and sheet_not_determined says which of the two ceilings "
+        "did and what the other one was"
+    ),
+    "destination sheet": (
+        "the dollars are the DESTINATION entity's own BALANCE SHEET, and not this row's. The "
+        "sheet is BELOW that function's flow.out witness here and is what capped the figure — "
+        "bounded_by beside destination_sheet_usd and flow_out_witness.usd says which of the two "
+        "ceilings did and what the other one was"
+    ),
+}
+
+# One name per component of :func:`_composed_order`'s key, positionally. The
+# published ``chosen_by`` reads the component that ACTUALLY separated this
+# candidate from each one it was chosen over, so the names have to line up with
+# the tuple; a length mismatch is a fixture-free way for the string to name the
+# wrong rule, and it is asserted rather than trusted.
+_ORDER_COMPONENT_NAMES = (
+    "the published figure, highest",
+    "the weakest witness state",
+    "the lowest selector",
+    "the lowest destination function",
+    "the chain's calling selectors, in order",
+    "the chain's own published identity",
+)
+
 
 @dataclass(frozen=True)
 class _ComposedMagnitude:
@@ -291,6 +397,86 @@ class _ComposedMagnitude:
     deletability: P.DeletabilityVerdict | None = None
     route: P.RouteClassification | None = None
 
+    def _chain_identity_gloss(self) -> str:
+        """What the order's last component actually ranges over, read off the steps.
+
+        The shipped gloss named five fields — caller, selector, calling selector,
+        receiver variable, receiver block — and :func:`_composed_order`'s tail is
+        every field ``P.ActAsStep.as_json`` publishes, which is more than five and
+        grows. Under-stating the key it describes made the string false of every
+        carrier (``COMPOSITION_WITNESS_SHAPE_SPEC.md`` §11.2 (k)). Reading the
+        field names off the steps in hand keeps the gloss exhaustive by
+        construction, including on the day a step publishes a new field.
+        """
+        fields = sorted({name for entry in (self, *self.tied_with) for step in entry.chain for name in step.as_json()})
+        if not fields:
+            return (
+                "Its last component is every field each act_as_chain step publishes, and no "
+                "candidate here publishes a step at all, so that component is empty on all of "
+                "them and separates nothing"
+            )
+        return (
+            "Its last component is EVERY field each act_as_chain step publishes — on these "
+            "candidates " + ", ".join(fields) + " — taken from the step's own published shape "
+            "rather than from a list written into this sentence, so the key stays total over "
+            "the entry on the day a step publishes a new field"
+        )
+
+    def _chosen_by(self) -> str:
+        """The rule, and the component of it that decided THIS tie.
+
+        Reciting the whole ladder reads as though every component applied. It did
+        not: on a tie the components ahead of the deciding one hold the same
+        value on every candidate — the figure always does, by the definition of
+        a tie — and the ones behind it are never reached. So the deciding
+        component is computed per tie, against each candidate this entry was
+        chosen over, and the case where the order separates nothing is published
+        as itself rather than left to read as a decision.
+        """
+        key = _composed_order(self)
+        decided: dict[int, int] = defaultdict(int)
+        unseparated = 0
+        for other in self.tied_with:
+            component = _first_differing_component(key, _composed_order(other))
+            if component is None:
+                unseparated += 1
+            else:
+                decided[component] += 1
+        named = [
+            f"{_ORDER_COMPONENT_NAMES[index]} (component {index + 1} of {len(key)}) against {hits} candidate(s)"
+            for index, hits in sorted(decided.items())
+        ]
+        if not named:
+            what_decided = (
+                f"This order decides NOTHING here: every component of the key holds the same "
+                f"value on all {unseparated} of them, so which one is published rests on the "
+                f"order the candidates were built in and not on this rule"
+            )
+        else:
+            what_decided = (
+                "What decided it: "
+                + "; ".join(named)
+                + " — in each case the FIRST component on which this entry differs from that "
+                "candidate. The components ahead of a deciding one hold the same value on every "
+                "candidate in this tie and decided nothing, and the components behind it were "
+                "never reached"
+            )
+            if unseparated:
+                what_decided += (
+                    f". It separates this entry from {unseparated} of them not at all — every "
+                    "component of the key is equal there, so which of those is published rests "
+                    "on the order the candidates were built in and not on this rule"
+                )
+        return (
+            f"the total order at _composed_order, over the {len(self.tied_with) + 1} candidates "
+            "this entity offered at the same published figure: "
+            + "; then ".join(_ORDER_COMPONENT_NAMES)
+            + ". "
+            + self._chain_identity_gloss()
+            + ". "
+            + what_decided
+        )
+
     def _tie_json(self) -> dict[str, Any] | None:
         if not self.tied_with:
             return None
@@ -306,13 +492,7 @@ class _ComposedMagnitude:
                 }
                 for entry in sorted((self, *self.tied_with), key=_composed_order)
             ],
-            "chosen_by": (
-                "the weakest witness state; then the lowest selector; then the lowest "
-                "destination function; then the chain's calling selectors; then "
-                "the chain's own identity — each step's caller, selector, calling selector, "
-                "receiver variable and receiver block. Total over every field the entry "
-                "publishes, so nothing is left to the order the candidates were built in"
-            ),
+            "chosen_by": self._chosen_by(),
             "reading": (
                 "this entity carries more than one call at the same PUBLISHED figure, and "
                 "which of them names the published selector, destination_function and "
@@ -326,18 +506,33 @@ class _ComposedMagnitude:
             ),
         }
 
+    @property
+    def bounded_by(self) -> str:
+        """Which of the two ceilings was the binding one on THIS entry.
+
+        A property rather than an inline expression in :meth:`as_json` because
+        the published ``reading`` is derived from it: the sentence naming where
+        the dollars came from has to say the same thing this field does, and
+        computing the answer twice is how the two drift apart.
+        """
+        return (
+            "flow.out witness"
+            if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
+            else "destination sheet"
+        )
+
     def _predicates_json(self) -> dict[str, Any]:
         found = self.predicates
         reading = (
             "the predicate texts extracted from the DESTINATION function's compiled body, "
             "published verbatim and in stored order so this entry's ceiling can be checked "
-            "against the evidence rather than taken on the fold's word. Four things about "
+            "against the evidence rather than taken on the fold's word. Three things about "
             "them. (1) They are stored WITHOUT POLARITY: the same text is a require-condition "
             "in one function and a revert-condition in another, so nothing here can tell "
             "whether any one of them must hold or must not. (2) The scorer therefore EVALUATES "
             "NONE of them and no published figure, band, refusal or count is affected by any "
             "one of them — removing this block changes no number. (3) The list is not a list of "
-            "unmet business conditions: it includes the authorization guard that this step's "
+            "unmet business conditions: it may include the authorization guard that this step's "
             "own act-as witness proves satisfied, and it may include transfer post-conditions "
             "and compiler or decompiler artefacts, all of which the extractor labels 'business' "
             "alike — which is why the label is not read and the list is not filtered. state is "
@@ -413,11 +608,7 @@ class _ComposedMagnitude:
             # Which of the two ceilings was the binding one. Not
             # flow_out_witness.state, which says whether the destination's own
             # dollar figure for one call is exact or a priced floor.
-            "bounded_by": (
-                "flow.out witness"
-                if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
-                else "destination sheet"
-            ),
+            "bounded_by": self.bounded_by,
             "sheet_not_determined": self.sheet_usd is None,
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
@@ -426,8 +617,8 @@ class _ComposedMagnitude:
             # here", which is a different fact from a field nobody filled in.
             "composed_selector_tie": self._tie_json(),
             "reading": (
-                "the dollars are the DESTINATION function's own flow.out witness, not this "
-                "row's and not the destination's balance sheet. Every hop from the seized node to it carries "
+                _COMPOSED_SOURCE_READINGS[self.bounded_by] + ". "
+                "Every hop from the seized node to it carries "
                 "its own act-as witness, in one of two admissible shapes named per step under "
                 "witness_kind: "
                 "the CALLER'S OWN state variable, read on-chain holding the next node, or — "
@@ -494,6 +685,22 @@ def _composed_order(entry: _ComposedMagnitude) -> tuple[Any, ...]:
         tuple(step.calling_selector or "" for step in entry.chain),
         tuple(tuple(sorted((key, repr(value)) for key, value in step.as_json().items())) for step in entry.chain),
     )
+
+
+def _first_differing_component(chosen: tuple[Any, ...], other: tuple[Any, ...]) -> int | None:
+    """The index of the component that decided ``chosen`` over ``other``.
+
+    ``None`` where no component differs — the two candidates are equal under the
+    whole key and the order decided nothing between them. That is a real third
+    state on a total-by-construction key (two candidates can agree on every
+    ordered field and still differ in fields the key does not read, such as the
+    execution that proved each one), and the published ``chosen_by`` says so
+    rather than naming a component that separated nothing.
+    """
+    for index, (mine, theirs) in enumerate(zip(chosen, other)):
+        if mine != theirs:
+            return index
+    return None
 
 
 def _select_composed(candidates: list[_ComposedMagnitude]) -> _ComposedMagnitude:
@@ -842,10 +1049,9 @@ def compute_protocol_score(
                 "('hook', 'vault', 'roleRegistry'); the same-kind hops that survive it walk on no "
                 "more evidence than the label-presence test gave them. A refused hop is NOT "
                 "disproved: whether it composes anyway turns on the intermediate node's own "
-                "function surface, and this plane DOES NOT CONSULT IT — that surface usually "
-                "exists (0x4df6b733's setUserRole/setRoleCapability/transferOwnership are "
-                "analysed effective_functions rows), so this is a join not performed and not a "
-                "witness that is missing. The join that would decide it is the intermediate "
+                "function surface, and this plane DOES NOT CONSULT IT — a refusal here is "
+                "therefore a join not performed, and nothing in it says the surface that would "
+                "answer the question is absent. The join that would decide it is the intermediate "
                 "node's own functions against its outbound targets "
                 "(effective_functions.sinks/effect_targets and the external_call_target edges "
                 "CONTROL_RELATIONS excludes). Until it runs the hop is withheld as "
@@ -1733,6 +1939,7 @@ def _aggregate(
                 row.zero_reach_stripped,
                 valued.hops_not_determined,
                 valued.withheld_behind_hops,
+                valued.composed_magnitudes,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
@@ -1971,6 +2178,52 @@ def _aggregate(
     return findings, subsumed, warnings
 
 
+def _order_tie_reading(shared_entities: list[str], position_in_tie: int) -> str:
+    """What the tie-break string decided on THIS row, read off what the row holds.
+
+    The λ half is true of every carrier — a tied row's index is that string's
+    doing whatever else is true — so it is constant. Two things after it are
+    not, and both are published in the same block a line away.
+
+    ``shared_entities``: the order splits a budget only where an entity is
+    actually held in common, and a row that shares none has no split. Publishing
+    the split sentence there asserts an apportionment that provably did not
+    happen, which is the same defect one level down from the figures.
+
+    ``position_in_tie``: which SIDE of the split this row is on. The first row in
+    a tie group has no tied row ahead of it and is charged FIRST; saying it "is
+    charged the remainder" is false of exactly the carrier the field beside it
+    identifies. The two directions are the same fact told from two ends, and
+    naming the wrong end inverts who the order cost.
+    """
+    lam = "this row's λ position is decided by that string, not by evidence"
+    if not shared_entities:
+        return (
+            lam + "; and it holds NO entity in common with the tied rows — shared_entities is "
+            "an asked-and-empty, not an unasked question — so no exposure budget was split by the "
+            "order here and none of this row's dollars is an order-determined apportionment"
+        )
+    shared_clause = (
+        f"{lam}, and so is its share of the {len(shared_entities)} entity(ies) it holds in "
+        "common with the tied rows (named under shared_entities): "
+    )
+    if position_in_tie == 0:
+        charged = (
+            "this row is FIRST in the tie (position_in_tie 0), so it consumes that shared exposure "
+            "budget before any row tied with it and the rows behind it are charged the remainder"
+        )
+    else:
+        charged = (
+            f"the {position_in_tie} row(s) ahead of this one in the tie (position_in_tie "
+            f"{position_in_tie}) consume that shared exposure budget first and this row is charged "
+            "what is left of it"
+        )
+    return (
+        shared_clause + charged + ", so the split among them is order-determined and is not a "
+        "measurement of who reaches what"
+    )
+
+
 def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
     """Where rows tie on the sort key, say so: the order decides, and it is a string.
 
@@ -1995,16 +2248,13 @@ def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
         units = [f["principal_unit"] for f in group]
         for position, finding in enumerate(group):
             others = {key for other in group if other is not finding for key in other["value_by_entity"]}
+            shared = sorted(set(finding["value_by_entity"]) & others)
             finding["exposure_order_tie"] = {
                 "tied_with": [unit for unit in units if unit != finding["principal_unit"]],
-                "shared_entities": sorted(set(finding["value_by_entity"]) & others),
+                "shared_entities": shared,
                 "position_in_tie": position,
                 "basis": "equal raw_points and capability; the remaining order is the principal_unit string",
-                "reading": (
-                    "this row's λ position and its share of any entity it holds in common with "
-                    "the tied rows are decided by that string, not by evidence; the split among "
-                    "them is order-determined and is not a measurement of who reaches what"
-                ),
+                "reading": _order_tie_reading(shared, position),
             }
 
 
@@ -2122,6 +2372,7 @@ def _ceiling_bearing_basis(
     zero_reach_stripped: list[dict[str, Any]],
     hops_not_determined: list[dict[str, Any]],
     withheld_behind_hops: dict[str, Any],
+    composed: dict[str, _ComposedMagnitude],
 ) -> str:
     """The basis for a row some of whose figures are extraction ceilings.
 
@@ -2135,6 +2386,16 @@ def _ceiling_bearing_basis(
     row could not establish and the graph withheld behind them are value the sum
     does not carry, and they are named here because they were consulted in
     :func:`_bound_direction` before the arm was taken.
+
+    ``composed`` is read for one clause only, and it is read rather than
+    asserted: a ceiling can overstate what this principal actually extracts, and
+    the only evidence in this document that could narrow it is the destination
+    function's OWN stored conditions, which travel with each composed entry and
+    which this fold evaluates none of. How many of the row's ceiling-bearing
+    figures carry that text is a fact about the row and is counted here. It
+    replaces a clause naming an extraction precondition this document no longer
+    publishes — a definite reference to a deleted field, which reads as a
+    constraint that was consulted.
     """
     n_entities = len(per_entity)
     counted = f"{len(ceiling_entities)} of {n_entities} entity(ies)"
@@ -2172,11 +2433,27 @@ def _ceiling_bearing_basis(
     ungraded = n_entities - len(ceiling_entities)
     if ungraded:
         missing.append(f"{ungraded} entity(ies) whose figure is not a composed ceiling and is graded in no direction")
+    # What, in THIS document, could put the true extraction below the ceiling —
+    # counted off the row's own composed entries rather than named from a field
+    # that no longer exists.
+    with_conditions = sum(
+        1 for entity in ceiling_entities if entity in composed and composed[entity].predicates.descriptions
+    )
+    if with_conditions:
+        untightened = (
+            f"and nothing here tightens it: the destination function's own stored conditions "
+            f"travel with {with_conditions} of those {len(ceiling_entities)} figure(s) "
+            "(destination_predicates) and this fold evaluates none of them"
+        )
+    else:
+        untightened = (
+            f"and nothing here tightens it: no condition text was extracted for any of those "
+            f"{len(ceiling_entities)} figure(s) (destination_predicates), so the destination's "
+            "own conditions are not available here to check the ceiling against at all"
+        )
     basis = (
         f"bounded in NEITHER direction: {counted} {ceilings} — a ceiling does not become a floor "
-        "by being summed, and the precondition can put the true extraction below it; "
-        + ", ".join(missing)
-        + " leave the sum short of a ceiling on the row too"
+        f"by being summed, {untightened}; " + ", ".join(missing) + " leave the sum short of a ceiling on the row too"
     )
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
@@ -2554,6 +2831,24 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "composed_usd_summed_over_rows": round(usd, 2),
         }
 
+    # How many entities actually take the subsumed-exclusive route into a top
+    # row's exposure, counted rather than stated: the sentence below used to
+    # assert "one … does so here", a measurement of this corpus baked into a
+    # literal and false the moment a second row composes one.
+    exclusive: set[str] = set()
+    for row in findings:
+        exclusive.update(row.get("subsumed_exclusive_value_by_entity") or {})
+    charged = sorted(
+        exclusive.intersection(
+            str(entry["entity"]) for row in subsumed for entry in (row.get("reach_composed_magnitudes") or [])
+        )
+    )
+    charging = (
+        f"and {len(charged)} composed subsumed entity(ies) do so here"
+        if charged
+        else "and no composed subsumed entity does so here — the fold looked, and the two "
+        "populations do not meet on this corpus"
+    )
     return {
         "findings": roll(findings),
         "subsumed_rows": roll(subsumed),
@@ -2563,18 +2858,17 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "and summing the two would double one composition and read as twice the recovery. "
             "It is NOT that a subsumed row's dollars stay out of the grade: its entities that "
             "no surviving row reaches charge the top row's exposure at that row's own fraction "
-            "(subsumed_exclusive_value_by_entity), and one composed subsumed entity does so "
-            "here. licensed_selectors is every "
+            f"(subsumed_exclusive_value_by_entity), {charging}. licensed_selectors is every "
             "(hop, licensed function) pair a gate-control walk offered; act_as_witnessed is "
             "the subset where the caller is witnessed able to make that call at that "
             "destination; the pairs under act_as_refused are the ones whose magnitude stayed "
             "not_determined and went to confidence instead of the grade. composed_usd is "
             "summed over ROWS and entities are counted distinct, so the two disagree wherever "
             "two rows compose the same entity; the exposure budget, not this figure, is what "
-            "stops that entity being paid for twice. A large act_as_refused beside a small "
-            "entities_composed is the honest shape of this corpus, not a shortfall in the "
-            "pass: most licensed hops have no witness that the licensed party can be made to "
-            "use the licence"
+            "stops that entity being paid for twice. act_as_refused standing far above "
+            "entities_composed is not a shortfall in the pass but its arithmetic: a licensed "
+            "hop composes only where the licensed party is ALSO witnessed makeable to use the "
+            "licence, and act_as_refused counts, by reason, every pair where it was not"
         ),
     }
 
@@ -2594,6 +2888,92 @@ def _counted(values: Iterable[str]) -> dict[str, int]:
     for value in values:
         out[value] += 1
     return dict(sorted(out.items()))
+
+
+# Why each arm withheld, for the CENSUS's account of ``composed_withheld``. The
+# sentence these replace gave a single cause for a counter three different arms
+# feed — "because the route they publish is not the route the proof took and
+# nothing proved this principal could have issued the proven call itself" — and
+# both halves are the two clauses B1-N1 removed from the per-entry reading,
+# failing on the same carriers: there is no proven route to differ from on the
+# transport-fault arm, no typed route finding either way on the unclassified
+# arm, and the fault arm is reached BEFORE the join is consulted, so it can
+# publish ``deletable`` beside its own refusal. Rolling three findings into one
+# cause at the aggregate is the same collapse the per-entry fix removed, one
+# level up.
+#
+# ``ARM_GATE_ONLY`` is keyed on the ROUTE TOKEN and not on the arm, because the
+# arm fires on two of them (:func:`_admit_composed`) and they are two different
+# findings about the traversed body: one says the intermediate computes the
+# quantity, the other says it pins the counterparty. Keyed on the arm alone, a
+# target-constrained carrier read "AUTHORING" in the census beside its own
+# ``withheld_reason`` naming the other token — the same disagreement between two
+# adjacent blocks, one level down. The other two arms do not read the route at
+# all: the transport fault is a finding about neither witness, and the
+# unclassified arm's own reason IS the route's.
+_GATE_ONLY_ROUTE_CAUSES = {
+    P.ROUTE_AMOUNT_AUTHORED: (
+        "a route witnessed AUTHORING what the destination call carries, so the destination's own "
+        "figure is not a figure for this route"
+    ),
+    P.ROUTE_TARGET_CONSTRAINED: (
+        "a route witnessed PINNING which counterparty the destination call pays, so the "
+        "destination's own figure is not a figure this caller can direct"
+    ),
+}
+_ARM_ONLY_CAUSES = {
+    ARM_WITHHELD: (
+        "an execution that could not be READ at all — which is a finding about neither the route "
+        "nor the join: both were computed before this arm was reached and are published, and a "
+        "deletability licence standing among them does not release the figure"
+    ),
+    ARM_NOT_DETERMINED: (
+        "a route that earned no typed finding in either direction, with no arm left to fall through to"
+    ),
+}
+# Every (arm, route token) pair that has a registered cause, in the order the
+# census lists them. There is no default: a pair absent here raises rather than
+# reaching the document through a sentence nobody wrote for it.
+_WITHHELD_CAUSE_ORDER: tuple[tuple[str, str | None], ...] = tuple(
+    (ARM_GATE_ONLY, state) for state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_TARGET_CONSTRAINED)
+) + tuple((arm, None) for arm in COMPOSITION_ARMS if arm in _ARM_ONLY_CAUSES)
+
+
+def _withheld_cause_key(record: "_WithheldComposition") -> tuple[str, str | None]:
+    """The (arm, route token) pair this record's census cause is keyed on."""
+    return (record.arm, record.route.state if record.arm == ARM_GATE_ONLY else None)
+
+
+def _withheld_cause(key: tuple[str, str | None]) -> str:
+    arm, route_state = key
+    if arm == ARM_GATE_ONLY:
+        return _GATE_ONLY_ROUTE_CAUSES[cast(str, route_state)]
+    return _ARM_ONLY_CAUSES[arm]
+
+
+def _withheld_cause_clause(withheld: tuple["_WithheldComposition", ...]) -> str:
+    """The census's account of ``composed_withheld``, derived from the arms and
+    route tokens that actually fired on THIS row rather than authored once for
+    all of them."""
+    counts: dict[tuple[str, str | None], int] = defaultdict(int)
+    for record in withheld:
+        counts[_withheld_cause_key(record)] += 1
+    fired = [(key, counts[key]) for key in _WITHHELD_CAUSE_ORDER if counts.get(key)]
+    if not fired:
+        return (
+            "composed_withheld is 0 here: no candidate that cleared the witnesses above lost its "
+            "figure to the composition rule, which is a count of nothing and not a claim that the "
+            "rule was not asked"
+        )
+    return (
+        "composed_withheld is a LATER and different refusal: those candidates cleared every "
+        "witness above and then lost their figure to the composition rule — "
+        + "; ".join(f"{hits} to {_withheld_cause(key)}" for key, hits in fired)
+        + f". The {len(_WITHHELD_CAUSE_ORDER)} registered causes are not interchangeable. "
+        "composed_withheld_by_arm beside this separates the arms, and because one arm withholds "
+        "under either of two route tokens, composed_withheld_by_reason is what separates those "
+        "two — each entry's own withheld_reason names the token it was refused under"
+    )
 
 
 def _composition_report(
@@ -2681,11 +3061,11 @@ def _composition_report(
             "selector, destination_function and act_as_chain were picked out of them, under "
             "composed_selector_tie; null there is the proven 'one candidate'. Everything in "
             "act_as_refused stayed not_determined and is charged to confidence. "
-            "composed_withheld is a LATER and different refusal: those candidates cleared every "
-            "witness above and then lost their figure to the composition rule, because the "
-            "route they publish is not the route the proof took and nothing proved this "
-            "principal could have issued the proven call itself. They keep their gate claim and "
-            "their execution record and are listed per row under "
+            + _withheld_cause_clause(withheld)
+            + ". Each keeps its act-as chain and publishes its gate_claim and proving_execution "
+            "blocks whatever state those reached — a withheld figure retracts neither question, "
+            "and where either could not be answered the block carries its own typed reason rather "
+            "than going quiet. They are listed per row under "
             "reach_composed_magnitudes_withheld. gate_claim_by_state is a DIFFERENT axis again and "
             "cuts across both populations: it says, per entry, whether the execution that proved "
             "the destination's figure was admitted for the caller this entry's chain names. Where "
@@ -2833,6 +3213,12 @@ class _WithheldComposition:
     route: P.RouteClassification
     deletability: P.DeletabilityVerdict
 
+    def __post_init__(self) -> None:
+        # An arm with no registered sentence would otherwise reach the published
+        # reading through a default, which is a claim nobody wrote for it.
+        if self.arm not in _WITHHELD_ARM_READINGS:
+            raise ValueError(f"no withheld reading is registered for arm {self.arm!r}")
+
     @property
     def counter_key(self) -> str:
         """The ``(state, reason)`` pair the refusal counter keys on.
@@ -2869,24 +3255,7 @@ class _WithheldComposition:
             "act_as_chain_length": len(self.chain),
             "route_classification": self.route.as_json(),
             "authority_deletability": self.deletability.disclosure(),
-            "reading": (
-                "the destination carries a flow.out magnitude and this principal is witnessed "
-                "able to reach it, and the DOLLARS are still withheld. What was proven is a "
-                "call the probe made directly to the destination; what this entry claims is a "
-                "route through an intermediate, and the two are compared under route_comparison "
-                "rather than assumed equal. The gate claim survives that difference — an "
-                "authorization check reads msg.sender and msg.sig and no ARGUMENT, so a route "
-                "the proof did not take says nothing about it — and the act_as_chain above is "
-                "published in full. Whether the proof was admitted for THIS caller is a separate "
-                "question and is answered separately, under gate_claim: a different caller is not "
-                "covered by that argument, because msg.sender is what the check reads. The "
-                "magnitude does not survive either: route_classification "
-                "names what the traversed body does to the destination's arguments, and "
-                "authority_deletability names whether this principal could have issued the "
-                "proven call itself. Neither answered in favour of the figure, so no figure is "
-                "published. This is a REFUSAL and not a zero: nothing here says the principal "
-                "moves nothing, only that what it moves is not determined by this evidence"
-            ),
+            "reading": _WITHHELD_OPENING + _WITHHELD_ARM_READINGS[self.arm] + _WITHHELD_CLOSING,
         }
 
 
@@ -2965,7 +3334,7 @@ def _admit_composed(
         elif verdict.is_deletable:
             kept[key] = replace(entry, arm_taken=ARM_REPUBLISHED_DIRECT, deletability=verdict, route=route)
             continue
-        elif route.state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_CALLEE_RESTRICTED):
+        elif route.state in (P.ROUTE_AMOUNT_AUTHORED, P.ROUTE_TARGET_CONSTRAINED):
             arm, reason = ARM_GATE_ONLY, route.state
         else:
             arm, reason = ARM_NOT_DETERMINED, cast(str, route.reason)
@@ -3698,9 +4067,18 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferr
         "conferred_by_at_least_one_gate_capability": len(conferred_by_any),
         "conferred_by_none": len(pairs) - len(conferred_by_any),
         "reading": (
+            # "and no finding walks it" was here: a universal over the findings
+            # population, authored in a census that runs over the control
+            # closure BEFORE any finding exists and therefore never asked it.
+            # What is stated instead is the property this function does
+            # establish — why the union over-counts — which holds at every value
+            # of the counters.
             "the union over the five gate capabilities, each asked with the class-wide union of "
             "what its witnesses rewrite. It is an upper bound on every real walk twice over — "
-            "over capabilities and over instances — and no finding walks it. by_capability is "
+            "over capabilities, because a pair walked by any one of the five is counted here, "
+            "and over instances, because each capability is asked with the union of what its "
+            "witnesses rewrite anywhere rather than with one instance's own set. Nothing here "
+            "counts findings, and no row is claimed to walk this width. by_capability is "
             "the per-capability answer at the same class-wide width"
         ),
     }
