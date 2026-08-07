@@ -1,0 +1,556 @@
+"""§14 case 8 — no constant data-claim.
+
+A published string that DESCRIBES what a field means may be a constant; it is
+documentation and the subject is the code. A string that makes a CLAIM ABOUT THE
+DATA must be derived from the carrier's own data, because a constant one can be —
+and on this document was — false for the row carrying it.
+
+Every test below is the same shape: two carriers whose data differs must publish
+different strings. That is the property a constant cannot have, which is what
+makes each assertion a mutation test in disguise — de-interpolate the sentence
+back into an ``ast.Constant`` and the ``!=`` fails. The end of the module walks a
+whole folded document and asserts that no narration names a concept the document
+no longer publishes, because a cross-reference is a claim that the field exists.
+
+Case 7's subsumed parity applies here too: the composed and withheld readings are
+produced by ``_ComposedMagnitude.as_json`` / ``_WithheldComposition.as_json``,
+which have no findings/subsumed branch, and the document-level test asserts the
+claim over both populations.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from services.scoring import fold as FOLD
+from services.scoring import planes as P
+from services.scoring.schema import PrincipalRef
+from tests import composition_admission_fixtures as CA
+from tests.test_scoring_redteam import (
+    CALLING_SELECTOR,
+    COMPOSED_SELECTOR,
+    EOA,
+    KEY_C,
+    KEY_V,
+    _composing_case,
+    _composing_principals,
+    _composing_signals,
+    fold,  # noqa: F401  — the fold fixture, reused rather than forked
+    proven,
+    reaches,
+    sig,
+)
+from utils import execution_record as EX
+
+_AUTHORS_THE_AMOUNT_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param_derived", "unconstrained_proven"),)
+_DELETES_THE_VAULT_AUTHORITY = ((KEY_V, EOA, "setAuthority"),)
+
+
+# ---------------------------------------------------------------------------
+# Builders. Each returns the smallest carrier that can hold the string.
+# ---------------------------------------------------------------------------
+
+
+def _predicates(*descriptions: str) -> P.DestinationPredicates:
+    return P.DestinationPredicates(
+        state="extracted",
+        function_id=1,
+        function_name="exit",
+        descriptions=tuple(descriptions),
+        entries_stored=len(descriptions),
+        functions_matching=1,
+    )
+
+
+def _recorded() -> EX.ProvingExecution:
+    return EX.ProvingExecution(
+        state=EX.EXECUTION_RECORDED,
+        transcript_ptr="job::artifact",
+        effect_verdict_id=7,
+        caller="0x" + "a" * 40,
+        target="0x" + "b" * 40,
+        selector=COMPOSED_SELECTOR,
+    )
+
+
+def _composed(*, witnessed_usd: float, sheet_usd: float | None) -> FOLD._ComposedMagnitude:
+    return FOLD._ComposedMagnitude(
+        entity=KEY_V,
+        selector=COMPOSED_SELECTOR,
+        function="exit",
+        witness_state="proven_floor",
+        witnessed_usd=witnessed_usd,
+        usd=(witnessed_usd if sheet_usd is None else min(witnessed_usd, sheet_usd)),
+        sheet_usd=sheet_usd,
+        chain=(),
+        predicates=_predicates("require(bool)(isAuthorized(msg.sender,msg.sig))"),
+        execution=_recorded(),
+    )
+
+
+def _route(state: str) -> P.RouteClassification:
+    if state == P.ROUTE_AMOUNT_AUTHORED:
+        return P.RouteClassification(
+            state=state,
+            reason=None,
+            flows=(
+                P.RouterFlow(
+                    sink_id="exit:sink1",
+                    destination_selector=COMPOSED_SELECTOR,
+                    amount_kind="param_derived",
+                    target_constraint_state="unconstrained_proven",
+                    target_constraint_guard=None,
+                ),
+            ),
+            amount_authored=True,
+            target_constrained=False,
+        )
+    return P.RouteClassification(
+        state=P.ROUTE_NOT_DETERMINED,
+        reason=P.ROUTE_NEITHER_CONJUNCT,
+        flows=(),
+        amount_authored=False,
+        target_constrained=False,
+    )
+
+
+def _verdict(state: str) -> P.DeletabilityVerdict:
+    if state == P.DELETABILITY_DELETABLE:
+        return P.DeletabilityVerdict(
+            state=state,
+            destination_key=KEY_V,
+            selector=COMPOSED_SELECTOR,
+            principal_addresses=(EOA,),
+            arm="host",
+            basis=P.SetterPrincipal(
+                function_principal_id=1,
+                chain="ethereum",
+                contract_address=KEY_V.partition("::")[2],
+                function_name="setAuthority",
+                selector="0x7a9e5e4b",
+                principal_address=EOA,
+                membership_quality="exact",
+            ),
+        )
+    return P.DeletabilityVerdict(
+        state=P.DELETABILITY_PROVEN_NOT_DELETABLE,
+        destination_key=KEY_V,
+        selector=COMPOSED_SELECTOR,
+        principal_addresses=(EOA,),
+        reason=P.DELETABILITY_NO_SETTER_ROW,
+    )
+
+
+def _withheld_entry(arm: str, *, deletability: str = P.DELETABILITY_PROVEN_NOT_DELETABLE) -> FOLD._WithheldComposition:
+    route = _route(P.ROUTE_AMOUNT_AUTHORED if arm == FOLD.ARM_GATE_ONLY else P.ROUTE_NOT_DETERMINED)
+    reason = route.state if arm == FOLD.ARM_GATE_ONLY else (route.reason or EX.REASON_FETCH_FAILED)
+    if arm == FOLD.ARM_WITHHELD:
+        reason = EX.REASON_FETCH_FAILED
+    return FOLD._WithheldComposition(
+        entity=KEY_V,
+        selector=COMPOSED_SELECTOR,
+        function="exit",
+        chain=(),
+        execution=(
+            _recorded()
+            if arm != FOLD.ARM_WITHHELD
+            else EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_FETCH_FAILED)
+        ),
+        arm=arm,
+        reason=reason,
+        route=route,
+        deletability=_verdict(deletability),
+    )
+
+
+def _tied_findings(shared: bool) -> list[dict[str, Any]]:
+    """Two rows that tie on the sort key, holding entities in common or not."""
+    return [
+        {
+            "raw_points": 10.0,
+            "capability": "authority.replace",
+            "principal_unit": "ethereum::0x" + "1" * 40,
+            "value_by_entity": {"ethereum::0xaaa": 1.0},
+        },
+        {
+            "raw_points": 10.0,
+            "capability": "authority.replace",
+            "principal_unit": "ethereum::0x" + "2" * 40,
+            "value_by_entity": {"ethereum::0xaaa" if shared else "ethereum::0xbbb": 2.0},
+        },
+    ]
+
+
+# ---------------------------------------------------------------------------
+# exposure_order_tie.reading — the split the order made, or the earned empty
+# ---------------------------------------------------------------------------
+
+
+def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_rows_that_do_not():
+    """The old constant asserted that the order decided "its share of any entity
+    it holds in common with the tied rows" and that "the split among them is
+    order-determined" — on a row sharing nothing there is no share and no split,
+    which was every carrier in the document."""
+    shared = _tied_findings(shared=True)
+    alone = _tied_findings(shared=False)
+    FOLD._disclose_order_ties(shared)
+    FOLD._disclose_order_ties(alone)
+    shared_reading = shared[0]["exposure_order_tie"]["reading"]
+    alone_reading = alone[0]["exposure_order_tie"]["reading"]
+
+    # The mutation: a constant string makes these equal.
+    assert shared_reading != alone_reading
+
+    assert shared[0]["exposure_order_tie"]["shared_entities"] == ["ethereum::0xaaa"]
+    assert alone[0]["exposure_order_tie"]["shared_entities"] == []
+    # The claim is made only where the data carries it, and the count is the
+    # row's own rather than a word standing in for it.
+    assert "1 entity(ies) it holds in common" in shared_reading
+    assert "split among them is order-determined" in shared_reading
+    # And where nothing is shared the row publishes the EARNED empty rather than
+    # a quieter version of the same claim.
+    assert "no exposure budget was split by the order here" in alone_reading
+    assert "split among them" not in alone_reading
+
+
+def test_the_order_tie_reading_scales_with_the_number_of_shared_entities():
+    """Three carriers, three strings: a sentence that names a count cannot be
+    written once."""
+    readings = [FOLD._order_tie_reading(list(names)) for names in ([], ["a"], ["a", "b"])]
+    assert len(set(readings)) == 3
+
+
+# ---------------------------------------------------------------------------
+# reach_composed_magnitudes[].reading — which ceiling actually bound the figure
+# ---------------------------------------------------------------------------
+
+
+def test_the_composed_reading_names_the_ceiling_that_actually_bound_the_figure():
+    """V0-b's #8/#35. The constant said the dollars are "not the destination's
+    balance sheet" while ``bounded_by`` said ``destination sheet`` and
+    ``destination_sheet_usd`` equalled ``published_usd`` on six of the
+    twenty-eight kept entries — the document contradicting itself in two
+    adjacent keys."""
+    by_witness = _composed(witnessed_usd=100.0, sheet_usd=900.0).as_json()
+    by_sheet = _composed(witnessed_usd=900.0, sheet_usd=100.0).as_json()
+
+    assert by_witness["reading"] != by_sheet["reading"]
+
+    assert by_witness["bounded_by"] == "flow.out witness"
+    assert by_sheet["bounded_by"] == "destination sheet"
+    # The published figure and the sentence agree about where it came from.
+    assert by_sheet["published_usd"] == by_sheet["destination_sheet_usd"] == 100.0
+    assert "BALANCE SHEET" in by_sheet["reading"]
+    assert "not the destination's balance sheet" not in by_sheet["reading"]
+    assert "flow.out witness" in by_witness["reading"]
+
+
+def test_a_composed_entry_with_no_sheet_at_all_reads_as_bound_by_its_witness():
+    """``sheet_not_determined`` is a third state, and the sentence for it may not
+    claim a sheet was compared and lost."""
+    entry = _composed(witnessed_usd=100.0, sheet_usd=None).as_json()
+    assert entry["sheet_not_determined"] is True
+    assert entry["bounded_by"] == "flow.out witness"
+    assert entry["destination_sheet_usd"] is None
+    assert "sheet_not_determined" in entry["reading"]
+
+
+# ---------------------------------------------------------------------------
+# reach_composed_magnitudes_withheld[].reading — the arm that withheld it
+# ---------------------------------------------------------------------------
+
+
+def test_the_withheld_reading_is_derived_from_the_arm_that_withheld_the_figure():
+    """The constant asserted "What was proven is a call the probe made directly
+    to the destination" and "Neither answered in favour of the figure". Both are
+    FALSE on the transport-fault arm: nothing was proven there, and
+    ``_admit_composed`` computes the deletability verdict BEFORE the fault
+    branch, so that entry can publish ``deletable`` beside the refusal."""
+    readings = {arm: _withheld_entry(arm).as_json()["reading"] for arm in FOLD._WITHHELD_ARM_READINGS}
+    assert len(set(readings.values())) == 3
+
+    fault = readings[FOLD.ARM_WITHHELD]
+    assert "could not be READ at all" in fault
+    assert "What was proven is the call recorded" not in fault
+    # The two clauses that were false on this arm are gone from it.
+    assert "call the probe made directly to the destination" not in fault
+    assert "Neither answered in favour of the figure" not in fault
+
+    gate_only = readings[FOLD.ARM_GATE_ONLY]
+    assert "The MAGNITUDE does not survive it" in gate_only
+    undetermined = readings[FOLD.ARM_NOT_DETERMINED]
+    assert "no typed finding" in undetermined
+    assert "no fourth arm that publishes" in undetermined
+
+
+def test_a_faulted_entry_that_the_join_licensed_does_not_read_as_a_join_refusal():
+    """The exercised carrier: a fault beside a proven deletability licence. The
+    sentence must not say the join answered against the figure, and it must not
+    say the licence releases it either."""
+    entry = _withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE).as_json()
+    assert entry["authority_deletability"]["state"] == P.DELETABILITY_DELETABLE
+    assert entry["published_usd"] is None
+    reading = entry["reading"]
+    assert "does NOT release it" in reading
+    assert "Neither answered in favour" not in reading
+
+
+def test_an_unregistered_withholding_arm_cannot_reach_a_published_reading():
+    """No default sentence: an arm nobody wrote a reading for raises rather than
+    borrowing another arm's claim."""
+    with pytest.raises(ValueError, match="no withheld reading is registered"):
+        _withheld_entry(FOLD.ARM_REPUBLISHED_DIRECT)
+
+
+# ---------------------------------------------------------------------------
+# value_at_stake_basis — the concept the document no longer publishes
+# ---------------------------------------------------------------------------
+
+
+def _basis(composed: dict[str, FOLD._ComposedMagnitude], ceiling: frozenset[str]) -> str:
+    return FOLD._ceiling_bearing_basis(
+        FOLD.BOUND_DIRECTION_NOT_DETERMINED,
+        {key: 1.0 for key in ceiling},
+        ceiling,
+        [{"instance": 1}],
+        [],
+        [],
+        [],
+        [],
+        {},
+        composed,
+    )
+
+
+def test_the_ceiling_basis_counts_the_condition_texts_it_names():
+    """A3 deleted ``caller_holding_precondition``; the basis kept saying "the
+    precondition can put the true extraction below it" — a definite reference to
+    a field the document does not contain. What replaces it is counted."""
+    with_text = _basis({KEY_V: _composed(witnessed_usd=1.0, sheet_usd=None)}, frozenset({KEY_V}))
+    without_text = _basis(
+        {
+            KEY_V: FOLD._ComposedMagnitude(
+                entity=KEY_V,
+                selector=COMPOSED_SELECTOR,
+                function="exit",
+                witness_state="proven_floor",
+                witnessed_usd=1.0,
+                usd=1.0,
+                sheet_usd=None,
+                chain=(),
+                predicates=P.DestinationPredicates(
+                    state="column_holds_no_array",
+                    function_id=None,
+                    function_name=None,
+                    descriptions=None,
+                    entries_stored=None,
+                    functions_matching=0,
+                ),
+                execution=_recorded(),
+            )
+        },
+        frozenset({KEY_V}),
+    )
+
+    assert with_text != without_text
+
+    assert "precondition" not in with_text
+    assert "precondition" not in without_text
+    assert "travel with 1 of those 1 figure(s)" in with_text
+    assert "no condition text was extracted" in without_text
+
+
+# ---------------------------------------------------------------------------
+# act_as_composition.census.reading — the corpus count in a literal
+# ---------------------------------------------------------------------------
+
+
+def _rollup(exclusive: dict[str, float], composed_entities: list[str]) -> str:
+    findings = [{"reach_composition_census": {}, "subsumed_exclusive_value_by_entity": exclusive}]
+    subsumed = [
+        {
+            "reach_composition_census": {},
+            "reach_composed_magnitudes": [{"entity": key, "published_usd": 1.0} for key in composed_entities],
+        }
+    ]
+    return FOLD._composition_totals(findings, subsumed)["reading"]
+
+
+def test_the_rollup_reading_counts_the_subsumed_entities_that_charge_a_top_row():
+    """ "one composed subsumed entity does so here" was a measurement of one
+    corpus baked into a literal."""
+    none = _rollup({}, [])
+    one = _rollup({"ethereum::0xaaa": 1.0}, ["ethereum::0xaaa"])
+    two = _rollup({"ethereum::0xaaa": 1.0, "ethereum::0xbbb": 1.0}, ["ethereum::0xaaa", "ethereum::0xbbb"])
+
+    assert len({none, one, two}) == 3
+
+    assert "1 composed subsumed entity(ies) do so here" in one
+    assert "2 composed subsumed entity(ies) do so here" in two
+    # The empty case is an earned negative, not silence.
+    assert "no composed subsumed entity does so here" in none
+    # And the corpus characterisation is gone from all three.
+    assert "honest shape of this corpus" not in none + one + two
+
+
+# ---------------------------------------------------------------------------
+# The deleted concepts, asserted over a whole folded document
+# ---------------------------------------------------------------------------
+
+
+def _authored_strings(node: Any, path: str = "") -> list[tuple[str, str]]:
+    """Every authored string in the published document, by ruling 7's scope —
+    the key names, not just ``reading``/``note``."""
+    keys = ("reading", "note", "basis", "chosen_by", "bound_kind", "fact", "value_at_stake_basis", "licensing")
+    out: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in keys and isinstance(value, str):
+                out.append((f"{path}.{key}", value))
+            else:
+                out.extend(_authored_strings(value, f"{path}.{key}"))
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_authored_strings(item, f"{path}[]"))
+    return out
+
+
+# A cross-reference is a claim that the field exists, and every one of these
+# names something this document does not publish or a measurement its author
+# never made.
+_DEAD_CONCEPTS = (
+    "caller_holding_precondition",
+    "principal_extraction_bound",
+    "the precondition can put",
+    "the 87 contracts",
+    "the 13 callers",
+    "no finding walks it",
+    "is not_determined wherever populated",
+    "one composed subsumed entity does so here",
+)
+
+
+def test_no_published_narration_names_a_concept_the_document_does_not_publish(fold):  # noqa: F811
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+    )
+    payload = {
+        "findings": document.findings,
+        "warnings": document.warnings,
+        "model_parameters": document.model_parameters,
+        "provenance": document.provenance,
+    }
+    strings = _authored_strings(payload)
+    assert strings, "the walk found no authored string — the scope is wrong, not the document"
+    for path, value in strings:
+        for dead in _DEAD_CONCEPTS:
+            assert dead not in value, f"{path} still names {dead!r}"
+
+
+def test_the_predicate_reading_claims_no_guard_it_did_not_check(fold):  # noqa: F811
+    """Ruling 6.1 M1. "it INCLUDES the authorization guard" is an indicative
+    existential about this row's extracted list; the fold never checks it. A
+    modal states exactly what the code knows and survives every carrier."""
+    document = fold(
+        _composing_signals(),
+        principals=_composing_principals(),
+        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+    )
+    payload = {
+        "findings": document.findings,
+        "warnings": document.warnings,
+        "model_parameters": document.model_parameters,
+        "provenance": document.provenance,
+    }
+    readings = [value for path, value in _authored_strings(payload) if path.endswith("destination_predicates.reading")]
+    assert readings
+    for reading in readings:
+        assert "it includes the authorization guard" not in reading
+        assert "it may include the authorization guard" in reading
+        # The enumeration matches what is enumerated.
+        assert "Three things about them" in reading
+        assert reading.count("(1)") == reading.count("(2)") == reading.count("(3)") == 1
+        assert "(4)" not in reading
+
+
+# ---------------------------------------------------------------------------
+# The registries themselves, and case 7's subsumed parity
+# ---------------------------------------------------------------------------
+
+
+def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
+    """A registry whose entries collapse to one string is a constant wearing a
+    dict. Both maps are keyed on a closed vocabulary and every key must move the
+    sentence."""
+    assert set(FOLD._WITHHELD_ARM_READINGS) == {
+        FOLD.ARM_WITHHELD,
+        FOLD.ARM_GATE_ONLY,
+        FOLD.ARM_NOT_DETERMINED,
+    }
+    assert len(set(FOLD._WITHHELD_ARM_READINGS.values())) == len(FOLD._WITHHELD_ARM_READINGS)
+    assert set(FOLD._COMPOSED_SOURCE_READINGS) == {"flow.out witness", "destination sheet"}
+    assert len(set(FOLD._COMPOSED_SOURCE_READINGS.values())) == len(FOLD._COMPOSED_SOURCE_READINGS)
+    # Every arm the rule can take when it withholds has a sentence; the one it
+    # takes when it PUBLISHES has none, and reaching for it raises.
+    assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_READINGS
+
+
+def _second_capability_signals() -> list[Any]:
+    """The composing case under a weaker second capability on the same unit, so
+    one of the two rows is published under ``provenance.subsumed_rows``."""
+    weaker = sig(
+        claim_id="ownership.transfer",
+        function_name="transferOwnership",
+        selector="0xf2fde38b",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+    )
+    return [*_composing_signals(), weaker]
+
+
+@pytest.mark.parametrize(
+    "deletability,key",
+    [
+        (CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY), "reach_composed_magnitudes"),
+        (CA.deletability_plane(), "reach_composed_magnitudes_withheld"),
+    ],
+    ids=["republished", "withheld"],
+)
+def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):  # noqa: F811
+    """§14 case 7 applied to case 8. ``_ComposedMagnitude.as_json`` and
+    ``_WithheldComposition.as_json`` have no findings/subsumed branch, and this
+    asserts the consequence on the population three earlier passes never
+    measured."""
+    document = fold(
+        _second_capability_signals(),
+        principals=_composing_principals(),
+        deletability=deletability,
+        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
+        **_composing_case(),
+    )
+    subsumed = list(document.provenance.get("subsumed_rows") or [])
+    assert subsumed, "the case must exercise a subsumed row, not two findings"
+    entries = [entry for row in subsumed for entry in (row.get(key) or [])]
+    assert entries, f"the subsumed row published no {key}"
+    for entry in entries:
+        reading = entry["reading"]
+        if key == "reach_composed_magnitudes":
+            # Derived from this entry's own bounded_by, on a subsumed row too.
+            assert reading.startswith(FOLD._COMPOSED_SOURCE_READINGS[entry["bounded_by"]] + ". ")
+        else:
+            assert reading == (
+                FOLD._WITHHELD_OPENING + FOLD._WITHHELD_ARM_READINGS[entry["arm_taken"]] + FOLD._WITHHELD_CLOSING
+            )
+        for dead in _DEAD_CONCEPTS:
+            assert dead not in reading
