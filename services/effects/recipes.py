@@ -72,6 +72,7 @@ from services.effects.simulate import (
     transfers_out,
     transfers_out_with_asset,
 )
+from utils.execution_record import PROVING_EXECUTION_KEY, residue_payload
 from utils.rpc import EthCallResult
 
 logger = logging.getLogger(__name__)
@@ -697,7 +698,37 @@ def value_out(
             # code — not "moves value in current state". A consumer that ignores
             # this key reads a treasury-empty contract as a live outflow.
             details["contract_balance_seeded"] = True
-    concrete: dict[str, Any] = {}
+    concrete: dict[str, Any] = {
+        # F6: the caller that proved this outflow exists nowhere but inside the
+        # transcript blob, so every consumer of the figure sees a number with no
+        # account of the call behind it. Recorded here, from the call that was
+        # ACTUALLY ISSUED — the seeded retry where one landed, the unseeded probe
+        # where none did — because on a seeded retry the unseeded call reverted
+        # and naming it would publish an execution that proved nothing.
+        #
+        # ``concrete``, never ``details``: a caller address and a block height are
+        # one deployment's observation and must not ride the behavioral cache onto
+        # a bytecode twin (the reach-leak class, ``db/effect_cache.py``). The
+        # residue column is additive and key-merged, and an ABSENT key is the
+        # third state — every verdict written before this existed reads as
+        # not_determined, never as an unseeded probe with no caller.
+        PROVING_EXECUTION_KEY: residue_payload(
+            caller=principal,
+            target=contract_address,
+            calldata=used.calldata if used is not None else calldata,
+            probe_label=used.label if used is not None else "value_probe",
+            succeeded=observed.success,
+            block_number=tr.get("block_number"),
+            block_source=tr.get("block_source"),
+            chain_id=ctx.chain_id,
+            tier=TIER_CALL,
+            # Earned negatives, not defaults: no attempt landed means the proving
+            # call ran with no seeded input and no balance override, which the
+            # unseeded probe's own success proves.
+            input_seeded=used is not None,
+            contract_balance_seeded=used is not None and used.contract_balance_seeded,
+        )
+    }
     if concrete_dest is not None:
         concrete["destination"] = concrete_dest
     if not value_moved and shape != SHAPE_CALLER_ARBITRARY:
