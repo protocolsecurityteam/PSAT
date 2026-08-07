@@ -17,7 +17,7 @@ describe("fold — reconstruction of the published grade", () => {
   it("reproduces the document's λ to 4dp", () => {
     // The pin that makes every counterfactual on this page trustworthy: if the
     // fold drifts from the producer's, the modeled recoveries are fiction.
-    expect(lambdaOf(FINDINGS)).toBe(54.7638);
+    expect(lambdaOf(FINDINGS)).toBe(73.2508);
     expect(lambdaOf(FINDINGS)).toBe(ETHERFI.grade_lambda);
   });
 
@@ -30,9 +30,9 @@ describe("fold — reconstruction of the published grade", () => {
   it("ranks by raw points descending, ties by document order", () => {
     const ranked = rankedFindings(FINDINGS);
     expect(ranked.map((r) => r.index).slice(0, 5)).toEqual([0, 1, 2, 3, 4]);
-    expect(ranked[0].raw).toBe(20.25);
-    expect(ranked[1].raw).toBe(20.25);
-    expect(ranked[1].net).toBe(12.15);
+    expect(ranked[0].raw).toBe(14.7);
+    expect(ranked[1].raw).toBe(10.5);
+    expect(ranked[1].net).toBe(6.3);
   });
 
   it("folds an empty population to a clean 100", () => {
@@ -77,37 +77,39 @@ describe("fold — an unwitnessed raw refuses the reconstruction", () => {
 describe("fold — counterfactuals", () => {
   it("recovers more than the removed nets, because rank decay promotes survivors", () => {
     const { before, after, recovery } = recoveryFrom(FINDINGS, [0, 1]);
-    expect(before).toBe(54.7638);
-    expect(after).toBe(64.3437);
-    expect(recovery).toBe(9.5799);
-    // The nets of the two removed rows sum to 32.4 — the naive answer, and the
-    // wrong one by more than 22 points in the other direction.
+    expect(before).toBe(73.2508);
+    expect(after).toBe(84.0295);
+    expect(recovery).toBe(10.7787);
+    // The nets of the two removed rows sum to 21 — the naive answer, and the
+    // wrong one by more than 10 points in the other direction.
     const naive = FINDINGS[0].net_points_lambda + FINDINGS[1].net_points_lambda;
-    expect(naive).toBe(32.4);
+    expect(naive).toBe(21);
     expect(recovery).toBeLessThan(naive);
     expect(lambdaWithout(FINDINGS, [0, 1])).toBe(after);
   });
 
   it("prices each credited principal's strength as a λ delta", () => {
     // Pinned against the approved prototype's protection column.
-    expect(protectionDelta(FINDINGS, 7)).toBe(41.8457);
-    expect(protectionDelta(FINDINGS, 4)).toBe(23.3333);
-    expect(protectionDelta(FINDINGS, 2)).toBe(11.1);
-    expect(protectionDelta(FINDINGS, 3)).toBe(11.1);
+    expect(protectionDelta(FINDINGS, 0)).toBe(27.3);
+    expect(protectionDelta(FINDINGS, 1)).toBe(17.82);
+    expect(protectionDelta(FINDINGS, 6)).toBe(0.9305);
+    expect(protectionDelta(FINDINGS, 7)).toBe(0.9305);
   });
 
   it("re-ranks the weakened finding rather than scaling its net in place", () => {
-    // finding 7 is rank 7 today; at weakness 1.0 its raw is 60 and it takes
-    // rank 0. Scaling its own net would have moved λ by 1.5 points.
-    expect(lambdaAtWeaknessOne(FINDINGS, 7)).toBe(12.9181);
+    // finding 7 is rank 7 today; at weakness 1.0 its raw rises from 4.95 to 9
+    // and it takes a rank above four of the rows now ahead of it. Scaling its
+    // own net in place would have moved λ by a tenth of a point.
+    expect(lambdaAtWeaknessOne(FINDINGS, 7)).toBe(72.3203);
     expect(rankedFindings(FINDINGS)[7].index).toBe(7);
   });
 
   it("has no protection delta to report for an already-unconditional principal", () => {
-    // weakness 1.0 (anyone) and weakness 0.9 (EOA above the ceiling) still
-    // return a number only when there is credited strength to remove.
-    expect(lambdaAtWeaknessOne(FINDINGS, 10)).toBeNull();
-    expect(protectionDelta(FINDINGS, 10)).toBeNull();
+    // weakness 1.0 is "anyone": there is no credited strength to remove, so
+    // both counterfactuals refuse rather than returning the unchanged λ.
+    expect(FINDINGS[15].weakness).toBe(1.0);
+    expect(lambdaAtWeaknessOne(FINDINGS, 15)).toBeNull();
+    expect(protectionDelta(FINDINGS, 15)).toBeNull();
     expect(protectionDelta([{ raw_points: 1 }], 0)).toBeNull();
   });
 });

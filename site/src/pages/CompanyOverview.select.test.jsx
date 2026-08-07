@@ -29,12 +29,13 @@ vi.mock("../ProtocolSurface.jsx", () => ({
 
 const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
 const SECOND_TARGET = "0x917cee801a67f933f2e6b33fc0cd1ed2d5909d88";
-const CONTROLLER = "0x2322ba43eff1542b6a7baed35e66099ea0d12bd1";
-// The row-0 host — the contract the capability's function actually lives on.
-const HOST = "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198";
+const CONTROLLER = "0xf8553c8552f906c19286f21711721e206ee4909e";
+// The row's single host — the contract the capability's function actually
+// lives on, and NOT the first contract its reach lands on.
+const HOST = "0x989468982b08aefa46e37cd0086142a86fa466d7";
 
-// Row 0's example function is `setAuthority`, and its capability reaches
-// SEVEN contracts. Two of them carry contract rows here, so "the page asked
+// The row's example function is `setAuthority`, and its capability reaches
+// TWELVE contracts. Two of them carry contract rows here, so "the page asked
 // for the first reached contract as the function's host" is a distinguishable
 // wrong answer rather than the only answer the fixture can express.
 function installMocks() {
@@ -78,8 +79,14 @@ async function openBreakdown(user) {
   await user.click(await screen.findByRole("button", { name: /Full score breakdown/i }));
 }
 
+// The row these cases need has ONE host and a wider reach set, so a target
+// click has a route to carry. It is row 5 of the published ranking; the pin
+// below fails loudly if the ranking moves it rather than silently testing some
+// other row's shape.
+const ROW = 5;
+
 function firstRow() {
-  return document.querySelector(".sc-frow");
+  return document.querySelectorAll(".sc-frow")[ROW];
 }
 
 describe("CompanyOverview — score entities select on the embedded surface", () => {
@@ -103,7 +110,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     // directly instead of asking the graph to resolve the bare name.
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
-      contractAddress: "0x7c12c550fe8857380b8f5a9e55d9145a0d7a7198",
+      contractAddress: HOST,
       functionSignature: "setAuthority",
       highlight: { functionSignature: "setAuthority", controller: CONTROLLER },
     });
@@ -115,7 +122,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0x2322…2bd1/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
     expect(selectExample).toHaveBeenCalledWith({
       chain: "ethereum",
       contractAddress: CONTROLLER,
@@ -146,7 +153,7 @@ describe("CompanyOverview — score entities select on the embedded surface", ()
     const user = userEvent.setup();
     render(<CompanyOverview companyName="etherfi" onNavigateToSurface={() => {}} />);
     await openBreakdown(user);
-    await user.click(within(firstRow()).getByRole("button", { name: /0x2322…2bd1/ }));
+    await user.click(within(firstRow()).getByRole("button", { name: /0xf855…909e/ }));
     // The principal card is the whole answer to "who is this" — there is no
     // function row on it to pair with.
     expect(selectExample.mock.calls[0][0]).not.toHaveProperty("highlight");
