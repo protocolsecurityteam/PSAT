@@ -388,6 +388,8 @@ class _ComposedMagnitude:
             # licensed it. Published beside the comparison it is decided from
             # rather than left to be inferred from whether a figure is present.
             "arm_taken": self.arm_taken,
+            # §7.2 arm 1's caller conjunct, evaluated rather than left implicit.
+            "gate_claim": _gate_claim(self.chain, self.execution),
             # The route the proof took is republished as this entry's own only
             # where the deletability join proved this principal can author the
             # destination's calldata itself. The basis names the row that proved
@@ -2409,8 +2411,14 @@ def _row_value(
     licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
     refusals_out = dict(sorted(refused_composed.items()))
     withheld_out = tuple(withheld_composed[key] for key in sorted(withheld_composed))
+    # §7.2 arm 1's conjunct, counted over every entry this row publishes —
+    # republished and withheld alike, because the gate claim is published on
+    # both and the conjunct qualifies it on both.
+    gate_claims = _counted(
+        _gate_claim(entry.chain, entry.execution)["state"] for entry in (*composition.values(), *withheld_out)
+    )
     composition_report = _composition_report(
-        composition, composition_census, dict(composition_refusals), withheld_out, refusals_out
+        composition, composition_census, dict(composition_refusals), withheld_out, refusals_out, gate_claims
     )
     if not per_entity:
         basis = "proven_no_reach" if proven_no_reach and not undetermined else "not_determined"
@@ -2499,6 +2507,7 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
         "composed_withheld_by_deletability",
         "composed_withheld_by_arm",
         "composed_withheld_by_reason",
+        "gate_claim_by_state",
     )
 
     def roll(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2593,6 +2602,7 @@ def _composition_report(
     refusals: dict[str, int],
     withheld: tuple[_WithheldComposition, ...],
     refused_magnitudes: dict[str, int],
+    gate_claims: dict[str, int],
 ) -> dict[str, Any]:
     """What composition proved, and — in the same object — what it refused.
 
@@ -2624,6 +2634,11 @@ def _composition_report(
         "composed_withheld_by_deletability": refused_magnitudes,
         "composed_withheld_by_arm": _counted(record.arm for record in withheld),
         "composed_withheld_by_reason": _counted(record.reason for record in withheld),
+        # §7.2 arm 1's caller conjunct over every entry this row publishes. An
+        # entry the proof was admitted for a DIFFERENT caller at keeps its gate
+        # claim on the act-as witness and is counted apart, so "the gate claim
+        # transferred" is never a silent default.
+        "gate_claim_by_state": gate_claims,
         # Chain length is unbounded by the rule and bounded by the corpus, and a
         # reader has no other way to see the day it grows. 1 is a direct call
         # from the seized node; 2 is the first chain that traverses a node the
@@ -2671,7 +2686,12 @@ def _composition_report(
             "route they publish is not the route the proof took and nothing proved this "
             "principal could have issued the proven call itself. They keep their gate claim and "
             "their execution record and are listed per row under "
-            "reach_composed_magnitudes_withheld"
+            "reach_composed_magnitudes_withheld. gate_claim_by_state is a DIFFERENT axis again and "
+            "cuts across both populations: it says, per entry, whether the execution that proved "
+            "the destination's figure was admitted for the caller this entry's chain names. Where "
+            "it was not, the gate claim rests on the act-as witness alone and says so — an "
+            "authorization check reads msg.sender, so a proof admitted for another address does "
+            "not establish this one"
         ),
     }
 
@@ -2842,7 +2862,9 @@ class _WithheldComposition:
                 claimed_target=self.chain[-1].destination if self.chain else None,
                 claimed_selector=self.chain[-1].calling_selector if self.chain else None,
             ),
-            # The gate claim, which survives the refusal in full.
+            # The gate claim, which survives the refusal — qualified by its own
+            # caller conjunct rather than by the arm that took the figure.
+            "gate_claim": _gate_claim(self.chain, self.execution),
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
             "route_classification": self.route.as_json(),
@@ -2853,9 +2875,12 @@ class _WithheldComposition:
                 "call the probe made directly to the destination; what this entry claims is a "
                 "route through an intermediate, and the two are compared under route_comparison "
                 "rather than assumed equal. The gate claim survives that difference — an "
-                "authorization check reads msg.sender and msg.sig and no argument, so a route "
+                "authorization check reads msg.sender and msg.sig and no ARGUMENT, so a route "
                 "the proof did not take says nothing about it — and the act_as_chain above is "
-                "published in full. The magnitude does not survive it: route_classification "
+                "published in full. Whether the proof was admitted for THIS caller is a separate "
+                "question and is answered separately, under gate_claim: a different caller is not "
+                "covered by that argument, because msg.sender is what the check reads. The "
+                "magnitude does not survive either: route_classification "
                 "names what the traversed body does to the destination's arguments, and "
                 "authority_deletability names whether this principal could have issued the "
                 "proven call itself. Neither answered in favour of the figure, so no figure is "
@@ -2863,6 +2888,18 @@ class _WithheldComposition:
                 "moves nothing, only that what it moves is not determined by this evidence"
             ),
         }
+
+
+def _gate_claim(chain: tuple[P.ActAsStep, ...], execution: EX.ProvingExecution) -> dict[str, Any]:
+    """§7.2 arm 1's conjunct, EVALUATED, for one entry.
+
+    The arm is "gate claims transfer ON CALLER MATCH", and the conjunct is not
+    satisfied by publishing ``caller_matches`` and leaving a reader to apply it:
+    an entry that says nothing about the comparison reads as one where it
+    passed. So the outcome is published under its own three-state token, on the
+    republished entries and the withheld ones alike, and it is counted per row.
+    """
+    return EX.gate_claim(execution, claimed_caller=chain[-1].caller if chain else None)
 
 
 def _admit_composed(
@@ -2881,10 +2918,17 @@ def _admit_composed(
 
     The arms, in the order they are asked:
 
-    1. **The gate claim transfers, always.** It is not one of the branches
-       below: every outcome publishes the act-as chain, because an authorization
-       check reads ``msg.sender`` and ``msg.sig`` and no argument, so the route
-       the proof took is irrelevant to it.
+    1. **The gate claim transfers ACROSS A ROUTE MISMATCH, and its caller
+       conjunct is evaluated separately.** It is not one of the branches below:
+       every outcome publishes the act-as chain, because an authorization check
+       reads ``msg.sender`` and ``msg.sig`` and no ARGUMENT, so a proof that
+       entered by a different path still exercised the same check. That argument
+       does NOT carry across a different CALLER — ``msg.sender`` is exactly what
+       the check reads — so the caller half is asked per entry by
+       :func:`_gate_claim` and published as its own three-state outcome beside
+       the chain. A mismatch qualifies the claim; it does not retract it, because
+       the chain is the act-as plane's witness and is established without any
+       transcript.
     2. **The magnitude is withheld** where the figure's own execution could not
        be reached at all (a transport fault — ``ARM_WITHHELD``), or where the
        body the chain traverses is witnessed authoring the destination call's

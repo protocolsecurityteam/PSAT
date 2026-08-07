@@ -627,6 +627,97 @@ def route_comparison(
     }
 
 
+# §7.2 arm 1's CONJUNCT, as a published outcome rather than a field a consumer
+# has to evaluate for itself.
+#
+# The arm reads "gate claims transfer ON CALLER MATCH; routing is irrelevant to
+# them", and the two halves have different justifications that must not be
+# swapped. Routing is irrelevant because ``isAuthorized(msg.sender, msg.sig)``
+# reads no ARGUMENT — so a proof that entered the destination by a different
+# path still exercised the same check. That argument says nothing whatever about
+# a different CALLER: ``msg.sender`` is precisely what the check reads, so an
+# execution admitted for address X establishes the gate for X and for nobody
+# else. Re-using the routing argument to cover a caller mismatch would publish a
+# claim broader than the execution proves, which is the defect class the whole
+# execution record exists to close.
+#
+# What a mismatch does NOT do is retract the act-as chain. The chain is the
+# ACT-AS PLANE's witness — a state variable read on-chain, or the destination's
+# own access-control list naming the caller by an enumerated role — and it is
+# established without reference to any transcript. So the honest outcome is a
+# qualification and not a withdrawal: the chain stands on its own witness, and
+# what the execution adds to it (corroboration by a call the destination
+# actually admitted) is present, absent or unasked, and is said out loud.
+GATE_CLAIM_CORROBORATED = "corroborated"
+GATE_CLAIM_NOT_CORROBORATED = "not_corroborated"
+GATE_CLAIM_NOT_DETERMINED = "not_determined"
+GATE_CLAIM_STATES = (GATE_CLAIM_CORROBORATED, GATE_CLAIM_NOT_CORROBORATED, GATE_CLAIM_NOT_DETERMINED)
+
+GATE_CLAIM_REASON_SAME_CALLER = "the_proving_execution_was_admitted_for_the_caller_this_entry_claims"
+GATE_CLAIM_REASON_OTHER_CALLER = "the_proving_execution_was_admitted_for_a_different_caller"
+GATE_CLAIM_REASON_NOT_COMPARED = "no_execution_record_reached_this_entry_to_compare_a_caller_against"
+
+# A field-description under ruling 7: true of every carrier, and it asserts
+# nothing about the row it rides on. What the row DOES assert is composed per
+# entry below, out of the two addresses.
+_GATE_CLAIM_INVARIANT = (
+    " The act-as chain beside this is the ACT-AS PLANE's own witness and is not retracted by "
+    "anything here: this block says only what the proving execution adds to it."
+)
+
+
+def gate_claim(execution: ProvingExecution, *, claimed_caller: str | None) -> dict[str, Any]:
+    """Whether the proving execution corroborates the caller this entry claims.
+
+    Three states and no fall-through, one per value ``caller_matches`` can take.
+    The reading is DERIVED — a mismatch names both addresses, because "a
+    different caller" is a claim about this row and a constant sentence could
+    not name which one.
+    """
+    matches = _addr_matches(claimed_caller, execution.caller)
+    if matches is None:
+        return {
+            "state": GATE_CLAIM_NOT_DETERMINED,
+            "reason": GATE_CLAIM_REASON_NOT_COMPARED,
+            "claimed_caller": claimed_caller,
+            "proven_caller": execution.caller,
+            "reading": (
+                "no caller could be compared: either no execution record reached this entry or it "
+                "names no caller, so whether the destination admitted THIS caller is not "
+                "determined here. It is not a match and not a mismatch." + _GATE_CLAIM_INVARIANT
+            ),
+        }
+    if matches:
+        return {
+            "state": GATE_CLAIM_CORROBORATED,
+            "reason": GATE_CLAIM_REASON_SAME_CALLER,
+            "claimed_caller": claimed_caller,
+            "proven_caller": execution.caller,
+            "reading": (
+                f"the probe was admitted at the destination as {execution.caller}, which is the "
+                "caller this entry's last act-as step names, so the destination's authorization "
+                "check was exercised for the very address the chain claims. The route it took to "
+                "get there differs and is irrelevant to this: an authorization check reads "
+                "msg.sender and msg.sig and no argument." + _GATE_CLAIM_INVARIANT
+            ),
+        }
+    return {
+        "state": GATE_CLAIM_NOT_CORROBORATED,
+        "reason": GATE_CLAIM_REASON_OTHER_CALLER,
+        "claimed_caller": claimed_caller,
+        "proven_caller": execution.caller,
+        "reading": (
+            f"the probe was admitted at the destination as {execution.caller}, and this entry's "
+            f"last act-as step names {claimed_caller}. The execution therefore establishes the "
+            "destination's authorization check for the address it impersonated and for no other — "
+            "msg.sender is exactly what that check reads, so the argument that routing is "
+            "irrelevant does not carry across a caller it never used. The chain's own claim about "
+            "this caller rests on the act-as witness alone and is UNCORROBORATED by any execution "
+            "here." + _GATE_CLAIM_INVARIANT
+        ),
+    }
+
+
 def _addr_matches(claimed: str | None, recorded: str | None) -> bool | None:
     if not isinstance(claimed, str) or not isinstance(recorded, str):
         return None
