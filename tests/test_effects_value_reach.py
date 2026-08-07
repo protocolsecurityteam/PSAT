@@ -30,6 +30,7 @@ from services.effects.simulate import SimCallResult, SimResult
 from tests.conftest import ADDR, requires_postgres
 from tests.test_effects_harness import RecordingStore, transfer_log
 from tests.test_effects_selection import _balance, _contract, _fn, _principal, _protocol
+from utils.execution_record import PROVING_EXECUTION_KEY
 
 CTX = SimContext(chain_id=1, block=1000, hardfork="prague")
 
@@ -736,13 +737,20 @@ def test_a_fully_priced_two_holder_move_is_untouched_by_the_pair_keying():
     have a priced row. Every pair that moved is priced, so this is the measured branch
     and the payload is exactly what it was before the keying changed: neither new key
     appears, because ``reach_determined: True`` already says every named holder was
-    priced. Asserted as a whole-dict equality so a new key cannot slip in unnoticed."""
+    priced. Asserted as a whole-dict equality so a new key cannot slip in unnoticed.
+
+    The proving execution is popped rather than listed: it is not a REACH key and
+    is written on every proven value_out row whatever branch the reach took, so
+    folding it into the dict below would make this control assert the presence of
+    something that is not this branch's own output."""
     logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, HOLDER, PAYEE, 7))
     moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0), AssetHolding(HOLDER, TOKEN, _VAULT_WEETH_USD))
     eff = _value_out([moved], holders=holdings, floor=0.0, tvl=3_322_211_996.00)
 
-    assert eff.concrete == {
+    reach = dict(eff.concrete)
+    assert reach.pop(PROVING_EXECUTION_KEY)["target"] == CONTRACT.lower()
+    assert reach == {
         "destination": PAYEE,
         "observed_reach_holders": sorted([CONTRACT, HOLDER]),
         "observed_reach_assets": [TOKEN],
