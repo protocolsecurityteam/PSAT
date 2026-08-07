@@ -19,6 +19,7 @@ yields ``severity = not_determined`` and the row never enters the grade.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -68,6 +69,8 @@ from utils.scoring_status import (
     WITNESS_TIER_POLICY_DERIVED,
     WITNESS_TIER_STANDARD_EXACT,
 )
+
+logger = logging.getLogger(__name__)
 
 # Gate envelopes every signal carries, so the fold can read them without a
 # ``dict.get`` default standing in for an unread witness.
@@ -175,6 +178,11 @@ class _ContractFacts:
     # answer for, and charging it would both invent reach and spend exposure room
     # belonging to an entity in the perimeter.
     protocol_entities: set[str] = field(default_factory=set)
+    # How to read a stored transcript, for a verdict whose ``observed_residue``
+    # predates the execution record. ``None`` is the in-memory feeding mode with
+    # no session to read from, which reads as "not derivable here", never as
+    # "there is no execution".
+    transcripts: _TranscriptReader | None = None
 
 
 def distill_job_signals(session: Session, job: Any) -> dict[int, list[FunctionSignal]]:
@@ -209,6 +217,87 @@ def distill_contract_signals(session: Session, contract: Any, *, job_id: Any) ->
 # ---------------------------------------------------------------- plane reads
 
 
+# Transcript bodies, keyed by the ``(job_id, artifact_name)`` a pointer resolves
+# to. An artifact body is immutable once written — the key is the identity of a
+# stored object, not of a mutable row — so caching it across contracts inside one
+# score run cannot make the fold read two different answers to one question
+# (inv. 11). Cleared by :func:`clear_transcript_cache` for tests that stand up a
+# fresh bucket under the same keys.
+_TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def clear_transcript_cache() -> None:
+    """Drop the process-level transcript cache. For tests, which reuse keys."""
+    _TRANSCRIPT_CACHE.clear()
+
+
+class _TranscriptReader:
+    """Reads the execution behind a verdict out of the transcript it points at.
+
+    The record belongs on ``effect_verdicts.observed_residue`` and is written
+    there at production time. Every verdict produced before that write existed
+    carries none — which is not a statement that no call was made, because the
+    transcript the verdict already points at holds that call verbatim. This
+    reader recovers it, so a figure that CAN name its execution does, and the
+    typed refusal is reserved for the ones that genuinely cannot.
+
+    The database is not written. Nothing here backfills; the derivation happens
+    on the read path and is discarded with the score run.
+
+    Every failure to reach the body is its own typed reason, and they are not
+    interchangeable: an artifact row that does not exist, a row naming no
+    storage key, and a transport error are three different things to a reader
+    deciding whether to look again.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def execution(self, *, transcript_ptr: Any, effect_verdict_id: int | None) -> EX.ProvingExecution:
+        parts = EX.pointer_parts(transcript_ptr)
+        if parts is None:
+            return EX.not_determined(
+                EX.REASON_PTR_UNRESOLVABLE,
+                transcript_ptr=transcript_ptr if isinstance(transcript_ptr, str) else None,
+                effect_verdict_id=effect_verdict_id,
+            )
+        blob = self._body(parts)
+        if isinstance(blob, str):
+            return EX.not_determined(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
+        return EX.from_transcript(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
+
+    def _body(self, parts: tuple[str, str]) -> Any:
+        """The transcript body, or the typed reason token it could not be read."""
+        if parts in _TRANSCRIPT_CACHE:
+            return _TRANSCRIPT_CACHE[parts]
+        from db.models import Artifact
+        from db.queue import _artifact_row_to_value
+        from db.storage import StorageKeyAbsent, StorageKeyMissing
+
+        job_id, name = parts
+        try:
+            row = self._session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).one_or_none()
+            if row is None:
+                body: Any = EX.REASON_TRANSCRIPT_UNSTORED
+            else:
+                # The STORED key, never a constructed one: the prefix is per-job
+                # on this data (345 keys under one, 34 under another) and a
+                # reader that builds the key would miss a third of the corpus and
+                # report it as absence.
+                body = _artifact_row_to_value(row)
+        except StorageKeyAbsent:
+            body = EX.REASON_STORAGE_KEY_MISSING
+        except StorageKeyMissing:
+            body = EX.REASON_TRANSCRIPT_UNSTORED
+        except Exception:
+            # A transport failure says nothing about the call, so it is its own
+            # reason and invites a retry rather than asserting an absence.
+            logger.warning("transcript body unreadable for %s::%s", job_id, name, exc_info=True)
+            body = EX.REASON_FETCH_FAILED
+        _TRANSCRIPT_CACHE[parts] = body
+        return body
+
+
 def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _ContractFacts:
     from db.models import ControlGraphNode, ControllerValue, EffectiveFunction, EffectVerdict, FunctionPrincipal
 
@@ -226,6 +315,7 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         chain=chain,
         address=address,
         functions=functions,
+        transcripts=_TranscriptReader(session),
     )
     function_ids = [f.id for f in functions]
     if function_ids:
@@ -864,10 +954,14 @@ def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict
     not tell a row that predates the record from a transcript that failed to
     store.
 
-    Read off the claim witness the effects→claims bridge projects, never by
-    fetching the transcript: the record is persisted at production time on
-    ``effect_verdicts.observed_residue`` precisely so this layer does not have to
-    reach into object storage to learn who called.
+    Read off the claim witness the effects→claims bridge projects wherever the
+    record is persisted — that is the cheap path and the one every future verdict
+    takes. Where the residue carries none, the verdict's own transcript is read
+    (:class:`_TranscriptReader`), because the call IS in there and "not written
+    to the column" is not "not determined". Every verdict in the reference corpus
+    predates the write, so the fallback is the whole of the corpus's coverage
+    today and the fast path is the whole of it tomorrow. A fault reaching the
+    transcript keeps its own reason and is NOT collapsed into the residue's.
 
     Which entry is read is :func:`_cited_verdict_entry`'s decision and NOT this
     function's, so the execution published here and the ``effect_verdict_id`` the
@@ -890,11 +984,14 @@ def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict
         record = EX.not_determined(EX.REASON_VERDICT_NOT_LOCATED, effect_verdict_id=verdict_id)
     else:
         observed = witness.get("observed") or {}
+        transcript_ptr = getattr(verdict, "transcript_ptr", None)
         record = EX.from_residue(
             observed.get(PROVING_EXECUTION_KEY),
-            transcript_ptr=getattr(verdict, "transcript_ptr", None),
+            transcript_ptr=transcript_ptr,
             effect_verdict_id=verdict_id,
         )
+        if not record.is_recorded and facts.transcripts is not None:
+            record = facts.transcripts.execution(transcript_ptr=transcript_ptr, effect_verdict_id=verdict_id)
     state = EX.GATE_STATE_RECORDED if record.is_recorded else EX.GATE_STATE_NOT_RECORDED
     return Tri.proven(state, record.as_json())
 
