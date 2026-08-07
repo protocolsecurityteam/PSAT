@@ -1,21 +1,13 @@
 """§14 case 8 — no constant data-claim.
 
-A published string that DESCRIBES what a field means may be a constant; it is
-documentation and the subject is the code. A string that makes a CLAIM ABOUT THE
-DATA must be derived from the carrier's own data, because a constant one can be —
-and on this document was — false for the row carrying it.
-
-Every test below is the same shape: two carriers whose data differs must publish
-different strings. That is the property a constant cannot have, which is what
-makes each assertion a mutation test in disguise — de-interpolate the sentence
-back into an ``ast.Constant`` and the ``!=`` fails. The end of the module walks a
-whole folded document and asserts that no narration names a concept the document
-no longer publishes, because a cross-reference is a claim that the field exists.
-
-Case 7's subsumed parity applies here too: the composed and withheld readings are
-produced by ``_ComposedMagnitude.as_json`` / ``_WithheldComposition.as_json``,
-which have no findings/subsumed branch, and the document-level test asserts the
-claim over both populations.
+A published string that DESCRIBES what a field means may be a constant; one that
+makes a CLAIM ABOUT THE DATA must be derived from the carrier's own data,
+because a constant one can be — and on this document was — false for the row
+carrying it. Every test below is the same shape: two carriers whose data differs
+must publish different strings, which is the property a constant cannot have.
+The end of the module walks a whole folded document and asserts that no
+narration names a concept the document no longer publishes, over findings and
+subsumed rows alike (case 7's parity clause).
 """
 
 from __future__ import annotations
@@ -34,8 +26,6 @@ from tests.test_scoring_redteam import (
     EOA,
     KEY_C,
     KEY_V,
-    _composing_case,
-    _composing_principals,
     _composing_signals,
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
     proven,
@@ -47,10 +37,16 @@ from utils import execution_record as EX
 _AUTHORS_THE_AMOUNT_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "param_derived", "unconstrained_proven"),)
 _DELETES_THE_VAULT_AUTHORITY = ((KEY_V, EOA, "setAuthority"),)
 
-
-# ---------------------------------------------------------------------------
 # Builders. Each returns the smallest carrier that can hold the string.
-# ---------------------------------------------------------------------------
+
+_NO_PREDICATE_TEXT = P.DestinationPredicates(
+    state="column_holds_no_array",
+    function_id=None,
+    function_name=None,
+    descriptions=None,
+    entries_stored=None,
+    functions_matching=0,
+)
 
 
 def _predicates(*descriptions: str) -> P.DestinationPredicates:
@@ -75,9 +71,15 @@ def _recorded() -> EX.ProvingExecution:
     )
 
 
-def _composed(*, witnessed_usd: float, sheet_usd: float | None) -> FOLD._ComposedMagnitude:
+def _composed(
+    *,
+    witnessed_usd: float,
+    sheet_usd: float | None,
+    entity: str = KEY_V,
+    predicates: P.DestinationPredicates | None = None,
+) -> FOLD._ComposedMagnitude:
     return FOLD._ComposedMagnitude(
-        entity=KEY_V,
+        entity=entity,
         selector=COMPOSED_SELECTOR,
         function="exit",
         witness_state="proven_floor",
@@ -85,7 +87,9 @@ def _composed(*, witnessed_usd: float, sheet_usd: float | None) -> FOLD._Compose
         usd=(witnessed_usd if sheet_usd is None else min(witnessed_usd, sheet_usd)),
         sheet_usd=sheet_usd,
         chain=(),
-        predicates=_predicates("require(bool)(isAuthorized(msg.sender,msg.sig))"),
+        predicates=(
+            predicates if predicates is not None else _predicates("require(bool)(isAuthorized(msg.sender,msg.sig))")
+        ),
         execution=_recorded(),
     )
 
@@ -183,15 +187,11 @@ def _tied_findings(shared: bool) -> list[dict[str, Any]]:
     ]
 
 
-# ---------------------------------------------------------------------------
 # exposure_order_tie.reading — the split the order made, or the earned empty
-# ---------------------------------------------------------------------------
 
 
 def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_rows_that_do_not():
-    """The old constant asserted that the order decided "its share of any entity
-    it holds in common with the tied rows" and that "the split among them is
-    order-determined" — on a row sharing nothing there is no share and no split,
+    """The old constant asserted a share and a split on a row sharing nothing,
     which was every carrier in the document."""
     shared = _tied_findings(shared=True)
     alone = _tied_findings(shared=False)
@@ -209,25 +209,22 @@ def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_row
     # row's own rather than a word standing in for it.
     assert "1 entity(ies) it holds in common" in shared_reading
     assert "split among them is order-determined" in shared_reading
-    # And where nothing is shared the row publishes the EARNED empty rather than
-    # a quieter version of the same claim.
+    # Where nothing is shared the row publishes the EARNED empty.
     assert "no exposure budget was split by the order here" in alone_reading
     assert "split among them" not in alone_reading
 
 
 def test_the_order_tie_reading_scales_with_the_number_of_shared_entities():
-    """Three carriers, three strings: a sentence that names a count cannot be
-    written once."""
+    """Three carriers, three strings: a sentence naming a count cannot be written
+    once."""
     readings = [FOLD._order_tie_reading(list(names), 1) for names in ([], ["a"], ["a", "b"])]
     assert len(set(readings)) == 3
 
 
 def test_the_order_tie_reading_says_which_side_of_the_split_this_row_is_on():
     """B1-R S2. The first row in a tie group has no tied row AHEAD of it and is
-    charged FIRST — "the earlier row consumes the exposure budget first and this
-    row is charged the remainder" is false of exactly the carrier
-    ``position_in_tie`` identifies, one field away in the same block. Asserted as
-    truth per position, not as a substring."""
+    charged FIRST, so "the earlier row consumes the budget first" is false of
+    exactly the carrier ``position_in_tie`` identifies one field away."""
     first = FOLD._order_tie_reading(["a"], 0)
     second = FOLD._order_tie_reading(["a"], 1)
     third = FOLD._order_tie_reading(["a"], 2)
@@ -235,14 +232,11 @@ def test_the_order_tie_reading_says_which_side_of_the_split_this_row_is_on():
     # The mutation: dropping position_in_tie from the derivation makes these equal.
     assert len({first, second, third}) == 3
 
-    # Position 0 is charged first and never described as taking a remainder.
     assert "FIRST in the tie (position_in_tie 0)" in first
     assert "consumes that shared exposure budget before any row tied with it" in first
     assert "this row is charged what is left" not in first
     assert "row(s) ahead" not in first
 
-    # Every later position names how many rows are ahead of it, and is the one
-    # charged the remainder.
     assert "the 1 row(s) ahead of this one in the tie (position_in_tie 1)" in second
     assert "the 2 row(s) ahead of this one in the tie (position_in_tie 2)" in third
     for later in (second, third):
@@ -261,17 +255,14 @@ def test_a_real_tie_group_publishes_the_position_it_also_prints():
         assert block["reading"] == FOLD._order_tie_reading(block["shared_entities"], index)
 
 
-# ---------------------------------------------------------------------------
 # reach_composed_magnitudes[].reading — which ceiling actually bound the figure
-# ---------------------------------------------------------------------------
 
 
 def test_the_composed_reading_names_the_ceiling_that_actually_bound_the_figure():
     """V0-b's #8/#35. The constant said the dollars are "not the destination's
-    balance sheet" while ``bounded_by`` said ``destination sheet`` and
-    ``destination_sheet_usd`` equalled ``published_usd`` on six of the
-    twenty-eight kept entries — the document contradicting itself in two
-    adjacent keys."""
+    balance sheet" while ``bounded_by`` said ``destination sheet`` on six of the
+    twenty-eight kept entries — the document contradicting itself in two adjacent
+    keys."""
     by_witness = _composed(witnessed_usd=100.0, sheet_usd=900.0).as_json()
     by_sheet = _composed(witnessed_usd=900.0, sheet_usd=100.0).as_json()
 
@@ -287,8 +278,8 @@ def test_the_composed_reading_names_the_ceiling_that_actually_bound_the_figure()
 
 
 def test_a_composed_entry_with_no_sheet_at_all_reads_as_bound_by_its_witness():
-    """``sheet_not_determined`` is a third state, and the sentence for it may not
-    claim a sheet was compared and lost."""
+    """``sheet_not_determined`` is a third state, and its sentence may not claim
+    a sheet was compared and lost."""
     entry = _composed(witnessed_usd=100.0, sheet_usd=None).as_json()
     assert entry["sheet_not_determined"] is True
     assert entry["bounded_by"] == "flow.out witness"
@@ -296,17 +287,14 @@ def test_a_composed_entry_with_no_sheet_at_all_reads_as_bound_by_its_witness():
     assert "sheet_not_determined" in entry["reading"]
 
 
-# ---------------------------------------------------------------------------
 # reach_composed_magnitudes_withheld[].reading — the arm that withheld it
-# ---------------------------------------------------------------------------
 
 
 def test_the_withheld_reading_is_derived_from_the_arm_that_withheld_the_figure():
-    """The constant asserted "What was proven is a call the probe made directly
-    to the destination" and "Neither answered in favour of the figure". Both are
-    FALSE on the transport-fault arm: nothing was proven there, and
-    ``_admit_composed`` computes the deletability verdict BEFORE the fault
-    branch, so that entry can publish ``deletable`` beside the refusal."""
+    """The constant's two clauses are FALSE on the transport-fault arm: nothing
+    was proven there, and ``_admit_composed`` computes the deletability verdict
+    BEFORE the fault branch, so that entry can publish ``deletable`` beside the
+    refusal."""
     readings = {arm: _withheld_entry(arm).as_json()["reading"] for arm in FOLD._WITHHELD_ARM_READINGS}
     assert len(set(readings.values())) == 3
 
@@ -325,9 +313,7 @@ def test_the_withheld_reading_is_derived_from_the_arm_that_withheld_the_figure()
 
 
 def test_a_faulted_entry_that_the_join_licensed_does_not_read_as_a_join_refusal():
-    """The exercised carrier: a fault beside a proven deletability licence. The
-    sentence must not say the join answered against the figure, and it must not
-    say the licence releases it either."""
+    """The exercised carrier: a fault beside a proven deletability licence."""
     entry = _withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE).as_json()
     assert entry["authority_deletability"]["state"] == P.DELETABILITY_DELETABLE
     assert entry["published_usd"] is None
@@ -343,9 +329,7 @@ def test_an_unregistered_withholding_arm_cannot_reach_a_published_reading():
         _withheld_entry(FOLD.ARM_REPUBLISHED_DIRECT)
 
 
-# ---------------------------------------------------------------------------
 # value_at_stake_basis — the concept the document no longer publishes
-# ---------------------------------------------------------------------------
 
 
 def _basis(composed: dict[str, FOLD._ComposedMagnitude], ceiling: frozenset[str]) -> str:
@@ -363,35 +347,27 @@ def _basis(composed: dict[str, FOLD._ComposedMagnitude], ceiling: frozenset[str]
     )
 
 
+def _mixed_ceiling(with_text: int, without_text: int) -> tuple[dict[str, Any], frozenset[str]]:
+    """A ceiling-bearing row of ``with_text + without_text`` composed entries,
+    only the first group of which publishes extracted predicate text."""
+    composed: dict[str, Any] = {}
+    for index in range(with_text + without_text):
+        key = f"ethereum::0x{index:040x}"
+        composed[key] = _composed(
+            witnessed_usd=1.0,
+            sheet_usd=None,
+            entity=key,
+            predicates=None if index < with_text else _NO_PREDICATE_TEXT,
+        )
+    return composed, frozenset(composed)
+
+
 def test_the_ceiling_basis_counts_the_condition_texts_it_names():
     """A3 deleted ``caller_holding_precondition``; the basis kept saying "the
     precondition can put the true extraction below it" — a definite reference to
     a field the document does not contain. What replaces it is counted."""
-    with_text = _basis({KEY_V: _composed(witnessed_usd=1.0, sheet_usd=None)}, frozenset({KEY_V}))
-    without_text = _basis(
-        {
-            KEY_V: FOLD._ComposedMagnitude(
-                entity=KEY_V,
-                selector=COMPOSED_SELECTOR,
-                function="exit",
-                witness_state="proven_floor",
-                witnessed_usd=1.0,
-                usd=1.0,
-                sheet_usd=None,
-                chain=(),
-                predicates=P.DestinationPredicates(
-                    state="column_holds_no_array",
-                    function_id=None,
-                    function_name=None,
-                    descriptions=None,
-                    entries_stored=None,
-                    functions_matching=0,
-                ),
-                execution=_recorded(),
-            )
-        },
-        frozenset({KEY_V}),
-    )
+    with_text = _basis(*_mixed_ceiling(1, 0))
+    without_text = _basis(*_mixed_ceiling(0, 1))
 
     assert with_text != without_text
 
@@ -401,45 +377,12 @@ def test_the_ceiling_basis_counts_the_condition_texts_it_names():
     assert "no condition text was extracted" in without_text
 
 
-def _mixed_ceiling(with_text: int, without_text: int) -> tuple[dict[str, Any], frozenset[str]]:
-    """A ceiling-bearing row of ``with_text + without_text`` composed entries,
-    only the first group of which publishes extracted predicate text."""
-    composed: dict[str, Any] = {}
-    for index in range(with_text + without_text):
-        key = f"ethereum::0x{index:040x}"
-        composed[key] = FOLD._ComposedMagnitude(
-            entity=key,
-            selector=COMPOSED_SELECTOR,
-            function="exit",
-            witness_state="proven_floor",
-            witnessed_usd=1.0,
-            usd=1.0,
-            sheet_usd=None,
-            chain=(),
-            predicates=(
-                _predicates("require(bool)(isAuthorized(msg.sender,msg.sig))")
-                if index < with_text
-                else P.DestinationPredicates(
-                    state="column_holds_no_array",
-                    function_id=None,
-                    function_name=None,
-                    descriptions=None,
-                    entries_stored=None,
-                    functions_matching=0,
-                )
-            ),
-            execution=_recorded(),
-        )
-    return composed, frozenset(composed)
-
-
 def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
-    """B1-R S1. The one-entity carrier above pins the BRANCH and never the
-    COUNT: freezing the interpolation to "1 of those 1 figure(s)" left the suite
-    green while the document published that literal on rows carrying 11 and 2
-    figures. These carriers have M > 1 and N != M — the shapes the live corpus
-    actually holds (11/11 and 2/2) plus a mixed one no corpus row has — so a
-    frozen pair fails."""
+    """B1-R S1. The one-entity carrier above pins the BRANCH and never the COUNT:
+    freezing the interpolation to "1 of those 1 figure(s)" left the suite green
+    while the document published that literal on rows carrying 11 and 2 figures.
+    These carriers have M > 1 and N != M — the live shapes (11/11 and 2/2) plus a
+    mixed one no corpus row has — so a frozen pair fails."""
     eleven = _basis(*_mixed_ceiling(11, 0))
     two = _basis(*_mixed_ceiling(2, 0))
     mixed = _basis(*_mixed_ceiling(2, 3))
@@ -450,19 +393,15 @@ def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
 
     assert "travel with 11 of those 11 figure(s)" in eleven
     assert "travel with 2 of those 2 figure(s)" in two
-    # N < M: the numerator and the denominator are read from different fields
-    # and a single count standing in for both would hide the shortfall.
+    # N < M: numerator and denominator are read from different fields and a
+    # single count standing in for both would hide the shortfall.
     assert "travel with 2 of those 5 figure(s)" in mixed
     assert "travel with 1 of those 1 figure(s)" in one
-    # The numerator is not the denominator restated: on the mixed carrier the
-    # two must be different numbers or the shortfall disappears.
     assert "travel with 5 of those 5 figure(s)" not in mixed
     assert "travel with 2 of those 2 figure(s)" not in mixed
 
 
-# ---------------------------------------------------------------------------
 # act_as_composition.census.reading — the corpus count in a literal
-# ---------------------------------------------------------------------------
 
 
 def _rollup(exclusive: dict[str, float], composed_entities: list[str]) -> str:
@@ -489,18 +428,14 @@ def test_the_rollup_reading_counts_the_subsumed_entities_that_charge_a_top_row()
     assert "2 composed subsumed entity(ies) do so here" in two
     # The empty case is an earned negative, not silence.
     assert "no composed subsumed entity does so here" in none
-    # And the corpus characterisation is gone from all three.
     assert "honest shape of this corpus" not in none + one + two
 
 
-# ---------------------------------------------------------------------------
 # The deleted concepts, asserted over a whole folded document
-# ---------------------------------------------------------------------------
 
 
 def _authored_strings(node: Any, path: str = "") -> list[tuple[str, str]]:
-    """Every authored string in the published document, by ruling 7's scope —
-    the key names, not just ``reading``/``note``."""
+    """Every authored string in the published document, by ruling 7's scope."""
     keys = ("reading", "note", "basis", "chosen_by", "bound_kind", "fact", "value_at_stake_basis", "licensing")
     out: list[tuple[str, str]] = []
     if isinstance(node, dict):
@@ -530,45 +465,42 @@ _DEAD_CONCEPTS = (
 )
 
 
-def test_no_published_narration_names_a_concept_the_document_does_not_publish(fold):  # noqa: F811
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
+def _published_strings(document) -> list[tuple[str, str]]:
+    return _authored_strings(
+        {
+            "findings": document.findings,
+            "warnings": document.warnings,
+            "model_parameters": document.model_parameters,
+            "provenance": document.provenance,
+        }
     )
-    payload = {
-        "findings": document.findings,
-        "warnings": document.warnings,
-        "model_parameters": document.model_parameters,
-        "provenance": document.provenance,
-    }
-    strings = _authored_strings(payload)
+
+
+@pytest.fixture()
+def republishing_document(fold):  # noqa: F811
+    return CA.composed_document(
+        fold,
+        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
+        routes=_AUTHORS_THE_AMOUNT_AT_C,
+    )
+
+
+def test_no_published_narration_names_a_concept_the_document_does_not_publish(republishing_document):
+    strings = _published_strings(republishing_document)
     assert strings, "the walk found no authored string — the scope is wrong, not the document"
     for path, value in strings:
         for dead in _DEAD_CONCEPTS:
             assert dead not in value, f"{path} still names {dead!r}"
 
 
-def test_the_predicate_reading_claims_no_guard_it_did_not_check(fold):  # noqa: F811
+def test_the_predicate_reading_claims_no_guard_it_did_not_check(republishing_document):
     """Ruling 6.1 M1. "it INCLUDES the authorization guard" is an indicative
-    existential about this row's extracted list; the fold never checks it. A
-    modal states exactly what the code knows and survives every carrier."""
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        deletability=CA.deletability_plane(host=_DELETES_THE_VAULT_AUTHORITY),
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
-    )
-    payload = {
-        "findings": document.findings,
-        "warnings": document.warnings,
-        "model_parameters": document.model_parameters,
-        "provenance": document.provenance,
-    }
-    readings = [value for path, value in _authored_strings(payload) if path.endswith("destination_predicates.reading")]
+    existential about this row's extracted list; the fold never checks it."""
+    readings = [
+        value
+        for path, value in _published_strings(republishing_document)
+        if path.endswith("destination_predicates.reading")
+    ]
     assert readings
     for reading in readings:
         assert "it includes the authorization guard" not in reading
@@ -579,42 +511,18 @@ def test_the_predicate_reading_claims_no_guard_it_did_not_check(fold):  # noqa: 
         assert "(4)" not in reading
 
 
-# ---------------------------------------------------------------------------
 # The registries themselves, and case 7's subsumed parity
-# ---------------------------------------------------------------------------
 
 
 def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
     """A registry whose entries collapse to one string is a constant wearing a
-    dict. Both maps are keyed on a closed vocabulary and every key must move the
-    sentence."""
-    assert set(FOLD._WITHHELD_ARM_READINGS) == {
-        FOLD.ARM_WITHHELD,
-        FOLD.ARM_GATE_ONLY,
-        FOLD.ARM_NOT_DETERMINED,
-    }
+    dict; both maps are keyed on a closed vocabulary."""
+    assert set(FOLD._WITHHELD_ARM_READINGS) == {FOLD.ARM_WITHHELD, FOLD.ARM_GATE_ONLY, FOLD.ARM_NOT_DETERMINED}
     assert len(set(FOLD._WITHHELD_ARM_READINGS.values())) == len(FOLD._WITHHELD_ARM_READINGS)
     assert set(FOLD._COMPOSED_SOURCE_READINGS) == {"flow.out witness", "destination sheet"}
     assert len(set(FOLD._COMPOSED_SOURCE_READINGS.values())) == len(FOLD._COMPOSED_SOURCE_READINGS)
-    # Every arm the rule can take when it withholds has a sentence; the one it
-    # takes when it PUBLISHES has none, and reaching for it raises.
+    # The arm the rule takes when it PUBLISHES has no sentence; reaching for it raises.
     assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_READINGS
-
-
-def _second_capability_signals() -> list[Any]:
-    """The composing case under a weaker second capability on the same unit, so
-    one of the two rows is published under ``provenance.subsumed_rows``."""
-    weaker = sig(
-        claim_id="ownership.transfer",
-        function_name="transferOwnership",
-        selector="0xf2fde38b",
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        **proven(0.75),
-        **reaches(KEY_C),
-    )
-    return [*_composing_signals(), weaker]
 
 
 @pytest.mark.parametrize(
@@ -626,16 +534,25 @@ def _second_capability_signals() -> list[Any]:
     ids=["republished", "withheld"],
 )
 def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):  # noqa: F811
-    """§14 case 7 applied to case 8. ``_ComposedMagnitude.as_json`` and
+    """§14 case 7 applied to case 8: ``_ComposedMagnitude.as_json`` and
     ``_WithheldComposition.as_json`` have no findings/subsumed branch, and this
     asserts the consequence on the population three earlier passes never
     measured."""
-    document = fold(
-        _second_capability_signals(),
-        principals=_composing_principals(),
+    weaker = sig(
+        claim_id="ownership.transfer",
+        function_name="transferOwnership",
+        selector="0xf2fde38b",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.75),
+        **reaches(KEY_C),
+    )
+    document = CA.composed_document(
+        fold,
+        signals=[*_composing_signals(), weaker],
         deletability=deletability,
-        routes=CA.router_flow_plane(_AUTHORS_THE_AMOUNT_AT_C),
-        **_composing_case(),
+        routes=_AUTHORS_THE_AMOUNT_AT_C,
     )
     subsumed = list(document.provenance.get("subsumed_rows") or [])
     assert subsumed, "the case must exercise a subsumed row, not two findings"
@@ -654,18 +571,14 @@ def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletabilit
             assert dead not in reading
 
 
-# ---------------------------------------------------------------------------
 # reach_composition_census.reading — B1-N1's two clauses, one level up
-# ---------------------------------------------------------------------------
 
 
 def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_fired():
-    """B1-R S3. The census explained `composed_withheld` with a single cause —
-    "because the route they publish is not the route the proof took and nothing
-    proved this principal could have issued the proven call itself" — which is
-    B1-N1's two clauses aggregated. Both fail on the transport-fault arm, which
-    is reached before the join is consulted and can publish `deletable` beside
-    its refusal, and the first fails on the unclassified arm too."""
+    """B1-R S3. The census explained ``composed_withheld`` with a single cause,
+    which is B1-N1's two clauses aggregated: both fail on the transport-fault arm
+    (reached before the join is consulted, and able to publish ``deletable``
+    beside its refusal) and the first fails on the unclassified arm too."""
     none = FOLD._withheld_cause_clause(())
     gate_only = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_GATE_ONLY),))
     fault = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE),))
@@ -675,8 +588,6 @@ def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_f
     # The mutation: one authored cause for the counter collapses all of these.
     assert len({none, gate_only, fault, undetermined, both}) == 5
 
-    # The two clauses that were false on the fault arm are gone from the census
-    # exactly as they are gone from the entry.
     for clause in (none, gate_only, fault, undetermined, both):
         assert "not the route the proof took" not in clause
         assert "nothing proved this principal could have issued the proven call" not in clause
@@ -692,12 +603,9 @@ def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_f
 
 
 def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
-    """The registry cannot collapse, and the publishing arm has no entry.
-
-    Keyed on ``(arm, route token)`` since B2: the gate-only arm fires on two
-    tokens and each carries its own cause, so the registry is larger than the
-    arm set and the distinctness has to hold over the pairs.
-    """
+    """Keyed on ``(arm, route token)`` since B2: the gate-only arm fires on two
+    tokens and each carries its own cause, so the registry is larger than the arm
+    set and the distinctness has to hold over the pairs."""
     arms = {arm for arm, _ in FOLD._WITHHELD_CAUSE_ORDER}
     assert arms == set(FOLD._WITHHELD_ARM_READINGS)
     causes = [FOLD._withheld_cause(key) for key in FOLD._WITHHELD_CAUSE_ORDER]
@@ -706,16 +614,10 @@ def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
 
 
 def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries(monkeypatch):
-    """B1-R S4. "no duration term" is false beside the `auto_expiry` rung in the
-    same dict, which `distill.py` applies only under a witnessed
-    `duration_bound_seconds` ceiling. Both thresholds are read from the constants
-    so the sentence moves with them.
-
-    B1-R R2-N2: asserting ``str(K.FREEZE_AUTO_EXPIRY) in note`` against the
-    shipped values is a tautology — a hard-coded ``"(0.02)"`` passes it and then
-    drifts silently the day the constant moves. The thresholds are moved here and
-    the note re-read, so only a live interpolation survives.
-    """
+    """B1-R S4/R2-N2. "no duration term" is false beside the ``auto_expiry`` rung
+    in the same dict. Asserting ``str(K.FREEZE_AUTO_EXPIRY) in note`` against the
+    shipped values is a tautology, so the thresholds are moved and the note
+    re-read: only a live interpolation survives."""
     from services.scoring import constants as K
 
     note = K.model_parameters()["freeze_ladder"]["note"]
@@ -731,6 +633,5 @@ def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries(mon
     moved = K.model_parameters()["freeze_ladder"]["note"]
     assert moved != note
     assert "0.99" in moved and str(7 * 86400) in moved
-    # ...and the shipped values are gone from it, so a literal that happens to
-    # match today cannot pass.
+    # ...and the shipped values are gone, so a literal matching today cannot pass.
     assert str(shipped_rung) not in moved and str(shipped_seconds) not in moved
