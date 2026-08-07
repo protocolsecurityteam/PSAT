@@ -1,0 +1,3 @@
+score_etherfi.json is a regenerated score document (see routers/company.py's payload
+shape). Write it back MINIFIED and on ONE line — `json.dumps(doc, separators=(",", ":"))`,
+no trailing newline. Pretty-printing it turns a 20-line regeneration into a 41,000-line diff.
