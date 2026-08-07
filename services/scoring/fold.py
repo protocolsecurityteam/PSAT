@@ -945,10 +945,9 @@ def compute_protocol_score(
                 "('hook', 'vault', 'roleRegistry'); the same-kind hops that survive it walk on no "
                 "more evidence than the label-presence test gave them. A refused hop is NOT "
                 "disproved: whether it composes anyway turns on the intermediate node's own "
-                "function surface, and this plane DOES NOT CONSULT IT — that surface usually "
-                "exists (0x4df6b733's setUserRole/setRoleCapability/transferOwnership are "
-                "analysed effective_functions rows), so this is a join not performed and not a "
-                "witness that is missing. The join that would decide it is the intermediate "
+                "function surface, and this plane DOES NOT CONSULT IT — a refusal here is "
+                "therefore a join not performed, and nothing in it says the surface that would "
+                "answer the question is absent. The join that would decide it is the intermediate "
                 "node's own functions against its outbound targets "
                 "(effective_functions.sinks/effect_targets and the external_call_target edges "
                 "CONTROL_RELATIONS excludes). Until it runs the hop is withheld as "
@@ -1836,6 +1835,7 @@ def _aggregate(
                 row.zero_reach_stripped,
                 valued.hops_not_determined,
                 valued.withheld_behind_hops,
+                valued.composed_magnitudes,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
@@ -2074,6 +2074,31 @@ def _aggregate(
     return findings, subsumed, warnings
 
 
+def _order_tie_reading(shared_entities: list[str]) -> str:
+    """What the tie-break string decided on THIS row, read off what the row holds.
+
+    The λ half is true of every carrier — a tied row's index is that string's
+    doing whatever else is true — so it is constant. The exposure half is not:
+    the order splits a budget only where an entity is actually held in common,
+    and a row that shares none has no split. Publishing the split sentence there
+    asserts an apportionment that provably did not happen, which is the same
+    defect one level down from the figures.
+    """
+    position = "this row's λ position is decided by that string, not by evidence"
+    if not shared_entities:
+        return (
+            position + "; and it holds NO entity in common with the tied rows — shared_entities is "
+            "an asked-and-empty, not an unasked question — so no exposure budget was split by the "
+            "order here and none of this row's dollars is an order-determined apportionment"
+        )
+    return (
+        f"{position}, and so is its share of the {len(shared_entities)} entity(ies) it holds in "
+        "common with the tied rows (named under shared_entities): the earlier row consumes the "
+        "exposure budget first and this row is charged the remainder, so the split among them is "
+        "order-determined and is not a measurement of who reaches what"
+    )
+
+
 def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
     """Where rows tie on the sort key, say so: the order decides, and it is a string.
 
@@ -2098,16 +2123,13 @@ def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
         units = [f["principal_unit"] for f in group]
         for position, finding in enumerate(group):
             others = {key for other in group if other is not finding for key in other["value_by_entity"]}
+            shared = sorted(set(finding["value_by_entity"]) & others)
             finding["exposure_order_tie"] = {
                 "tied_with": [unit for unit in units if unit != finding["principal_unit"]],
-                "shared_entities": sorted(set(finding["value_by_entity"]) & others),
+                "shared_entities": shared,
                 "position_in_tie": position,
                 "basis": "equal raw_points and capability; the remaining order is the principal_unit string",
-                "reading": (
-                    "this row's λ position and its share of any entity it holds in common with "
-                    "the tied rows are decided by that string, not by evidence; the split among "
-                    "them is order-determined and is not a measurement of who reaches what"
-                ),
+                "reading": _order_tie_reading(shared),
             }
 
 
@@ -2225,6 +2247,7 @@ def _ceiling_bearing_basis(
     zero_reach_stripped: list[dict[str, Any]],
     hops_not_determined: list[dict[str, Any]],
     withheld_behind_hops: dict[str, Any],
+    composed: dict[str, _ComposedMagnitude],
 ) -> str:
     """The basis for a row some of whose figures are extraction ceilings.
 
@@ -2238,6 +2261,16 @@ def _ceiling_bearing_basis(
     row could not establish and the graph withheld behind them are value the sum
     does not carry, and they are named here because they were consulted in
     :func:`_bound_direction` before the arm was taken.
+
+    ``composed`` is read for one clause only, and it is read rather than
+    asserted: a ceiling can overstate what this principal actually extracts, and
+    the only evidence in this document that could narrow it is the destination
+    function's OWN stored conditions, which travel with each composed entry and
+    which this fold evaluates none of. How many of the row's ceiling-bearing
+    figures carry that text is a fact about the row and is counted here. It
+    replaces a clause naming an extraction precondition this document no longer
+    publishes — a definite reference to a deleted field, which reads as a
+    constraint that was consulted.
     """
     n_entities = len(per_entity)
     counted = f"{len(ceiling_entities)} of {n_entities} entity(ies)"
@@ -2275,11 +2308,27 @@ def _ceiling_bearing_basis(
     ungraded = n_entities - len(ceiling_entities)
     if ungraded:
         missing.append(f"{ungraded} entity(ies) whose figure is not a composed ceiling and is graded in no direction")
+    # What, in THIS document, could put the true extraction below the ceiling —
+    # counted off the row's own composed entries rather than named from a field
+    # that no longer exists.
+    with_conditions = sum(
+        1 for entity in ceiling_entities if entity in composed and composed[entity].predicates.descriptions
+    )
+    if with_conditions:
+        untightened = (
+            f"and nothing here tightens it: the destination function's own stored conditions "
+            f"travel with {with_conditions} of those {len(ceiling_entities)} figure(s) "
+            "(destination_predicates) and this fold evaluates none of them"
+        )
+    else:
+        untightened = (
+            f"and nothing here tightens it: no condition text was extracted for any of those "
+            f"{len(ceiling_entities)} figure(s) (destination_predicates), so the destination's "
+            "own conditions are not available here to check the ceiling against at all"
+        )
     basis = (
         f"bounded in NEITHER direction: {counted} {ceilings} — a ceiling does not become a floor "
-        "by being summed, and the precondition can put the true extraction below it; "
-        + ", ".join(missing)
-        + " leave the sum short of a ceiling on the row too"
+        f"by being summed, {untightened}; " + ", ".join(missing) + " leave the sum short of a ceiling on the row too"
     )
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
@@ -2657,6 +2706,24 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "composed_usd_summed_over_rows": round(usd, 2),
         }
 
+    # How many entities actually take the subsumed-exclusive route into a top
+    # row's exposure, counted rather than stated: the sentence below used to
+    # assert "one … does so here", a measurement of this corpus baked into a
+    # literal and false the moment a second row composes one.
+    exclusive: set[str] = set()
+    for row in findings:
+        exclusive.update(row.get("subsumed_exclusive_value_by_entity") or {})
+    charged = sorted(
+        exclusive.intersection(
+            str(entry["entity"]) for row in subsumed for entry in (row.get("reach_composed_magnitudes") or [])
+        )
+    )
+    charging = (
+        f"and {len(charged)} composed subsumed entity(ies) do so here"
+        if charged
+        else "and no composed subsumed entity does so here — the fold looked, and the two "
+        "populations do not meet on this corpus"
+    )
     return {
         "findings": roll(findings),
         "subsumed_rows": roll(subsumed),
@@ -2666,18 +2733,17 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "and summing the two would double one composition and read as twice the recovery. "
             "It is NOT that a subsumed row's dollars stay out of the grade: its entities that "
             "no surviving row reaches charge the top row's exposure at that row's own fraction "
-            "(subsumed_exclusive_value_by_entity), and one composed subsumed entity does so "
-            "here. licensed_selectors is every "
+            f"(subsumed_exclusive_value_by_entity), {charging}. licensed_selectors is every "
             "(hop, licensed function) pair a gate-control walk offered; act_as_witnessed is "
             "the subset where the caller is witnessed able to make that call at that "
             "destination; the pairs under act_as_refused are the ones whose magnitude stayed "
             "not_determined and went to confidence instead of the grade. composed_usd is "
             "summed over ROWS and entities are counted distinct, so the two disagree wherever "
             "two rows compose the same entity; the exposure budget, not this figure, is what "
-            "stops that entity being paid for twice. A large act_as_refused beside a small "
-            "entities_composed is the honest shape of this corpus, not a shortfall in the "
-            "pass: most licensed hops have no witness that the licensed party can be made to "
-            "use the licence"
+            "stops that entity being paid for twice. act_as_refused standing far above "
+            "entities_composed is not a shortfall in the pass but its arithmetic: a licensed "
+            "hop composes only where the licensed party is ALSO witnessed makeable to use the "
+            "licence, and act_as_refused counts, by reason, every pair where it was not"
         ),
     }
 
@@ -3790,9 +3856,18 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferr
         "conferred_by_at_least_one_gate_capability": len(conferred_by_any),
         "conferred_by_none": len(pairs) - len(conferred_by_any),
         "reading": (
+            # "and no finding walks it" was here: a universal over the findings
+            # population, authored in a census that runs over the control
+            # closure BEFORE any finding exists and therefore never asked it.
+            # What is stated instead is the property this function does
+            # establish — why the union over-counts — which holds at every value
+            # of the counters.
             "the union over the five gate capabilities, each asked with the class-wide union of "
             "what its witnesses rewrite. It is an upper bound on every real walk twice over — "
-            "over capabilities and over instances — and no finding walks it. by_capability is "
+            "over capabilities, because a pair walked by any one of the five is counted here, "
+            "and over instances, because each capability is asked with the union of what its "
+            "witnesses rewrite anywhere rather than with one instance's own set. Nothing here "
+            "counts findings, and no row is claimed to walk this width. by_capability is "
             "the per-capability answer at the same class-wide width"
         ),
     }
