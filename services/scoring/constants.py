@@ -392,7 +392,12 @@ def model_parameters() -> dict[str, Any]:
                 "question stays on it; SUSTAINABLE is added only on proven key-set "
                 "dependence and the RECOVERABLE credit only on proven independence"
             ),
-            "note": "no duration term: duration_bound_source is not_determined wherever populated",
+            # The second clause used to read "duration_bound_source is
+            # not_determined wherever populated" — a universal over the scored
+            # data, authored in a module that opens no session and reads no row,
+            # so nothing here could have checked it. What the ladder itself
+            # knows is that it has no duration term, and that is all it says.
+            "note": "no duration term: the ladder is not a function of duration_bound_source at all",
         },
         "weakness_ladder": {
             "anyone": WEAKNESS_ANYONE,
@@ -444,14 +449,22 @@ def model_parameters() -> dict[str, Any]:
                 "running on those are no longer walked. The same-kind hops that survive walk on "
                 "no more evidence than the label-presence test gave them. A refused hop is NOT "
                 "disproved: whether it composes anyway turns on the intermediate node's own "
-                "function surface, and this plane DOES NOT CONSULT IT — the surface usually "
-                "exists, so this is a join not performed rather than a witness that is missing, "
-                "and the join that would decide it is the intermediate node's own functions "
-                "against its outbound targets (effective_functions.sinks/effect_targets and the "
-                "external_call_target edges CONTROL_RELATIONS excludes). It is published as "
-                "not_determined rather than walked or dropped, as are the 55 role edges whose "
-                "label names no role at all, and reach_withheld_behind_hops sizes the subtree "
-                "each withheld frontier hop hides. One "
+                # "the surface usually exists" and "the 55 role edges" were both
+                # here: a frequency and a count, over a corpus this module opens
+                # no session to read. The claim the refusal actually supports is
+                # the one about the join, and it holds whatever the surface turns
+                # out to be; the edge population is counted in
+                # provenance.reach_bounds.hop_census.scope_not_determined, where
+                # a reader can check it.
+                "function surface, and this plane DOES NOT CONSULT IT — so a refusal is a join "
+                "not performed and is never a witness that is missing, whether or not that "
+                "surface is there. The join that would decide it is the intermediate node's own "
+                "functions against its outbound targets (effective_functions.sinks/effect_targets "
+                "and the external_call_target edges CONTROL_RELATIONS excludes). It is published "
+                "as not_determined rather than walked or dropped, as are the role edges whose "
+                "label names no role at all — counted under "
+                "provenance.reach_bounds.hop_census.scope_not_determined — and "
+                "reach_withheld_behind_hops sizes the subtree each withheld frontier hop hides. One "
                 "residual is named rather than assumed away: the role branch asks only what the "
                 "role licenses at the destination and does not additionally require the seizing "
                 "capability to be one that governs role assignment, because the role edge names "
