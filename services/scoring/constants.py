@@ -265,6 +265,12 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "authority_deletability_basis_arm:gating_authority",
     "route_comparison_verdict:route_match",
     "retired:destination_callee_is_restricted_by_the_intermediate",
+    # Not one of the run's own arms — it predates them, with 0 rows before Phase A
+    # and 0 after. Registered here anyway (CAP-B ruling 2) because §8's obligation
+    # is a flag in the DOCUMENT and a spec deferral does not discharge it, and
+    # because the page allow-lists this direction: it would render a badge for a
+    # state nothing can earn, with nothing published saying so.
+    "value_at_stake_bound_direction:ceiling",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -386,6 +392,32 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "constrains the destination call's counterparty ARGUMENT, and no stored witness says an "
             "intermediate restricts the callee SET. A genuine callee-set restriction — the Manager's "
             "merkle verification — is not witnessed in this data and is not claimed"
+        ),
+    },
+    {
+        "arm": "value_at_stake_bound_direction:ceiling",
+        "state": "ceiling",
+        # The FIELD is published on every row — it is the value `ceiling` that has
+        # no carrier — so the path is named rather than nulled. That is the
+        # difference between this and the retired token above, whose producer
+        # cannot emit it at all.
+        "published_at": "findings[].value_at_stake_bound_direction",
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_redteam.py::"
+            "test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling",
+            "tests/test_scoring_redteam.py::test_b7_a_direction_is_published_only_where_one_was_proven",
+        ),
+        "note": (
+            "the one arm here that PREDATES this run: 0 rows before Phase A and 0 after. It is "
+            "deliberately unearnable on this corpus — the conjunction requires every contribution "
+            "to be a proven ceiling with no coverage gap, and ruling 6.3 item 4 declined to relax "
+            "it to make it exercisable, which is why the flag rather than the relaxation is the "
+            "right disclosure. Earnability stays deferred with that ruling and is NOT reopened by "
+            "registering it. Registered because the obligation is a flag in this document and a "
+            "spec deferral does not discharge one, and because site/src/score/derive.js allow-lists "
+            "this direction: the page would render a <= badge for a state nothing can earn, with "
+            "nothing published saying so"
         ),
     },
 )

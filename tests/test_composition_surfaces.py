@@ -353,7 +353,9 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     block = parameters["uncalibrated_arm_disclosures"]
     registered = block["registered"]
 
-    assert len(registered) == 7
+    # Seven arms this run added, plus the one pre-existing zero-population arm
+    # CAP-B ruled into the same register (ruling 2).
+    assert len(registered) == 8
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -509,3 +511,40 @@ def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
     assert moved != shipped
     assert "(9.9.9-fictional, before the execution-witness pass)" in moved
     assert "1.1.0-provisional" not in moved
+
+
+def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in_a_spec():
+    """CAP-B ruling 2. `value_at_stake_bound_direction == "ceiling"` has 0 rows
+    before Phase A and 0 after, and its disclosure was carried as a spec deferral
+    — which does not discharge `SCORER_DISCIPLINE_CONTRACT.md` §8, whose
+    obligation is a flag in the DOCUMENT.
+
+    The decisive fact is on the page: `site/src/score/derive.js` allow-lists this
+    direction, so a `<=` badge would render for a state nothing can earn with
+    nothing published saying so. Registering it does NOT reopen its earnability,
+    which stays deferred with ruling 6.3 item 4.
+    """
+    parameters = K.model_parameters()
+    entry = next(
+        item
+        for item in parameters["uncalibrated_arm_disclosures"]["registered"]
+        if item["arm"] == "value_at_stake_bound_direction:ceiling"
+    )
+    assert entry["arm"] in parameters["uncalibrated_arms"]
+    assert entry["state"] == FOLD.BOUND_DIRECTION_CEILING
+    # The FIELD is published on every row; it is the VALUE that has no carrier,
+    # so the path is named rather than nulled — unlike the retired token, whose
+    # producer cannot emit it at all.
+    assert entry["published_at"] == "findings[].value_at_stake_bound_direction"
+    assert entry["population_census"] is None
+    assert "deferred" in entry["note"] and "derive.js" in entry["note"]
+
+
+def test_the_ceiling_direction_stays_allow_listed_on_the_page():
+    """The register is the fix, not the removal. Dropping `ceiling` from
+    `BOUND_DIRECTIONS` would make the page silently null a direction the fold can
+    still compute — `_bound_direction` returns it and two committed tests earn it
+    — which trades an undisclosed badge for an undisclosed blank."""
+    derive = (ROOT / "site" / "src" / "score" / "derive.js").read_text()
+    assert f'"{FOLD.BOUND_DIRECTION_CEILING}"' in derive
+    assert "BOUND_DIRECTIONS" in derive
