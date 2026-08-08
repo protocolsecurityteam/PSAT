@@ -139,6 +139,12 @@ class SweepRequest:
     # would omit every earlier asset — and the balance view takes a fetch's rows
     # wholesale, so the omission would read as a sale.
     known_assets: tuple[str, ...] = ()
+    # The typed receipts already on record. Carried for the refusal they carry,
+    # not for their quantity.
+    known_typed: tuple[str, ...] = ()
+    # First block of the union of the scans behind the current set; None when
+    # nothing has been scanned yet.
+    union_from_block: int | None = None
 
 
 def observation_contract(
@@ -151,9 +157,13 @@ def observation_contract(
     """The contract row an observation of *requested_address* belongs to.
 
     The single ``observed_address`` policy is enforced by construction: whoever
-    owns the address owns the fetch row. When no contract row holds that address
-    on that chain the read falls back to *fallback*'s own address, which keeps
-    the invariant true rather than filing a foreign address against it.
+    owns the address owns the fetch row. Selection is scoped to the PRODUCING
+    protocol — a row belonging to another tenant is never adopted, because
+    writing a fetch against it (and pruning its history) would let one
+    protocol's job mutate another's balance plane. When no row of this
+    protocol's owns the address the read falls back to *fallback*'s own address:
+    an address nobody here owns is not read at all, which loses an observation
+    and is the direction that cannot corrupt a neighbour.
     """
     from services.monitoring.chain_rpc import chain_id_for
 
@@ -162,16 +172,19 @@ def observation_contract(
     wanted = requested_address.lower()
     if (fallback.address or "").lower() == wanted:
         return fallback
+    if fallback.protocol_id is None:
+        return fallback
     candidates = (
-        session.execute(select(Contract).where(func.lower(Contract.address) == wanted).order_by(Contract.id))
+        session.execute(
+            select(Contract)
+            .where(func.lower(Contract.address) == wanted, Contract.protocol_id == fallback.protocol_id)
+            .order_by(Contract.id)
+        )
         .scalars()
         .all()
     )
     same_chain = [c for c in candidates if chain_id_for(c.chain) == chain_id]
-    if not same_chain:
-        return fallback
-    owned = [c for c in same_chain if c.protocol_id is not None and c.protocol_id == fallback.protocol_id]
-    return (owned or same_chain)[0]
+    return same_chain[0] if same_chain else fallback
 
 
 def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
@@ -238,7 +251,16 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     The stored cursor plus one, or 0 for a contract never swept. Without it the
     hourly loop would re-run a full-history scan every cycle — the cursor is what
     makes the one-shot a one-shot.
+
+    A cursor is only trusted when the fetch that carries the current asset set
+    also recorded what that scan found about ERC-721/1155 receipts. A cursor
+    without that record is a scan whose completeness evidence was never kept:
+    skipping the blocks behind it would inherit a conclusion from a scan that
+    cannot show what it saw, so the scan is redone from the beginning instead.
     """
+    current = _current_asset_fetch(session, contract_id=contract_id)
+    if current is not None and current.swept_through_block is not None and current.typed_assets is None:
+        return 0
     through = session.execute(
         select(func.max(ContractBalanceFetch.swept_through_block)).where(
             ContractBalanceFetch.contract_id == contract_id,
@@ -255,21 +277,10 @@ def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
     ``contract_balances_latest`` publishes — so the list carried into the next
     incremental window is exactly the one a consumer is reading today.
     """
-    winner = (
-        session.execute(
-            select(ContractBalanceFetch.id)
-            .where(
-                ContractBalanceFetch.contract_id == contract_id,
-                ContractBalanceFetch.asset_set_status != ASSET_SET_STATUS_FETCH_FAILED,
-            )
-            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
-            .limit(1)
-        )
-        .scalars()
-        .first()
-    )
-    if winner is None:
+    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    if fetch is None:
         return ()
+    winner = fetch.id
     rows = (
         session.execute(
             select(ContractBalance.token_address).where(
@@ -282,6 +293,53 @@ def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
         .all()
     )
     return tuple(sorted({str(a).lower() for a in rows if a}))
+
+
+def known_typed_assets(session: Session, *, contract_id: int) -> tuple[str, ...]:
+    """The ERC-721/1155 receipts the current fetch record already knows about.
+
+    This is the durable half of the completeness refusal. A typed receipt whose
+    holding has no readable answer is why a swept set may not be published as
+    complete, and an incremental window will not name it again — so it is read
+    back from the fetch record and re-carried every cycle. Without it the refusal
+    lasted exactly one cycle and the next one published the empty sheet.
+    """
+    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    entries = (fetch.typed_assets if fetch is not None else None) or []
+    return tuple(
+        sorted({str(entry["address"]).lower() for entry in entries if isinstance(entry, dict) and entry.get("address")})
+    )
+
+
+def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
+    """The first block of the union of the scans behind the current asset set."""
+    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    if fetch is None:
+        return None
+    if fetch.typed_assets is None and fetch.swept_through_block is not None:
+        # Same rule as :func:`sweep_from_block`: a scan that kept no typed-receipt
+        # record is being redone, so the union extent restarts with it.
+        return None
+    if fetch.swept_from_block is not None:
+        return int(fetch.swept_from_block)
+    return 0 if fetch.swept_through_block is not None else None
+
+
+def _current_asset_fetch(session: Session, *, contract_id: int) -> ContractBalanceFetch | None:
+    """The fetch whose ERC-20 row set ``contract_balances_latest`` publishes."""
+    return (
+        session.execute(
+            select(ContractBalanceFetch)
+            .where(
+                ContractBalanceFetch.contract_id == contract_id,
+                ContractBalanceFetch.asset_set_status != ASSET_SET_STATUS_FETCH_FAILED,
+            )
+            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
 
 
 def sweep_keeps_failing(session: Session, *, contract_id: int) -> bool:
@@ -339,6 +397,11 @@ def run_sweeps(
             chain_id=chain_id,
             from_block_by_address={a: r.from_block for a, r in by_address.items()},
             known_assets_by_address={a: r.known_assets for a, r in by_address.items()},
+            known_typed_by_address={a: r.known_typed for a, r in by_address.items()},
+            union_from_by_address={
+                a: (r.union_from_block if r.union_from_block is not None else r.from_block)
+                for a, r in by_address.items()
+            },
             cost=cost,
             head_block=head,
         )
@@ -359,6 +422,7 @@ def record_observation(
     writer: str,
     sweep: SweepOutcome | None = None,
     escalation: str | None = None,
+    cost_note: str | None = None,
 ) -> RecordedObservation:
     """THE write point for both producers: one fetch row plus its row set.
 
@@ -429,8 +493,10 @@ def record_observation(
                 "token_address": asset.token_address,
                 "token_name": None,
                 # The quantity is a COUNT of items, not a scaled amount of
-                # anything, so ``decimals`` is 0 and there is no USD column to
-                # fill. It must never be summed into a sheet total.
+                # anything, so ``decimals`` is 0 — never the conventional 18,
+                # which would present a count as a fungible quantity — and there
+                # is no USD column to fill. It must never be summed into a sheet
+                # total.
                 "token_symbol": None,
                 "decimals": 0,
                 "raw_balance": asset.raw_balance,
@@ -439,6 +505,22 @@ def record_observation(
                 "source": ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
             }
 
+    # The typed receipts, recorded on the fetch whether or not they are holdings
+    # today: they are the evidence for the completeness this scan does or does
+    # not claim, and an incremental window will never name them again.
+    typed_evidence: list[dict] | None = None
+    if scan_completed:
+        assert sweep is not None
+        typed_evidence = [
+            {
+                "address": asset.token_address,
+                "kind": asset.kind,
+                "quantity_readable": asset.raw_balance is not None,
+                "quantity": None if asset.raw_balance is None else str(asset.raw_balance),
+            }
+            for asset in sweep.typed_assets
+        ]
+
     sweep_status: str | None
     if swept_ok:
         assert sweep is not None
@@ -446,6 +528,7 @@ def record_observation(
         asset_set_source = ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
         sweep_status = SWEEP_STATUS_COMPLETED
         swept_through_block = sweep.swept_through_block
+        swept_from_block: int | None = sweep.swept_from_block
         basis = f"{sweep.basis}; escalated because {escalation}; {SWEEP_POPULATION_NOTE}"
         if page.status != ASSET_SET_STATUS_FETCH_FAILED and page.rows:
             basis = f"{basis}; priced entries carried from {page.basis}"
@@ -462,22 +545,28 @@ def record_observation(
         asset_set_source = ASSET_SET_SOURCE_ETHERSCAN_PAGES
         sweep_status = SWEEP_STATUS_COMPLETED
         swept_through_block = sweep.swept_through_block
+        swept_from_block = sweep.swept_from_block
         basis = (
-            f"{page.basis}; chain scan through block {sweep.swept_through_block} ran but its asset set is "
-            f"NOT claimed complete: {len(typed_unreadable)} ERC-721/1155 receipt(s) whose current holding "
-            f"has no readable balanceOf(address) answer; {SWEEP_POPULATION_NOTE}"
+            f"{page.basis}; chain scan of blocks {sweep.swept_from_block}-{sweep.swept_through_block} ran but "
+            f"its asset set is NOT claimed complete: {len(typed_unreadable)} ERC-721/1155 receipt(s) whose "
+            f"current holding has no readable balanceOf(address) answer "
+            f"({', '.join(t.token_address for t in typed_unreadable[:8])}); {SWEEP_POPULATION_NOTE}"
         )
     else:
         asset_set_status = page.status
         asset_set_source = ASSET_SET_SOURCE_ETHERSCAN_PAGES
         sweep_status = SWEEP_STATUS_FAILED if sweep is not None else None
         swept_through_block = None
+        swept_from_block = None
         basis = page.basis
         if sweep is not None:
             basis = (
                 f"{basis}; chain sweep ABORTED, asset set NOT proven complete: "
                 f"{sweep.failure_reason or 'no reason recorded'}"
             )
+
+    if cost_note and sweep is not None:
+        basis = f"{basis}; {cost_note}"
 
     fetch = ContractBalanceFetch(
         contract_id=contract.id,
@@ -491,6 +580,8 @@ def record_observation(
         asset_set_basis=basis or None,
         sweep_status=sweep_status,
         swept_through_block=swept_through_block,
+        swept_from_block=swept_from_block,
+        typed_assets=typed_evidence,
         writer=writer,
     )
     session.add(fetch)
@@ -571,6 +662,8 @@ __all__ = [
     "escalation_reason",
     "fetch_asset_page",
     "known_swept_assets",
+    "known_typed_assets",
+    "scanned_from_block",
     "observation_contract",
     "record_observation",
     "run_sweeps",

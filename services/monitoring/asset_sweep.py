@@ -133,6 +133,9 @@ class SweepOutcome:
 
     address: str
     status: str
+    # The first block of the UNION of the scans behind this asset set, not this
+    # cycle's window start: the basis string publishes the extent of the claim,
+    # and an incremental window rests on the full-history scan that preceded it.
     swept_from_block: int
     swept_through_block: int | None
     assets: tuple[SweptAsset, ...] = ()
@@ -338,6 +341,8 @@ def sweep_holders(
     chain_id: int,
     from_block_by_address: dict[str, int],
     known_assets_by_address: dict[str, tuple[str, ...]] | None = None,
+    known_typed_by_address: dict[str, tuple[str, ...]] | None = None,
+    union_from_by_address: dict[str, int] | None = None,
     cost: SweepCost | None = None,
     fetcher: RpcEventLogFetcher | None = None,
     head_block: int | None = None,
@@ -356,6 +361,18 @@ def sweep_holders(
     and the balance view takes a fetch's row set wholesale, so the omission reads
     as a sale. The known list is re-read at the new block alongside whatever the
     window found.
+
+    ``known_typed_by_address`` is the same carry-forward for ERC-721/1155
+    receipts, and it is load-bearing rather than symmetric: a typed receipt whose
+    holding cannot be read is the EVIDENCE that the asset set may not be
+    published as complete, and dropping it after one cycle publishes the earned
+    negative the scan refused. A carried typed asset stays typed — its
+    ``balanceOf`` is a count of items when it answers at all, and folding it into
+    the fungible set would launder a count into an 18-decimal quantity.
+
+    ``union_from_by_address`` is the first block of the union of the scans behind
+    each holder's current set; the outcome republishes it so the basis string
+    names the extent of the CLAIM rather than of this cycle's window.
     """
     cost = cost if cost is not None else SweepCost()
     outcomes: dict[str, SweepOutcome] = {}
@@ -380,14 +397,22 @@ def sweep_holders(
 
     for start, cohort in sorted(by_start.items()):
         if start > head:
-            # Already swept past the current head; nothing new can have arrived.
+            # Already swept past the current head: no NEW asset can have arrived,
+            # which says nothing about the ones already known. Skipping the read
+            # here published an empty asset set for a holder whose sheet the last
+            # cycle filled — the view takes a fetch's rows wholesale, so an
+            # unread set reads as a sale, and an unread typed receipt reads as a
+            # completeness this scan never established.
             for address in cohort:
-                outcomes[address] = SweepOutcome(
-                    address=address,
-                    status=SWEEP_COMPLETED,
-                    swept_from_block=start,
-                    swept_through_block=head,
-                    basis=_basis(start, head),
+                outcomes[address] = _read_carried_set(
+                    address,
+                    known_assets=tuple((known_assets_by_address or {}).get(address, ())),
+                    known_typed=tuple((known_typed_by_address or {}).get(address, ())),
+                    union_from=(union_from_by_address or {}).get(address, start),
+                    rpc_url=rpc_url,
+                    chain_id=chain_id,
+                    head=head,
+                    cost=cost,
                 )
             continue
         for index in range(0, len(cohort), SWEEP_ADDRESS_BATCH):
@@ -412,7 +437,13 @@ def sweep_holders(
                     )
                     continue
                 known = set((known_assets_by_address or {}).get(address, ()))
-                typed_tokens = sorted(typed.get(address, set()))
+                known_typed = set((known_typed_by_address or {}).get(address, ()))
+                # A carried typed asset stays typed. It was classified by the log
+                # that delivered it — a 4-topic Transfer or an 1155 topic0 — and
+                # that classification is a fact about the asset, not about which
+                # window happened to see it. Folding it into the fungible set on
+                # a later cycle turns an item COUNT into an 18-decimal quantity.
+                typed_tokens = sorted(typed.get(address, set()) | known_typed)
                 erc20_tokens = sorted((erc20.get(address, set()) | known) - set(typed_tokens))
                 balances, balance_transport_failed = read_balances(
                     address,
@@ -447,10 +478,11 @@ def sweep_holders(
                 # completeness claim without discarding the assets that DID answer.
                 unreadable = [t for t in erc20_tokens if t not in balances]
                 erc20_tokens = [t for t in erc20_tokens if t in balances]
+                union_from = (union_from_by_address or {}).get(address, start)
                 outcomes[address] = SweepOutcome(
                     address=address,
                     status=SWEEP_COMPLETED,
-                    swept_from_block=start,
+                    swept_from_block=union_from,
                     swept_through_block=head,
                     assets=tuple(
                         SweptAsset(token_address=t, raw_balance=balances[t][0], decimals=balances[t][1], kind="erc20")
@@ -468,12 +500,60 @@ def sweep_holders(
                     + tuple(
                         SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in unreadable
                     ),
-                    basis=_basis(start, head),
+                    basis=_basis(union_from, head),
                 )
     return outcomes, cost
 
 
+def _read_carried_set(
+    address: str,
+    *,
+    known_assets: tuple[str, ...],
+    known_typed: tuple[str, ...],
+    union_from: int,
+    rpc_url: str,
+    chain_id: int,
+    head: int,
+    cost: SweepCost,
+) -> SweepOutcome:
+    """Re-read a holder's already-discovered set when no window has to be scanned."""
+    balances, balance_failed = read_balances(
+        address, list(known_assets), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
+    )
+    typed_balances, typed_failed = read_balances(
+        address, list(known_typed), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
+    )
+    if balance_failed or typed_failed:
+        return SweepOutcome(
+            address=address,
+            status=SWEEP_FAILED,
+            swept_from_block=union_from,
+            swept_through_block=None,
+            failure_reason="balanceOf batch did not answer; no holdings were read",
+        )
+    unreadable = [t for t in known_assets if t not in balances]
+    readable = [t for t in known_assets if t in balances]
+    return SweepOutcome(
+        address=address,
+        status=SWEEP_COMPLETED,
+        swept_from_block=union_from,
+        swept_through_block=head,
+        assets=tuple(
+            SweptAsset(token_address=t, raw_balance=balances[t][0], decimals=balances[t][1], kind="erc20")
+            for t in readable
+        ),
+        typed_assets=tuple(
+            SweptAsset(token_address=t, raw_balance=typed_balances.get(t, (None, None))[0], decimals=None, kind="typed")
+            for t in known_typed
+        )
+        + tuple(SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in unreadable),
+        basis=_basis(union_from, head),
+    )
+
+
 def _basis(from_block: int, through_block: int) -> str:
+    """The extent of the CLAIM, which is the union of the scans behind the set —
+    never the width of the last incremental window."""
     return (
         f"full-history log scan of Transfer/TransferSingle/TransferBatch with the holder as recipient "
         f"(topic 2 for ERC-20/721, topic 3 for ERC-1155), blocks {from_block}-{through_block}, "

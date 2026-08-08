@@ -32,8 +32,10 @@ from services.monitoring.balance_observation import (
     SWEEP_FAILURE_RUN,
     NativeReading,
     escalation_reason,
+    known_typed_assets,
     observation_contract,
     record_observation,
+    scanned_from_block,
     sweep_from_block,
 )
 from services.monitoring.balance_reads import winning_asset_fetches
@@ -357,19 +359,75 @@ class TestSweepDiscovery:
         )
         assert [(a.token_address, a.raw_balance) for a in outcomes[HOLDER].assets] == [(TOKEN, 7)]
 
-    def test_a_cursor_past_the_head_costs_no_request(self, monkeypatch):
+    def test_a_cursor_past_the_head_scans_nothing_but_still_republishes_the_set(self, monkeypatch):
+        # "No new asset can have arrived" is not "no asset is held". The view
+        # takes a fetch's rows wholesale, so publishing an empty set here would
+        # withdraw every holding the last cycle found and claim chain-proven
+        # emptiness off a scan that read no blocks at all.
         rpc = _StubRpc([])
         monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        monkeypatch.setattr(
+            "services.monitoring.asset_sweep.multicall3_aggregate3",
+            lambda url, calls, block, **kw: [(True, _word(3)) if call[0] == TOKEN else (False, "0x") for call in calls],
+        )
         outcomes, cost = sweep_holders(
             [HOLDER],
             rpc_url="http://rpc.invalid",
             chain_id=1,
             from_block_by_address={HOLDER: 100},
+            known_assets_by_address={HOLDER: (TOKEN,)},
+            known_typed_by_address={HOLDER: (NFT,)},
+            union_from_by_address={HOLDER: 0},
             cost=SweepCost(),
             head_block=99,
         )
-        assert outcomes[HOLDER].status == SWEEP_COMPLETED
+        outcome = outcomes[HOLDER]
+        assert outcome.status == SWEEP_COMPLETED
         assert cost.get_logs == 0
+        assert [(a.token_address, a.raw_balance) for a in outcome.assets] == [(TOKEN, 3)]
+        # ...and the typed receipt survives, so the completeness refusal does too.
+        assert [(a.token_address, a.raw_balance) for a in outcome.typed_assets] == [(NFT, None)]
+        assert outcome.swept_from_block == 0
+
+    def test_the_basis_names_the_union_extent_not_the_incremental_window(self, monkeypatch):
+        rpc = _StubRpc([[], []])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        outcomes, _cost = sweep_holders(
+            [HOLDER],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={HOLDER: 900},
+            union_from_by_address={HOLDER: 0},
+            cost=SweepCost(),
+            head_block=963,
+        )
+        # The window was 63 blocks wide; the CLAIM rests on everything since 0.
+        assert "blocks 0-963" in outcomes[HOLDER].basis
+        assert "blocks 900-963" not in outcomes[HOLDER].basis
+        assert outcomes[HOLDER].swept_from_block == 0
+
+    def test_a_carried_typed_asset_is_never_folded_into_the_fungible_set(self, monkeypatch):
+        # Its balanceOf is a COUNT of items when it answers at all. Folding it in
+        # on a later cycle presents that count as an 18-decimal quantity.
+        rpc = _StubRpc([[], []])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        monkeypatch.setattr(
+            "services.monitoring.asset_sweep.multicall3_aggregate3",
+            lambda url, calls, block, **kw: [(True, _word(2))] * len(calls),
+        )
+        outcomes, _cost = sweep_holders(
+            [HOLDER],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={HOLDER: 10},
+            known_typed_by_address={HOLDER: (NFT,)},
+            union_from_by_address={HOLDER: 0},
+            cost=SweepCost(),
+            head_block=20,
+        )
+        outcome = outcomes[HOLDER]
+        assert [a.token_address for a in outcome.assets] == []
+        assert [(a.token_address, a.kind) for a in outcome.typed_assets] == [(NFT, "typed")]
 
 
 @requires_postgres
@@ -456,6 +514,30 @@ class TestEscalationAndRecording:
         # The cursor is what makes the next cycle incremental.
         assert sweep_from_block(db_session, contract_id=contract.id) == 1235
 
+    def test_a_cursor_whose_scan_kept_no_typed_record_is_not_trusted(self, db_session):
+        # The cursor's promise is "those blocks were read and what they held is
+        # on record". A fetch that carries a cursor but no typed-receipt record
+        # cannot show what it saw, so skipping past it would inherit a
+        # completeness conclusion from a scan that left no evidence for it.
+        _proto, contract = self._fixture(db_session, address="0x" + "c3" * 20)
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=1234,
+                typed_assets=None,
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.flush()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert scanned_from_block(db_session, contract_id=contract.id) is None
+
     def test_a_failed_sweep_publishes_no_completeness_and_no_cursor(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
 
@@ -518,6 +600,71 @@ class TestEscalationAndRecording:
         assert recorded.fetch.swept_through_block == 1234
         assert "ERC-721/1155" in (recorded.fetch.asset_set_basis or "")
         assert "NOT claimed complete" in (recorded.fetch.asset_set_basis or "")
+        # THE REFUSAL MUST OUTLIVE THE WINDOW IT WAS SEEN IN. The next cycle's
+        # incremental window will not name this receipt again, so the evidence is
+        # persisted and read back — without it the very next cycle sees no typed
+        # asset, believes the set complete, and publishes the earned negative
+        # this scan refused.
+        assert [e["address"] for e in (recorded.fetch.typed_assets or [])] == [NFT]
+        assert [e["quantity_readable"] for e in (recorded.fetch.typed_assets or [])] == [False]
+        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+
+    def test_the_withheld_completeness_survives_the_next_cycle(self, db_session):
+        """The whole point of persisting the evidence, end to end."""
+        from services.monitoring.asset_sweep import SweepOutcome
+
+        _proto, contract = self._fixture(db_session, address="0x" + "a5b" * 13 + "a")
+        first = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_COMPLETED,
+                swept_from_block=0,
+                swept_through_block=1234,
+                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                basis="scan",
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+        db_session.flush()
+        assert first.asset_set_source == ASSET_SET_SOURCE_ETHERSCAN_PAGES
+
+        # Cycle two: an incremental window over 63 blocks that names nothing. The
+        # carried receipt is what the producer hands back to the scan...
+        carried = known_typed_assets(db_session, contract_id=contract.id)
+        assert carried == (NFT,)
+        second = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_COMPLETED,
+                swept_from_block=scanned_from_block(db_session, contract_id=contract.id) or 0,
+                swept_through_block=1297,
+                typed_assets=tuple(
+                    SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in carried
+                ),
+                basis="full-history log scan ... blocks 0-1297",
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+        db_session.flush()
+        # ...and the refusal holds. Before the evidence was persisted this second
+        # fetch published chain_log_sweep + returned_empty — an earned negative
+        # resting on a scan that had refused to claim one.
+        assert second.asset_set_source == ASSET_SET_SOURCE_ETHERSCAN_PAGES
+        assert second.asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
+        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+        assert scanned_from_block(db_session, contract_id=contract.id) == 0
 
     def test_a_swept_asset_is_written_unpriced_and_never_as_zero_dollars(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
@@ -629,6 +776,26 @@ class TestEscalationAndRecording:
         # ...and the trigger that would otherwise fire stops firing, so an
         # unprovable holder cannot spend the request budget every hour forever.
         assert escalation_reason(db_session, contract_id=contract.id, page=page([])) is None
+
+    def test_another_tenants_row_is_never_adopted_for_a_read(self, db_session):
+        # ``uq_contract_address_chain`` means there is at most ONE row per
+        # (address, chain) — so the row that owns an address a job asks about may
+        # simply belong to a different protocol. Adopting it would write fetches,
+        # rows and a retention prune against another tenant's contract: one
+        # protocol's job mutating another's balance plane. Falling back to this
+        # row's own address loses an observation, which is the direction that
+        # cannot corrupt a neighbour.
+        mine, my_contract = self._fixture(db_session, address="0x" + "c1" * 20)
+        theirs = Protocol(name="other-tenant")
+        db_session.add(theirs)
+        db_session.flush()
+        shared = "0x" + "c2" * 20
+        db_session.add(Contract(protocol_id=theirs.id, address=shared, chain="ethereum", contract_name="Theirs"))
+        db_session.flush()
+
+        target = observation_contract(db_session, fallback=my_contract, chain_id=1, requested_address=shared)
+        assert target.id == my_contract.id
+        assert target.protocol_id == mine.id
 
     def test_a_later_failed_fetch_cannot_withdraw_a_truncation_its_rows_still_carry(self, db_session):
         proto, contract = self._fixture(db_session, address="0x" + "a9" * 20)

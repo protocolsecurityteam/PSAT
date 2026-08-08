@@ -37,8 +37,10 @@ from services.monitoring.balance_observation import (
     escalation_reason,
     fetch_asset_page,
     known_swept_assets,
+    known_typed_assets,
     record_observation,
     run_sweeps,
+    scanned_from_block,
     sweep_from_block,
 )
 from services.monitoring.balance_reads import (
@@ -47,6 +49,7 @@ from services.monitoring.balance_reads import (
 )
 from services.monitoring.chain_rpc import chain_id_for
 from utils.balance_status import (
+    ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
     BALANCE_WRITER_TVL,
     NATIVE_STATUS_FETCH_FAILED,
@@ -127,10 +130,26 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 
 
 def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract]:
-    """Return contracts to fetch balances for, excluding implementation-behind-proxy."""
+    """Return contracts to fetch balances for, excluding implementation-behind-proxy.
+
+    With ONE exception, and it is a correctness exception rather than a
+    convenience: an excluded implementation row whose CURRENT asset fetch says
+    ``at_page_cap`` is a permanently stuck truncation. The value plane unions
+    completeness over every contract that folds onto one entity key, so that
+    stale prefix keeps the proxy's sheet marked incomplete — and refuses it a
+    ceiling — no matter how many times the proxy itself is re-observed, because
+    nothing is ever allowed to re-observe the implementation. Re-observing it is
+    the only thing that can clear a flag it is the sole carrier of.
+    """
     from services.aggregations.company_overview import _entity_key
+    from services.monitoring.balance_reads import winning_asset_fetches
 
     contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
+    stuck_at_cap = {
+        contract_id
+        for contract_id, fetch in winning_asset_fetches(session, protocol_id).items()
+        if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP
+    }
 
     # Impl-behind-proxy tokens, keyed by the composite "<chain>::<address>": an
     # EIP-1967 impl lives on its proxy's chain, so exclude it only there. A bare
@@ -143,7 +162,11 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
             impl_tokens.add(_entity_key(c.chain, c.implementation))
 
     # Keep proxy contracts (they hold the funds) and non-impl regular contracts
-    return [c for c in contracts if c.address and _entity_key(c.chain, c.address) not in impl_tokens]
+    return [
+        c
+        for c in contracts
+        if c.address and (_entity_key(c.chain, c.address) not in impl_tokens or c.id in stuck_at_cap)
+    ]
 
 
 @dataclass(frozen=True)
@@ -333,11 +356,22 @@ def refresh_contract_balances(
             from_block=sweep_from_block(session, contract_id=p.contract.id),
             reason=p.escalation,
             known_assets=known_swept_assets(session, contract_id=p.contract.id),
+            known_typed=known_typed_assets(session, contract_id=p.contract.id),
+            union_from_block=scanned_from_block(session, contract_id=p.contract.id),
         )
         for p in pending
         if p.escalation is not None and p.contract.address
     ]
     sweeps, sweep_cost = run_sweeps(sweep_requests, rpc_url_for=lambda cid: rpc_url_for_chain_id(cid))
+    # The cycle's real request count, carried onto every fetch record it wrote.
+    # A cost estimate nobody can check against the record is a claim; this is the
+    # measurement, stored where a reviewer reads the claim.
+    cost_note = (
+        f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
+        f"{sweep_cost.head_reads} head over {len(sweep_requests)} escalated contract(s)"
+        if sweep_requests
+        else None
+    )
     if sweep_requests:
         logger.info(
             "asset sweep: %d contract(s) escalated, %d getLogs + %d multicall + %d head request(s)",
@@ -364,6 +398,7 @@ def refresh_contract_balances(
             writer=BALANCE_WRITER_TVL,
             sweep=sweeps.get(contract.id),
             escalation=entry.escalation,
+            cost_note=cost_note,
         )
         native_status = recorded.native_status
 

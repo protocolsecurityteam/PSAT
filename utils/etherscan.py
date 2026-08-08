@@ -653,9 +653,12 @@ class TokenBalancePage:
 
     ``rows`` is the filtered holdings list :func:`get_token_balances` returns.
     ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter,
-    summed over the pages read — the only thing that can witness the at-cap case,
-    and the signal the filter destroys. ``None`` means not_determined (the fetch
-    failed).
+    summed (deduplicated by token) over EVERY page read — so once paging exists
+    it is a whole-list length and routinely exceeds
+    :data:`TOKEN_BALANCE_PAGE_SIZE`. It is no longer "how long the one page was",
+    and comparing it to the page size no longer answers whether the list was cut
+    off: ``status`` answers that, and only ``status`` does. ``None`` means
+    not_determined (the fetch failed).
 
     ``status`` exists because ``rows == []`` is three states at once: the fetch
     failed, the address holds nothing, or the list was cut off. The failure is

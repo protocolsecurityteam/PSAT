@@ -31,9 +31,11 @@ from services.monitoring.balance_observation import (
     escalation_reason,
     fetch_asset_page,
     known_swept_assets,
+    known_typed_assets,
     observation_contract,
     record_observation,
     run_sweeps,
+    scanned_from_block,
     sweep_from_block,
 )
 from services.monitoring.balance_reads import pinned_native_balances
@@ -682,8 +684,9 @@ class ResolutionWorker(BaseWorker):
         # write point both producers go through.
         escalation = escalation_reason(session, contract_id=contract.id, page=page)
         sweeps: dict[int, SweepOutcome] = {}
+        sweep_cost = None
         if escalation is not None and contract.address:
-            sweeps, _cost = run_sweeps(
+            sweeps, sweep_cost = run_sweeps(
                 [
                     SweepRequest(
                         contract_id=contract.id,
@@ -692,6 +695,8 @@ class ResolutionWorker(BaseWorker):
                         from_block=sweep_from_block(session, contract_id=contract.id),
                         reason=escalation,
                         known_assets=known_swept_assets(session, contract_id=contract.id),
+                        known_typed=known_typed_assets(session, contract_id=contract.id),
+                        union_from_block=scanned_from_block(session, contract_id=contract.id),
                     )
                 ],
                 rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
@@ -712,6 +717,12 @@ class ResolutionWorker(BaseWorker):
             writer=BALANCE_WRITER_RESOLUTION,
             sweep=cast(SweepOutcome | None, sweeps.get(contract.id)),
             escalation=escalation,
+            cost_note=(
+                f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
+                f"{sweep_cost.head_reads} head over 1 escalated contract"
+                if sweep_cost is not None
+                else None
+            ),
         )
         session.commit()
         logger.info(

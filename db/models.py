@@ -1596,6 +1596,21 @@ class ContractBalanceFetch(Base):
     asset_set_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
     # NULL = no sweep was attempted (a third state, not a failure).
     sweep_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The ERC-721/1155 receipts the scan found, as
+    # ``[{address, kind, quantity_readable}]``. Durable BECAUSE it is durable: a
+    # typed receipt whose current holding has no readable ``balanceOf(address)``
+    # answer is why an asset set's completeness is withheld, and the evidence for
+    # that refusal has to outlive the window it was seen in. An incremental
+    # window names only what arrived inside it, so a later cycle that could not
+    # read this column would see no typed receipt, believe the set complete, and
+    # publish the earned negative the earlier scan refused. NULL = no sweep has
+    # answered for this contract; ``[]`` = a scan answered and found none.
+    typed_assets: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # The FIRST block of the union of every scan that produced the current asset
+    # set — not this cycle's window start. The basis string publishes the extent
+    # of the claim, and an incremental cycle whose window is 63 blocks wide still
+    # rests on the full-history scan that preceded it.
+    swept_from_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # The block the log scan ran through. Present ONLY on a completed sweep
     # (CHECK below), because it is the extent of the claim and a failed scan has
     # no extent. It is also the cursor: the next cycle scans from here, which is
