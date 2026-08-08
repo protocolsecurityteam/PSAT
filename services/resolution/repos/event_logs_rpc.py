@@ -143,6 +143,7 @@ class RpcEventLogFetcher:
         min_bisect_span: int = MIN_BISECT_SPAN,
         chain_id: int | None = None,
         result_cap: int | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
@@ -157,6 +158,14 @@ class RpcEventLogFetcher:
         # Declared so ``rpc_request`` can assert the eRPC URL routes this chain
         # (inv. 7). None keeps the guard a no-op for callers that lack a chain.
         self.chain_id = chain_id
+        # None = the module default in ``rpc_request``, which is what every
+        # landed caller gets. A caller whose windows are wide enough that an
+        # honest answer outlasts that default passes its own ceiling: a client
+        # timeout arrives here as a RuntimeError, the bisect path reads it as an
+        # upstream reject, and a window that was merely SLOW would be halved
+        # until the floor and then raised as unprovable. The extent of a scan is
+        # a claim about the chain, never about how long this process waited.
+        self.timeout = timeout
 
     def fetch_logs(
         self,
@@ -234,7 +243,16 @@ class RpcEventLogFetcher:
             log_filter["address"] = event_address
         params = [log_filter]
         try:
-            raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
+            # Two branches rather than one call passing ``timeout=None``: a
+            # fetcher that declared no ceiling issues the SAME call it always
+            # has, argument for argument, so nothing about the landed callers'
+            # request changes here.
+            if self.timeout is None:
+                raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
+            else:
+                raw_logs = rpc_request(
+                    self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id, timeout=self.timeout
+                )
         except RuntimeError as exc:
             # Result-cap / range-cap / query-timeout from the upstream. Halve and
             # recurse; a span at the floor is a real error, not a sizing problem.

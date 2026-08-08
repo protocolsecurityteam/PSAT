@@ -48,6 +48,12 @@ from services.monitoring.balance_reads import (
     pinned_native_balances,
 )
 from services.monitoring.chain_rpc import chain_id_for
+from services.monitoring.delivery_shape import (
+    discovered_request,
+    disposition_cost_note,
+    disposition_requests,
+    run_disposition,
+)
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
@@ -417,6 +423,37 @@ def refresh_contract_balances(
             sweep_cost.multicall,
             sweep_cost.head_reads,
         )
+
+    # THIRD PHASE, still before the write: how each unpriced holding ARRIVED.
+    # Its own request budget, so a wide disposition run cannot starve the sweep
+    # whose proven-empty negative depends on requests of its own. The population
+    # is the protocol's whole unpriced set grouped by observed account, plus this
+    # cycle's page/sweep readings, whose rows do not exist yet.
+    discovered = [
+        request
+        for request in (
+            discovered_request(
+                contract_id=p.contract.id,
+                chain_id=p.chain_id,
+                holder_address=p.contract.address,
+                page=p.page,
+                sweep=sweeps.get(p.contract.id),
+            )
+            for p in pending
+            if p.contract.address
+        )
+        if request is not None
+    ]
+    disposition_cost = run_disposition(
+        session,
+        disposition_requests(session, protocol_id=protocol_id, contract_ids=contract_ids, discovered=discovered),
+        rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+    )
+    if disposition_cost.total:
+        # Logged, deliberately NOT folded into ``cost_note``: that string is the
+        # SWEEP's cost carried onto the fetch record whose asset set the sweep
+        # produced, and this phase produced no part of that set.
+        logger.info("disposition: %s", disposition_cost_note(disposition_cost))
 
     for entry in pending:
         contract = entry.contract

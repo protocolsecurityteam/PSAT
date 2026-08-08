@@ -183,23 +183,26 @@ class TestCompletenessMappingIsTotalAndCannotSayComplete:
     """A13 — the merged ``asset_set_status`` must not leak a whole-list reading."""
 
     @pytest.mark.parametrize("status", ASSET_SET_STATUSES + (None,))
-    @pytest.mark.parametrize("page_length", [None, 0, 7, TOKEN_BALANCE_PAGE_SIZE, TOKEN_BALANCE_PAGE_SIZE + 3])
-    def test_total_over_the_whole_vocabulary(self, status, page_length):
-        out = _completeness_from_fetch(status, page_length)
+    def test_total_over_the_whole_vocabulary(self, status):
+        out = _completeness_from_fetch(status)
         assert out in (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMPLETENESS_NOT_DETERMINED)
         # There is no "complete" member to return, and that is the invariant:
-        # a page below the cap is consistent with a whole list AND with paging.
+        # a status other than at-cap is consistent with a whole list AND with a
+        # list the fetch simply never proved whole.
         assert out != "complete"
 
-    def test_returned_assets_below_cap_is_not_determined(self):
-        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS, 7) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
+    def test_returned_assets_is_not_determined(self):
+        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
-    def test_capped_page_is_witnessed_either_way(self):
-        assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP, None) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-        assert (
-            _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS, TOKEN_BALANCE_PAGE_SIZE)
-            == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-        )
+    def test_only_the_status_witnesses_the_cap(self):
+        """The fetch's own status, and never a length.
+
+        The fetch pages the endpoint to exhaustion, so an exhausted list of exactly
+        ``TOKEN_BALANCE_PAGE_SIZE`` entries — or more — was never cut off. Only
+        ``at_page_cap`` says the stored list is a prefix.
+        """
+        assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
+        assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 class TestPositiveQuantityGuardFailsClosedWithoutRaising:

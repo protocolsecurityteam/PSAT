@@ -39,6 +39,12 @@ from services.monitoring.balance_observation import (
     sweep_from_block,
 )
 from services.monitoring.balance_reads import pinned_native_balances
+from services.monitoring.delivery_shape import (
+    discovered_request,
+    disposition_cost_note,
+    disposition_requests,
+    run_disposition,
+)
 from services.monitoring.role_holder_cycle import (
     OUTCOME_GATE_CLOSED,
     OUTCOME_NO_REGISTRY,
@@ -701,6 +707,37 @@ class ResolutionWorker(BaseWorker):
                 ],
                 rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
             )
+
+        # THIRD PHASE, still before the write: how each unpriced holding
+        # ARRIVED. Scoped to this contract, but grouped by the account the
+        # readings were observed at — a proxy and its implementation that share
+        # one observed account are one holder here, and the evidence is filed
+        # where the deliveries actually landed.
+        if contract.protocol_id is not None:
+            discovered = discovered_request(
+                contract_id=contract.id,
+                chain_id=chain_id,
+                holder_address=observed_address,
+                page=page,
+                sweep=sweeps.get(contract.id),
+            )
+            disposition_cost = run_disposition(
+                session,
+                disposition_requests(
+                    session,
+                    protocol_id=contract.protocol_id,
+                    contract_ids={contract.id},
+                    discovered=[discovered] if discovered is not None else [],
+                ),
+                rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+            )
+            if disposition_cost.total:
+                # Logged, deliberately NOT folded into the fetch's ``cost_note``:
+                # that string is the SWEEP's cost carried onto the fetch record
+                # whose asset set the sweep produced, and this phase produced no
+                # part of that set.
+                logger.info("Job %s: disposition: %s", job.id, disposition_cost_note(disposition_cost))
+
         recorded = record_observation(
             session,
             contract=contract,
