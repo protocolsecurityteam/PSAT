@@ -49,6 +49,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_RETURNED_EMPTY,
     BALANCE_SOURCE_PINNED_NATIVE_READ,
     BALANCE_SOURCE_UNPINNED_NATIVE_READ,
+    NATIVE_STATUS_PROVEN_ZERO,
     SWEEP_STATUS_COMPLETED,
     SWEEP_STATUS_FAILED,
 )
@@ -500,6 +501,16 @@ def record_observation(
     if scan_completed:
         assert sweep is not None
         for asset in sweep.assets:
+            # A scan-discovered asset the holder no longer holds writes no row,
+            # and the completeness witness is why it does not need to. What
+            # ``proven_empty`` turns on is the SET — the fetch record carries
+            # ``chain_log_sweep`` + ``swept_through_block``, and the plane reads
+            # "this list is everything that ever arrived" off that — so a
+            # zero-quantity row would add no evidence while making row existence
+            # mean "holds this asset" again, which is the reading
+            # ``balance_reads.positive_raw_balance`` exists to stop. It would also
+            # flip the recorded asset-set status from ``returned_empty`` to
+            # ``returned_assets`` for a holder that holds nothing.
             if asset.raw_balance is None or asset.raw_balance <= 0:
                 continue
             existing = assets.get(asset.token_address)
@@ -642,7 +653,15 @@ def record_observation(
     written: list[ContractBalance] = []
     # No DELETE anywhere in here. The writers are insert-only and
     # ``contract_balances_latest`` decides what is current, per row class.
-    if native.wei is not None and native.wei > 0:
+    #
+    # A PROVEN zero is persisted as a row of its own. A quantity witnessed zero
+    # at a named height is an observation — the earned negative the sheet plane
+    # reads as ``proven_empty`` — and dropping it left the plane with an absence
+    # where a measurement had been made. The pinned-ness is what admits it and is
+    # not assumed: ``native_status_for`` stamps ``proven_zero`` only for a zero
+    # read AT a block, and an unpinned zero stays ``not_determined`` and writes
+    # nothing, because a zero at an unrecorded moment proves zero at no height.
+    if native.wei is not None and (native.wei > 0 or native_status == NATIVE_STATUS_PROVEN_ZERO):
         native_usd = (native.wei / 1e18) * native.price_usd if native.price_usd is not None else None
         written.append(
             ContractBalance(

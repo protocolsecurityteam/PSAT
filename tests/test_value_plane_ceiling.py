@@ -33,6 +33,9 @@ def _plane(
     alias: dict[str, str] | None = None,
     alias_ambiguous: set[str] | None = None,
     asset_set_truncated: set[str] | None = None,
+    asset_set_proven_complete: dict[str, dict] | None = None,
+    typed_receipts_unresolved: dict[str, list[dict]] | None = None,
+    unpriced_positions: dict[str, list[dict]] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
@@ -40,6 +43,9 @@ def _plane(
     plane.alias = alias or {}
     plane.alias_ambiguous = alias_ambiguous or set()
     plane.asset_set_truncated = asset_set_truncated or set()
+    plane.asset_set_proven_complete = asset_set_proven_complete or {}
+    plane.typed_receipts_unresolved = typed_receipts_unresolved or {}
+    plane.unpriced_positions = unpriced_positions or {}
     plane.contract_entities = set(plane.per_asset) | set(plane.per_asset_state)
     return plane
 
@@ -51,8 +57,24 @@ def _priced() -> P.ValuePlane:
     )
 
 
+# The completeness witness a proven-empty sheet cannot be published without: the
+# chain's own transfer history, read to a named block. Every builder that wants
+# an empty sheet has to carry it, which is the point — a plane that never scanned
+# answers ``unpriced`` and not $0.
+SCANNED = {
+    "source": "chain_log_sweep",
+    "accounts_scanned": 1,
+    "swept_from_block": 0,
+    "swept_through_block": 21_000_000,
+    "basis": ["chain scan of blocks 0-21000000 over Transfer/TransferSingle/TransferBatch"],
+}
+
+
 def _proven_empty() -> P.ValuePlane:
-    return _plane(per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}})
+    return _plane(
+        per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY: SCANNED},
+    )
 
 
 def _below_resolution() -> P.ValuePlane:
@@ -210,6 +232,7 @@ def test_a_truncated_list_refuses_a_proven_empty_sheet_too():
     """
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY: SCANNED},
         asset_set_truncated={KEY},
     )
     assert plane.sheet_state(KEY) == P.SHEET_PROVEN_EMPTY
@@ -272,3 +295,179 @@ def test_the_resolver_answers_the_value_conjuncts_only():
     import inspect
 
     assert list(inspect.signature(P.ceiling_for).parameters) == ["plane", "key"]
+
+
+# --- the empty claim's own conjuncts ----------------------------------------
+# ``proven_empty`` is the only state on this plane that publishes a NUMBER out of
+# an absence, so it is the one with a set conjunct beside its quantity conjunct.
+# Each refusal below is a different missing witness, closed by different work.
+
+
+def test_the_quantities_alone_do_not_publish_an_empty_sheet():
+    """Zeros over a list nobody established say nothing about the entity.
+
+    The reading is unchanged — the quantity IS witnessed zero — and the sheet
+    still refuses, because "every asset is zero" is a claim about a set, and the
+    set is what the scan supplies. The refusal publishes ``unpriced``: something
+    was observed here and no number covers it, which is the fail-closed
+    direction and never a $0.
+    """
+    plane = _plane(per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}})
+    assert plane.per_asset_state[KEY]["weth"] == P.ASSET_PROVEN_ZERO
+    assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE
+    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
+    assert plane.total(KEY) is None
+    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
+
+    plane.asset_set_proven_complete[KEY] = SCANNED
+    assert plane.proven_empty_refusal(KEY) is None
+    assert plane.sheet_state(KEY) == P.SHEET_PROVEN_EMPTY
+    assert plane.total(KEY) == 0.0
+    assert P.ceiling_for(plane, KEY) == (0.0, P.CEILING_PROVEN_EMPTY)
+
+
+def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_question():
+    """One sheet, one asset list: the fold decides where the witness applies."""
+    plane = _plane(
+        per_asset_state={OTHER: {"weth": P.ASSET_PROVEN_ZERO}},
+        alias={KEY: OTHER},
+        asset_set_proven_complete={OTHER: SCANNED},
+    )
+    assert plane.asset_set_is_proven_complete(KEY) is True
+    assert plane.sheet_state(KEY) == plane.sheet_state(OTHER) == P.SHEET_PROVEN_EMPTY
+    assert P.ceiling_for(plane, KEY) == (0.0, P.CEILING_PROVEN_EMPTY)
+
+
+@pytest.mark.parametrize(
+    "entry,resolved",
+    [
+        ({"address": "0x1", "kind": "typed", "quantity_readable": True, "quantity": "0"}, True),
+        ({"address": "0x1", "kind": "typed", "quantity_readable": True, "quantity": "1"}, False),
+        ({"address": "0x1", "kind": "typed", "quantity_readable": False, "quantity": None}, False),
+        ({"address": "0x1", "kind": "typed", "quantity_readable": True, "quantity": None}, False),
+        ({"address": "0x1", "kind": "typed", "quantity_readable": "yes", "quantity": "0"}, False),
+        ({"address": "0x1"}, False),
+        ("not a record", False),
+    ],
+)
+def test_only_a_readable_zero_resolves_a_typed_receipt(entry, resolved: bool):
+    """An ERC-721/1155 arrival is immutable; whether it is still HELD is not.
+
+    Exactly one shape closes it — the holding read back and read back zero. An
+    unreadable ``balanceOf`` (ERC-1155 has none taking an address alone) is
+    not_determined, a readable non-zero count is a held item, and a malformed
+    record is evidence nobody can read. None of the three may stand behind
+    "holds nothing", and a truthy-but-not-``True`` flag is not a witness either.
+    """
+    assert P.typed_receipt_is_resolved(entry) is resolved
+
+
+def test_an_unresolved_typed_receipt_refuses_the_empty_sheet_and_publishes_unpriced():
+    """ "Holds nothing" is false while a typed token may still be held.
+
+    The count is not a value either — ``balanceOf`` on a 721 answers a number of
+    ITEMS — so the entity publishes ``unpriced`` rather than a dollar figure in
+    either direction.
+    """
+    unreadable = {"address": "0xnft", "kind": "typed", "quantity_readable": False, "quantity": None}
+    plane = _plane(
+        per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY: SCANNED},
+        typed_receipts_unresolved={KEY: [unreadable]},
+    )
+    assert plane.unresolved_typed_receipts(KEY) == [unreadable]
+    assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED
+    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
+    assert plane.total(KEY) is None
+    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
+
+
+def test_a_typed_receipt_with_no_fungible_reading_is_not_no_rows():
+    """``no_rows`` says nothing was observed, and a receipt IS an observation.
+
+    Left as ``no_rows`` the entity would refuse its ceiling under "no balance was
+    ever observed", which sends the operator to the wrong pipeline: the balance
+    WAS observed and the typed holding is the part nobody answered.
+    """
+    plane = _plane(
+        asset_set_proven_complete={KEY: SCANNED},
+        typed_receipts_unresolved={KEY: [{"address": "0xnft", "quantity_readable": False, "quantity": None}]},
+    )
+    assert plane.per_asset_state.get(KEY) is None
+    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
+    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
+
+
+def test_an_unpriced_restaking_position_refuses_the_empty_sheet():
+    """The cross-plane gate: a $0 here would contradict a plane in the same document.
+
+    The restaking plane carries quantities with no USD column at this node, so
+    the priced sheet being all zeros is a fact about the priced sheet and not
+    about the node. Publishing the $0 would also let the fold bound a magnitude
+    at zero over holdings nobody priced.
+    """
+    plane = _plane(
+        per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY: SCANNED},
+        unpriced_positions={KEY: [{"asset": "eigenlayer_beacon_shares_wei", "quantity_wei": 3e19}]},
+    )
+    assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_UNPRICED_POSITIONS
+    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
+    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
+
+
+def test_every_refusal_token_has_a_case_and_they_do_not_collapse():
+    """The refusals are the work list, so an unexercised token is a claim."""
+    seen = set()
+    for refusal, plane in (
+        (P.EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE, _plane(per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}})),
+        (
+            P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED,
+            _plane(
+                per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}},
+                asset_set_proven_complete={KEY: SCANNED},
+                typed_receipts_unresolved={KEY: [{"address": "0xnft"}]},
+            ),
+        ),
+        (
+            P.EMPTY_REFUSED_UNPRICED_POSITIONS,
+            _plane(
+                per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}},
+                asset_set_proven_complete={KEY: SCANNED},
+                unpriced_positions={KEY: [{"asset": "shares", "quantity_wei": 1.0}]},
+            ),
+        ),
+    ):
+        assert plane.proven_empty_refusal(KEY) == refusal
+        seen.add(refusal)
+    assert seen == set(P.EMPTY_REFUSALS)
+
+
+def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
+    """§1 D3's non-disturbance rule, asserted rather than assumed.
+
+    ``native_value_state`` is ``native_fact``'s existing consumer and feeds the
+    fold's native-only reach branch. A proven zero reaches it two ways — the
+    fetch record's status for an absent row, and a stored zero-quantity row now
+    that the producer writes one — and both must answer the same determined 0.0
+    under the same label, or the branch's answer would depend on which writer
+    got there first.
+    """
+    from_fact = _plane()
+    from_fact.native_fact = {KEY: "proven_zero_at_block_21000000"}
+    from_row = _plane(
+        per_asset={KEY: {P.NATIVE_ASSET: 0.0}},
+        per_asset_state={KEY: {P.NATIVE_ASSET: P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY: SCANNED},
+    )
+    for plane in (from_fact, from_row):
+        answer = P.native_value_state(plane, KEY)
+        assert (answer.is_determined, answer.state, answer.value) == (True, "proven_zero", 0.0)
+
+    # A nonzero holding keeps the plain label, and a fetch record that proves
+    # nothing keeps not_determined — neither moves.
+    held = _plane(per_asset={KEY: {P.NATIVE_ASSET: 12.5}}, per_asset_state={KEY: {P.NATIVE_ASSET: P.ASSET_PRICED}})
+    assert P.native_value_state(held, KEY).state == "proven"
+    blank = _plane()
+    blank.native_fact = {KEY: "not_determined"}
+    assert P.native_value_state(blank, KEY).is_determined is False

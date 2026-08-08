@@ -271,14 +271,16 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # because the page allow-lists this direction: it would render a badge for a
     # state nothing can earn, with nothing published saying so.
     "value_at_stake_bound_direction:ceiling",
-    # The code-control ceiling's own two zero-carrier arms. The STATE is
-    # calibrated — sheet ceilings fire on the reference corpus and move the
-    # ranking — so ``proven_ceiling`` itself is deliberately absent here; what has
-    # never fired is these two admission arms, and each is exercised only by a
-    # constructed fixture.
-    "code_control_ceiling:proven_empty",
+    # The code-control ceiling's one remaining zero-carrier arm. Its siblings
+    # ``code_control_ceiling:proven_empty`` and
+    # ``sheet_ceiling_bound_direction:ceiling`` were registered here while no
+    # entity on the reference corpus held a sheet proven empty; the chain-log
+    # sweep gave them carriers, and an entry whose positive branch has fired is
+    # removed rather than left standing — a register that keeps a fired arm
+    # tells a reader the model was never fitted to something it now publishes.
+    # The refusal below still has none: the fold refuses a shared implementation
+    # before any magnitude branch reads a sheet, so no row can carry it.
     "code_control_ceiling_refused:alias_ambiguous",
-    "sheet_ceiling_bound_direction:ceiling",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -432,42 +434,6 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "not discharge one, and because site/src/score/derive.js allow-lists this direction: "
             "the page would render a <= badge for a state no ROW here earns, with nothing "
             "published saying so"
-        ),
-    },
-    {
-        "arm": "sheet_ceiling_bound_direction:ceiling",
-        "state": "ceiling",
-        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].bound_direction",
-        "population_census": None,
-        "exercised_by": (
-            "tests/test_scoring_redteam.py::test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet",
-        ),
-        "note": (
-            "the PER-ENTITY direction, which is a narrower question than the row header's and has "
-            "its own zero population. A priced sheet is a FLOOR over what was priced, so the "
-            "figure is an at-most on the move only where every asset observed at that entity was "
-            "priced and no position carries an absent USD column. Every ceiling-bearing entity on "
-            "this corpus holds assets nobody priced — one of them holds ninety-nine such assets "
-            "beside its one priced one — so every published entry takes the partial arm and says "
-            "what it bounds instead. This is the same conjunct the row header refuses on, asked at "
-            "one entity rather than over the sum, and it is registered separately because a "
-            "consumer reads the two fields separately"
-        ),
-    },
-    {
-        "arm": "code_control_ceiling:proven_empty",
-        "state": "proven_empty",
-        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].ceiling_reason",
-        "population_census": None,
-        "exercised_by": (
-            "tests/test_scoring_redteam.py::test_cc4_a_proven_empty_sheet_is_a_zero_ceiling_not_a_missing_one",
-        ),
-        "note": (
-            "the sheet ceiling's EARNED-NEGATIVE admission: every asset at the node carries a "
-            "quantity witnessed zero, so the ceiling is a proven $0. No entity on this corpus "
-            "holds such a sheet, so the arm ships exercised only by a constructed fold case. It "
-            "is registered rather than the ceiling STATE, which fires here and is calibrated: "
-            "what has never fired is this one way of admitting it"
         ),
     },
     {

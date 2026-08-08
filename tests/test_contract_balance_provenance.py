@@ -226,8 +226,14 @@ class TestUnpinnedZeroIsNotAProvenZero:
         refresh_contract_balances(db_session, proto.id)
         f = _fetches(db_session, pinned_c.id)[0]
         assert (f.native_status, f.block_number) == (NATIVE_STATUS_PROVEN_ZERO, BLOCK)
-        # A proven zero is still not a holding.
-        assert _rows(db_session, pinned_c.id) == []
+        # A proven zero is an OBSERVATION and is written as one. A quantity
+        # witnessed zero at a named height is the earned negative the value
+        # plane reads as an empty sheet, and dropping it left an absence where a
+        # measurement had been made. It is still not a HOLDING: the quantity is
+        # 0, and every consumer that means "holds this asset" asks the quantity
+        # (``balance_reads.positive_raw_balance``).
+        pinned_rows = [(r.raw_balance, r.block_number, r.token_address) for r in _rows(db_session, pinned_c.id)]
+        assert pinned_rows == [("0", BLOCK, None)]
 
         # Same observed value, unpinned path.
         _stub_unpinned(monkeypatch)
@@ -235,6 +241,10 @@ class TestUnpinnedZeroIsNotAProvenZero:
         refresh_contract_balances(db_session, proto.id)
         f2 = _fetches(db_session, pinned_c.id)[-1]
         assert (f2.native_status, f2.block_number) == (NATIVE_STATUS_NOT_DETERMINED, None)
+        # And it writes NOTHING: a zero at an unrecorded moment proves zero at no
+        # height, so there is no observation to persist. The pinned row from the
+        # first cycle is still the only one.
+        assert [(r.raw_balance, r.block_number, r.token_address) for r in _rows(db_session, pinned_c.id)] == pinned_rows
 
     def test_db_refuses_a_blockless_proven_zero(self, db_session):
         """The gate is a constraint, not writer discipline."""

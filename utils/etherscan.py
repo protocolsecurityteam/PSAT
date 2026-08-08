@@ -841,6 +841,17 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
     results = []
     for entry in raw_entries:
         raw_balance = int(entry.get("TokenQuantity", "0") or "0")
+        # A zero ENTRY is dropped rather than persisted, and that is a witness
+        # rule and not a size optimisation. This endpoint answers ``tag=latest``
+        # and its response carries no height, so a zero here is "zero at some
+        # unrecorded moment" — exactly the shape ``balance_reads.native_status_for``
+        # refuses to call a proven zero on the native leg. A stored zero-quantity
+        # row reads as an earned negative to the value plane
+        # (``planes._is_proven_zero_quantity``), so writing one would mint that
+        # negative out of a third-party read that names no block. The proven
+        # zeros this pipeline does publish come from reads AT a named height: the
+        # pinned ``getEthBalance`` for the coin, and the chain-log sweep's
+        # ``balanceOf`` round for the list.
         if raw_balance > 0:
             raw_divisor = entry.get("TokenDivisor")
             try:

@@ -177,15 +177,29 @@ def value_plane(
     contracts: tuple[str, ...] = (),
     alias: dict[str, str] | None = None,
     per_asset_state: dict[str, dict[str, str]] | None = None,
+    asset_set_proven_complete: dict[str, dict] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
     plane.per_asset_state = per_asset_state or {}
+    plane.asset_set_proven_complete = asset_set_proven_complete or {}
     # The confidence perimeter's base population, as the DB would supply it.
     plane.contract_entities = set(contracts) | set(plane.per_asset) | set(plane.per_asset_state)
     plane.alias = alias or {}
     plane.provenance = {"stub": True}
     return plane
+
+
+# The chain-scan witness a proven-empty sheet cannot be published without. The
+# reference corpus carries real ones now; these tests build theirs so the state
+# under test is the plane's rule and not one corpus's data.
+SCANNED = {
+    "source": "chain_log_sweep",
+    "accounts_scanned": 1,
+    "swept_from_block": 0,
+    "swept_through_block": 21_000_000,
+    "basis": ["chain scan of blocks 0-21000000 over Transfer/TransferSingle/TransferBatch"],
+}
 
 
 def closure_of(
@@ -2010,6 +2024,12 @@ def test_a_proven_zero_QUANTITY_is_the_only_witness_of_an_empty_sheet():
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="0")]})
     assert plane.per_asset_state["k"]["asset"] == P.ASSET_PROVEN_ZERO
+    # The quantity is half of it. The other half is the SET those quantities
+    # cover: without a scan proving the list whole, zeros over an unestablished
+    # list are refused and publish unpriced, never a $0.
+    assert plane.sheet_state("k") == P.SHEET_UNPRICED
+    assert plane.total("k") is None
+    plane.asset_set_proven_complete["k"] = SCANNED
     assert plane.sheet_state("k") == P.SHEET_PROVEN_EMPTY
     assert plane.total("k") == 0.0
 
@@ -5981,7 +6001,7 @@ def test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet(f
     assert entry["assets_not_priced"] == []
     assert entry["unpriced_positions"] == 0
     assert entry["per_asset"] == [{"asset": "usdc", "usd": 5_000_000.0, "state": P.ASSET_PRICED}]
-    assert "every asset observed at this entity was priced" in entry["bound_direction_basis"]
+    assert "every asset observed at this entity carries a determined reading" in entry["bound_direction_basis"]
     assert finding["reach_sheet_ceiling_magnitudes_withheld"] == []
     # The #170 answer. A sheet ceiling is proven by a BALANCE OBSERVATION, so
     # there is no execution to name — and the reason saying so must never be a
@@ -6122,6 +6142,7 @@ def test_cc4_a_proven_empty_sheet_is_a_zero_ceiling_not_a_missing_one(fold):
     plane = value_plane(
         {KEY_C: {"usdc": 0.0}},
         per_asset_state={KEY_C: {"usdc": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY_C: SCANNED},
     )
     assert plane.sheet_state(KEY_C) == P.SHEET_PROVEN_EMPTY
     signal = sig(
@@ -6149,19 +6170,30 @@ def test_cc4_a_proven_empty_sheet_is_a_zero_ceiling_not_a_missing_one(fold):
     assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
     assert entry["assets_not_priced"] == [] and entry["unpriced_positions"] == 0
 
-    # The OTHER proven-empty arm, which the coverage conjunct decides against.
-    # A restaking position carries no USD column at all, so "every asset is a
-    # witnessed zero" is a fact about the PRICED sheet and not about the node:
-    # the $0 stays an earned negative and stops being an at-most on the move.
-    positions = value_plane({KEY_C: {"usdc": 0.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PROVEN_ZERO}})
+    # The CROSS-PLANE gate, which used to be a shade of this arm and is now a
+    # refusal. A restaking position at the same node carries no USD column at
+    # all, so "every asset is a witnessed zero" is a fact about the PRICED sheet
+    # while the node demonstrably holds something — and a $0 published there
+    # would contradict a plane already in the same document AND bound a
+    # magnitude at zero over holdings nobody priced. The sheet refuses the empty
+    # state outright and publishes unpriced, so the entity earns no ceiling at
+    # all rather than a $0 one wearing a not_determined direction.
+    positions = value_plane(
+        {KEY_C: {"usdc": 0.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY_C: SCANNED},
+    )
     positions.unpriced_positions = {KEY_C: [{"asset": "eigenlayer_beacon_shares_wei", "quantity_wei": 3e19}]}
+    assert positions.proven_empty_refusal(KEY_C) == P.EMPTY_REFUSED_UNPRICED_POSITIONS
+    assert positions.sheet_state(KEY_C) == P.SHEET_UNPRICED
+    assert positions.total(KEY_C) is None
+    assert P.ceiling_for(positions, KEY_C) == (None, P.CEILING_UNPRICED)
     partial = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=positions))
-    held = partial["reach_sheet_ceiling_magnitudes"][0]
-    assert held["ceiling_reason"] == P.CEILING_PROVEN_EMPTY and held["published_usd"] == 0.0
-    assert held["unpriced_positions"] == 1
-    assert held["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert held["reading"] == FOLD._CEILING_SOURCE_READINGS[(P.CEILING_PROVEN_EMPTY, False)] + FOLD._CEILING_CLOSING
-    assert held["reading"] != entry["reading"]
+    assert partial["reach_sheet_ceiling_magnitudes"] == []
+    assert partial["entities_priced_from_a_sheet_ceiling"] == []
+    assert f"code_control_sheet_ceiling_refused({P.CEILING_UNPRICED})" in [
+        instance["why"] for instance in partial["undetermined_instances"]
+    ]
 
 
 def test_cc4_a_shared_implementation_earns_no_ceiling(fold):

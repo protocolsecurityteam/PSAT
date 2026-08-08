@@ -386,9 +386,11 @@ CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILI
 # total is a FLOOR over what was priced (``planes.ValuePlane.sheet_state``), so
 # on an entity holding assets nobody priced the figure is not an at-most on the
 # move at all. It is an at-most on the PRICED PORTION, and saying otherwise
-# claims a bound over holdings this fold never observed. Every published entry
-# on the reference corpus takes a partial arm; the full-coverage arms are
-# exercised by constructed carriers.
+# claims a bound over holdings this fold never observed. Every ADMITTED entry on
+# the reference corpus takes the partial arm — those entities hold assets nobody
+# priced — while the PROVEN-EMPTY ones take the full-coverage arm, which is the
+# only shape in which coverage is trivially whole: a sheet whose every quantity
+# is witnessed zero has nothing left over to be uncovered.
 _CEILING_SOURCE_READINGS = {
     (P.CEILING_ADMITTED, True): (
         "the dollars are THIS entity's own priced holdings, and every asset observed at it was "
@@ -412,13 +414,16 @@ _CEILING_SOURCE_READINGS = {
         "it. This is an earned negative — a sheet nobody priced publishes not_determined instead "
         "— and it bands at the floor for the same reason any small figure does"
     ),
-    (P.CEILING_PROVEN_EMPTY, False): (
-        "every asset PRICED at this entity carries a quantity witnessed zero, and the positions "
-        "under unpriced_positions carry no USD column at all — so the $0 is an earned negative "
-        "about the priced sheet and NOT a proof that replacing this node's code moves nothing. "
-        "What those positions are worth is not_determined here, which is why bound_direction is "
-        "not a ceiling on this entry"
-    ),
+    # ``(PROVEN_EMPTY, False)`` is ABSENT, and its absence is a rule rather than
+    # an omission. It described a proven-empty priced sheet at a node the
+    # restaking plane also carries unpriced positions for; the sheet plane now
+    # REFUSES the empty state there outright (``ValuePlane.proven_empty_refusal``
+    # — a $0 beside those positions both contradicts a plane already in this
+    # document and bounds a magnitude at zero over holdings nobody priced), so
+    # such an entity publishes ``unpriced`` and earns no ceiling at all. A
+    # sentence nothing can publish is removed on the same rule the uncalibrated
+    # register is kept by, and the lookup below stays strict so a fifth
+    # combination raises instead of borrowing one of these.
 }
 
 # True of every sheet ceiling whatever admitted it and whatever its coverage, so
@@ -439,8 +444,9 @@ _CEILING_CLOSING = (
 # stop.
 _SHEET_CEILING_DIRECTION_BASIS = {
     True: (
-        "every asset observed at this entity was priced and no position carries an absent USD "
-        "column, so the total covers the holdings and bounds the move from above"
+        "every asset observed at this entity carries a determined reading — a price, or a "
+        "QUANTITY witnessed zero, which is worth nothing at any price — and no position carries "
+        "an absent USD column, so the total covers the holdings and bounds the move from above"
     ),
     False: (
         "the priced sheet does not cover everything observed at this entity (assets_not_priced, "
@@ -2722,6 +2728,18 @@ _CEILING_KIND_BOUNDS = {
 }
 
 
+def _asset_set_completeness(value_plane: P.ValuePlane, entity: str) -> dict[str, Any] | None:
+    """The carrier record proving this entity's asset list whole, or ``None``.
+
+    Copied out of the plane rather than rebuilt: the strings inside are the
+    producer's own ``asset_set_basis`` values, so what the document publishes
+    about a scan is the scan's own record and not a sentence authored at the
+    point of publication.
+    """
+    record = value_plane.asset_set_proven_complete.get(value_plane.canonical(entity))
+    return dict(record) if record is not None else None
+
+
 def _sheet_ceiling_records(
     sheet_ceilings: frozenset[str],
     per_entity: dict[str, float],
@@ -2776,6 +2794,14 @@ def _sheet_ceiling_records(
                 "ceiling_reason": reason,
                 "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
                 "bound_direction_basis": _SHEET_CEILING_DIRECTION_BASIS[complete],
+                # What proves the asset list this figure is summed over is the
+                # WHOLE list, carried from the observation record rather than
+                # restated here: the source token, the block range the chain's
+                # own transfer history was read across, and the producer's own
+                # basis strings. ``null`` is the third state — no scan on record
+                # — which is every ADMITTED entry on this corpus and is why they
+                # bound the priced portion and not the move.
+                "asset_set_completeness": _asset_set_completeness(value_plane, entity),
                 **coverage,
                 PROVING_EXECUTION_KEY: EX.not_determined(EX.REASON_NOT_PROVEN_BY_A_CALL).as_json(),
                 "reading": _CEILING_SOURCE_READINGS[(reason, complete)] + _CEILING_CLOSING,
