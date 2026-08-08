@@ -85,6 +85,19 @@ def _word(value: int) -> str:
     return "0x" + f"{value:064x}"
 
 
+def _page_row(token: str) -> dict:
+    """One holdings row in the shape ``get_token_balances_page`` returns."""
+    return {
+        "token_address": token,
+        "token_name": "T",
+        "token_symbol": "T",
+        "decimals": 18,
+        "balance": 1000,
+        "price_usd": None,
+        "usd_value": None,
+    }
+
+
 class _StubRpc:
     """One eth_getLogs wire, scripted per call, with the requests recorded."""
 
@@ -605,6 +618,57 @@ class TestEscalationAndRecording:
         assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
         assert scanned_from_block(db_session, contract_id=contract.id) == 0
         assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+
+    def test_a_non_escalating_cycle_does_not_hand_its_successor_an_inherited_cursor(self, db_session):
+        """The third door: a cycle that never escalated becomes current.
+
+        It carries no scan record and no cursor of its own. While the cursor was
+        read from a ``max()`` over history it still handed back the old height,
+        so the next escalation resumed mid-history — from a scan whose evidence
+        the readers, keyed on the CURRENT fetch, could no longer see. Cursor and
+        evidence now come from one row, so this fetch answers 0 for both.
+        """
+        from services.monitoring.asset_sweep import SweepOutcome
+
+        _proto, contract = self._fixture(db_session, address="0x" + "d3" * 20)
+        record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_COMPLETED,
+                swept_from_block=0,
+                swept_through_block=1234,
+                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                basis="scan",
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+        db_session.flush()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+
+        # A plain cycle: Etherscan answered with assets, so nothing escalated and
+        # no scan ran. This fetch is non-failed, so it becomes current.
+        plain = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([_page_row(TOKEN)]),
+            writer=BALANCE_WRITER_TVL,
+        )
+        db_session.flush()
+        assert plain.asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
+        assert plain.fetch.swept_through_block is None
+        assert plain.fetch.typed_assets is None
+
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        assert known_typed_assets(db_session, contract_id=contract.id) == ()
 
     def test_a_malformed_typed_record_is_distrusted_not_read_as_none(self, db_session):
         # Degrading an unreadable record to "no typed receipts" would republish a

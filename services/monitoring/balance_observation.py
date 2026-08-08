@@ -252,22 +252,25 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     hourly loop would re-run a full-history scan every cycle — the cursor is what
     makes the one-shot a one-shot.
 
-    A cursor is only trusted when the fetch that carries the current asset set
-    also recorded what that scan found about ERC-721/1155 receipts. A cursor
-    without that record is a scan whose completeness evidence was never kept:
-    skipping the blocks behind it would inherit a conclusion from a scan that
-    cannot show what it saw, so the scan is redone from the beginning instead.
+    THE CURSOR AND THE EVIDENCE COME FROM THE SAME ROW, by construction rather
+    than by agreement. A cursor's promise is "those blocks were read and what
+    they held is on record", so it may only be taken from a fetch that is also
+    the one carrying the record — the current asset fetch. Reading the cursor
+    from anywhere wider (a ``max()`` over history, say) lets a row that scanned
+    nothing hand back a height a different row earned, and the evidence readers,
+    which key on the current fetch, then answer for a scan the cursor did not
+    come from. That divergence had three doors: a fetch with a cursor but no
+    typed record, an abort that became current, and a plain non-escalating
+    ``returned_assets`` cycle. One row closes all three.
+
+    The cost is accepted and stated: a cycle that does not escalate makes the
+    next escalation a full re-scan. It converges on that scan, and a re-scan is
+    the cheap side of the trade against inheriting a conclusion.
     """
     current = _current_asset_fetch(session, contract_id=contract_id)
-    if current is not None and current.swept_through_block is not None and not _typed_record_is_readable(current):
+    if current is None or current.swept_through_block is None or not _typed_record_is_readable(current):
         return 0
-    through = session.execute(
-        select(func.max(ContractBalanceFetch.swept_through_block)).where(
-            ContractBalanceFetch.contract_id == contract_id,
-            ContractBalanceFetch.sweep_status == SWEEP_STATUS_COMPLETED,
-        )
-    ).scalar()
-    return 0 if through is None else int(through) + 1
+    return int(current.swept_through_block) + 1
 
 
 def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]:
@@ -333,15 +336,12 @@ def _typed_record_is_readable(fetch: ContractBalanceFetch) -> bool:
 def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
     """The first block of the union of the scans behind the current asset set."""
     fetch = _current_asset_fetch(session, contract_id=contract_id)
-    if fetch is None:
+    if fetch is None or fetch.swept_through_block is None or not _typed_record_is_readable(fetch):
+        # Same row and same rule as :func:`sweep_from_block`: an extent is only
+        # readable off the fetch that carries the scan it describes, and a scan
+        # being redone has no extent yet.
         return None
-    if fetch.swept_through_block is not None and not _typed_record_is_readable(fetch):
-        # Same rule as :func:`sweep_from_block`: a scan that kept no typed-receipt
-        # record is being redone, so the union extent restarts with it.
-        return None
-    if fetch.swept_from_block is not None:
-        return int(fetch.swept_from_block)
-    return 0 if fetch.swept_through_block is not None else None
+    return int(fetch.swept_from_block) if fetch.swept_from_block is not None else 0
 
 
 def _current_asset_fetch(session: Session, *, contract_id: int) -> ContractBalanceFetch | None:
