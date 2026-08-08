@@ -55,10 +55,11 @@ from utils.scoring_status import (
     GRADE_FAULT_DEGRADED,
     GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
+    MAGNITUDE_STATE_PROVEN_CEILING,
     MAGNITUDE_STATE_PROVEN_EXACT,
     MAGNITUDE_STATE_PROVEN_FLOOR,
     MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
-    MAGNITUDE_STATES_ATTRIBUTION_DERIVED,
+    MAGNITUDE_STATES_UPPER_BOUNDING,
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
@@ -86,6 +87,16 @@ GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
     # ``not_determined`` nor a member here, and ``_gate`` degrades it — so
     # omitting it would take every attribution-derived magnitude out at once,
     # which is a number movement dressed as a vocabulary omission.
+    #
+    # ``proven_ceiling`` (``scoring_status.MAGNITUDE_STATES_UPPER_BOUNDING``) is
+    # ABSENT ON PURPOSE, and its absence takes no population out. This list
+    # allow-lists states a DISTILLED signal may carry on its own
+    # ``reach_magnitude_usd`` gate; a sheet ceiling is derived inside the fold
+    # from the ``ValuePlane`` at the moment a code-control capability is priced
+    # against the node it controls, so no signal ever presents it here and the
+    # F4 hazard cannot apply to it. Should a distiller ever stamp the state onto
+    # a gate, this is the line that must gain it — the omission is a scope
+    # ruling, not an oversight.
     "reach_magnitude_usd": (
         MAGNITUDE_STATE_PROVEN_EXACT,
         MAGNITUDE_STATE_PROVEN_FLOOR,
@@ -3222,8 +3233,15 @@ class _DestinationMagnitude:
         True on the attribution path, where a constant-amount probe credited a
         holder's whole priced balance. A row summing such contributions has not
         earned a ">=" band, whatever its coverage looks like.
+
+        The registry it reads is the DIRECTION set, which also carries the sheet
+        ceiling. That is not a widening here: a ``_DestinationMagnitude`` is
+        built only from a destination function's own witnessed ``flow.out``
+        figure, and a sheet ceiling — proven by a balance observation, not by a
+        call — never constructs one, so the ceiling state cannot reach this
+        property.
         """
-        return self.state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED
+        return self.state in MAGNITUDE_STATES_UPPER_BOUNDING
 
 
 def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, str], _DestinationMagnitude]:
@@ -3768,7 +3786,7 @@ def _instance_contributions(
         # attribution-derived REVOKES the grade, because the row may then be
         # publishing the attributed candidate's number.
         if contribution >= per_key[canonical]:
-            if state is not None and state not in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+            if state is not None and state not in MAGNITUDE_STATES_UPPER_BOUNDING:
                 non_attributed.add(canonical)
             else:
                 non_attributed.discard(canonical)
@@ -4057,18 +4075,48 @@ def _unbounded_figure(state: str, usd: float) -> dict[str, float]:
     """
     if state == MAGNITUDE_STATE_PROVEN_FLOOR:
         return {"witnessed_floor_usd": usd}
-    if state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+    if state in MAGNITUDE_STATES_UPPER_BOUNDING:
         return {"witnessed_upper_bound_usd": usd}
     return {"witnessed_usd": usd}
 
 
 def _unbounded_reading(state: str) -> str:
-    if state in MAGNITUDE_STATES_ATTRIBUTION_DERIVED:
+    """How the figure came to be a bound, in the terms of its OWN provenance.
+
+    Branched per state and not per direction, which is why it does not reuse the
+    direction registry the way ``_unbounded_figure`` above does. The key names
+    where the figure sits; this names how it got there, and the two
+    upper-bounding states got there by different proofs — a constant-amount
+    probe crediting a holder's whole balance, and a controlled node's own priced
+    sheet. One sentence written for the first is a false account of the second,
+    so each state says what is true of itself. A state with no branch of its own
+    takes the floor sentence, which is where every witnessed non-exact figure
+    landed before any direction was registered; that is inherited behaviour, and
+    no state reaches it today.
+
+    The one call site is ``_entity_contribution``'s branch for a witnessed figure
+    charged against an entity whose OWN sheet is not_determined, so what it reads
+    is a state that travelled to this entity from somewhere else. A sheet ceiling
+    admitted at its own node never arrives here — the admission rule requires
+    that node's sheet to be determined, which is the branch above this one — and
+    the ceiling's own disclosure is not written here at all: it is written by the
+    ceiling branch, ahead of the fallthrough, from its own reading registry. This
+    arm exists so that a ceiling state which does reach this call site is
+    described by its provenance rather than by the attribution path's.
+    """
+    if state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND:
         return (
             "an attribution-derived magnitude charged against an entity whose priced sheet is "
             "not_determined: the figure is a holder's whole priced balance credited off a "
             "constant-amount probe, so it bounds this call from ABOVE and nothing here says "
             "the call moves it — and no sheet was available to bound it against this entity"
+        )
+    if state == MAGNITUDE_STATE_PROVEN_CEILING:
+        return (
+            "a magnitude typed as a sheet ceiling charged against an entity whose priced sheet "
+            "is not_determined: the figure is some controlled node's own priced holdings, which "
+            "bounds from ABOVE what replacing THAT node's code can move — so whichever sheet "
+            "bounded it, it was not this entity's, and nothing here bounds it against this one"
         )
     return (
         "a floor witness charged against an entity whose priced sheet is "

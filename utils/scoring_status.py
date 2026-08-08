@@ -93,10 +93,21 @@ VALUE_BOUNDS = (VALUE_BOUND_EXACT, VALUE_BOUND_FLOOR, VALUE_BOUND_NOT_DETERMINED
 # confused because both spell "exact" and "floor". ``VALUE_BOUND_*`` grades the
 # ENTITY SET — is ``value_entity_keys`` the whole reach or a proven floor over
 # it — and is CHECK-constrained in the database. This one grades the DOLLAR
-# FIGURE and lives inside the free-form ``gate_inputs->'reach_magnitude_usd'``
-# envelope, where it is validated by the fold's own allow-list and nothing else.
+# FIGURE. Three of the four members ride the free-form
+# ``gate_inputs->'reach_magnitude_usd'`` envelope, where they are validated by
+# the fold's own allow-list and nothing else.
 #
-# Three members, because the second and third are opposite directions:
+# ``proven_ceiling`` is the exception and does NOT ride that envelope: it is
+# derived inside the fold from the ``ValuePlane`` and is deliberately absent
+# from the allow-list (``fold.GATE_PROVEN_TOKENS``, the ``reach_magnitude_usd``
+# entry — see the comment there). A distiller that stamps it on a gate is not
+# adding a state to a vocabulary; it is handing ``_gate`` a token the allow-list
+# does not carry, which withholds the row. Adding the state there is the
+# decision to take first, and this comment is the only place that says so:
+# nothing reads ``MAGNITUDE_STATES`` below, so the tuple can neither admit nor
+# refuse anything on its own.
+#
+# Four members, because the second and the last two are opposite directions:
 #   * ``proven_exact`` — the witness measured the call's own magnitude.
 #   * ``proven_floor`` — the call moves AT LEAST this much (a partly priced
 #     sheet, a gated indeterminate reach). The truth is at or above it.
@@ -106,19 +117,36 @@ VALUE_BOUNDS = (VALUE_BOUND_EXACT, VALUE_BOUND_FLOOR, VALUE_BOUND_NOT_DETERMINED
 #     witness says the call moves the whole balance) and it is emphatically not
 #     a floor (``proven_floor``'s prose means "at least this much", which this
 #     figure does not support in that direction).
+#   * ``proven_ceiling`` — the SHEET path: the principal can replace the
+#     controlled node's code, so nothing the node's current code does stands
+#     between them and what the node holds, and the node's own priced sheet
+#     bounds the move from ABOVE. Same direction as ``proven_upper_bound`` and a
+#     different provenance — a per-ENTITY balance observation rather than a
+#     per-CALL probe attribution — so the two are kept apart here for the same
+#     reason the module keeps every other pair of same-shape facts apart: a
+#     consumer that must say WHY the figure is a bound cannot read it off a
+#     token that merged them.
 MAGNITUDE_STATE_PROVEN_EXACT = "proven_exact"
 MAGNITUDE_STATE_PROVEN_FLOOR = "proven_floor"
 MAGNITUDE_STATE_PROVEN_UPPER_BOUND = "proven_upper_bound"
+MAGNITUDE_STATE_PROVEN_CEILING = "proven_ceiling"
 MAGNITUDE_STATES = (
     MAGNITUDE_STATE_PROVEN_EXACT,
     MAGNITUDE_STATE_PROVEN_FLOOR,
     MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+    MAGNITUDE_STATE_PROVEN_CEILING,
 )
 # The states whose figure bounds the principal from ABOVE and never from below,
 # so a row summing them has not earned a ">=" band. Named as a set rather than
 # tested against one token, so a future upper-bounding state joins the rule by
-# being registered here instead of by being remembered at each consumer.
-MAGNITUDE_STATES_ATTRIBUTION_DERIVED = (MAGNITUDE_STATE_PROVEN_UPPER_BOUND,)
+# being registered here instead of by being remembered at each consumer — which
+# is exactly how ``proven_ceiling`` joined it. Membership is the DIRECTION only:
+# the members share nothing else, and every consumer that must name the
+# provenance behind the bound branches on the state itself.
+MAGNITUDE_STATES_UPPER_BOUNDING = (
+    MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
+    MAGNITUDE_STATE_PROVEN_CEILING,
+)
 
 # --- destination lattice ---------------------------------------------------
 # ``not_applicable`` is a fourth member and a genuinely different fact from

@@ -213,6 +213,92 @@ class ValuePlane:
         return round(sum(sorted(t for t in totals if t is not None)), 2)
 
 
+# --- the sheet ceiling -------------------------------------------------------
+# The closed vocabulary ``ceiling_for`` answers in. Two of the six are ADMITS and
+# four are refusals, and the split is not readable from the names — ``no_rows``,
+# ``below_resolution`` and ``unpriced`` refuse for three different unmeasured
+# reasons, while ``proven_empty`` is an EARNED NEGATIVE that admits a $0 ceiling.
+# Kept as six tokens rather than a bool plus a note because the refusals are the
+# work list: "no balance was ever observed" and "the price lookup never answered"
+# are answered by different pipelines.
+CEILING_ADMITTED = "admitted"
+CEILING_PROVEN_EMPTY = "proven_empty"
+CEILING_NO_ROWS = "no_rows"
+CEILING_BELOW_RESOLUTION = "below_resolution"
+CEILING_UNPRICED = "unpriced"
+CEILING_ALIAS_AMBIGUOUS = "alias_ambiguous"
+
+CEILING_REASONS = (
+    CEILING_ADMITTED,
+    CEILING_PROVEN_EMPTY,
+    CEILING_NO_ROWS,
+    CEILING_BELOW_RESOLUTION,
+    CEILING_UNPRICED,
+    CEILING_ALIAS_AMBIGUOUS,
+)
+
+# The reasons under which a ceiling WAS established. Named, because a census that
+# counted admits by testing ``reason == "admitted"`` would drop every proven-zero
+# ceiling into the refusals and report an under-claim as a coverage gap.
+CEILING_ADMITTING_REASONS = (CEILING_ADMITTED, CEILING_PROVEN_EMPTY)
+
+# The three sheet states that are not a number, each under its own token. A
+# ``.get`` with a default would let a sixth sheet state refuse under a reason
+# written for a different fact, so an unregistered state raises instead.
+_CEILING_REFUSALS: dict[str, str] = {
+    SHEET_NO_ROWS: CEILING_NO_ROWS,
+    SHEET_BELOW_RESOLUTION: CEILING_BELOW_RESOLUTION,
+    SHEET_UNPRICED: CEILING_UNPRICED,
+}
+
+
+def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
+    """The most an entity's own priced sheet can bound a code seizure at.
+
+    Answers ONLY the value-side conjuncts of the admission rule: that the sheet
+    is determined, and that the key is not an implementation two proxies share.
+    The capability-side conjuncts — that the capability is code control, and that
+    it is proven for this principal over this node — are the caller's, and this
+    function must never be read as having checked them.
+
+    ``(usd, reason)``, with ``reason`` from ``CEILING_REASONS`` and ``usd`` a
+    number on exactly the two admitting reasons, so a caller may branch on
+    ``usd is not None`` and get the same answer the reason gives. The two admits
+    stay distinct tokens all the way out: ``proven_empty`` is a PROVEN $0 —
+    every asset's quantity witnessed zero — and refusing it would publish
+    ``not_determined`` where an earned negative exists, while reporting it as a
+    plain ``admitted`` would hide that the $0 is a witness rather than an
+    absence. Both admits band at the floor; only the state distinguishes them.
+
+    The alias conjunct is tested on the key AS PASSED, which is safe under the
+    caller's canonicalisation: an ambiguous implementation is aliased onto
+    nothing, so ``canonical()`` is the identity on it and folding first cannot
+    launder the ambiguity away. Everywhere else the sheet is read at the
+    canonical key, which ``sheet_state`` and ``total`` already do for themselves.
+
+    ``fold._entity_contribution`` will be the only caller, and it calls with the
+    canonical key. Nothing in the fold calls it yet — the resolver is landed
+    ahead of the branch that consumes it — so every reason it can answer is
+    pinned by ``tests/test_value_plane_ceiling.py`` over hand-built planes
+    rather than by the corpus, which carries no proven-empty sheet and no
+    ambiguous alias to exercise two of them.
+    """
+    if key in plane.alias_ambiguous:
+        return None, CEILING_ALIAS_AMBIGUOUS
+    state = plane.sheet_state(key)
+    if state == SHEET_PRICED:
+        return plane.total(key), CEILING_ADMITTED
+    if state == SHEET_PROVEN_EMPTY:
+        # Written as a literal rather than read back from ``total()``: the
+        # witness here is the state — every quantity proven zero — and the
+        # figure it implies is $0 whatever the sum of an empty sheet computes to.
+        return 0.0, CEILING_PROVEN_EMPTY
+    refusal = _CEILING_REFUSALS.get(state)
+    if refusal is None:
+        raise ValueError(f"sheet state {state!r} has no registered ceiling reason")
+    return None, refusal
+
+
 _EPOCH = datetime.min
 
 # Every counter the reduction publishes, so a rule that never fired reports a
@@ -4107,6 +4193,14 @@ __all__ = [
     "ASSET_PRICED",
     "ASSET_PROVEN_ZERO",
     "ASSET_UNPRICED",
+    "CEILING_ADMITTED",
+    "CEILING_ADMITTING_REASONS",
+    "CEILING_ALIAS_AMBIGUOUS",
+    "CEILING_BELOW_RESOLUTION",
+    "CEILING_NO_ROWS",
+    "CEILING_PROVEN_EMPTY",
+    "CEILING_REASONS",
+    "CEILING_UNPRICED",
     "CONFERRAL_CONFERRED",
     "CONFERRAL_OUTCOMES",
     "CONFERRAL_ROLE_NOT_LICENSED",
@@ -4189,6 +4283,7 @@ __all__ = [
     "SetterPrincipal",
     "ValuePlane",
     "authority_deletability",
+    "ceiling_for",
     "load_act_as_plane",
     "load_audit_posture",
     "discovery_relation_entities",
