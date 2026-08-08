@@ -4818,6 +4818,19 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     The claim's own provenness is not re-tested here: :func:`_row_value` admits an
     instance only where ``value_state`` is ``proven_reach``, so an unproven claim
     never reaches this function with an entity to charge.
+
+    ANTI-GAMING (inv. 13), because a branch that reads a protocol's own balance
+    sheet invites the question. Both conjuncts are expensive to move and neither
+    is movable by presentation: to lower the figure a protocol must hold less, or
+    be genuinely non-upgradeable, and both of those are real facts about it
+    rather than facts about how it is described. The residual vector is the third
+    thing — obfuscating the proxy pattern so the upgrade capability cannot be
+    PROVEN — and it is named rather than claimed away. It fails closed the way
+    every capability detection in this pipeline fails closed: an unproven
+    capability produces no finding, so it produces NO ceiling row at all, not a
+    smaller one. What such a protocol buys is the absence of the row, which is
+    charged to confidence as an unanswered question, and not a cheaper number
+    standing in the document where the honest one would have been.
     """
     if instance.signal.claim_id not in K.CODE_CONTROL_CAPABILITIES:
         return None, None
