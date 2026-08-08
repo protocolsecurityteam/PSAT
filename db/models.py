@@ -39,6 +39,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+    DELIVERY_SHAPE_FAN_OUT_ALL,
+    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+    DELIVERY_SHAPE_NOT_DETERMINED,
     NATIVE_STATUS_PROVEN_ZERO,
     SWEEP_STATUS_COMPLETED,
 )
@@ -3229,6 +3232,112 @@ class ProtocolScoreQueue(Base):
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TokenDeliveryEvidence(Base):
+    """How one (chain, token, holder) balance ARRIVED, from the chain's receipts.
+
+    A delivery-shape plane, deliberately separate from every balance table. Two
+    reasons, both measured rather than assumed:
+
+    * ``contract_balances`` rows are EVICTED — retention depth 10 plus
+      ``ON DELETE CASCADE`` on the fetch — so an annotation carried there is
+      gone within ~10 producer cycles and the evidence would have to be
+      re-measured every time. A delivering transaction is block-stamped and
+      immutable; it outlives every fetch that ever observed the holding.
+    * a (holder, token) pair is a fact about two ADDRESSES. It is not owned by
+      the protocol whose producer happened to measure it, and nothing here is
+      protocol-scoped.
+
+    **Rows accrete; they are never rewritten.** A recorded delivery is a receipt
+    that was read at a named block and stays on the row forever. A later cycle
+    may only (a) append deliveries newly found above ``measured_through_block``
+    and (b) advance ``measured_through_block`` itself. Nothing removes a
+    delivery, lowers the cursor, or turns ``has_direct_delivery`` back into
+    ``fan_out_all`` — that verdict is an earned negative and it is settled.
+
+    ``measured_through_block`` is BOTH the extent of the claim and the cursor
+    that keeps this a once-per-pair cost: the all-quantifier is over deliveries
+    from ``scanned_from_block`` through it, and a consumer must read the pair to
+    know what the verdict covers. Without the cursor the one-shot repeats hourly.
+
+    The published claim is delivery SHAPE and nothing else — see
+    ``utils.balance_status.DELIVERY_SHAPES``. It never says a token is worthless.
+    """
+
+    __tablename__ = "token_delivery_evidence"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Lowercased at the write point. The holder is the address the recipient
+    # topic filter was built from — the account the read was issued against,
+    # never a canonical/folded entity key: two accounts of one plane entity are
+    # two holders here, and folding them would publish one account's evidence
+    # over the other's.
+    holder_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    token_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    # The block range the delivery set is an all-quantifier OVER. ``from`` is the
+    # holder's creation block where it was obtainable and 0 otherwise; anything
+    # else would claim completeness over blocks nobody scanned.
+    scanned_from_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    measured_through_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # ``[{tx, block, log_index, fan_out, fan_out_basis}]`` — one entry per
+    # delivering transaction, with the SAME-token recipient count measured from
+    # that transaction's own receipt. ``fan_out`` is null exactly where
+    # ``fan_out_basis`` is ``receipt_unreadable``, which forces the verdict to
+    # ``not_determined``: an unread receipt is not a small fan-out.
+    deliveries: Mapped[list] = mapped_column(JSONB(none_as_null=True), nullable=False)
+    delivery_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    unreadable_deliveries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The weakest delivery on record, which is what the all-quantifier turns on.
+    # NULL where any delivery is unreadable or none is on record.
+    min_fan_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The threshold this verdict was decided under, stored per row rather than
+    # read from today's constant: K is a published model parameter and a row
+    # measured under one K must not be re-read under another.
+    fan_out_threshold_k: Mapped[int] = mapped_column(Integer, nullable=False)
+    delivery_shape: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=DELIVERY_SHAPE_NOT_DETERMINED
+    )
+    # The sentence the published claim derives its scope from — the filter, the
+    # block range, the request counts — never re-authored downstream.
+    basis: Mapped[str] = mapped_column(Text, nullable=False)
+    first_measured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("chain_id", "holder_address", "token_address", name="uq_tde_chain_holder_token"),
+        Index("ix_tde_chain_token", "chain_id", "token_address"),
+        Index("ix_tde_chain_holder", "chain_id", "holder_address"),
+        # The positive verdict is an all-quantifier, so it cannot stand beside a
+        # delivery nobody could read, and it cannot stand over an empty set: a
+        # holding whose arrival is not on record is not_determined, never
+        # airdrop-delivered.
+        CheckConstraint(
+            f"delivery_shape <> '{DELIVERY_SHAPE_FAN_OUT_ALL}' OR "
+            "(unreadable_deliveries = 0 AND delivery_count > 0 AND min_fan_out >= fan_out_threshold_k)",
+            name="ck_tde_fan_out_all_is_earned",
+        ),
+        # The earned negative needs a delivery that actually read BELOW K; a
+        # missing measurement must not be laundered into a negative either.
+        CheckConstraint(
+            f"delivery_shape <> '{DELIVERY_SHAPE_HAS_DIRECT_DELIVERY}' OR "
+            "(delivery_count > 0 AND min_fan_out IS NOT NULL AND min_fan_out < fan_out_threshold_k)",
+            name="ck_tde_direct_delivery_is_measured",
+        ),
+        CheckConstraint(
+            "delivery_shape IN ('"
+            + "', '".join(
+                (DELIVERY_SHAPE_FAN_OUT_ALL, DELIVERY_SHAPE_HAS_DIRECT_DELIVERY, DELIVERY_SHAPE_NOT_DETERMINED)
+            )
+            + "')",
+            name="ck_tde_delivery_shape_vocabulary",
+        ),
+        CheckConstraint("jsonb_typeof(deliveries) = 'array'", name="ck_tde_deliveries_is_array"),
+        CheckConstraint("measured_through_block >= scanned_from_block", name="ck_tde_range_is_ordered"),
+    )
 
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")

@@ -128,3 +128,43 @@ STATUS_FETCH_FAILED = "fetch_failed"
 BALANCE_WRITER_TVL = "tvl"
 BALANCE_WRITER_RESOLUTION = "resolution_worker"
 BALANCE_WRITERS = (BALANCE_WRITER_TVL, BALANCE_WRITER_RESOLUTION)
+
+
+# --- delivery shape (the disposition evidence plane) -------------------------
+# What the chain's own log history says about HOW a (holder, token) balance
+# arrived. This is a claim about DELIVERY, never about worth: a token delivered
+# in a 400-recipient batch is an airdrop whatever it is worth, and a real token
+# can be airdrop-delivered (measured: HEX, uniETH). Nothing in this vocabulary
+# may be read, published or renamed as "spam", "scam" or "worthless" — those are
+# judgments about value that no receipt witnesses.
+#
+# ``fan_out_all`` is the ALL-QUANTIFIER over every delivery on record: every
+# incoming Transfer of that token to that holder arrived in a transaction that
+# moved the SAME token to at least ``fan_out_threshold_k`` recipients. It is the
+# only positive verdict, and it is earned per delivery.
+#
+# ``has_direct_delivery`` is the EARNED NEGATIVE: at least one delivery moved the
+# token to fewer than K recipients, so the all-quantifier is false and the pair
+# is not an airdrop-only holding. Kept apart from ``not_determined`` because they
+# are closed by different work — nothing closes the first (it is settled), and a
+# readable receipt closes the second.
+#
+# ``not_determined`` is everything else and is FAIL-CLOSED by construction: a
+# receipt that could not be read, a scan that aborted, or a balance with no
+# incoming Transfer on record at all (a non-conforming token, or a mint this
+# scan's topic filter cannot see). Absence of a readable delivery is never read
+# as absence of a direct delivery.
+DELIVERY_SHAPE_FAN_OUT_ALL = "fan_out_all"
+DELIVERY_SHAPE_HAS_DIRECT_DELIVERY = "has_direct_delivery"
+DELIVERY_SHAPE_NOT_DETERMINED = "not_determined"
+DELIVERY_SHAPES = (
+    DELIVERY_SHAPE_FAN_OUT_ALL,
+    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+    DELIVERY_SHAPE_NOT_DETERMINED,
+)
+
+# How a delivery's fan-out was counted. Stored per delivery so a published
+# figure names the mechanism that produced it rather than being trusted.
+DELIVERY_FAN_OUT_BASIS_RECEIPT = "receipt_same_token_transfer_logs"
+DELIVERY_FAN_OUT_BASIS_UNREADABLE = "receipt_unreadable"
+DELIVERY_FAN_OUT_BASES = (DELIVERY_FAN_OUT_BASIS_RECEIPT, DELIVERY_FAN_OUT_BASIS_UNREADABLE)

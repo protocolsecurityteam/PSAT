@@ -54,6 +54,7 @@ from db.models import (  # noqa: E402
     ProtocolSubscription,
     ProxySubscription,
     ProxyUpgradeEvent,
+    TokenDeliveryEvidence,
     TvlSnapshot,
     UpgradeTransaction,
     WatchedProxy,
@@ -718,6 +719,13 @@ def db_session():
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.
             DaemonLease,
+            # Delivery evidence is a fact about two ADDRESSES, so it carries no
+            # protocol FK and nothing above cascades it. That is right for
+            # production — the row outlives every fetch and every protocol that
+            # observed it — and it means this teardown is the only thing that
+            # can clear it between tests. Without this line one test's
+            # constructed fan-out becomes the next test's stored verdict.
+            TokenDeliveryEvidence,
         ]:
             session.query(model).delete()
         session.commit()
