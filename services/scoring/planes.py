@@ -25,6 +25,7 @@ from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     SWEEP_STATUS_COMPLETED,
+    TYPED_PER_ID_BASES,
 )
 from utils.scoring_status import (
     PERIMETER_NOT_DETERMINED,
@@ -146,10 +147,19 @@ def typed_receipt_is_resolved(entry: Any) -> bool:
     ``balanceOf(address)`` at all, so the call reverts) is not determined, and a
     readable NON-zero one is a held item this plane cannot price. Neither may
     stand behind "holds nothing".
+
+    A quantity read PER TOKEN ID carries one more condition, derived from the
+    record rather than trusted: summing an id inventory is an all-quantifier over
+    it, so it says nothing at all unless the record also says the inventory is
+    whole. A per-id zero over a PREFIX of the ids is the shape that would publish
+    "holds nothing" over ids nobody read, so it is refused here as well as at the
+    producer — the published claim derives from the carrier's own fields.
     """
     if not isinstance(entry, dict):
         return False
     if entry.get("quantity_readable") is not True:
+        return False
+    if entry.get("quantity_basis") in TYPED_PER_ID_BASES and entry.get("ids_complete") is not True:
         return False
     try:
         return float(str(entry.get("quantity"))) == 0.0
@@ -965,20 +975,34 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     # rule nobody wired up.
     empty_refused: dict[str, int] = dict.fromkeys(EMPTY_REFUSALS, 0)
     empty_admitted = 0
+    # THE COMPLEMENT, published beside it rather than folded into it. A sheet
+    # leaves the all-zero population the moment any reading on it is not a proven
+    # zero — including the reading the refusal's own evidence produced. A typed
+    # receipt read back as a HELD item is exactly that: it writes a non-zero count
+    # row, drops its sheet out of the population, and the counter above then
+    # reports zero refusals on the very ground that refuses the entity. The two
+    # dicts sum, per reason, to every refused sheet in the plane.
+    empty_refused_outside: dict[str, int] = dict.fromkeys(EMPTY_REFUSALS, 0)
     # The population includes sheets refused for an UNSCANNED ACCOUNT even though
     # they carry no reading at all: the reading is missing precisely because the
     # refusal fired — the native proven-zero is only promoted onto a sheet whose
     # list is whole — so a census over readings alone would report the refusal it
     # was written to count as zero.
     for key in sorted(
-        set(plane.per_asset_state) | set(plane.typed_receipts_unresolved) | set(plane.asset_set_accounts_unscanned)
+        set(plane.per_asset)
+        | set(plane.per_asset_state)
+        | set(plane.typed_receipts_unresolved)
+        | set(plane.asset_set_accounts_unscanned)
     ):
         states_at_key = plane.per_asset_state.get(key) or {}
-        if any(state != ASSET_PROVEN_ZERO for state in states_at_key.values()):
-            continue
-        if not states_at_key and not plane.typed_receipts_unresolved.get(key):
-            continue
+        in_population = not any(state != ASSET_PROVEN_ZERO for state in states_at_key.values()) and bool(
+            states_at_key or plane.typed_receipts_unresolved.get(key)
+        )
         refusal = plane.proven_empty_refusal(key)
+        if not in_population:
+            if refusal is not None:
+                empty_refused_outside[refusal] += 1
+            continue
         if refusal is None:
             empty_admitted += 1
         else:
@@ -1047,6 +1071,9 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             },
             "sheets_published_empty": empty_admitted,
             "sheets_refused_empty_by_reason": dict(sorted(empty_refused.items())),
+            "sheets_refused_empty_by_reason_outside_the_all_zero_population": dict(
+                sorted(empty_refused_outside.items())
+            ),
             "reading": (
                 "the two completeness figures are NOT complements: proven_complete is an earned "
                 "positive and proven_truncated an earned negative, and an entity in neither is the "
@@ -1057,13 +1084,17 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
                 "implementation's address, which is why accounts_scanned is published beside "
                 "accounts_folded and why folded_account_never_scanned is its own refusal rather "
                 "than a shade of 'nobody scanned this'. Only a proven-complete sheet admits an "
-                "empty one as a proven $0; every refusal publishes unpriced, never a zero. The "
-                "refusal counted under typed_receipt_unresolved is also the UPSTREAM cause of most "
-                "completeness withholding: the producer records the third-party source rather than "
-                "the scan's whenever a receipt's holding has no readable balanceOf answer, so those "
-                "sheets are refused for the receipts and not for a scan that failed to run — "
-                "entities_with_unresolved_typed_receipts beside it is the population, and reading "
-                "those two together is how a reader finds the pipeline that closes them"
+                "empty one as a proven $0; every refusal publishes unpriced, never a zero. "
+                "sheets_refused_empty_by_reason counts ONLY the sheets whose every reading is a "
+                "proven zero — the population the empty claim was ever available to — so it is NOT "
+                "the count of entities a reason refuses, and reading it against "
+                "entities_with_unresolved_typed_receipts as though it were will mislead: a receipt "
+                "read back as a HELD item writes a non-zero count row, which drops its sheet out of "
+                "that population while still refusing it. Those sheets are counted in "
+                "sheets_refused_empty_by_reason_outside_the_all_zero_population, and the two dicts "
+                "sum per reason to every refused sheet in the plane. Most of the "
+                "asset_set_not_proven_complete entries in the second are sheets holding real money, "
+                "which were never candidates for an empty claim at all"
             ),
         },
         # The fold's own exposure denominator, published rather than left to be

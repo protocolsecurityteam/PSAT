@@ -43,7 +43,19 @@ from services.resolution.repos.event_logs_rpc import (
     FetchedEventLog,
     RpcEventLogFetcher,
 )
-from utils.balance_status import SWEEP_STATUS_COMPLETED, SWEEP_STATUS_FAILED
+from utils.balance_status import (
+    SWEEP_STATUS_COMPLETED,
+    SWEEP_STATUS_FAILED,
+    TYPED_BASIS_ADDRESS_BALANCE,
+    TYPED_BASIS_PER_ID_BALANCE_OF_BATCH,
+    TYPED_BASIS_PER_ID_BALANCE_OF_ID,
+    TYPED_BASIS_PER_ID_OWNER_OF,
+    TYPED_STANDARD_ERC721,
+    TYPED_STANDARD_ERC1155,
+    TYPED_STANDARD_NOT_DETERMINED,
+    TYPED_STANDARD_TRANSFER_NO_ID,
+    TYPED_STANDARDS,
+)
 from utils.rpc import _MULTICALL3_CHUNK, MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, selector
 
 logger = logging.getLogger(__name__)
@@ -125,34 +137,11 @@ _WORD_HEX_LEN = 66
 # than the request count.
 _TYPED_ID_CALL_CHUNK = 100
 
-# What the delivering log proved about a typed token's standard. Derived from
-# topic0 and topic COUNT — never from a name, a token list or a label — and kept,
-# because the selector that reads the holding differs per standard and
-# re-deriving it costs the whole full-history scan again.
-TYPED_STANDARD_ERC1155 = "erc1155"
-TYPED_STANDARD_ERC721 = "erc721"
-# A three-topic ``Transfer`` emitter whose ``balanceOf(address)`` returned no
-# word. It is filed with the typed receipts because it withholds the same
-# completeness, but its delivering log carries no id, so there is no per-id read
-# to escalate to and its id inventory is settled as EMPTY. Settled, not unknown:
-# that is what stops it demanding a fresh full-history scan every cycle. It stays
-# unresolved regardless — an unreadable balance is not a zero.
-TYPED_STANDARD_TRANSFER_NO_ID = "erc20_transfer_shape"
-TYPED_STANDARD_NOT_DETERMINED = "not_determined"
+# The standard and basis vocabularies are re-exported from the leaf module (as
+# the sweep statuses are) so the producer, the fetch record and the PLANE that
+# reads the record cannot drift on a literal — the plane's resolution rule turns
+# on the pair (basis, ids_complete), so it needs the same tokens this writes.
 _ID_BEARING_STANDARDS = (TYPED_STANDARD_ERC1155, TYPED_STANDARD_ERC721)
-TYPED_STANDARDS = (
-    TYPED_STANDARD_ERC1155,
-    TYPED_STANDARD_ERC721,
-    TYPED_STANDARD_TRANSFER_NO_ID,
-    TYPED_STANDARD_NOT_DETERMINED,
-)
-
-# How a typed receipt's published quantity was obtained. A quantity with no basis
-# is a number with no witness, so the basis is stored beside it.
-TYPED_BASIS_ADDRESS_BALANCE = "balance_of_address"
-TYPED_BASIS_PER_ID_BALANCE_OF_BATCH = "balance_of_batch_per_id"
-TYPED_BASIS_PER_ID_BALANCE_OF_ID = "balance_of_account_id_per_id"
-TYPED_BASIS_PER_ID_OWNER_OF = "owner_of_per_id"
 
 
 @dataclass(frozen=True)
@@ -1117,8 +1106,9 @@ def _basis(from_block: int, through_block: int) -> str:
         f"(topic 2 for ERC-20/721, topic 3 for ERC-1155), blocks {from_block}-{through_block}, "
         f"window {MAX_BLOCK_RANGE} with an explicit {SWEEP_RESULT_CAP}-log cap; "
         f"balances read by Multicall3 at block {through_block}, and typed (ERC-721/1155) receipts whose "
-        f"balanceOf(address) does not answer read per token id (balanceOfBatch / ownerOf) over the ids "
-        f"their delivering logs carried"
+        f"balanceOf(address) does not answer read per token id over the ids their delivering logs carried "
+        f"(balanceOfBatch, then balanceOf(address,uint256) for a token that reverts the batch selector, "
+        f"then ownerOf for ERC-721)"
     )
 
 

@@ -75,6 +75,20 @@ PERSISTENT_FAILURE_RUN = 3
 # by asking again next hour, and asking is what costs the budget.
 SWEEP_FAILURE_RUN = 3
 
+# Consecutive full-history re-scans that still could not settle a typed receipt's
+# id inventory before the cursor stops being refused for it.
+#
+# The re-scan exists to recover token ids from the logs that delivered them, and
+# a log this decoder cannot read an id out of will not become readable by
+# scanning it again. Without a bound that is a permanent full-history scan every
+# cycle: ``sweep_keeps_failing`` cannot catch it, because the scan SUCCEEDS —
+# what fails is the decode. So the same shape as the failure run above, and the
+# same division: what is bounded is the COST of asking, never the answer. A
+# bounded-out record still carries an unsettled inventory, so its receipts stay
+# unresolved and its sheet stays refused — fail-closed, just no longer at the
+# price of a genesis-to-head scan per hour.
+ID_RESCAN_RUN = 3
+
 ESCALATE_RETURNED_EMPTY = "etherscan returned an empty list"
 ESCALATE_PERSISTENT_FAILURE = "etherscan persistently unobtainable"
 ESCALATE_NO_FETCH_RECORD = "no prior fetch record for this contract"
@@ -281,17 +295,57 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     held" is a set of token ids, because no address-level call answers for one.
     A record that names typed receipts but no ids is a scan whose evidence cannot
     answer the question the sheet asks, so its cursor is refused and the scan is
-    redone — once. After that the ids are stored and the cursor holds forever.
+    redone — once. After that the ids are stored and the cursor holds forever,
+    and where the ids are undecodable the re-scan is bounded rather than endless
+    (:data:`ID_RESCAN_RUN`).
     """
     current = _current_asset_fetch(session, contract_id=contract_id)
-    if (
-        current is None
-        or current.swept_through_block is None
-        or not _typed_record_is_readable(current)
-        or not _typed_record_is_id_complete(current)
-    ):
+    if not _cursor_is_inheritable(session, current, contract_id=contract_id):
         return 0
+    assert current is not None and current.swept_through_block is not None
     return int(current.swept_through_block) + 1
+
+
+def _cursor_is_inheritable(session: Session, fetch: ContractBalanceFetch | None, *, contract_id: int) -> bool:
+    """The single condition behind both the cursor and the scan extent.
+
+    One predicate rather than two copies: a union extent inherited past a refused
+    cursor would name blocks the re-scan is about to read again as if they were
+    already behind the set, and the only way that cannot drift is for the two
+    readers to ask the same function.
+    """
+    if fetch is None or fetch.swept_through_block is None or not _typed_record_is_readable(fetch):
+        return False
+    if _typed_record_is_id_complete(fetch):
+        return True
+    return id_rescan_keeps_failing(session, contract_id=contract_id)
+
+
+def id_rescan_keeps_failing(session: Session, *, contract_id: int) -> bool:
+    """Whether this contract's last few full-history scans all failed to settle ids.
+
+    Looks only at scans that ran from the union's first block — the re-scan the
+    refused cursor buys — so a run of them that still produced no settled
+    inventory is evidence about the LOGS, not about one unlucky cycle. The state
+    is self-sustaining by construction: once bounded out the incremental cycles
+    inherit the same unsettled record, which is what keeps it from oscillating
+    between a cheap cycle and a genesis scan.
+    """
+    recent = (
+        session.execute(
+            select(ContractBalanceFetch.typed_assets)
+            .where(
+                ContractBalanceFetch.contract_id == contract_id,
+                ContractBalanceFetch.sweep_status == SWEEP_STATUS_COMPLETED,
+                ContractBalanceFetch.swept_from_block == 0,
+            )
+            .order_by(ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc())
+            .limit(ID_RESCAN_RUN)
+        )
+        .scalars()
+        .all()
+    )
+    return len(recent) >= ID_RESCAN_RUN and not any(_entries_are_id_complete(entries) for entries in recent)
 
 
 def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]:
@@ -386,7 +440,10 @@ def _typed_record_is_id_complete(fetch: ContractBalanceFetch) -> bool:
     established that it has none. What this refuses is the record that never
     asked, which is every record written before the ids were decoded.
     """
-    entries = fetch.typed_assets
+    return _entries_are_id_complete(fetch.typed_assets)
+
+
+def _entries_are_id_complete(entries: object) -> bool:
     if entries is None or not isinstance(entries, list):
         return False
     return all(isinstance(entry, dict) and entry.get("ids_complete") is True for entry in entries)
@@ -395,18 +452,12 @@ def _typed_record_is_id_complete(fetch: ContractBalanceFetch) -> bool:
 def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
     """The first block of the union of the scans behind the current asset set."""
     fetch = _current_asset_fetch(session, contract_id=contract_id)
-    if (
-        fetch is None
-        or fetch.swept_through_block is None
-        or not _typed_record_is_readable(fetch)
-        or not _typed_record_is_id_complete(fetch)
-    ):
-        # Same row and same rule as :func:`sweep_from_block`: an extent is only
-        # readable off the fetch that carries the scan it describes, and a scan
-        # being redone has no extent yet. The two conditions must stay identical
-        # — a union extent inherited past a refused cursor would name blocks the
-        # re-scan is about to read again as if they were already behind the set.
+    # Same row and same predicate as :func:`sweep_from_block`: an extent is only
+    # readable off the fetch that carries the scan it describes, and a scan being
+    # redone has no extent yet.
+    if not _cursor_is_inheritable(session, fetch, contract_id=contract_id):
         return None
+    assert fetch is not None
     return int(fetch.swept_from_block) if fetch.swept_from_block is not None else 0
 
 
@@ -803,6 +854,7 @@ __all__ = [
     "ESCALATE_NO_FETCH_RECORD",
     "ESCALATE_PERSISTENT_FAILURE",
     "ESCALATE_RETURNED_EMPTY",
+    "ID_RESCAN_RUN",
     "PERSISTENT_FAILURE_RUN",
     "SWEEP_POPULATION_NOTE",
     "NativeReading",
@@ -810,6 +862,7 @@ __all__ = [
     "SweepRequest",
     "escalation_reason",
     "fetch_asset_page",
+    "id_rescan_keeps_failing",
     "known_swept_assets",
     "known_typed_assets",
     "scanned_from_block",

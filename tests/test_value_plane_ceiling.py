@@ -355,6 +355,66 @@ def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_questi
         ({"address": "0x1", "kind": "typed", "quantity_readable": "yes", "quantity": "0"}, False),
         ({"address": "0x1"}, False),
         ("not a record", False),
+        # A quantity SUMMED OVER TOKEN IDS is an all-quantifier over an inventory,
+        # so it says nothing at all unless the record also says the inventory is
+        # whole. A per-id zero over a prefix of the ids is the shape that would
+        # publish "holds nothing" over ids nobody read.
+        (
+            {
+                "address": "0x1",
+                "kind": "typed",
+                "quantity_readable": True,
+                "quantity": "0",
+                "quantity_basis": "balance_of_batch_per_id",
+                "ids_complete": True,
+            },
+            True,
+        ),
+        (
+            {
+                "address": "0x1",
+                "kind": "typed",
+                "quantity_readable": True,
+                "quantity": "0",
+                "quantity_basis": "balance_of_batch_per_id",
+                "ids_complete": False,
+            },
+            False,
+        ),
+        (
+            {
+                "address": "0x1",
+                "kind": "typed",
+                "quantity_readable": True,
+                "quantity": "0",
+                "quantity_basis": "owner_of_per_id",
+            },
+            False,
+        ),
+        (
+            {
+                "address": "0x1",
+                "kind": "typed",
+                "quantity_readable": True,
+                "quantity": "0",
+                "quantity_basis": "balance_of_account_id_per_id",
+                "ids_complete": "yes",
+            },
+            False,
+        ),
+        # An ADDRESS-level read covers the holder's whole position, so no
+        # inventory stands behind it and none is asked for.
+        (
+            {
+                "address": "0x1",
+                "kind": "typed",
+                "quantity_readable": True,
+                "quantity": "0",
+                "quantity_basis": "balance_of_address",
+                "ids_complete": False,
+            },
+            True,
+        ),
     ],
 )
 def test_only_a_readable_zero_resolves_a_typed_receipt(entry, resolved: bool):

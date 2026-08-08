@@ -70,6 +70,42 @@ BALANCE_SOURCES = (
     BALANCE_SOURCE_UNPINNED_NATIVE_READ,
 )
 
+# --- typed (ERC-721/1155) receipts -----------------------------------------
+# What the DELIVERING LOG proved about a typed token's standard — topic0 and
+# topic count, never a name or a token list. Kept rather than derived and
+# dropped, because it decides which selector can read the holding later and the
+# logs it comes from are not stored anywhere.
+TYPED_STANDARD_ERC1155 = "erc1155"
+TYPED_STANDARD_ERC721 = "erc721"
+# A three-topic ``Transfer`` emitter whose ``balanceOf(address)`` returned no
+# word. Filed with the typed receipts because it withholds the same
+# completeness, but its log carries no id, so there is no per-id read to
+# escalate to and its id inventory is settled as EMPTY. Settled, not unknown.
+TYPED_STANDARD_TRANSFER_NO_ID = "erc20_transfer_shape"
+TYPED_STANDARD_NOT_DETERMINED = "not_determined"
+TYPED_STANDARDS = (
+    TYPED_STANDARD_ERC1155,
+    TYPED_STANDARD_ERC721,
+    TYPED_STANDARD_TRANSFER_NO_ID,
+    TYPED_STANDARD_NOT_DETERMINED,
+)
+
+# WHICH READ produced a typed receipt's published quantity. A quantity with no
+# basis is a number with no witness, so the basis is stored beside it — and the
+# per-id ones carry a further condition: they are an ALL-QUANTIFIER over an id
+# inventory, so they say nothing unless that inventory is whole. The consumer
+# checks the pair, which is why the tokens live here rather than in the producer.
+TYPED_BASIS_ADDRESS_BALANCE = "balance_of_address"
+TYPED_BASIS_PER_ID_BALANCE_OF_BATCH = "balance_of_batch_per_id"
+TYPED_BASIS_PER_ID_BALANCE_OF_ID = "balance_of_account_id_per_id"
+TYPED_BASIS_PER_ID_OWNER_OF = "owner_of_per_id"
+TYPED_PER_ID_BASES = (
+    TYPED_BASIS_PER_ID_BALANCE_OF_BATCH,
+    TYPED_BASIS_PER_ID_BALANCE_OF_ID,
+    TYPED_BASIS_PER_ID_OWNER_OF,
+)
+TYPED_QUANTITY_BASES = (TYPED_BASIS_ADDRESS_BALANCE, *TYPED_PER_ID_BASES)
+
 # --- the escalation's own outcome ------------------------------------------
 # NULL/absent = no sweep was attempted, which is a third state and not a
 # failure. ``failed`` means the scan could not be shown to be whole (a window at

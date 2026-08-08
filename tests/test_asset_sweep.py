@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol
+from services.monitoring import asset_sweep as A
 from services.monitoring.asset_sweep import (
     SWEEP_COMPLETED,
     SWEEP_FAILED,
@@ -39,9 +40,11 @@ from services.monitoring.balance_observation import (
     ESCALATE_NO_FETCH_RECORD,
     ESCALATE_PERSISTENT_FAILURE,
     ESCALATE_RETURNED_EMPTY,
+    ID_RESCAN_RUN,
     SWEEP_FAILURE_RUN,
     NativeReading,
     escalation_reason,
+    id_rescan_keeps_failing,
     known_swept_assets,
     known_typed_assets,
     observation_contract,
@@ -519,6 +522,22 @@ def _uint_array_return(values: list[int]) -> str:
     return "0x" + f"{32:064x}" + f"{len(values):064x}" + "".join(f"{v:064x}" for v in values)
 
 
+def _current_typed_entry(session, contract_id: int) -> dict:
+    """The one typed entry a consumer reads off the CURRENT fetch."""
+    from services.monitoring.balance_observation import _current_asset_fetch
+
+    fetch = _current_asset_fetch(session, contract_id=contract_id)
+    assert fetch is not None
+    return (fetch.typed_assets or [])[0]
+
+
+def _words(raw: str) -> list[str]:
+    """Split an ABI payload the way the fetcher's ``data_words`` does, but without
+    its length guard, so a malformed payload reaches the decoder under test."""
+    body = raw[2:] if raw.startswith("0x") else raw
+    return ["0x" + body[index : index + 64] for index in range(0, len(body), 64)]
+
+
 class _StubCalls:
     """One Multicall3 wire, answering per selector, with the calldata recorded."""
 
@@ -546,6 +565,87 @@ class _StubCalls:
             else:  # decimals()
                 out.append((True, _word(0)))
         return out
+
+
+class TestTypedIdDecode:
+    """The ABI decode, adversarially. Every case here is a payload a token could
+    emit and this decoder could get wrong, and getting it wrong in the permissive
+    direction is the dangerous one: a SHORT id list reads as a whole inventory,
+    and an all-ids-read-zero claim over it publishes "holds nothing" for ids
+    nobody looked at. So the rule is a decode this reader cannot follow exactly is
+    refused, never approximated.
+    """
+
+    def test_the_canonical_batch_layout_decodes(self):
+        assert A._batch_ids(_words(_batch_data([5, 9], [1, 2]))) == ["5", "9"]
+
+    def test_a_values_first_tail_is_followed_by_its_offset_not_by_position(self):
+        # ids at 0xa0 because values were laid out first. Reading word 2 as the
+        # length would return the VALUES array as the id list.
+        raw = "0x" + "".join(
+            [
+                f"{0xA0:064x}",  # ids[] tail, second in the payload
+                f"{0x40:064x}",  # values[] tail, first
+                f"{2:064x}",
+                f"{111:064x}",
+                f"{222:064x}",  # values
+                f"{2:064x}",
+                f"{5:064x}",
+                f"{9:064x}",  # ids
+            ]
+        )
+        assert A._batch_ids(_words(raw)) == ["5", "9"]
+
+    def test_a_non_minimal_offset_over_padding_is_followed_too(self):
+        raw = "0x" + "".join(
+            [
+                f"{0x60:064x}",  # ids[] tail, one padding word past the head
+                f"{0xC0:064x}",
+                f"{0:064x}",  # padding
+                f"{1:064x}",
+                f"{7:064x}",  # ids
+                f"{0:064x}",
+                f"{1:064x}",
+                f"{1:064x}",  # values
+            ]
+        )
+        assert A._batch_ids(_words(raw)) == ["7"]
+
+    def test_an_empty_id_array_is_settled_empty_and_not_malformed(self):
+        # A batch that delivered nothing named no id. That is an answer — an
+        # inventory of zero ids — and refusing it as malformed would send the
+        # contract back for a full-history re-scan it can never satisfy.
+        assert A._batch_ids(_words(_batch_data([], []))) == []
+
+    def test_trailing_garbage_past_the_arrays_is_ignored(self):
+        assert A._batch_ids(_words(_batch_data([5], [1]) + f"{0xDEAD:064x}")) == ["5"]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "0x" + f"{0x20:064x}" + f"{4:064x}" + f"{5:064x}",  # length past the payload
+            "0x" + f"{0x21:064x}" + f"{1:064x}" + f"{5:064x}",  # offset not a multiple of 32
+            "0x" + f"{0x400:064x}" + f"{1:064x}",  # offset past the end
+            "0x" + f"{0x20:064x}" + f"{2**64:064x}",  # absurd length
+            "0x" + f"{0x20:064x}" + f"{1:064x}" + "z" * 64,  # non-hex tail word
+            "0x",  # nothing at all
+        ],
+    )
+    def test_a_layout_this_decoder_cannot_follow_is_refused(self, raw):
+        assert A._batch_ids(_words(raw)) is None
+
+    def test_a_transfer_single_needs_both_of_its_words(self):
+        # One word is the id with no value: not the event this decoder claims to
+        # have read, so it names no id rather than a possibly-wrong one.
+        assert A._single_ids(_words("0x" + f"{7:064x}")) is None
+        assert A._single_ids(_words("0x")) is None
+        assert A._single_ids(_words(_single_data(7, 3))) == ["7"]
+
+    def test_the_uint_array_decoder_is_the_same_one_the_answers_go_through(self):
+        # One decoder for the TransferBatch id array and the balanceOfBatch
+        # answer: two would drift, and the drift would be silent.
+        assert A._uint_array(_words(_uint_array_return([0, 4, 0]))) == [0, 4, 0]
+        assert A._uint_array(_words("0x" + f"{0x20:064x}" + f"{3:064x}" + f"{1:064x}")) is None
 
 
 class TestTypedReceiptIdRecovery:
@@ -1137,6 +1237,91 @@ class TestTypedIdRecordAndCursor:
         assert known_typed_assets(db_session, contract_id=contract.id) == ()
         assert sweep_from_block(db_session, contract_id=contract.id) == 0
         assert scanned_from_block(db_session, contract_id=contract.id) is None
+
+    def _unsettled_scan(self, session, contract, *, through: int):
+        """A full-history scan that ran and still could not settle its inventory."""
+        session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=through,
+                swept_from_block=0,
+                typed_assets=[
+                    {
+                        "address": NFT,
+                        "kind": "typed",
+                        "standard": TYPED_STANDARD_ERC1155,
+                        "quantity": None,
+                        "quantity_readable": False,
+                        "ids_complete": False,
+                        "ids": [],
+                    }
+                ],
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        session.flush()
+
+    def test_a_run_of_re_scans_that_never_settle_the_ids_stops_paying_for_them(self, db_session):
+        # A delivering log this decoder cannot read an id out of will not become
+        # readable by scanning it again — and the scan SUCCEEDS, so the failing-
+        # sweep bound cannot catch it. Without this the contract pays a
+        # genesis-to-head scan every hour, forever.
+        _proto, contract = self._fixture(db_session, address="0x" + "e8" * 20)
+        for index in range(ID_RESCAN_RUN - 1):
+            self._unsettled_scan(db_session, contract, through=1000 + index)
+            assert sweep_from_block(db_session, contract_id=contract.id) == 0
+            assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
+        self._unsettled_scan(db_session, contract, through=1234)
+        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is True
+        # Bounded out: the cursor is inherited again...
+        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert scanned_from_block(db_session, contract_id=contract.id) == 0
+        # ...and the receipt is STILL unresolved, so the sheet is still refused.
+        # What the bound buys back is the request budget, never the answer.
+        carried = known_typed_assets(db_session, contract_id=contract.id)
+        assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=(), ids_complete=False),)
+        entry = _current_typed_entry(db_session, contract.id)
+        assert typed_receipt_is_resolved(entry) is False
+
+    def test_one_settled_re_scan_in_the_run_keeps_the_full_re_scan_on(self, db_session):
+        # The bound is evidence about the LOGS, so a single cycle that did settle
+        # the inventory withdraws it.
+        _proto, contract = self._fixture(db_session, address="0x" + "e9" * 20)
+        self._unsettled_scan(db_session, contract, through=1000)
+        self._record(db_session, contract, (_typed(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",)),))
+        self._unsettled_scan(db_session, contract, through=1002)
+        db_session.flush()
+        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+
+    def test_an_incremental_cycle_is_not_evidence_that_the_ids_cannot_be_read(self, db_session):
+        # Only scans that ran from the union's first block count: an incremental
+        # window was never asked to recover the ids.
+        _proto, contract = self._fixture(db_session, address="0x" + "ea" * 20)
+        for index in range(ID_RESCAN_RUN):
+            db_session.add(
+                ContractBalanceFetch(
+                    contract_id=contract.id,
+                    chain_id=1,
+                    observed_address=contract.address,
+                    native_status="not_determined",
+                    asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                    asset_set_source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+                    sweep_status=SWEEP_STATUS_COMPLETED,
+                    swept_through_block=2000 + index,
+                    swept_from_block=900,
+                    typed_assets=[{"address": NFT, "kind": "typed", "ids_complete": False, "ids": []}],
+                    writer=BALANCE_WRITER_TVL,
+                )
+            )
+        db_session.flush()
+        assert id_rescan_keeps_failing(db_session, contract_id=contract.id) is False
 
     def test_an_inventory_the_record_calls_partial_is_not_carried_as_whole(self, db_session):
         _proto, contract = self._fixture(db_session, address="0x" + "e7" * 20)
