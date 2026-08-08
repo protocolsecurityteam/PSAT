@@ -11,6 +11,7 @@ import {
   pctOf,
   shortAddress,
   splitEntity,
+  usdCompact,
 } from "./format.js";
 import { lambdaOf, protectionDelta, rankedFindings, recoveryFrom, round4 } from "./fold.js";
 
@@ -125,6 +126,86 @@ export function valueCell(finding) {
 // answer was "nothing". Branching on value_state alone reads it as unmeasured.
 export function isProvenNoReach(finding) {
   return finding?.value_at_stake_basis === "proven_no_reach";
+}
+
+// ── sheet state / ceiling reason ────────────────────────────────────────────
+
+// The producer's sheet-state and ceiling-reason vocabularies, in the words the
+// page shows. These are LABEL tables and NOT allow-lists: an unregistered token
+// falls through to the raw token rather than to a blank, because a state the
+// page cannot name is still a state the document published, and rendering it as
+// nothing would silently withdraw it. `sheetStateLabel` is where that
+// fall-through lives; every consumer goes through it.
+export const SHEET_STATE_LABELS = {
+  priced: "priced",
+  priced_below_resolution: "below resolution",
+  unpriced: "unpriced",
+  proven_empty: "proven empty",
+  no_rows: "nothing observed",
+  // 1.4.0. Every recorded delivery of this sheet's remaining holdings was a
+  // mass distribution. A DELIVERY shape, never a worth claim — real tokens are
+  // airdropped too — so the word is "airdrop-delivered" and never "spam".
+  airdrop_determined: "airdrop-delivered",
+};
+
+export const CEILING_REASON_LABELS = {
+  admitted: "admitted",
+  proven_empty: "proven empty",
+  no_rows: "nothing observed",
+  below_resolution: "below resolution",
+  unpriced: "unpriced",
+  asset_list_truncated: "asset list cut off",
+  alias_ambiguous: "alias ambiguous",
+  airdrop_determined: "airdrop-delivered",
+};
+
+function label(table, token) {
+  const key = String(token || "");
+  if (!key) return null;
+  return table[key] || key;
+}
+
+export function sheetStateLabel(state) {
+  return label(SHEET_STATE_LABELS, state);
+}
+
+export function ceilingReasonLabel(reason) {
+  return label(CEILING_REASON_LABELS, reason);
+}
+
+export const AIRDROP_DETERMINED = "airdrop_determined";
+
+const AIRDROP_NOTE =
+  "every delivery of these holdings on record was a mass distribution, so they are not presented as positions " +
+  "this protocol holds — a claim about how the balance arrived, never about what it is worth";
+
+// The disposed part of a row's sheet ceilings, or `null` where there is none.
+//
+// `usd` is the sum of what the disposed entries PUBLISHED, and it is a real
+// measured figure — normally 0, because a sheet whose remaining holdings are all
+// airdrop-delivered has nothing left to price. It is carried so the page can
+// render "$0 · airdrop-delivered" rather than a bare zero: a zero with no reason
+// beside it reads as "this reaches nothing", which is a different claim and one
+// nobody proved. A published entry with no number gets `usd: null`, which the
+// cell renders as not-determined rather than as another zero.
+export function sheetDisposition(finding) {
+  const records = (finding?.reach_sheet_ceiling_magnitudes || []).filter(
+    (r) => r?.sheet_state === AIRDROP_DETERMINED || r?.ceiling_reason === AIRDROP_DETERMINED,
+  );
+  if (!records.length) return null;
+  const numbers = records.map((r) => r?.published_usd).filter((v) => typeof v === "number" && Number.isFinite(v));
+  const usd = numbers.length === records.length ? numbers.reduce((sum, v) => sum + v, 0) : null;
+  return {
+    count: records.length,
+    entities: records.map((r) => r?.entity).filter(Boolean),
+    usd,
+    // `$0` is printed exactly, not routed through the compact formatter: a
+    // disposed sheet's figure is small on purpose and rounding it away would
+    // hide the one number the label is attached to.
+    usdText: usd === null ? null : usd === 0 ? "$0" : usdCompact(usd),
+    label: sheetStateLabel(AIRDROP_DETERMINED),
+    reason: AIRDROP_NOTE,
+  };
 }
 
 // ── functions / targets ─────────────────────────────────────────────────────
@@ -242,6 +323,11 @@ export function deductionRows(doc, index) {
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
+      // Published beside the value on every row that has one, including the rows
+      // whose value cell is not determined: the disposition is a fact about the
+      // sheet the figure would have come from, and it is exactly on the rows
+      // with no figure that a silent omission would read as "nothing here".
+      sheetDisposition: sheetDisposition(finding),
       provenNoReach: isProvenNoReach(finding),
       trackPct: maxRaw && entry.raw !== null ? (entry.raw / maxRaw) * 100 : 0,
       fillPct: maxRaw && net !== null ? (net / maxRaw) * 100 : 0,

@@ -139,6 +139,20 @@ function BoundBadge({ direction }) {
   );
 }
 
+// The disposed part of a row's sheet, printed with its figure attached. A zero
+// with no reason beside it reads as "this reaches nothing"; the reason is what
+// makes it a delivery-shape statement instead. `usdText: null` means the
+// document published no number for the disposed entries, and that renders as
+// not-determined rather than as another zero.
+function SheetDispositionBadge({ disposition }) {
+  if (!disposition) return null;
+  return (
+    <span className="sc-fl" title={disposition.reason}>
+      {disposition.usdText || "not determined"} · {disposition.label}
+    </span>
+  );
+}
+
 function DeductionRow({ row, onSelect }) {
   const { chip, value } = row;
   // The function click names its host when the document does: a single-host
@@ -221,6 +235,7 @@ function DeductionRow({ row, onSelect }) {
         ) : (
           <span className="sc-nd">value not determined</span>
         )}
+        <SheetDispositionBadge disposition={row.sheetDisposition} />
       </span>
     </div>
   );

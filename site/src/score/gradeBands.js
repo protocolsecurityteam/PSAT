@@ -181,11 +181,56 @@ const LETTER_CUTS = [
 // evidence never supported it, and the confidence term that measures magnitude
 // coverage falls (below the published decimal, but it falls). Nothing at
 // etherfi got better between these two documents either.
+// ---------------------------------------------------------------------------
+//
+// 1.4.0-provisional carries the same cut points forward a FOURTH time, and the
+// argument has to answer something none of the first three did: this version
+// changes what the document PRESENTS without changing what it computes. A table
+// carried through a presentation-only change is the easiest kind of ratchet to
+// hide, so the reason has to be stated as a reason.
+//
+// What moved. 1.4.0 reads, per (holder, token), how every recorded delivery of
+// a balance ARRIVED. A pair whose every delivery on record was a mass
+// distribution — fan-out at or above the published K, all-quantified over the
+// scanned range, failing closed on any receipt that could not be read — is no
+// longer presented as a position the protocol holds, on the effects selection
+// plane, in the company payload and on the score page. The row is KEPT and
+// LABELLED everywhere it was published before: this version withholds a
+// reading, it does not delete a record.
+//
+// What that is NOT. It is not a worth claim, and the corpus is why the
+// distinction is load-bearing rather than pedantic: uniETH arrives at fan-out
+// 101 and HEX at 199/399/399, and both are real. The published state names
+// delivery shape and nothing else, so nothing here licenses reading a
+// disposed row as worthless.
+//
+//     λ             71.7053 → 71.7053         letter B → B
+//     exposure_usd  $18,061,300.76 → $18,061,300.76
+//
+// Why the cuts do not move with it. The first two 1.2.0 reasons still hold
+// unchanged — a nine-band table fitted to one protocol's λ is not a
+// calibration, and nothing a band table is calibrated against moved
+// (BASE_SEVERITY, the weakness ladder, VALUE_BANDS and the λ discount are all
+// untouched). The reason specific to this bump is the third: every disposed
+// reading on this corpus is UNPRICED, so it contributed $0 to a sheet total
+// before the disposition and contributes $0 after it. λ cannot move on an
+// arithmetic that never saw those rows, and a table re-cut on a change that
+// provably could not move λ would be a cut point chosen for free — the same
+// defect as one chosen to save a letter, with the pressure removed.
+//
+// Read the flat λ correctly, which here means reading it as an INCOMPLETE
+// account of the change. The grade is unmoved and the document is materially
+// more honest: 2,006 of 2,425 unpriced readings sat on the 30 entities the
+// previous fold published under entities_holding_unpriced_assets, and the ones
+// disposed here stop being counted as protocol holdings on every consumer
+// surface. That is a presentation correction the letter has no term for, and
+// the absence of a λ movement is not evidence it was small.
 const BANDS = {
   "1.0.1-provisional": LETTER_CUTS,
   "1.1.0-provisional": LETTER_CUTS,
   "1.2.0-provisional": LETTER_CUTS,
   "1.3.0-provisional": LETTER_CUTS,
+  "1.4.0-provisional": LETTER_CUTS,
 };
 
 export function bandsFor(modelVersion) {

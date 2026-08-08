@@ -70,7 +70,7 @@ describe("DetailEmptyState — score card", () => {
     renderPanel({ companyName: "scored" });
     await waitFor(() => expect(screen.getByText("B")).toBeInTheDocument());
     expect(screen.getByText(/71\.7 \/ 100/)).toBeInTheDocument();
-    expect(screen.getByText(/confidence 40\.6%/)).toBeInTheDocument();
+    expect(screen.getByText(/confidence 43\.2%/)).toBeInTheDocument();
     expect(screen.getByText(/71\.7 kept/)).toBeInTheDocument();
     expect(screen.getByText(/across 27 findings/)).toBeInTheDocument();
     // The fix-first sentence is the derivation the score page publishes.

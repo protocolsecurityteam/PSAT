@@ -148,3 +148,75 @@ describe("BalanceTable — holdings coverage", () => {
     expect(screen.getByText("No token balances recorded")).toBeInTheDocument();
   });
 });
+
+describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed", () => {
+  const junk = () =>
+    row({
+      token_symbol: "JUNK",
+      token_name: "claim at t.ly/x",
+      usd_value: null,
+      usd_value_state: "not_determined",
+      delivery_shape: "fan_out_all",
+      delivery_shape_basis: "own-history scan 0..25710573",
+    });
+
+  it("still renders the row — a suppressed row is a deletion nobody can see", () => {
+    render(
+      <BalanceTable
+        machine={machine([row(), junk()], {
+          holdings_coverage: {
+            rows: 2,
+            page_cap: 100,
+            state: "not_determined",
+            unvalued_rows: 1,
+            airdrop_delivered_rows: 1,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("JUNK")).toBeInTheDocument();
+  });
+
+  it("labels it by DELIVERY SHAPE and never calls it worthless", () => {
+    render(<BalanceTable machine={machine([row(), junk()])} />);
+    const note = screen.getAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
+    expect(note).toBeDefined();
+    expect(note).toHaveTextContent(/not about what it is worth/i);
+    // Real tokens arrive this way (uniETH at fan-out 101, HEX at 199/399/399),
+    // so any of these words would be a claim the evidence does not carry.
+    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+      expect(note.textContent).not.toMatch(word);
+    }
+  });
+
+  it("keeps it out of the presented holdings, dust filter or not", async () => {
+    render(<BalanceTable machine={machine([row(), junk()])} />);
+    // The dust button counts only the presented holdings: one priced $1,234 row
+    // is above $10, so nothing is hidden by the filter.
+    expect(screen.getByRole("button")).toHaveTextContent("Hide priced <$10 (0)");
+    // And the unpriced-shown note is about presented holdings too, so an
+    // airdrop-delivered unpriced row must not raise it.
+    expect(screen.queryByText(/unpriced holding is still listed/i)).toBeNull();
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("JUNK")).toBeInTheDocument();
+  });
+
+  it("presents a has_direct_delivery and a not_determined row normally", () => {
+    // FAIL-CLOSED CONTROL: only the proven all-quantifier withholds a row. An
+    // earned negative and an unmeasured pair are different states and neither
+    // is disposed.
+    render(
+      <BalanceTable
+        machine={machine([
+          row({ token_symbol: "REAL", delivery_shape: "has_direct_delivery" }),
+          row({ token_symbol: "UNK2", delivery_shape: "not_determined" }),
+          row({ token_symbol: "NOKEY" }),
+        ])}
+      />,
+    );
+    expect(screen.queryByRole("note")).toBeNull();
+    for (const symbol of ["REAL", "UNK2", "NOKEY"]) {
+      expect(screen.getByText(symbol)).toBeInTheDocument();
+    }
+  });
+});

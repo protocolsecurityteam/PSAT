@@ -24,6 +24,7 @@ because it only moves a candidate earlier in the queue, never out of it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -53,9 +54,14 @@ from db.models import (
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.monitoring.balance_reads import positive_raw_balance
-from utils.balance_status import ASSET_SET_STATUS_AT_PAGE_CAP
-from utils.chains import UnknownChainError, canonical_chain, chain_by_id
-from utils.etherscan import token_balances_may_be_truncated
+from services.monitoring.delivery_evidence import load_delivery_evidence
+from utils.balance_status import (
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    DELIVERY_SHAPE_FAN_OUT_ALL,
+    DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
+    DELIVERY_SHAPE_NOT_DETERMINED,
+)
+from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -425,15 +431,25 @@ class AssetHolding(NamedTuple):
     usd_value: float | None
     # What is known about whether this holder's holdings list is WHOLE, as one
     # of :data:`HOLDINGS_COMPLETENESS_STATES`. Never ``"complete"``, and that is the
-    # point: this is derived from the stored rows, and the stored rows are the fetch's
-    # output AFTER ``utils.etherscan.get_token_balances`` drops every zero-balance
-    # entry, so a FULL 100-entry page containing any zero-balance entry stores fewer
-    # than the cap. The count is therefore a LOWER BOUND on the page length and can
-    # only ever prove the at-cap case, never its negation. Nothing persisted records
-    # the page length (see ``_holdings_completeness``), so "we know this list is whole"
-    # is not a state this input can reach. Uniform across every holding of one holder;
-    # carried per row so the reach probe needs no second input to thread.
+    # point: the ONLY witness is the fetch's own recorded ``asset_set_status``, whose
+    # ``at_page_cap`` member is a positive statement that the endpoint cut the list
+    # off. Every other status — including a list paged to exhaustion — is
+    # ``not_determined``, because no stored field says "and there was nothing more".
+    # Uniform across every holding of one holder; carried per row so the reach probe
+    # needs no second input to thread.
     completeness: str = HOLDINGS_COMPLETENESS_NOT_DETERMINED
+    # How every recorded delivery of this asset into this holder ARRIVED, as one of
+    # :data:`~utils.balance_status.DELIVERY_SHAPES`. A DELIVERY claim and never a worth
+    # claim: two demonstrably real tokens on this corpus are airdrop-delivered (uniETH
+    # at fan-out 101, HEX at 199/399/399), so ``fan_out_all`` states how the balance
+    # got here and states nothing about what it is worth.
+    #
+    # The record is KEPT under every shape — a vanished row is an unwitnessed deletion,
+    # and this record's EXISTENCE is what downstream reads as "this deployment holds
+    # this asset". ``fan_out_all`` is the one shape not presented as a holding, and it
+    # is excluded at the consumption points rather than dropped here, so the exclusion
+    # is visible in a labelled record rather than silent in a missing one.
+    delivery_shape: str = DELIVERY_SHAPE_NOT_DETERMINED
 
 
 def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
@@ -450,11 +466,18 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     rows = session.execute(
         select(
             Contract.id,
+            Contract.chain,
             ContractBalanceLatest.token_address,
             ContractBalanceLatest.usd_value,
             ContractBalanceLatest.raw_balance,
+            # The account the read was ISSUED against, which is the key delivery
+            # evidence is stored under. It differs from ``contracts.address`` on 162
+            # of this protocol's token rows (18 distinct ethereum accounts), so keying
+            # the lookup on the contract address would answer ``not_determined`` for
+            # every one of them.
+            ContractBalanceLatest.observed_address,
+            ContractBalanceFetch.chain_id,
             ContractBalanceFetch.asset_set_status,
-            ContractBalanceFetch.asset_page_length,
         )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
         # OUTER: a legacy row (``fetch_id IS NULL``) has no fetch to join to, and
@@ -469,16 +492,18 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
             select(Contract.id, Contract.address).where(Contract.protocol_id == protocol_id)
         ).all()
     }
-    # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
-    # is never treated as 0 in the max: a copy of the same holding that happened to be
-    # priced is strictly more informative.
-    best: dict[tuple[str, str], float | None] = {}
-    # Per holder, whether ANY contributing fetch proves its page was capped.
-    # WEAKEST WINS: one capped sibling means this holder's asset list may be
-    # missing entries, whatever the other siblings said. Taking the last-seen or
-    # the strongest value would let a complete-looking fetch mask a capped one.
-    holder_capped: dict[str, bool] = {}
-    for contract_id, token_address, usd, raw_balance, asset_set_status, asset_page_length in rows:
+    kept: list[tuple[str, str, float | None, tuple[int, str, str] | None, str | None]] = []
+    accounts: set[tuple[int, str]] = set()
+    for (
+        contract_id,
+        chain,
+        token_address,
+        usd,
+        raw_balance,
+        observed_address,
+        fetch_chain_id,
+        asset_set_status,
+    ) in rows:
         holder = holders.get(contract_id) or _addr(addresses.get(contract_id))
         if holder is None:
             continue
@@ -491,8 +516,30 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
         if not positive_raw_balance(raw_balance):
             continue
         asset = _addr(token_address) or NATIVE_ASSET_LOG_EMITTER
-        key = (holder, asset)
         value = None if usd is None else float(_usd(usd))
+        account = _delivery_account(fetch_chain_id, chain, observed_address)
+        evidence_key = None if account is None or token_address is None else (*account, _addr(token_address) or "")
+        if account is not None:
+            accounts.add(account)
+        kept.append((holder, asset, value, evidence_key, asset_set_status))
+    # ONE batched read for the whole protocol's accounts, keyed by the account the
+    # balance was read against rather than by any folded entity: two accounts of one
+    # deployment are two holders here, and merging them would let one account's
+    # evidence answer for the other's holding.
+    facts = load_delivery_evidence(session, accounts)
+    # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
+    # is never treated as 0 in the max: a copy of the same holding that happened to be
+    # priced is strictly more informative.
+    best: dict[tuple[str, str], float | None] = {}
+    # Per holder, whether ANY contributing fetch proves its page was capped.
+    # WEAKEST WINS: one capped sibling means this holder's asset list may be
+    # missing entries, whatever the other siblings said. Taking the last-seen or
+    # the strongest value would let a complete-looking fetch mask a capped one.
+    holder_capped: dict[str, bool] = {}
+    # (holder, asset) -> the shapes every contributing account's evidence answered.
+    shapes: dict[tuple[str, str], list[str]] = {}
+    for holder, asset, value, evidence_key, asset_set_status in kept:
+        key = (holder, asset)
         if key not in best:
             best[key] = value
         else:
@@ -501,23 +548,14 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
                 best[key] = value
             elif value is not None:
                 best[key] = max(current, value)
-        if _completeness_from_fetch(asset_set_status, asset_page_length) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP:
+        fact = None if evidence_key is None else facts.get(evidence_key)
+        shapes.setdefault(key, []).append(fact.shape if fact is not None else DELIVERY_SHAPE_NOT_DETERMINED)
+        if _completeness_from_fetch(asset_set_status) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP:
             holder_capped[holder] = True
-    # Per-holder completeness, from the same rows. The native row is excluded from the
-    # count because it is fetched separately and is not part of the paged list.
-    token_rows: dict[str, int] = {}
-    for (holder, asset), _usd_value in best.items():
-        if asset != NATIVE_ASSET_LOG_EMITTER:
-            token_rows[holder] = token_rows.get(holder, 0) + 1
     out: dict[str, list[AssetHolding]] = {}
     for (holder, asset), usd_value in sorted(best.items()):
-        # The recorded page length is the real witness; the stored-row count is
-        # the fallback that still covers every legacy row (``asset_page_length``
-        # is NULL on all of them, permanently — it was never recorded).
         completeness = (
-            HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-            if holder_capped.get(holder)
-            else _holdings_completeness(token_rows.get(holder, 0))
+            HOLDINGS_COMPLETENESS_AT_PAGE_CAP if holder_capped.get(holder) else HOLDINGS_COMPLETENESS_NOT_DETERMINED
         )
         out.setdefault(holder, []).append(
             AssetHolding(
@@ -525,63 +563,81 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
                 asset=asset,
                 usd_value=usd_value,
                 completeness=completeness,
+                delivery_shape=_merged_delivery_shape(shapes.get((holder, asset), ())),
             )
         )
     return {holder: tuple(items) for holder, items in out.items()}
 
 
-def _completeness_from_fetch(asset_set_status: str | None, asset_page_length: int | None) -> str:
-    """A TOTAL mapping from one fetch's recorded page facts to a completeness state.
+def _delivery_account(
+    fetch_chain_id: int | None, chain_name: str | None, observed_address: str | None
+) -> tuple[int, str] | None:
+    """The ``(chain_id, account)`` delivery evidence for one balance row is keyed by.
 
-    Total over the whole ``ASSET_SET_STATUSES`` vocabulary crossed with every
-    page length including ``None``, and it provably cannot return a whole/complete
-    state — there is no such member of :data:`HOLDINGS_COMPLETENESS_STATES` to
-    return. That is the point of routing the merged ``asset_set_status`` through
-    one function: the status vocabulary gained a value that names the at-cap case,
-    and a naive reading of its three siblings as "not capped, therefore whole"
-    would turn a page fact into a proven-absence claim about the holder's assets.
+    ``None`` where either half is missing, which is the state that admits no lookup
+    and therefore leaves the row ``not_determined`` — the shape that keeps the row
+    presented. The fetch's own ``chain_id`` is preferred over the contract's chain
+    NAME because it is the value the producer measured against; the name is the
+    fallback that still covers a legacy row with no fetch.
+    """
+    if not observed_address:
+        return None
+    chain_id = fetch_chain_id
+    if chain_id is None and chain_name:
+        try:
+            chain_id = chain_by_name(chain_name).chain_id
+        except UnknownChainError:
+            return None
+    if chain_id is None:
+        return None
+    return int(chain_id), str(observed_address).lower()
 
-    ``returned_assets`` is ``not_determined``, not complete: a page below the cap
-    is consistent with a whole list AND with the endpoint's own paging, and the
-    stored rows cannot separate them.
+
+def _merged_delivery_shape(shapes: Iterable[str]) -> str:
+    """One delivery shape for a (holder, asset) several accounts' rows contributed to.
+
+    ``fan_out_all`` only under UNANIMITY, because it is the shape that stops a row
+    being presented as a holding and the all-quantifier it comes from is per account:
+    one contributing account that saw a direct delivery, or that nobody measured, is
+    enough that "every delivery on record was a mass distribution" is not proven for
+    this holding. ``has_direct_delivery`` outranks ``not_determined`` — an earned
+    negative is not weakened by a sibling gap — and an empty contribution set is
+    ``not_determined`` rather than vacuously unanimous.
+    """
+    seen = list(shapes)
+    if seen and all(shape == DELIVERY_SHAPE_FAN_OUT_ALL for shape in seen):
+        return DELIVERY_SHAPE_FAN_OUT_ALL
+    if any(shape == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY for shape in seen):
+        return DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
+    return DELIVERY_SHAPE_NOT_DETERMINED
+
+
+def _completeness_from_fetch(asset_set_status: str | None) -> str:
+    """A TOTAL mapping from one fetch's recorded status to a completeness state.
+
+    Total over the whole ``ASSET_SET_STATUSES`` vocabulary plus ``None``, and it
+    provably cannot return a whole/complete state — there is no such member of
+    :data:`HOLDINGS_COMPLETENESS_STATES` to return. That is the point of routing the
+    merged ``asset_set_status`` through one function: the status vocabulary carries
+    the one value that names the at-cap case, and a naive reading of its three
+    siblings as "not capped, therefore whole" would turn a page fact into a
+    proven-absence claim about the holder's assets.
+
+    ``asset_set_status`` is the WHOLE input, and a LENGTH is not part of it. The
+    fetch pages the endpoint to exhaustion and records the deduplicated whole-list
+    entry count, which routinely exceeds ``TOKEN_BALANCE_PAGE_SIZE`` on a list that
+    was never cut off; comparing it to the cap read a complete list as a truncated
+    one. ``at_page_cap`` on the status is the producer's own witness that the list it
+    stored is a prefix, and it is the only truncation discriminator there is.
+
+    ``returned_assets`` is ``not_determined``, not complete: nothing stored says the
+    exhausted list is everything the holder holds, and the one-directional contract
+    is what keeps this from minting that sentence.
 
     ``fetch_failed`` and ``None`` (a legacy row, no fetch recorded) are
     ``not_determined`` for the plainest reason: nothing was learned.
     """
     if asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP:
-        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-    if asset_page_length is not None and token_balances_may_be_truncated(asset_page_length):
-        return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
-    return HOLDINGS_COMPLETENESS_NOT_DETERMINED
-
-
-def _holdings_completeness(stored_token_rows: int) -> str:
-    """What a STORED row count can say about a holdings list being whole.
-
-    ONE direction only. ``stored_token_rows >= cap`` proves the fetch returned a full
-    page, so assets are probably missing. Below the cap proves NOTHING: the stored rows
-    are ``utils.etherscan.get_token_balances``' output AFTER its ``raw_balance > 0``
-    filter, and the truncation check there is evaluated on that same filtered list, so
-    the page-size signal is destroyed one line above where it is read. A full 100-entry
-    page containing any zero-balance entry stores fewer than 100 and would have read as
-    proven-complete.
-
-    ARMED POPULATION, stated honestly: ``at_page_cap`` is reachable by
-    construction and test-covered, and it fires on ZERO local holders. 7 local
-    contracts do sit exactly at the cap (WETH9, Dai, WstETH, Lido, LinkToken,
-    DepositContract, FiatTokenV2_2, one of them holding $8.6B) — but all 7 have
-    ``protocol_id IS NULL`` and ``_asset_holdings_by_deployment`` filters
-    ``Contract.protocol_id == protocol_id``, so none of them can enter a holder set.
-    The most token rows any protocol-1 contract carries is 90. So: 0 of 29 holders
-    armed, on one protocol on one chain, which is a LOWER BOUND and not evidence the
-    shape does not occur.
-
-    The only thing that could ever return ``"complete"`` is the fetch's own page
-    length, recorded at fetch time. That needs a schema column and a re-fetch of the
-    whole population, so it is deferred; until then the honest answer below the cap
-    is "not determined".
-    """
-    if token_balances_may_be_truncated(stored_token_rows):
         return HOLDINGS_COMPLETENESS_AT_PAGE_CAP
     return HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
@@ -611,10 +667,25 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     holding is typically an airdropped spam token, and a mint witnessed against
     one would carry a ``backing.inflow_observed: true`` indistinguishable from a
     real deposit. Native balance (``token_address IS NULL``) is excluded — it is
-    not an argument any token parameter can take."""
+    not an argument any token parameter can take.
+
+    An asset whose every recorded delivery into this account was a mass distribution
+    is not presented here either. This list is consumed as "tokens this contract
+    holds a position in", and delivery shape is the second, independent reason a row
+    fails that reading — the price filter above answers a different question and
+    cannot answer this one. The balance row is untouched and keeps its label; only
+    the presentation of it as a held position is withheld."""
     rows = session.execute(
-        select(Contract.id, ContractBalanceLatest.token_address, ContractBalanceLatest.usd_value)
+        select(
+            Contract.id,
+            Contract.chain,
+            ContractBalanceLatest.token_address,
+            ContractBalanceLatest.usd_value,
+            ContractBalanceLatest.observed_address,
+            ContractBalanceFetch.chain_id,
+        )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
+        .outerjoin(ContractBalanceFetch, ContractBalanceFetch.id == ContractBalanceLatest.fetch_id)
         .where(
             Contract.protocol_id == protocol_id,
             ContractBalanceLatest.token_address.isnot(None),
@@ -633,11 +704,23 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
             ContractBalanceLatest.id.asc(),
         )
     ).all()
+    accounts = {
+        account
+        for _cid, chain, _token, _usd, observed, fetch_chain_id in rows
+        if (account := _delivery_account(fetch_chain_id, chain, observed)) is not None
+    }
+    facts = load_delivery_evidence(session, accounts)
     out: dict[int, list[str]] = {}
-    for contract_id, token, _usd in rows:
+    for contract_id, chain, token, _usd, observed, fetch_chain_id in rows:
         addr = _addr(token)
+        if addr is None:
+            continue
+        account = _delivery_account(fetch_chain_id, chain, observed)
+        fact = None if account is None else facts.get((*account, addr))
+        if fact is not None and fact.is_airdrop_only:
+            continue
         holdings = out.setdefault(contract_id, [])
-        if addr is not None and addr not in holdings and len(holdings) < limit:
+        if addr not in holdings and len(holdings) < limit:
             holdings.append(addr)
     return {cid: tuple(v) for cid, v in out.items()}
 
@@ -1348,10 +1431,19 @@ def select_candidates(
     # input that makes a reach total not-determined, and dropping it made a moved
     # unpriced asset silently equivalent to no movement at all. A holding priced at
     # exactly 0 is likewise kept — a measured zero is evidence.
+    #
+    # A holding whose delivery shape is ``fan_out_all`` is NOT presented here. Every
+    # delivery of that asset into that account on record was a mass distribution, and
+    # a mass distribution is not evidence the protocol took a position — so the row's
+    # existence must not be read as "this deployment holds this asset", which is
+    # exactly what membership of this tuple means downstream. The record itself is
+    # kept and labelled by ``_asset_holdings_by_deployment``, so the exclusion is
+    # readable off the labelled row rather than inferred from a row that vanished.
     value_holders = tuple(
         holding
         for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
         for holding in holdings_for_deployment
+        if holding.delivery_shape != DELIVERY_SHAPE_FAN_OUT_ALL
     )
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
     protocol_tvl = _protocol_tvl_usd(session, protocol_id)

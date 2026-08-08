@@ -21,6 +21,21 @@ function usdCell(row) {
   return { text: formatted || "$0.00", className: "ps-balance-usd" };
 }
 
+// Every recorded delivery of this balance was a mass distribution. The row is
+// PUBLISHED and LABELLED — a suppressed row is a deletion nobody can see — but
+// it is not presented as a position this contract holds, so it is out of the
+// holdings list, out of the holdings count, and shown under its own heading.
+//
+// A DELIVERY claim, never a worth claim. Real tokens arrive this way (uniETH at
+// fan-out 101, HEX at 199/399/399), so the label says how the balance arrived
+// and the word "spam" appears nowhere: that would be a claim the evidence does
+// not carry.
+const AIRDROP_DELIVERED = "fan_out_all";
+
+export function isAirdropDelivered(row) {
+  return row?.delivery_shape === AIRDROP_DELIVERED;
+}
+
 // Whether this contract's holdings list can be reported as the whole set.
 // `holdings_coverage.state` is two-valued by construction — the backend cannot
 // prove completeness (see company_overview) — so this only ever answers
@@ -47,6 +62,31 @@ function coverageNote(machine) {
   return parts.length ? parts.join(" ") : null;
 }
 
+function BalanceRow({ row }) {
+  const human = Number(row.raw_balance) / 10 ** row.decimals;
+  const amount =
+    human >= 1e6
+      ? `${(human / 1e6).toFixed(1)}M`
+      : human >= 1e3
+        ? `${(human / 1e3).toFixed(1)}K`
+        : human >= 1
+          ? human.toFixed(2)
+          : human.toFixed(6);
+  const usd = usdCell(row);
+  return (
+    <div className="ps-balance-row">
+      <div className="ps-balance-token">
+        <span className="ps-balance-symbol">{row.token_symbol}</span>
+        <span className="ps-balance-name">{row.token_name}</span>
+      </div>
+      <div className="ps-balance-values">
+        <span className="ps-balance-amount">{amount}</span>
+        <span className={usd.className}>{usd.text}</span>
+      </div>
+    </div>
+  );
+}
+
 export function BalanceTable({ machine }) {
   const [hideDust, setHideDust] = useState(true);
 
@@ -68,8 +108,12 @@ export function BalanceTable({ machine }) {
     const determined = b?.usd_value_state ? b.usd_value_state === "measured" : b?.usd_value != null;
     return determined && b.usd_value < 10;
   };
-  const filtered = hideDust ? machine.balances.filter((b) => !isDust(b)) : machine.balances;
-  const hiddenCount = machine.balances.length - filtered.length;
+  // Split BEFORE the dust filter: the two questions are independent, and an
+  // airdrop-delivered row must be listed whatever it is worth.
+  const holdings = machine.balances.filter((b) => !isAirdropDelivered(b));
+  const airdropped = machine.balances.filter(isAirdropDelivered);
+  const filtered = hideDust ? holdings.filter((b) => !isDust(b)) : holdings;
+  const hiddenCount = holdings.length - filtered.length;
   const unpricedShown = filtered.filter(
     (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null),
   ).length;
@@ -94,28 +138,26 @@ export function BalanceTable({ machine }) {
         </div>
       ) : null}
       <div className="ps-balance-list">
-        {filtered.map((b, i) => {
-          const human = Number(b.raw_balance) / (10 ** b.decimals);
-          const amount = human >= 1e6 ? `${(human / 1e6).toFixed(1)}M`
-            : human >= 1e3 ? `${(human / 1e3).toFixed(1)}K`
-            : human >= 1 ? human.toFixed(2)
-            : human.toFixed(6);
-          const usd = usdCell(b);
-          return (
-            <div key={i} className="ps-balance-row">
-              <div className="ps-balance-token">
-                <span className="ps-balance-symbol">{b.token_symbol}</span>
-                <span className="ps-balance-name">{b.token_name}</span>
-              </div>
-              <div className="ps-balance-values">
-                <span className="ps-balance-amount">{amount}</span>
-                <span className={usd.className}>{usd.text}</span>
-              </div>
-            </div>
-          );
-        })}
+        {filtered.map((b, i) => (
+          <BalanceRow key={i} row={b} />
+        ))}
         {filtered.length === 0 && <div className="ps-lane-empty">No holdings priced above $10</div>}
       </div>
+      {airdropped.length > 0 ? (
+        <>
+          <div className="ps-balance-coverage" role="note">
+            {airdropped.length} {airdropped.length === 1 ? "balance" : "balances"} below arrived only by mass
+            distribution — every delivery on record went to hundreds of recipients at once. They are listed because
+            the contract does hold them, and kept out of the holdings above because arriving in an airdrop is not
+            taking a position. This is a statement about how the balance arrived and not about what it is worth.
+          </div>
+          <div className="ps-balance-list">
+            {airdropped.map((b, i) => (
+              <BalanceRow key={i} row={b} />
+            ))}
+          </div>
+        </>
+      ) : null}
     </section>
   );
 }

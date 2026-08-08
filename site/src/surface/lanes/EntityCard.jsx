@@ -5,7 +5,7 @@ import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js"
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows, governancePathTargets } from "../layout/governancePath.js";
-import { BalanceTable } from "./BalanceTable.jsx";
+import { BalanceTable, isAirdropDelivered } from "./BalanceTable.jsx";
 import { DependsOnTab } from "./DependsOnTab.jsx";
 import { GovernsTab } from "./GovernsTab.jsx";
 import { LaneColumn } from "./LaneColumn.jsx";
@@ -114,7 +114,10 @@ export function EntityCard({
         control: machine.lanes.top.length + machine.lanes.ops.length,
         inflows: machine.lanes.left.length,
         outflows: machine.lanes.right.length,
-        balances: machine.balances?.length || 0,
+        // The count is of HOLDINGS. An airdrop-delivered balance is still
+        // listed on the tab and still published by the backend, but counting it
+        // here would present it as a position this contract took.
+        balances: (machine.balances || []).filter((b) => !isAirdropDelivered(b)).length,
         governs: canCallRows.length,
       }
     : { governs: canCallRows.length };
