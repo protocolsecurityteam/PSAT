@@ -11,7 +11,12 @@ What the sweep is, exactly: for a batch of holders, every ``Transfer`` /
 ``TransferSingle`` / ``TransferBatch`` log that named one of them as recipient,
 from genesis (or from a stored cursor) through a named block. The emitters of
 those logs are the candidate asset list; a Multicall3 ``balanceOf`` round then
-reads what is still held.
+reads what is still held. For an ERC-721/1155 receipt that round answers
+nothing — 1155 has no ``balanceOf(address)`` — so the sweep also decodes the
+TOKEN IDS out of the delivering logs and reads the holding per id. Those ids are
+persisted with the receipt: they exist nowhere else in the pipeline, and a
+record without them makes every later cycle re-scan the whole history to learn
+what one scan already knew.
 
 What it is NOT: proof of nothing. Four structural blind spots exist and each is
 guarded rather than assumed away — see :class:`SweepOutcome`'s ``failure_reason``
@@ -26,7 +31,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from eth_utils.crypto import keccak
 
@@ -102,7 +109,80 @@ SWEEP_FAILED = SWEEP_STATUS_FAILED
 
 _BALANCE_OF_SELECTOR = selector("balanceOf(address)")
 _DECIMALS_SELECTOR = selector("decimals()")
+# ERC-1155 has no ``balanceOf(address)`` at all — the address-level call reverts,
+# so an 1155 receipt's holding is not_determined for as long as the only thing
+# asked is that selector. The call that DOES answer is per token id, and the ids
+# exist nowhere but the logs that delivered them. That is why the sweep decodes
+# the ids and PERSISTS them: an inventory recovered once is an inventory never
+# re-scanned for.
+_BALANCE_OF_BATCH_SELECTOR = selector("balanceOfBatch(address[],uint256[])")
+_BALANCE_OF_ID_SELECTOR = selector("balanceOf(address,uint256)")
+_OWNER_OF_SELECTOR = selector("ownerOf(uint256)")
 _WORD_HEX_LEN = 66
+
+# Token ids per ``balanceOfBatch`` sub-call. One aggregate3 carries many
+# sub-calls, so this bounds the calldata (and the gas) of a single one rather
+# than the request count.
+_TYPED_ID_CALL_CHUNK = 100
+
+# What the delivering log proved about a typed token's standard. Derived from
+# topic0 and topic COUNT — never from a name, a token list or a label — and kept,
+# because the selector that reads the holding differs per standard and
+# re-deriving it costs the whole full-history scan again.
+TYPED_STANDARD_ERC1155 = "erc1155"
+TYPED_STANDARD_ERC721 = "erc721"
+# A three-topic ``Transfer`` emitter whose ``balanceOf(address)`` returned no
+# word. It is filed with the typed receipts because it withholds the same
+# completeness, but its delivering log carries no id, so there is no per-id read
+# to escalate to and its id inventory is settled as EMPTY. Settled, not unknown:
+# that is what stops it demanding a fresh full-history scan every cycle. It stays
+# unresolved regardless — an unreadable balance is not a zero.
+TYPED_STANDARD_TRANSFER_NO_ID = "erc20_transfer_shape"
+TYPED_STANDARD_NOT_DETERMINED = "not_determined"
+_ID_BEARING_STANDARDS = (TYPED_STANDARD_ERC1155, TYPED_STANDARD_ERC721)
+TYPED_STANDARDS = (
+    TYPED_STANDARD_ERC1155,
+    TYPED_STANDARD_ERC721,
+    TYPED_STANDARD_TRANSFER_NO_ID,
+    TYPED_STANDARD_NOT_DETERMINED,
+)
+
+# How a typed receipt's published quantity was obtained. A quantity with no basis
+# is a number with no witness, so the basis is stored beside it.
+TYPED_BASIS_ADDRESS_BALANCE = "balance_of_address"
+TYPED_BASIS_PER_ID_BALANCE_OF_BATCH = "balance_of_batch_per_id"
+TYPED_BASIS_PER_ID_BALANCE_OF_ID = "balance_of_account_id_per_id"
+TYPED_BASIS_PER_ID_OWNER_OF = "owner_of_per_id"
+
+
+@dataclass(frozen=True)
+class TypedItem:
+    """One token id a typed receipt delivered, and what is still held of it.
+
+    ``token_id`` is a DECIMAL STRING: ids are uint256 and routinely exceed what a
+    JSON number survives, and this value is persisted and read back.
+    ``quantity`` is ``None`` when the chain did not answer for that id — never 0,
+    which is the answer this module exists to earn rather than assume.
+    """
+
+    token_id: str
+    quantity: int | None
+
+
+@dataclass(frozen=True)
+class CarriedTypedReceipt:
+    """A typed receipt read back off the stored fetch record.
+
+    ``ids_complete`` is the load-bearing field: it says the stored id list is the
+    UNION of every id the scans behind this set delivered, which is the only
+    footing an "every id reads zero" claim can stand on. False means the
+    inventory is a prefix (or absent), and a prefix resolves nothing.
+    """
+
+    address: str
+    standard: str = TYPED_STANDARD_NOT_DETERMINED
+    ids: tuple[str, ...] = ()
+    ids_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -115,6 +195,16 @@ class SweptAsset:
     # ``erc20`` | ``typed`` — ``typed`` covers every 721/1155 receipt, whose
     # ``balanceOf`` is a COUNT of items and not a quantity of anything priceable.
     kind: str
+    # The four fields below describe a TYPED receipt only; an ``erc20`` row
+    # carries their defaults. They travel on the same dataclass because they
+    # travel on the same list, and the list is what the fetch record persists.
+    standard: str = TYPED_STANDARD_NOT_DETERMINED
+    # Every id the scans behind this set delivered, with what is still held of
+    # each. A per-id quantity of ``None`` is an id the chain did not answer for.
+    items: tuple[TypedItem, ...] = ()
+    ids_complete: bool = False
+    # Which read produced ``raw_balance``; ``None`` when nothing did.
+    quantity_basis: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +281,90 @@ def _addr_from_topic(topic: str) -> str:
     return "0x" + topic[-40:].lower()
 
 
+def _int_word(word: Any) -> int | None:
+    """A 32-byte word as an int, or ``None`` if it is not one."""
+    if not isinstance(word, str):
+        return None
+    try:
+        return int(word, 16)
+    except ValueError:
+        return None
+
+
+def _uint_array(words: list[str]) -> list[int] | None:
+    """The ``uint256[]`` an ABI head/tail pair encodes, or ``None``.
+
+    Followed through the head's OFFSET rather than read at a fixed index: the ABI
+    puts the tail wherever the head points, and hard-coding word 2 as the length
+    happens to work only for the canonical single-array layout. A layout this
+    decoder cannot follow is refused outright — a short read here becomes a short
+    id inventory, and a short inventory would let "every id reads zero" be
+    published over ids nobody looked at.
+
+    Shared by the ``TransferBatch`` id decode and the ``balanceOfBatch`` answer
+    decode so the two cannot drift.
+    """
+    if not words:
+        return None
+    offset = _int_word(words[0])
+    if offset is None or offset % 32:
+        return None
+    head = offset // 32
+    if head >= len(words):
+        return None
+    length = _int_word(words[head])
+    if length is None or length < 0 or head + 1 + length > len(words):
+        return None
+    values: list[int] = []
+    for word in words[head + 1 : head + 1 + length]:
+        value = _int_word(word)
+        if value is None:
+            return None
+        values.append(value)
+    return values
+
+
+def _single_ids(words: list[str]) -> list[str] | None:
+    """The one id a ``TransferSingle`` carries — ``None`` if the log is malformed.
+
+    Both words are required: a log with the id but not the value is not the event
+    this decoder claims to have read.
+    """
+    if len(words) < 2:
+        return None
+    token_id = _int_word(words[0])
+    return None if token_id is None else [str(token_id)]
+
+
+def _batch_ids(words: list[str]) -> list[str] | None:
+    """The id array a ``TransferBatch`` carries — ``None`` if the log is malformed."""
+    values = _uint_array(words)
+    return None if values is None else [str(value) for value in values]
+
+
+@dataclass
+class TypedSighting:
+    """What the delivering logs said about one (holder, token) typed receipt.
+
+    ``malformed`` is a log this decoder could not read an id out of. The id set is
+    then a PREFIX of the truth, and a prefix can never carry the all-quantifier
+    behind a resolved receipt — so one malformed log withholds the whole token's
+    inventory rather than shortening it.
+    """
+
+    standard: str | None = None
+    ids: set[str] = field(default_factory=set)
+    malformed: bool = False
+
+    def observe(self, standard: str) -> None:
+        # Two standards on one token is a contradiction, not a majority vote:
+        # neither selector can be trusted, so no per-id read is issued for it.
+        if self.standard is None or self.standard == standard:
+            self.standard = standard
+        else:
+            self.standard = TYPED_STANDARD_NOT_DETERMINED
+
+
 def sweep_head_block(rpc_url: str, *, chain_id: int, cost: SweepCost) -> int | None:
     """The block the sweep claims through, or ``None`` if the head is unknown."""
     try:
@@ -212,20 +386,23 @@ def discover_recipient_assets(
     to_block: int,
     cost: SweepCost,
     fetcher: RpcEventLogFetcher | None = None,
-) -> tuple[dict[str, set[str]], dict[str, set[str]], str | None]:
+) -> tuple[dict[str, set[str]], dict[str, dict[str, TypedSighting]], str | None]:
     """Every asset that ever sent one of *addresses* a transfer in the range.
 
-    Returns ``(erc20_by_holder, typed_by_holder, failure)``. ``failure`` is a
-    string on the truncation/exhausted-bisect path and aborts EVERY holder in the
-    batch: the logs that did come back cannot be attributed a completeness they
-    do not have, and a per-holder rescue would publish a prefix as a whole list.
+    Returns ``(erc20_by_holder, typed_by_holder, failure)``. The typed half is
+    keyed by token and carries the standard and the token ids its delivering logs
+    named — the only place those ids ever exist, since nothing else in the
+    pipeline stores a log. ``failure`` is a string on the truncation/
+    exhausted-bisect path and aborts EVERY holder in the batch: the logs that did
+    come back cannot be attributed a completeness they do not have, and a
+    per-holder rescue would publish a prefix as a whole list.
     """
     scanner = fetcher or _CountingFetcher(
         rpc_url, chain_id=chain_id, cost=cost, result_cap=SWEEP_RESULT_CAP, budget=SWEEP_REQUEST_BUDGET
     )
     wanted = {a.lower() for a in addresses}
     erc20: dict[str, set[str]] = {a: set() for a in wanted}
-    typed: dict[str, set[str]] = {a: set() for a in wanted}
+    typed: dict[str, dict[str, TypedSighting]] = {a: {} for a in wanted}
     padded = [_pad32(a) for a in sorted(wanted)]
 
     for position, topic0s in _RECIPIENT_PASSES:
@@ -262,7 +439,7 @@ def _attribute(
     position: int,
     wanted: set[str],
     erc20: dict[str, set[str]],
-    typed: dict[str, set[str]],
+    typed: dict[str, dict[str, TypedSighting]],
 ) -> None:
     for log in logs:
         if len(log.topics) <= position or not log.address:
@@ -271,12 +448,29 @@ def _attribute(
         if holder not in wanted:
             continue
         topic0 = log.topics[0]
+        token = log.address.lower()
         # A 4-topic Transfer indexes tokenId: ERC-721. A 3-topic one is the
-        # ERC-20 shape. The 1155 topic0s are typed by definition.
-        if topic0 in _ERC1155_TOPIC0S or (topic0 == TRANSFER_TOPIC0 and len(log.topics) >= 4):
-            typed[holder].add(log.address.lower())
+        # ERC-20 shape. The 1155 topic0s are typed by definition. The standard is
+        # RECORDED here rather than derived and dropped: it decides which selector
+        # can read the holding later, and the logs it comes from are not stored.
+        if topic0 in _ERC1155_TOPIC0S:
+            sighting = typed[holder].setdefault(token, TypedSighting())
+            sighting.observe(TYPED_STANDARD_ERC1155)
+            ids = _single_ids(log.data_words) if topic0 == TRANSFER_SINGLE_TOPIC0 else _batch_ids(log.data_words)
+            if ids is None:
+                sighting.malformed = True
+            else:
+                sighting.ids.update(ids)
+        elif topic0 == TRANSFER_TOPIC0 and len(log.topics) >= 4:
+            sighting = typed[holder].setdefault(token, TypedSighting())
+            sighting.observe(TYPED_STANDARD_ERC721)
+            token_id = _int_word(log.topics[3])
+            if token_id is None:
+                sighting.malformed = True
+            else:
+                sighting.ids.add(str(token_id))
         elif topic0 == TRANSFER_TOPIC0:
-            erc20[holder].add(log.address.lower())
+            erc20[holder].add(token)
 
 
 def read_balances(
@@ -334,6 +528,314 @@ def read_balances(
     return out, False
 
 
+def _uint_word(value: int) -> str:
+    return f"{value:064x}"
+
+
+def _balance_of_batch_calldata(holder: str, ids: tuple[str, ...]) -> str:
+    """``balanceOfBatch([holder]*n, ids)`` — one call for a whole id inventory.
+
+    Hand-encoded rather than routed through an ABI encoder because the two array
+    offsets are the only thing to get right and the shape is pinned by a test.
+    """
+    holder_word = holder.lower().removeprefix("0x").rjust(64, "0")
+    count = len(ids)
+    words = [
+        _uint_word(64),  # accounts[] tail
+        _uint_word(64 + 32 + 32 * count),  # ids[] tail, past accounts'
+        _uint_word(count),
+        *([holder_word] * count),
+        _uint_word(count),
+        *(_uint_word(int(token_id)) for token_id in ids),
+    ]
+    return _BALANCE_OF_BATCH_SELECTOR + "".join(words)
+
+
+def _address_from_word(data: Any) -> str | None:
+    if not isinstance(data, str) or len(data) != _WORD_HEX_LEN:
+        return None
+    return "0x" + data[-40:].lower()
+
+
+def _data_words(data: Any) -> list[str] | None:
+    if not isinstance(data, str) or not data.startswith("0x"):
+        return None
+    body = data[2:]
+    if not body or len(body) % 64:
+        return None
+    return ["0x" + body[index : index + 64] for index in range(0, len(body), 64)]
+
+
+def _calls_for(basis: str, holder: str, token: str, ids: tuple[str, ...]) -> list[tuple[str, str]]:
+    holder_word = holder.lower().removeprefix("0x").rjust(64, "0")
+    if basis == TYPED_BASIS_PER_ID_BALANCE_OF_BATCH:
+        return [
+            (token, _balance_of_batch_calldata(holder, ids[index : index + _TYPED_ID_CALL_CHUNK]))
+            for index in range(0, len(ids), _TYPED_ID_CALL_CHUNK)
+        ]
+    if basis == TYPED_BASIS_PER_ID_BALANCE_OF_ID:
+        return [(token, _BALANCE_OF_ID_SELECTOR + holder_word + _uint_word(int(token_id))) for token_id in ids]
+    return [(token, _OWNER_OF_SELECTOR + _uint_word(int(token_id))) for token_id in ids]
+
+
+def _quantities_for(basis: str, holder: str, chunk: list[tuple[bool, str]]) -> list[int] | None:
+    """The per-id quantities one round's answers carry, or ``None`` if any is not one."""
+    quantities: list[int] = []
+    for ok, data in chunk:
+        if not ok:
+            return None
+        if basis == TYPED_BASIS_PER_ID_BALANCE_OF_BATCH:
+            decoded = _uint_array(_data_words(data) or [])
+            if decoded is None:
+                return None
+            quantities.extend(decoded)
+        elif basis == TYPED_BASIS_PER_ID_BALANCE_OF_ID:
+            value = _int_word(data) if isinstance(data, str) and len(data) == _WORD_HEX_LEN else None
+            if value is None:
+                return None
+            quantities.append(value)
+        else:
+            owner = _address_from_word(data)
+            if owner is None:
+                return None
+            # ``ownerOf`` names the current owner; anyone else means the item
+            # arrived and provably left.
+            quantities.append(1 if owner == holder else 0)
+    return quantities
+
+
+# The read shapes, in the order they are tried. ERC-1155 mandates both selectors,
+# but a token that emits conforming logs is not thereby a token that implements
+# them: four contracts on this corpus revert ``balanceOfBatch`` and answer
+# ``balanceOf(address,uint256)``. Trying the batch first keeps the common case at
+# one sub-call per receipt; the fallback turns what would be an unreadable
+# not_determined into a real reading, which is the whole point of asking.
+_TYPED_ID_ROUNDS = (
+    (TYPED_STANDARD_ERC1155, TYPED_BASIS_PER_ID_BALANCE_OF_BATCH),
+    (TYPED_STANDARD_ERC1155, TYPED_BASIS_PER_ID_BALANCE_OF_ID),
+    # ERC-721 has no batch read, and its ``balanceOf(address)`` already answered
+    # wherever it was going to; reaching here means it did not.
+    (TYPED_STANDARD_ERC721, TYPED_BASIS_PER_ID_OWNER_OF),
+)
+
+
+def read_typed_items(
+    requests: list[tuple[str, str, str, tuple[str, ...]]],
+    *,
+    rpc_url: str,
+    chain_id: int,
+    block: int,
+    cost: SweepCost,
+) -> dict[tuple[str, str], tuple[tuple[TypedItem, ...], str]]:
+    """Per-id holdings for the typed receipts whose address-level read said nothing.
+
+    *requests* is ``[(holder, token, standard, ids), ...]``; the answer maps
+    ``(holder, token)`` to its items and the basis that produced them. A key is
+    ABSENT unless EVERY one of its ids answered in the same round: the claim a
+    resolved receipt carries is an all-quantifier over the inventory, so one
+    unanswered id refuses the whole receipt rather than shrinking it. A transport
+    failure is not fatal to the sweep — the scan and its ids are still facts worth
+    storing, and the receipts simply stay unresolved for another cycle, which is
+    the direction that cannot publish a holding as nothing.
+
+    Batched across every holder on the chain at one pinned block, so the cycle's
+    id reads cost a request per round rather than a request per receipt.
+    """
+    out: dict[tuple[str, str], tuple[tuple[TypedItem, ...], str]] = {}
+    for standard, basis in _TYPED_ID_ROUNDS:
+        round_requests = [r for r in requests if r[2] == standard and (r[0], r[1]) not in out]
+        if round_requests:
+            out.update(
+                _read_typed_round(
+                    round_requests, basis=basis, rpc_url=rpc_url, chain_id=chain_id, block=block, cost=cost
+                )
+            )
+    return out
+
+
+def _read_typed_round(
+    requests: list[tuple[str, str, str, tuple[str, ...]]],
+    *,
+    basis: str,
+    rpc_url: str,
+    chain_id: int,
+    block: int,
+    cost: SweepCost,
+) -> dict[tuple[str, str], tuple[tuple[TypedItem, ...], str]]:
+    calls: list[tuple[str, str]] = []
+    plan: list[tuple[tuple[str, str], tuple[str, ...], int]] = []
+    for holder, token, _standard, ids in requests:
+        made = _calls_for(basis, holder, token, ids)
+        calls.extend(made)
+        plan.append(((holder, token), ids, len(made)))
+    if not calls:
+        return {}
+    cost.multicall += (len(calls) + _MULTICALL3_CHUNK - 1) // _MULTICALL3_CHUNK
+    try:
+        results = multicall3_aggregate3(rpc_url, calls, hex(block), chain_id=chain_id)
+    except Exception as exc:
+        logger.info("asset sweep: per-id typed read (%s) failed on chain %s: %s", basis, chain_id, exc)
+        return {}
+
+    out: dict[tuple[str, str], tuple[tuple[TypedItem, ...], str]] = {}
+    cursor = 0
+    for key, ids, width in plan:
+        chunk = results[cursor : cursor + width]
+        cursor += width
+        quantities = _quantities_for(basis, key[0], chunk)
+        if quantities is None or len(quantities) != len(ids):
+            # A short or unreadable answer is not a small holding. Left absent so
+            # the receipt keeps refusing — and so the next round may still answer.
+            continue
+        out[key] = (
+            tuple(TypedItem(token_id=token_id, quantity=q) for token_id, q in zip(ids, quantities, strict=True)),
+            basis,
+        )
+    return out
+
+
+@dataclass
+class _PendingTyped:
+    """One typed receipt after discovery, before its per-id read."""
+
+    token: str
+    standard: str
+    ids: tuple[str, ...]
+    ids_complete: bool
+    # What ``balanceOf(address)`` said, or ``None`` when it said nothing. Not a
+    # zero: ERC-1155 answers nothing to that selector by design.
+    address_quantity: int | None
+
+
+@dataclass
+class _PendingHolder:
+    """A holder whose scan completed, awaiting the batched per-id read."""
+
+    address: str
+    union_from: int
+    assets: tuple[SweptAsset, ...]
+    typed: list[_PendingTyped]
+
+
+def _pending_typed(
+    *,
+    token: str,
+    sighting: TypedSighting | None,
+    carried: CarriedTypedReceipt | None,
+    window_is_full_history: bool,
+    address_quantity: int | None,
+) -> _PendingTyped:
+    """Merge what this window saw with what the record carried, for one token.
+
+    ``ids_complete`` is the whole point. A window that started at block 0 IS the
+    full history, so whatever it saw is the whole inventory — including seeing
+    nothing, which settles the inventory as empty rather than as unknown. A later
+    incremental window inherits completeness only from a record that already had
+    it. Either way a malformed log takes it away: a prefix inventory resolves
+    nothing.
+    """
+    ids = set(carried.ids if carried else ())
+    standard = carried.standard if carried else TYPED_STANDARD_NOT_DETERMINED
+    malformed = False
+    if sighting is not None:
+        ids |= sighting.ids
+        malformed = sighting.malformed
+        if sighting.standard is not None:
+            if standard in (TYPED_STANDARD_NOT_DETERMINED, TYPED_STANDARD_TRANSFER_NO_ID):
+                standard = sighting.standard
+            elif standard != sighting.standard:
+                standard = TYPED_STANDARD_NOT_DETERMINED
+    carried_complete = bool(carried and carried.ids_complete)
+    return _PendingTyped(
+        token=token,
+        standard=standard,
+        ids=tuple(sorted(ids, key=int)),
+        ids_complete=(window_is_full_history or carried_complete) and not malformed,
+        address_quantity=address_quantity,
+    )
+
+
+def _typed_swept_asset(item: _PendingTyped, resolved: tuple[tuple[TypedItem, ...], str] | None) -> SweptAsset:
+    """One typed receipt as the fetch record will store it.
+
+    Order of evidence: an address-level answer wins, because it was read against
+    the holder's whole position rather than an id list. Failing that, an id
+    inventory every one of whose ids answered gives the count. Failing THAT the
+    quantity stays ``None`` — the ids are still stored, so the next cycle retries
+    the read alone instead of the scan.
+    """
+    unread = tuple(TypedItem(token_id=token_id, quantity=None) for token_id in item.ids)
+    if item.address_quantity is not None:
+        return SweptAsset(
+            token_address=item.token,
+            raw_balance=item.address_quantity,
+            decimals=None,
+            kind="typed",
+            standard=item.standard,
+            items=unread,
+            ids_complete=item.ids_complete,
+            quantity_basis=TYPED_BASIS_ADDRESS_BALANCE,
+        )
+    if resolved is None:
+        return SweptAsset(
+            token_address=item.token,
+            raw_balance=None,
+            decimals=None,
+            kind="typed",
+            standard=item.standard,
+            items=unread,
+            ids_complete=item.ids_complete,
+            quantity_basis=None,
+        )
+    items, basis = resolved
+    return SweptAsset(
+        token_address=item.token,
+        raw_balance=sum(entry.quantity or 0 for entry in items),
+        decimals=None,
+        kind="typed",
+        standard=item.standard,
+        items=items,
+        ids_complete=item.ids_complete,
+        quantity_basis=basis,
+    )
+
+
+def _resolve_pending(
+    pending: list[_PendingHolder],
+    *,
+    rpc_url: str,
+    chain_id: int,
+    head: int,
+    cost: SweepCost,
+) -> dict[str, SweepOutcome]:
+    """The per-id read for a whole chain cohort, then the outcomes it completes."""
+    requests = [
+        (holder.address, item.token, item.standard, item.ids)
+        for holder in pending
+        for item in holder.typed
+        # Only where the cheap read said nothing, only where the inventory is
+        # whole, and only for a standard whose selector is known. An empty id list
+        # is not an all-quantifier worth publishing — it is a receipt whose
+        # delivering logs named no id, which stays unresolved.
+        if item.address_quantity is None and item.ids and item.ids_complete and item.standard in _ID_BEARING_STANDARDS
+    ]
+    resolved = read_typed_items(requests, rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost)
+    return {
+        holder.address: SweepOutcome(
+            address=holder.address,
+            status=SWEEP_COMPLETED,
+            swept_from_block=holder.union_from,
+            swept_through_block=head,
+            assets=holder.assets,
+            typed_assets=tuple(
+                _typed_swept_asset(item, resolved.get((holder.address, item.token))) for item in holder.typed
+            ),
+            basis=_basis(holder.union_from, head),
+        )
+        for holder in pending
+    }
+
+
 def sweep_holders(
     addresses: list[str],
     *,
@@ -341,7 +843,7 @@ def sweep_holders(
     chain_id: int,
     from_block_by_address: dict[str, int],
     known_assets_by_address: dict[str, tuple[str, ...]] | None = None,
-    known_typed_by_address: dict[str, tuple[str, ...]] | None = None,
+    known_typed_by_address: dict[str, tuple[CarriedTypedReceipt, ...]] | None = None,
     union_from_by_address: dict[str, int] | None = None,
     cost: SweepCost | None = None,
     fetcher: RpcEventLogFetcher | None = None,
@@ -368,7 +870,10 @@ def sweep_holders(
     published as complete, and dropping it after one cycle publishes the earned
     negative the scan refused. A carried typed asset stays typed — its
     ``balanceOf`` is a count of items when it answers at all, and folding it into
-    the fungible set would launder a count into an 18-decimal quantity.
+    the fungible set would launder a count into an 18-decimal quantity. It also
+    carries the token IDS a previous scan decoded, which is what lets an
+    incremental window read an ERC-1155 holding at all: the ids live only in the
+    delivering logs, and those are long past the cursor.
 
     ``union_from_by_address`` is the first block of the union of the scans behind
     each holder's current set; the outcome republishes it so the basis string
@@ -390,10 +895,17 @@ def sweep_holders(
             )
         return outcomes, cost
 
+    def carried_of(address: str) -> dict[str, CarriedTypedReceipt]:
+        return {r.address: r for r in (known_typed_by_address or {}).get(address, ())}
+
     by_start: dict[int, list[str]] = {}
     for address in addresses:
         lowered = address.lower()
         by_start.setdefault(from_block_by_address.get(lowered, 0), []).append(lowered)
+
+    # Holders whose scan completed, held back until the per-id typed read can run
+    # once for the whole chain rather than once per holder.
+    pending: list[_PendingHolder] = []
 
     for start, cohort in sorted(by_start.items()):
         if start > head:
@@ -404,16 +916,20 @@ def sweep_holders(
             # unread set reads as a sale, and an unread typed receipt reads as a
             # completeness this scan never established.
             for address in cohort:
-                outcomes[address] = _read_carried_set(
+                carried_or_failed = _read_carried_set(
                     address,
                     known_assets=tuple((known_assets_by_address or {}).get(address, ())),
-                    known_typed=tuple((known_typed_by_address or {}).get(address, ())),
+                    carried_typed=carried_of(address),
                     union_from=(union_from_by_address or {}).get(address, start),
                     rpc_url=rpc_url,
                     chain_id=chain_id,
                     head=head,
                     cost=cost,
                 )
+                if isinstance(carried_or_failed, SweepOutcome):
+                    outcomes[address] = carried_or_failed
+                else:
+                    pending.append(carried_or_failed)
             continue
         for index in range(0, len(cohort), SWEEP_ADDRESS_BATCH):
             batch = cohort[index : index + SWEEP_ADDRESS_BATCH]
@@ -437,13 +953,14 @@ def sweep_holders(
                     )
                     continue
                 known = set((known_assets_by_address or {}).get(address, ()))
-                known_typed = set((known_typed_by_address or {}).get(address, ()))
+                carried = carried_of(address)
+                sightings = typed.get(address, {})
                 # A carried typed asset stays typed. It was classified by the log
                 # that delivered it — a 4-topic Transfer or an 1155 topic0 — and
                 # that classification is a fact about the asset, not about which
                 # window happened to see it. Folding it into the fungible set on
                 # a later cycle turns an item COUNT into an 18-decimal quantity.
-                typed_tokens = sorted(typed.get(address, set()) | known_typed)
+                typed_tokens = sorted(set(sightings) | set(carried))
                 erc20_tokens = sorted((erc20.get(address, set()) | known) - set(typed_tokens))
                 balances, balance_transport_failed = read_balances(
                     address,
@@ -479,43 +996,63 @@ def sweep_holders(
                 unreadable = [t for t in erc20_tokens if t not in balances]
                 erc20_tokens = [t for t in erc20_tokens if t in balances]
                 union_from = (union_from_by_address or {}).get(address, start)
-                outcomes[address] = SweepOutcome(
-                    address=address,
-                    status=SWEEP_COMPLETED,
-                    swept_from_block=union_from,
-                    swept_through_block=head,
-                    assets=tuple(
-                        SweptAsset(token_address=t, raw_balance=balances[t][0], decimals=balances[t][1], kind="erc20")
-                        for t in erc20_tokens
-                    ),
-                    typed_assets=tuple(
-                        SweptAsset(
-                            token_address=t,
-                            raw_balance=typed_balances.get(t, (None, None))[0],
-                            decimals=None,
-                            kind="typed",
-                        )
-                        for t in typed_tokens
+                pending.append(
+                    _PendingHolder(
+                        address=address,
+                        union_from=union_from,
+                        assets=tuple(
+                            SweptAsset(
+                                token_address=t,
+                                raw_balance=balances[t][0],
+                                decimals=balances[t][1],
+                                kind="erc20",
+                            )
+                            for t in erc20_tokens
+                        ),
+                        typed=[
+                            _pending_typed(
+                                token=t,
+                                sighting=sightings.get(t),
+                                carried=carried.get(t),
+                                window_is_full_history=start == 0,
+                                address_quantity=typed_balances.get(t, (None, None))[0],
+                            )
+                            for t in typed_tokens
+                        ]
+                        + [_no_id_typed(t) for t in unreadable],
                     )
-                    + tuple(
-                        SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in unreadable
-                    ),
-                    basis=_basis(union_from, head),
                 )
+    outcomes.update(_resolve_pending(pending, rpc_url=rpc_url, chain_id=chain_id, head=head, cost=cost))
     return outcomes, cost
+
+
+def _no_id_typed(token: str) -> _PendingTyped:
+    """A fungible-shaped token whose ``balanceOf(address)`` returned no word.
+
+    Its delivering log carried no id, so its inventory is settled as empty and it
+    will never demand another full-history scan — and it stays unresolved, since
+    an unreadable balance is not a zero.
+    """
+    return _PendingTyped(
+        token=token,
+        standard=TYPED_STANDARD_TRANSFER_NO_ID,
+        ids=(),
+        ids_complete=True,
+        address_quantity=None,
+    )
 
 
 def _read_carried_set(
     address: str,
     *,
     known_assets: tuple[str, ...],
-    known_typed: tuple[str, ...],
+    carried_typed: dict[str, CarriedTypedReceipt],
     union_from: int,
     rpc_url: str,
     chain_id: int,
     head: int,
     cost: SweepCost,
-) -> SweepOutcome:
+) -> _PendingHolder | SweepOutcome:
     """Re-read a holder's already-discovered set when no window has to be scanned.
 
     The typed set is subtracted from the fungible one FIRST, exactly as the
@@ -525,7 +1062,11 @@ def _read_carried_set(
     so partitioning ``known_assets`` on its own would re-emit an ERC-721 as
     ``erc20``, and its reverting ``decimals()`` would then present a count as an
     18-decimal quantity.
+
+    Returns a ``SweepOutcome`` only for the aborted read; otherwise the holder
+    joins the cohort's batched per-id round like any other.
     """
+    known_typed = tuple(sorted(carried_typed))
     fungible = tuple(t for t in known_assets if t not in set(known_typed))
     balances, balance_failed = read_balances(
         address, list(fungible), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
@@ -543,21 +1084,28 @@ def _read_carried_set(
         )
     unreadable = [t for t in fungible if t not in balances]
     readable = [t for t in fungible if t in balances]
-    return SweepOutcome(
+    return _PendingHolder(
         address=address,
-        status=SWEEP_COMPLETED,
-        swept_from_block=union_from,
-        swept_through_block=head,
+        union_from=union_from,
         assets=tuple(
             SweptAsset(token_address=t, raw_balance=balances[t][0], decimals=balances[t][1], kind="erc20")
             for t in readable
         ),
-        typed_assets=tuple(
-            SweptAsset(token_address=t, raw_balance=typed_balances.get(t, (None, None))[0], decimals=None, kind="typed")
+        typed=[
+            # No window was scanned this cycle, so nothing was sighted and
+            # completeness can only be what the record already carried — a
+            # full-history UNION behind the set is not itself evidence that the
+            # scan which built it kept an id inventory.
+            _pending_typed(
+                token=t,
+                sighting=None,
+                carried=carried_typed.get(t),
+                window_is_full_history=False,
+                address_quantity=typed_balances.get(t, (None, None))[0],
+            )
             for t in known_typed
-        )
-        + tuple(SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in unreadable),
-        basis=_basis(union_from, head),
+        ]
+        + [_no_id_typed(t) for t in unreadable],
     )
 
 
@@ -568,7 +1116,35 @@ def _basis(from_block: int, through_block: int) -> str:
         f"full-history log scan of Transfer/TransferSingle/TransferBatch with the holder as recipient "
         f"(topic 2 for ERC-20/721, topic 3 for ERC-1155), blocks {from_block}-{through_block}, "
         f"window {MAX_BLOCK_RANGE} with an explicit {SWEEP_RESULT_CAP}-log cap; "
-        f"balances read by Multicall3 at block {through_block}"
+        f"balances read by Multicall3 at block {through_block}, and typed (ERC-721/1155) receipts whose "
+        f"balanceOf(address) does not answer read per token id (balanceOfBatch / ownerOf) over the ids "
+        f"their delivering logs carried"
+    )
+
+
+def carried_typed_receipt(entry: Mapping[str, Any]) -> CarriedTypedReceipt:
+    """One stored ``typed_assets`` entry, read back for the next scan.
+
+    An id inventory is carried only when the record says it is COMPLETE and every
+    id in it parses. A partial or unparseable list is dropped rather than carried
+    as if it were most of the truth: the cursor rule sends such a record back for
+    a full re-scan, which re-derives the ids from the logs, and carrying a prefix
+    in the meantime could only make a later union look whole when it is not.
+    """
+    ids: tuple[str, ...] = ()
+    complete = False
+    raw_ids = entry.get("ids")
+    if entry.get("ids_complete") is True and isinstance(raw_ids, list):
+        parsed = [item.get("id") for item in raw_ids if isinstance(item, dict)]
+        if len(parsed) == len(raw_ids) and all(isinstance(value, str) and value.isdigit() for value in parsed):
+            ids = tuple(sorted({str(value) for value in parsed}, key=int))
+            complete = True
+    standard = entry.get("standard")
+    return CarriedTypedReceipt(
+        address=str(entry.get("address") or "").lower(),
+        standard=standard if standard in TYPED_STANDARDS else TYPED_STANDARD_NOT_DETERMINED,
+        ids=ids,
+        ids_complete=complete,
     )
 
 
@@ -581,11 +1157,25 @@ __all__ = [
     "SWEEP_RESULT_CAP",
     "SweepBudgetExceeded",
     "SWEEP_TOPIC0S",
+    "TYPED_BASIS_ADDRESS_BALANCE",
+    "TYPED_BASIS_PER_ID_BALANCE_OF_BATCH",
+    "TYPED_BASIS_PER_ID_BALANCE_OF_ID",
+    "TYPED_BASIS_PER_ID_OWNER_OF",
+    "TYPED_STANDARDS",
+    "TYPED_STANDARD_ERC721",
+    "TYPED_STANDARD_ERC1155",
+    "TYPED_STANDARD_NOT_DETERMINED",
+    "TYPED_STANDARD_TRANSFER_NO_ID",
+    "CarriedTypedReceipt",
     "SweepCost",
     "SweepOutcome",
     "SweptAsset",
+    "TypedItem",
+    "TypedSighting",
+    "carried_typed_receipt",
     "discover_recipient_assets",
     "read_balances",
+    "read_typed_items",
     "sweep_head_block",
     "sweep_holders",
 ]

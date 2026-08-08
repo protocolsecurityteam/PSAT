@@ -21,8 +21,18 @@ from services.monitoring.asset_sweep import (
     TRANSFER_BATCH_TOPIC0,
     TRANSFER_SINGLE_TOPIC0,
     TRANSFER_TOPIC0,
+    TYPED_BASIS_ADDRESS_BALANCE,
+    TYPED_BASIS_PER_ID_BALANCE_OF_BATCH,
+    TYPED_BASIS_PER_ID_BALANCE_OF_ID,
+    TYPED_BASIS_PER_ID_OWNER_OF,
+    TYPED_STANDARD_ERC721,
+    TYPED_STANDARD_ERC1155,
+    TYPED_STANDARD_NOT_DETERMINED,
+    TYPED_STANDARD_TRANSFER_NO_ID,
+    CarriedTypedReceipt,
     SweepCost,
     SweptAsset,
+    TypedItem,
     sweep_holders,
 )
 from services.monitoring.balance_observation import (
@@ -45,6 +55,7 @@ from services.resolution.repos.event_logs_rpc import (
     RpcEventLogFetcher,
     normalize_topic_filter,
 )
+from services.scoring.planes import typed_receipt_is_resolved
 from tests.conftest import requires_postgres
 from tests.support.balance_stubs import failed_page, page
 from utils.balance_status import (
@@ -58,6 +69,7 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
     SWEEP_STATUS_FAILED,
 )
+from utils.rpc import selector as rpc_selector
 
 HOLDER = "0x00000000000000000000000000000000000ho1de"[:42].ljust(42, "1")
 TOKEN = "0x000000000000000000000000000000000000c0de"
@@ -68,11 +80,11 @@ def _pad(address: str) -> str:
     return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
 
 
-def _log(*, emitter: str, topics: list[str], block: int = 5) -> dict:
+def _log(*, emitter: str, topics: list[str], block: int = 5, data: str = "0x" + "0" * 64) -> dict:
     return {
         "address": emitter,
         "topics": topics,
-        "data": "0x" + "0" * 64,
+        "data": data,
         "transactionHash": "0x" + "11" * 32,
         "blockHash": "0x" + "22" * 32,
         "logIndex": "0x0",
@@ -83,6 +95,38 @@ def _log(*, emitter: str, topics: list[str], block: int = 5) -> dict:
 
 def _word(value: int) -> str:
     return "0x" + f"{value:064x}"
+
+
+def _typed(
+    token: str,
+    *,
+    raw_balance: int | None = None,
+    standard: str = TYPED_STANDARD_ERC721,
+    ids: tuple[str, ...] = (),
+    ids_complete: bool = True,
+    quantity_basis: str | None = None,
+) -> SweptAsset:
+    """A typed receipt as a real scan produces it: with a settled id inventory."""
+    return SweptAsset(
+        token_address=token,
+        raw_balance=raw_balance,
+        decimals=None,
+        kind="typed",
+        standard=standard,
+        items=tuple(TypedItem(token_id=token_id, quantity=None) for token_id in ids),
+        ids_complete=ids_complete,
+        quantity_basis=quantity_basis,
+    )
+
+
+def _carried(
+    token: str,
+    *,
+    standard: str = TYPED_STANDARD_ERC721,
+    ids: tuple[str, ...] = (),
+    ids_complete: bool = True,
+) -> CarriedTypedReceipt:
+    return CarriedTypedReceipt(address=token, standard=standard, ids=ids, ids_complete=ids_complete)
 
 
 def _page_row(token: str) -> dict:
@@ -395,7 +439,7 @@ class TestSweepDiscovery:
             # the NFT appears in BOTH carried lists. Passing disjoint lists here
             # would test a shape the producer never hands over.
             known_assets_by_address={HOLDER: (TOKEN, NFT)},
-            known_typed_by_address={HOLDER: (NFT,)},
+            known_typed_by_address={HOLDER: (_carried(NFT),)},
             union_from_by_address={HOLDER: 0},
             cost=SweepCost(),
             head_block=99,
@@ -440,7 +484,7 @@ class TestSweepDiscovery:
             rpc_url="http://rpc.invalid",
             chain_id=1,
             from_block_by_address={HOLDER: 10},
-            known_typed_by_address={HOLDER: (NFT,)},
+            known_typed_by_address={HOLDER: (_carried(NFT),)},
             union_from_by_address={HOLDER: 0},
             cost=SweepCost(),
             head_block=20,
@@ -448,6 +492,681 @@ class TestSweepDiscovery:
         outcome = outcomes[HOLDER]
         assert [a.token_address for a in outcome.assets] == []
         assert [(a.token_address, a.kind) for a in outcome.typed_assets] == [(NFT, "typed")]
+
+
+_BALANCE_OF = rpc_selector("balanceOf(address)")
+_BALANCE_OF_ID = rpc_selector("balanceOf(address,uint256)")
+_BALANCE_OF_BATCH = rpc_selector("balanceOfBatch(address[],uint256[])")
+_OWNER_OF = rpc_selector("ownerOf(uint256)")
+
+
+def _single_data(token_id: int, value: int) -> str:
+    return "0x" + f"{token_id:064x}" + f"{value:064x}"
+
+
+def _batch_data(ids: list[int], values: list[int]) -> str:
+    """A canonical ``TransferBatch`` payload: two dynamic ``uint256[]`` tails."""
+    ids_off = 64
+    values_off = 64 + 32 + 32 * len(ids)
+    words = [f"{ids_off:064x}", f"{values_off:064x}", f"{len(ids):064x}"]
+    words += [f"{i:064x}" for i in ids]
+    words += [f"{len(values):064x}"] + [f"{v:064x}" for v in values]
+    return "0x" + "".join(words)
+
+
+def _uint_array_return(values: list[int]) -> str:
+    """What ``balanceOfBatch`` returns: one ``uint256[]``, head then tail."""
+    return "0x" + f"{32:064x}" + f"{len(values):064x}" + "".join(f"{v:064x}" for v in values)
+
+
+class _StubCalls:
+    """One Multicall3 wire, answering per selector, with the calldata recorded."""
+
+    def __init__(self, *, address_balance=None, batch=None, balance_of_id=None, owner=None):
+        self.address_balance = address_balance
+        self.batch = batch
+        self.balance_of_id = balance_of_id
+        self.owner = owner
+        self.calls: list[tuple[str, str]] = []
+        self.rounds = 0
+
+    def __call__(self, url, calls, block, **kw):
+        self.rounds += 1
+        self.calls.extend(calls)
+        out = []
+        for target, data in calls:
+            if data.startswith(_BALANCE_OF_BATCH):
+                out.append(self.batch(target, data) if self.batch else (False, "0x"))
+            elif data.startswith(_BALANCE_OF_ID):
+                out.append(self.balance_of_id(target, data) if self.balance_of_id else (False, "0x"))
+            elif data.startswith(_OWNER_OF):
+                out.append(self.owner(target, data) if self.owner else (False, "0x"))
+            elif data.startswith(_BALANCE_OF):
+                out.append(self.address_balance(target, data) if self.address_balance else (False, "0x"))
+            else:  # decimals()
+                out.append((True, _word(0)))
+        return out
+
+
+class TestTypedReceiptIdRecovery:
+    """The ids an ERC-1155 receipt needs, and the one scan that recovers them.
+
+    ``balanceOf(address)`` does not exist on ERC-1155, so an address-level read of
+    one of these receipts answers nothing forever — and "nothing" is not zero, so
+    the sheet stays refused. The only call that answers is per token id, and the
+    ids live in the delivering logs and nowhere else. This class is about
+    decoding them, reading them, and above all STORING them: an inventory that is
+    not persisted is a full-history re-scan every hour.
+    """
+
+    def _sweep(self, monkeypatch, logs_by_pass, calls, **kwargs):
+        rpc = _StubRpc(logs_by_pass)
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        monkeypatch.setattr("services.monitoring.asset_sweep.multicall3_aggregate3", calls)
+        return sweep_holders(
+            [HOLDER],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={HOLDER: 0},
+            cost=SweepCost(),
+            head_block=9,
+            **kwargs,
+        )
+
+    def test_a_transfer_single_names_the_id_it_delivered(self, monkeypatch):
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 3),
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.standard == TYPED_STANDARD_ERC1155
+        assert [item.token_id for item in receipt.items] == ["7"]
+        assert receipt.ids_complete is True
+
+    def test_a_transfer_batch_names_every_id_in_its_array(self, monkeypatch):
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0, 0])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_BATCH_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_batch_data([5, 9], [1, 1]),
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert [item.token_id for item in receipt.items] == ["5", "9"]
+        assert receipt.raw_balance == 0
+        assert receipt.quantity_basis == TYPED_BASIS_PER_ID_BALANCE_OF_BATCH
+
+    def test_a_log_whose_ids_cannot_be_decoded_withholds_the_whole_inventory(self, monkeypatch):
+        # A short data payload is not a batch of zero ids. Reading it as one would
+        # let "every id reads zero" be published over ids nobody ever saw, so the
+        # token's inventory is withheld and no per-id read is issued for it.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data="0x",
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.ids_complete is False
+        assert receipt.raw_balance is None
+        assert not [c for c in calls.calls if c[1].startswith(_BALANCE_OF_BATCH)]
+
+    def test_every_id_reading_zero_is_what_resolves_the_receipt(self, monkeypatch):
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0, 0])))
+        outcomes, cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 3),
+                    ),
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(8, 1),
+                    ),
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance == 0
+        assert [(i.token_id, i.quantity) for i in receipt.items] == [("7", 0), ("8", 0)]
+        # Both ids in ONE balanceOfBatch call, and the whole cohort's per-id round
+        # is ONE aggregate3 on top of the address-level round — the recovery costs
+        # a request per chain, not a request per id.
+        batch_calls = [c for c in calls.calls if c[1].startswith(_BALANCE_OF_BATCH)]
+        assert len(batch_calls) == 1
+        assert cost.multicall == 2
+
+    def test_one_non_zero_id_keeps_the_receipt_refused(self, monkeypatch):
+        # An item still held. The count is published — it is a real reading — but
+        # it is not zero, so nothing downstream may read the sheet as empty.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0, 2])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 3),
+                    ),
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(8, 1),
+                    ),
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance == 2
+        assert [(i.token_id, i.quantity) for i in receipt.items] == [("7", 0), ("8", 2)]
+
+    def test_one_unanswered_id_refuses_the_receipt_rather_than_shrinking_it(self, monkeypatch):
+        # The all-quantifier is the claim. A batch that came back short is not a
+        # smaller holding, and taking the ids that did answer would publish a zero
+        # over an id nobody read.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_BATCH_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_batch_data([5, 9], [1, 1]),
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance is None
+        assert receipt.quantity_basis is None
+        # The IDS are still stored, so the next cycle retries the read alone.
+        assert [i.token_id for i in receipt.items] == ["5", "9"]
+        assert receipt.ids_complete is True
+
+    def test_a_token_that_reverts_the_batch_read_is_asked_one_id_at_a_time(self, monkeypatch):
+        # ERC-1155 mandates both selectors; a token that emits conforming logs is
+        # not thereby a token that implements them. Four contracts on the real
+        # corpus revert ``balanceOfBatch`` and answer ``balanceOf(address,id)``.
+        # Stopping at the first revert would file a readable holding as
+        # not_determined.
+        calls = _StubCalls(batch=lambda t, d: (False, "0x"), balance_of_id=lambda t, d: (True, _word(4)))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 1),
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance == 4
+        assert receipt.quantity_basis == TYPED_BASIS_PER_ID_BALANCE_OF_ID
+        assert [(i.token_id, i.quantity) for i in receipt.items] == [("7", 4)]
+
+    def test_the_fallback_round_only_asks_about_what_the_batch_left_unread(self, monkeypatch):
+        calls = _StubCalls(
+            batch=lambda t, d: (True, _uint_array_return([0])) if t == NFT else (False, "0x"),
+            balance_of_id=lambda t, d: (True, _word(0)),
+        )
+        other = "0x000000000000000000000000000000000000f732"
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 1),
+                    ),
+                    _log(
+                        emitter=other,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(other), _pad(other), _pad(HOLDER)],
+                        data=_single_data(9, 1),
+                    ),
+                ],
+            ],
+            calls,
+        )
+        by_token = {a.token_address: a for a in outcomes[HOLDER].typed_assets}
+        assert by_token[NFT].quantity_basis == TYPED_BASIS_PER_ID_BALANCE_OF_BATCH
+        assert by_token[other].quantity_basis == TYPED_BASIS_PER_ID_BALANCE_OF_ID
+        assert [t for t, d in calls.calls if d.startswith(_BALANCE_OF_ID)] == [other]
+
+    def test_a_reverting_per_id_call_never_becomes_a_zero(self, monkeypatch):
+        calls = _StubCalls(batch=lambda t, d: (False, "0x"))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 3),
+                    )
+                ],
+            ],
+            calls,
+        )
+        assert outcomes[HOLDER].typed_assets[0].raw_balance is None
+
+    def test_a_721_whose_balance_reverts_is_asked_who_owns_each_id(self, monkeypatch):
+        calls = _StubCalls(owner=lambda t, d: (True, _pad(TOKEN)))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [[_log(emitter=NFT, topics=[TRANSFER_TOPIC0, _pad(NFT), _pad(HOLDER), _word(42)])], []],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.standard == TYPED_STANDARD_ERC721
+        # Owned by someone else now: the item arrived and provably left.
+        assert receipt.raw_balance == 0
+        assert receipt.quantity_basis == TYPED_BASIS_PER_ID_OWNER_OF
+
+    def test_a_721_still_owned_by_the_holder_counts_as_held(self, monkeypatch):
+        calls = _StubCalls(owner=lambda t, d: (True, _pad(HOLDER)))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [[_log(emitter=NFT, topics=[TRANSFER_TOPIC0, _pad(NFT), _pad(HOLDER), _word(42)])], []],
+            calls,
+        )
+        assert outcomes[HOLDER].typed_assets[0].raw_balance == 1
+
+    def test_an_answering_address_balance_needs_no_per_id_round(self, monkeypatch):
+        # ERC-721 answers ``balanceOf(address)``. Asking per id anyway would spend
+        # a call per token id for a number already in hand.
+        calls = _StubCalls(address_balance=lambda t, d: (True, _word(0)), owner=lambda t, d: (True, _pad(HOLDER)))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [[_log(emitter=NFT, topics=[TRANSFER_TOPIC0, _pad(NFT), _pad(HOLDER), _word(42)])], []],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance == 0
+        assert receipt.quantity_basis == TYPED_BASIS_ADDRESS_BALANCE
+        assert [i.token_id for i in receipt.items] == ["42"]
+        assert not [c for c in calls.calls if c[1].startswith(_OWNER_OF)]
+
+    def test_the_balance_of_batch_calldata_names_the_holder_once_per_id(self, monkeypatch):
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0, 0])))
+        self._sweep(
+            monkeypatch,
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_BATCH_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_batch_data([5, 9], [1, 1]),
+                    )
+                ],
+            ],
+            calls,
+        )
+        data = next(c[1] for c in calls.calls if c[1].startswith(_BALANCE_OF_BATCH))
+        words = [data[10 + i * 64 : 10 + (i + 1) * 64] for i in range((len(data) - 10) // 64)]
+        assert int(words[0], 16) == 64  # accounts[] tail
+        assert int(words[1], 16) == 64 + 32 + 32 * 2  # ids[] tail, past accounts'
+        assert int(words[2], 16) == 2
+        assert words[3] == words[4] == _pad(HOLDER)[2:]
+        assert int(words[5], 16) == 2
+        assert [int(words[6], 16), int(words[7], 16)] == [5, 9]
+
+    def test_a_carried_inventory_reads_the_holding_without_re_scanning_history(self, monkeypatch):
+        # The whole point. An incremental window will never name these ids again —
+        # they are a million blocks behind the cursor — so the read has to come off
+        # the stored inventory or not at all.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0, 0])))
+        rpc = _StubRpc([[], []])
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        monkeypatch.setattr("services.monitoring.asset_sweep.multicall3_aggregate3", calls)
+        outcomes, _cost = sweep_holders(
+            [HOLDER],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={HOLDER: 900},
+            known_typed_by_address={
+                HOLDER: (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=("5", "9"), ids_complete=True),)
+            },
+            union_from_by_address={HOLDER: 0},
+            cost=SweepCost(),
+            head_block=963,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.raw_balance == 0
+        assert [i.token_id for i in receipt.items] == ["5", "9"]
+
+    def test_an_incremental_window_never_promotes_a_partial_inventory_to_a_whole_one(self, monkeypatch):
+        # The window saw one new id; the record carried none it could vouch for.
+        # The union is still a prefix, so nothing is read per id.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0])))
+        rpc = _StubRpc(
+            [
+                [],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 1),
+                    )
+                ],
+            ]
+        )
+        monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", rpc)
+        monkeypatch.setattr("services.monitoring.asset_sweep.multicall3_aggregate3", calls)
+        outcomes, _cost = sweep_holders(
+            [HOLDER],
+            rpc_url="http://rpc.invalid",
+            chain_id=1,
+            from_block_by_address={HOLDER: 900},
+            known_typed_by_address={HOLDER: (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids_complete=False),)},
+            union_from_by_address={HOLDER: 0},
+            cost=SweepCost(),
+            head_block=963,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.ids_complete is False
+        assert receipt.raw_balance is None
+        assert not [c for c in calls.calls if c[1].startswith(_BALANCE_OF_BATCH)]
+
+    def test_a_token_the_full_history_never_typed_has_a_settled_empty_inventory(self, monkeypatch):
+        # An ERC-20 whose ``balanceOf`` returns no word is filed with the typed
+        # receipts for the completeness it withholds, but it carries no id and
+        # never will. Its inventory is SETTLED empty — otherwise it would demand a
+        # fresh full-history scan every cycle, forever.
+        calls = _StubCalls()
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [[_log(emitter=TOKEN, topics=[TRANSFER_TOPIC0, _pad(TOKEN), _pad(HOLDER)])], []],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.standard == TYPED_STANDARD_TRANSFER_NO_ID
+        assert receipt.ids_complete is True
+        assert receipt.items == ()
+        assert receipt.raw_balance is None
+
+    def test_two_standards_on_one_token_leave_the_standard_undetermined(self, monkeypatch):
+        # No selector can be chosen from a contradiction, so none is called.
+        calls = _StubCalls(batch=lambda t, d: (True, _uint_array_return([0])))
+        outcomes, _cost = self._sweep(
+            monkeypatch,
+            [
+                [_log(emitter=NFT, topics=[TRANSFER_TOPIC0, _pad(NFT), _pad(HOLDER), _word(42)])],
+                [
+                    _log(
+                        emitter=NFT,
+                        topics=[TRANSFER_SINGLE_TOPIC0, _pad(NFT), _pad(NFT), _pad(HOLDER)],
+                        data=_single_data(7, 1),
+                    )
+                ],
+            ],
+            calls,
+        )
+        receipt = outcomes[HOLDER].typed_assets[0]
+        assert receipt.standard == TYPED_STANDARD_NOT_DETERMINED
+        assert receipt.raw_balance is None
+        assert not [c for c in calls.calls if c[1].startswith(_BALANCE_OF_BATCH)]
+
+
+@requires_postgres
+class TestTypedIdRecordAndCursor:
+    """What the fetch record stores, and the one re-scan it buys."""
+
+    def _fixture(self, session, address: str):
+        proto = Protocol(name=f"p-{address[-6:]}")
+        session.add(proto)
+        session.flush()
+        contract = Contract(protocol_id=proto.id, address=address, chain="ethereum", contract_name="C")
+        session.add(contract)
+        session.flush()
+        return proto, contract
+
+    def _native(self):
+        return NativeReading(wei=0, block_number=1234, failed=False, price_usd=None, symbol="ETH", name="Ether")
+
+    def _record(self, session, contract, typed_assets, **kwargs):
+        from services.monitoring.asset_sweep import SweepOutcome
+
+        return record_observation(
+            session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_COMPLETED,
+                swept_from_block=0,
+                swept_through_block=1234,
+                typed_assets=typed_assets,
+                basis="scan",
+                **kwargs,
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+
+    def test_the_ids_and_their_per_id_readings_are_persisted(self, db_session):
+        _proto, contract = self._fixture(db_session, address="0x" + "e1" * 20)
+        recorded = self._record(
+            db_session,
+            contract,
+            (
+                SweptAsset(
+                    token_address=NFT,
+                    raw_balance=0,
+                    decimals=None,
+                    kind="typed",
+                    standard=TYPED_STANDARD_ERC1155,
+                    items=(TypedItem(token_id="7", quantity=0), TypedItem(token_id="8", quantity=0)),
+                    ids_complete=True,
+                    quantity_basis=TYPED_BASIS_PER_ID_BALANCE_OF_BATCH,
+                ),
+            ),
+        )
+        db_session.flush()
+        entry = (recorded.fetch.typed_assets or [])[0]
+        assert entry["standard"] == TYPED_STANDARD_ERC1155
+        assert entry["ids_complete"] is True
+        assert entry["ids"] == [{"id": "7", "quantity": "0"}, {"id": "8", "quantity": "0"}]
+        assert entry["quantity_basis"] == TYPED_BASIS_PER_ID_BALANCE_OF_BATCH
+        # A readable zero over a whole inventory IS the resolution the plane reads.
+        assert entry["quantity_readable"] is True
+        assert entry["quantity"] == "0"
+        assert typed_receipt_is_resolved(entry) is True
+        # ...and the earned negative now publishes: the set is chain-proven whole.
+        assert recorded.asset_set_source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
+        assert recorded.asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
+
+    def test_a_non_zero_id_reading_keeps_the_receipt_unresolved_on_the_record(self, db_session):
+        _proto, contract = self._fixture(db_session, address="0x" + "e2" * 20)
+        recorded = self._record(
+            db_session,
+            contract,
+            (
+                SweptAsset(
+                    token_address=NFT,
+                    raw_balance=2,
+                    decimals=None,
+                    kind="typed",
+                    standard=TYPED_STANDARD_ERC1155,
+                    items=(TypedItem(token_id="7", quantity=0), TypedItem(token_id="8", quantity=2)),
+                    ids_complete=True,
+                    quantity_basis=TYPED_BASIS_PER_ID_BALANCE_OF_BATCH,
+                ),
+            ),
+        )
+        db_session.flush()
+        entry = (recorded.fetch.typed_assets or [])[0]
+        assert entry["quantity"] == "2"
+        assert typed_receipt_is_resolved(entry) is False
+        # The count is a COUNT: stored at 0 decimals, with no USD column.
+        row = next(r for r in recorded.rows if r.token_address == NFT)
+        assert (row.decimals, row.raw_balance, row.usd_value) == (0, "2", None)
+
+    def test_a_record_with_a_settled_inventory_hands_its_cursor_forward(self, db_session):
+        _proto, contract = self._fixture(db_session, address="0x" + "e3" * 20)
+        self._record(
+            db_session,
+            contract,
+            (_typed(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",), ids_complete=True),),
+        )
+        db_session.flush()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+        assert scanned_from_block(db_session, contract_id=contract.id) == 0
+        carried = known_typed_assets(db_session, contract_id=contract.id)
+        assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=("7",), ids_complete=True),)
+
+    def test_a_record_that_never_asked_for_ids_pays_for_one_full_re_scan(self, db_session):
+        # Every record written before the ids were decoded looks like this. The
+        # cursor promises the blocks were read AND what they held is on record —
+        # and for an ERC-1155 "what it held" is a set of ids. So the scan is
+        # redone ONCE, and the record it writes carries the cursor forever after.
+        _proto, contract = self._fixture(db_session, address="0x" + "e4" * 20)
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=1234,
+                swept_from_block=0,
+                typed_assets=[{"address": NFT, "kind": "typed", "quantity": None, "quantity_readable": False}],
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.flush()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert scanned_from_block(db_session, contract_id=contract.id) is None
+        # The receipt itself still carries forward — the refusal must not lapse
+        # while the re-scan is pending.
+        assert known_typed_assets(db_session, contract_id=contract.id) == (
+            _carried(NFT, standard=TYPED_STANDARD_NOT_DETERMINED, ids=(), ids_complete=False),
+        )
+
+    def test_a_record_with_no_typed_receipts_keeps_its_cursor(self, db_session):
+        # The re-scan is for records that owe an inventory. A scan that saw no
+        # typed receipt owes none, and must not be dragged back to genesis.
+        _proto, contract = self._fixture(db_session, address="0x" + "e5" * 20)
+        self._record(db_session, contract, ())
+        db_session.flush()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+
+    @pytest.mark.parametrize(
+        "ids",
+        [
+            "not-a-list",
+            [{"id": "abc"}],
+            [{"id": 7}],
+            ["7"],
+        ],
+    )
+    def test_an_unreadable_id_inventory_is_distrusted_not_read_as_empty(self, db_session, ids):
+        # Same rule as the malformed record above, one level down. A blob that
+        # claims an inventory and cannot produce one is a scan whose evidence is
+        # gone, so nothing is inherited from it — neither the receipts nor the
+        # cursor — and the scan is redone.
+        _proto, contract = self._fixture(db_session, address="0x" + "e6" * 20)
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=1234,
+                swept_from_block=0,
+                typed_assets=[{"address": NFT, "kind": "typed", "ids_complete": True, "ids": ids}],
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.flush()
+        assert known_typed_assets(db_session, contract_id=contract.id) == ()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert scanned_from_block(db_session, contract_id=contract.id) is None
+
+    def test_an_inventory_the_record_calls_partial_is_not_carried_as_whole(self, db_session):
+        _proto, contract = self._fixture(db_session, address="0x" + "e7" * 20)
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=1234,
+                swept_from_block=0,
+                typed_assets=[
+                    {
+                        "address": NFT,
+                        "kind": "typed",
+                        "standard": TYPED_STANDARD_ERC1155,
+                        "ids_complete": False,
+                        "ids": [{"id": "7", "quantity": None}],
+                    }
+                ],
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.flush()
+        carried = known_typed_assets(db_session, contract_id=contract.id)
+        assert carried == (_carried(NFT, standard=TYPED_STANDARD_ERC1155, ids=(), ids_complete=False),)
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
 
 
 @requires_postgres
@@ -584,7 +1303,7 @@ class TestEscalationAndRecording:
                 swept_from_block=0,
                 swept_through_block=1234,
                 assets=(SweptAsset(token_address=TOKEN, raw_balance=5, decimals=6, kind="erc20"),),
-                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                typed_assets=(_typed(NFT),),
                 basis="scan",
             ),
             escalation=ESCALATE_RETURNED_EMPTY,
@@ -615,7 +1334,7 @@ class TestEscalationAndRecording:
         # The earlier fetch is still the record: its rows still publish, its typed
         # evidence still refuses completeness, and its cursor is still the cursor.
         assert known_swept_assets(db_session, contract_id=contract.id) == (TOKEN,)
-        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
         assert scanned_from_block(db_session, contract_id=contract.id) == 0
         assert sweep_from_block(db_session, contract_id=contract.id) == 1235
 
@@ -643,7 +1362,7 @@ class TestEscalationAndRecording:
                 status=SWEEP_COMPLETED,
                 swept_from_block=0,
                 swept_through_block=1234,
-                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                typed_assets=(_typed(NFT),),
                 basis="scan",
             ),
             escalation=ESCALATE_RETURNED_EMPTY,
@@ -738,7 +1457,7 @@ class TestEscalationAndRecording:
             status=SWEEP_COMPLETED,
             swept_from_block=0,
             swept_through_block=1234,
-            typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+            typed_assets=(_typed(NFT),),
             basis="full-history log scan",
         )
         recorded = record_observation(
@@ -767,7 +1486,7 @@ class TestEscalationAndRecording:
         # this scan refused.
         assert [e["address"] for e in (recorded.fetch.typed_assets or [])] == [NFT]
         assert [e["quantity_readable"] for e in (recorded.fetch.typed_assets or [])] == [False]
-        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
 
     def test_the_withheld_completeness_survives_the_next_cycle(self, db_session):
         """The whole point of persisting the evidence, end to end."""
@@ -786,7 +1505,7 @@ class TestEscalationAndRecording:
                 status=SWEEP_COMPLETED,
                 swept_from_block=0,
                 swept_through_block=1234,
-                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                typed_assets=(_typed(NFT),),
                 basis="scan",
             ),
             escalation=ESCALATE_RETURNED_EMPTY,
@@ -797,7 +1516,7 @@ class TestEscalationAndRecording:
         # Cycle two: an incremental window over 63 blocks that names nothing. The
         # carried receipt is what the producer hands back to the scan...
         carried = known_typed_assets(db_session, contract_id=contract.id)
-        assert carried == (NFT,)
+        assert carried == (_carried(NFT),)
         second = record_observation(
             db_session,
             contract=contract,
@@ -810,9 +1529,7 @@ class TestEscalationAndRecording:
                 status=SWEEP_COMPLETED,
                 swept_from_block=scanned_from_block(db_session, contract_id=contract.id) or 0,
                 swept_through_block=1297,
-                typed_assets=tuple(
-                    SweptAsset(token_address=t, raw_balance=None, decimals=None, kind="typed") for t in carried
-                ),
+                typed_assets=tuple(_typed(r.address, ids=r.ids, ids_complete=r.ids_complete) for r in carried),
                 basis="full-history log scan ... blocks 0-1297",
             ),
             escalation=ESCALATE_RETURNED_EMPTY,
@@ -823,7 +1540,7 @@ class TestEscalationAndRecording:
         # resting on a scan that had refused to claim one.
         assert second.asset_set_source == ASSET_SET_SOURCE_ETHERSCAN_PAGES
         assert second.asset_set_status == ASSET_SET_STATUS_RETURNED_EMPTY
-        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+        assert known_typed_assets(db_session, contract_id=contract.id) == (_carried(NFT),)
         assert scanned_from_block(db_session, contract_id=contract.id) == 0
 
     def test_a_swept_asset_is_written_unpriced_and_never_as_zero_dollars(self, db_session):

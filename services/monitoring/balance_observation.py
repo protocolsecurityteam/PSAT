@@ -38,7 +38,13 @@ from db.models import Contract, ContractBalance, ContractBalanceFetch
 # one indirection point means a stub (the offline suite's, or a test's) holds no
 # matter which producer imported this module's helpers.
 from services.monitoring import asset_sweep
-from services.monitoring.asset_sweep import SWEEP_COMPLETED, SweepCost, SweepOutcome
+from services.monitoring.asset_sweep import (
+    SWEEP_COMPLETED,
+    CarriedTypedReceipt,
+    SweepCost,
+    SweepOutcome,
+    carried_typed_receipt,
+)
 from services.monitoring.balance_reads import native_status_for, prune_balance_fetches
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
@@ -141,8 +147,10 @@ class SweepRequest:
     # wholesale, so the omission would read as a sale.
     known_assets: tuple[str, ...] = ()
     # The typed receipts already on record. Carried for the refusal they carry,
-    # not for their quantity.
-    known_typed: tuple[str, ...] = ()
+    # not for their quantity — and with the token ids a previous scan decoded,
+    # which is the only way an incremental window can read an ERC-1155 holding at
+    # all: the ids exist only in the delivering logs, long past the cursor.
+    known_typed: tuple[CarriedTypedReceipt, ...] = ()
     # First block of the union of the scans behind the current set; None when
     # nothing has been scanned yet.
     union_from_block: int | None = None
@@ -267,9 +275,21 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     The cost is accepted and stated: a cycle that does not escalate makes the
     next escalation a full re-scan. It converges on that scan, and a re-scan is
     the cheap side of the trade against inheriting a conclusion.
+
+    THE SAME RULE COVERS THE TYPED ID INVENTORY. A cursor promises the blocks
+    were read AND what they held is on record; for an ERC-1155 receipt "what it
+    held" is a set of token ids, because no address-level call answers for one.
+    A record that names typed receipts but no ids is a scan whose evidence cannot
+    answer the question the sheet asks, so its cursor is refused and the scan is
+    redone — once. After that the ids are stored and the cursor holds forever.
     """
     current = _current_asset_fetch(session, contract_id=contract_id)
-    if current is None or current.swept_through_block is None or not _typed_record_is_readable(current):
+    if (
+        current is None
+        or current.swept_through_block is None
+        or not _typed_record_is_readable(current)
+        or not _typed_record_is_id_complete(current)
+    ):
         return 0
     return int(current.swept_through_block) + 1
 
@@ -299,7 +319,7 @@ def known_swept_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
     return tuple(sorted({str(a).lower() for a in rows if a}))
 
 
-def known_typed_assets(session: Session, *, contract_id: int) -> tuple[str, ...]:
+def known_typed_assets(session: Session, *, contract_id: int) -> tuple[CarriedTypedReceipt, ...]:
     """The ERC-721/1155 receipts the current fetch record already knows about.
 
     This is the durable half of the completeness refusal. A typed receipt whose
@@ -307,15 +327,19 @@ def known_typed_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
     complete, and an incremental window will not name it again — so it is read
     back from the fetch record and re-carried every cycle. Without it the refusal
     lasted exactly one cycle and the next one published the empty sheet.
+
+    Each receipt carries its standard and its stored token ids, so the next cycle
+    can read an ERC-1155 holding without re-scanning the history that named them.
     """
     fetch = _current_asset_fetch(session, contract_id=contract_id)
     if fetch is None or not _typed_record_is_readable(fetch):
         return ()
-    return tuple(
-        sorted(
-            {str(entry["address"]).lower() for entry in (fetch.typed_assets or []) if entry.get("address")}  # type: ignore[union-attr]
-        )
-    )
+    receipts = {}
+    for entry in fetch.typed_assets or []:
+        receipt = carried_typed_receipt(entry)
+        if receipt.address:
+            receipts[receipt.address] = receipt
+    return tuple(receipts[address] for address in sorted(receipts))
 
 
 def _typed_record_is_readable(fetch: ContractBalanceFetch) -> bool:
@@ -331,16 +355,57 @@ def _typed_record_is_readable(fetch: ContractBalanceFetch) -> bool:
     entries = fetch.typed_assets
     if entries is None or not isinstance(entries, list):
         return False
-    return all(isinstance(entry, dict) and entry.get("address") for entry in entries)
+    return all(isinstance(entry, dict) and entry.get("address") and _typed_ids_are_readable(entry) for entry in entries)
+
+
+def _typed_ids_are_readable(entry: dict) -> bool:
+    """Whether one entry's id inventory can be read as one.
+
+    An entry from before ids were kept carries neither key, and that absence is a
+    fact this reader can act on: it is distinguished from a blob that claims an
+    inventory and cannot produce one. The malformed case is distrusted rather
+    than degraded to "no ids", for the same reason the record above is: a receipt
+    whose ids are unreadable is a receipt whose per-id holding can never be read,
+    and reading the blob as absent would let the next cycle inherit a cursor over
+    blocks whose evidence is gone.
+    """
+    if "ids" not in entry and "ids_complete" not in entry:
+        return True
+    if not isinstance(entry.get("ids_complete"), bool) or not isinstance(entry.get("ids"), list):
+        return False
+    return all(
+        isinstance(item, dict) and isinstance(item.get("id"), str) and str(item["id"]).isdigit()
+        for item in entry["ids"]
+    )
+
+
+def _typed_record_is_id_complete(fetch: ContractBalanceFetch) -> bool:
+    """Whether every typed receipt on this fetch carries a settled id inventory.
+
+    Settled includes empty — a full-history scan that saw no id for a token has
+    established that it has none. What this refuses is the record that never
+    asked, which is every record written before the ids were decoded.
+    """
+    entries = fetch.typed_assets
+    if entries is None or not isinstance(entries, list):
+        return False
+    return all(isinstance(entry, dict) and entry.get("ids_complete") is True for entry in entries)
 
 
 def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
     """The first block of the union of the scans behind the current asset set."""
     fetch = _current_asset_fetch(session, contract_id=contract_id)
-    if fetch is None or fetch.swept_through_block is None or not _typed_record_is_readable(fetch):
+    if (
+        fetch is None
+        or fetch.swept_through_block is None
+        or not _typed_record_is_readable(fetch)
+        or not _typed_record_is_id_complete(fetch)
+    ):
         # Same row and same rule as :func:`sweep_from_block`: an extent is only
         # readable off the fetch that carries the scan it describes, and a scan
-        # being redone has no extent yet.
+        # being redone has no extent yet. The two conditions must stay identical
+        # — a union extent inherited past a refused cursor would name blocks the
+        # re-scan is about to read again as if they were already behind the set.
         return None
     return int(fetch.swept_from_block) if fetch.swept_from_block is not None else 0
 
@@ -558,12 +623,24 @@ def record_observation(
     typed_evidence: list[dict] | None = None
     if scan_completed:
         assert sweep is not None
+        # The id inventory is stored beside the quantity, not instead of it. It is
+        # what makes the ERC-1155 read a one-off: the ids exist only in the logs
+        # that delivered them, nothing else in the pipeline keeps a log, and a
+        # record without them sends the next cycle back through the whole
+        # full-history scan to learn what it already knew.
         typed_evidence = [
             {
                 "address": asset.token_address,
                 "kind": asset.kind,
+                "standard": asset.standard,
                 "quantity_readable": asset.raw_balance is not None,
                 "quantity": None if asset.raw_balance is None else str(asset.raw_balance),
+                "quantity_basis": asset.quantity_basis,
+                "ids_complete": asset.ids_complete,
+                "ids": [
+                    {"id": item.token_id, "quantity": None if item.quantity is None else str(item.quantity)}
+                    for item in asset.items
+                ],
             }
             for asset in sweep.typed_assets
         ]
@@ -596,8 +673,9 @@ def record_observation(
         basis = (
             f"{page.basis}; chain scan of blocks {sweep.swept_from_block}-{sweep.swept_through_block} ran but "
             f"its asset set is NOT claimed complete: {len(typed_unreadable)} ERC-721/1155 receipt(s) whose "
-            f"current holding has no readable balanceOf(address) answer "
-            f"({', '.join(t.token_address for t in typed_unreadable[:8])}); {SWEEP_POPULATION_NOTE}"
+            f"current holding neither balanceOf(address) nor a per-token-id read could determine "
+            f"({', '.join(f'{t.token_address} [{t.standard}, {len(t.items)} id(s)]' for t in typed_unreadable[:8])}); "
+            f"{SWEEP_POPULATION_NOTE}"
         )
     else:
         asset_set_status = page.status
