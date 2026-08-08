@@ -332,11 +332,22 @@ def test_an_unregistered_withholding_arm_cannot_reach_a_published_reading():
 # value_at_stake_basis — the concept the document no longer publishes
 
 
-def _basis(composed: dict[str, FOLD._ComposedMagnitude], ceiling: frozenset[str]) -> str:
+def _basis(
+    composed: dict[str, FOLD._ComposedMagnitude],
+    ceiling: frozenset[str],
+    sheet: frozenset[str] = frozenset(),
+) -> str:
+    """The basis for a ceiling-bearing row, composed entries by default.
+
+    ``sheet`` is the writer's OTHER kind and is empty here on purpose: these
+    cases pin the composed clause's counting, and a sheet ceiling counts a
+    different population against a different question.
+    """
     return FOLD._ceiling_bearing_basis(
         FOLD.BOUND_DIRECTION_NOT_DETERMINED,
-        {key: 1.0 for key in ceiling},
+        {key: 1.0 for key in ceiling | sheet},
         ceiling,
+        sheet,
         [{"instance": 1}],
         [],
         [],
@@ -398,7 +409,36 @@ def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
     assert "travel with 2 of those 5 figure(s)" in mixed
     assert "travel with 1 of those 1 figure(s)" in one
     assert "travel with 5 of those 5 figure(s)" not in mixed
-    assert "travel with 2 of those 2 figure(s)" not in mixed
+
+
+def test_the_two_ceiling_kinds_are_counted_apart_and_neither_borrows_the_others_clause():
+    """A row can carry a composed extraction ceiling and a sheet ceiling at once.
+
+    The two are proven by different evidence and narrowed by different evidence —
+    a destination function's own stored conditions against which of a node's
+    assets replaced code can actually reach — so one clause written over both
+    would be a claim about the row that is false of whichever half it was not
+    written for. Each kind counts its OWN population, and a row carrying only one
+    of them reads exactly as it did before the other existed.
+    """
+    composed, ceiling = _mixed_ceiling(2, 0)
+    sheet = frozenset({"ethereum::0x" + "f" * 40, "ethereum::0x" + "e" * 40, "ethereum::0x" + "d" * 40})
+    both = _basis(composed, ceiling, sheet)
+
+    # Counted apart, and neither count is the row's total of five.
+    assert "2 priced from a composed extraction CEILING" in both
+    assert "3 priced from a SHEET CEILING" in both
+    assert "5 of 5 entity(ies)" in both
+    # The composed clause counts composed entries only; the sheet clause counts
+    # sheet entries only. A shared denominator would be the frozen-pair defect
+    # one axis over.
+    assert "travel with 2 of those 2 figure(s)" in both
+    assert "each of the 3 sheet figure(s)" in both
+    assert "travel with 2 of those 5 figure(s)" not in both
+
+    # A single-kind row is untouched by the existence of the other.
+    assert "SHEET CEILING" not in _basis(composed, ceiling)
+    assert "composed extraction CEILING" not in _basis({}, frozenset(), sheet)
 
 
 # act_as_composition.census.reading — the corpus count in a literal
@@ -462,6 +502,13 @@ _DEAD_CONCEPTS = (
     "no finding walks it",
     "is not_determined wherever populated",
     "one composed subsumed entity does so here",
+    # Retired by the code-control ceiling. It was true of every capability class
+    # when it was written and is now false of exactly one: at the node whose CODE
+    # a principal can replace, that node's own sheet is the answer, because the
+    # code that would have stood in the way is the code being replaced. The
+    # replacement sentence states which class it holds for and which it does not,
+    # so the unqualified form must never come back.
+    "balance sheet is never the answer",
 )
 
 
@@ -635,3 +682,186 @@ def test_the_freeze_ladder_note_states_the_duration_gate_it_actually_carries(mon
     assert "0.99" in moved and str(7 * 86400) in moved
     # ...and the shipped values are gone, so a literal matching today cannot pass.
     assert str(shipped_rung) not in moved and str(shipped_seconds) not in moved
+
+
+# The confidence pass's three credit paths, and the sheet-ceiling rollup
+
+
+def test_the_credit_path_reading_counts_the_paths_that_actually_answered():
+    """A magnitude question now has three possible answers, and the sentence that
+    describes the split has to move with the split. Every registered path is
+    named at whatever it counted, INCLUDING zero: a clause dropped for having no
+    carriers leaves a reader unable to tell a path that did not fire on this
+    corpus from one the model does not have."""
+    none = FOLD._credit_path_reading({})
+    mixed = FOLD._credit_path_reading(
+        {
+            FOLD.CREDIT_PATH_OWN: 55,
+            FOLD.CREDIT_PATH_COMPOSED: 40,
+            FOLD.CREDIT_PATH_SHEET_CEILING: 21,
+        }
+    )
+    moved = FOLD._credit_path_reading(
+        {
+            FOLD.CREDIT_PATH_OWN: 55,
+            FOLD.CREDIT_PATH_COMPOSED: 40,
+            FOLD.CREDIT_PATH_SHEET_CEILING: 22,
+        }
+    )
+    assert len({none, mixed, moved}) == 3
+    assert "55 from" in mixed and "40 from" in mixed and "21 from" in mixed
+    # The zero case names all three anyway.
+    assert none.count("0 from") == 3
+    for clause in FOLD._CREDIT_PATH_CLAUSES.values():
+        assert clause in none and clause in mixed
+    # Each path has its own sentence; a registry whose entries collapse to one
+    # string is a constant wearing a dict.
+    assert len(set(FOLD._CREDIT_PATH_CLAUSES.values())) == len(FOLD._CREDIT_PATH_CLAUSES)
+
+
+def test_the_mixed_witness_cause_names_the_answer_that_put_an_entity_in_the_population():
+    """ "Composition widens it" was true when composition was the only answer the
+    fold supplied. There are two now, and which of them did it is a measurement:
+    the sentence carries the counts, so a corpus where only one fires does not
+    read as though both did."""
+    empty = FOLD._mixed_witness_cause(0, 0, 0, 0)
+    plain = FOLD._mixed_witness_cause(5, 0, 0, 0)
+    composed = FOLD._mixed_witness_cause(5, 3, 0, 2)
+    ceiling = FOLD._mixed_witness_cause(5, 0, 3, 2)
+    both = FOLD._mixed_witness_cause(26, 3, 8, 6)
+    assert len({empty, plain, composed, ceiling, both}) == 5
+    # The empty population is an earned negative, not silence.
+    assert "measured zero" in empty
+    # No fold-supplied answer is its own statement, not the counted sentence.
+    assert "None of the 5 entity(ies)" in plain
+    assert "26 entity(ies)" in both and "3 carry a COMPOSED" in both and "8 a SHEET CEILING" in both
+    assert "6 of them carry no call witness of their own at all" in both
+
+
+def _ceiling_row(entity: str, usd: float, capability: str = "upgrade.implementation") -> dict[str, Any]:
+    return {
+        "reach_sheet_ceiling_magnitudes": [
+            {
+                "entity": entity,
+                "capability": capability,
+                "published_usd": usd,
+                "ceiling_reason": P.CEILING_ADMITTED,
+                "bound_direction": FOLD.BOUND_DIRECTION_NOT_DETERMINED,
+            }
+        ]
+    }
+
+
+def test_the_sheet_ceiling_rollup_reading_counts_what_the_rows_published():
+    """The document-level block's own account of itself, derived from its own
+    data. The three facts it can report — an admitted population, refusals, a
+    withheld label — are three different sentences, and the empty case is a
+    measured zero rather than a missing paragraph."""
+    empty = FOLD._sheet_ceiling_totals([], [], {})
+    one = FOLD._sheet_ceiling_totals([_ceiling_row("ethereum::0xaaa", 5.0)], [], {"upgrade.implementation": 1})
+    refusing = FOLD._sheet_ceiling_totals(
+        [
+            {
+                **_ceiling_row("ethereum::0xaaa", 5.0),
+                "undetermined_instances": [
+                    {
+                        "entity": "ethereum::0xbbb",
+                        "function": "f",
+                        "why": f"{FOLD.SHEET_CEILING_REFUSED_PREFIX}no_rows)",
+                    }
+                ],
+            }
+        ],
+        [],
+        {"upgrade.implementation": 1},
+    )
+    assert len({empty["reading"], one["reading"], refusing["reading"]}) == 3
+    assert empty["entities_priced_from_a_sheet_ceiling"] == 0
+    assert "measured zero and not a silence" in empty["reading"]
+    assert refusing["calls_refused_by_reason"]["no_rows"] == 1
+    assert "1 code-control call(s)" in refusing["reading"]
+    # A why token that is not the refusal token is not counted as one.
+    other = FOLD._sheet_ceiling_totals(
+        [{**_ceiling_row("ethereum::0xaaa", 5.0), "undetermined_instances": [{"why": "entity_value_not_determined"}]}],
+        [],
+        {},
+    )
+    assert set(other["calls_refused_by_reason"].values()) == {0}
+
+
+def test_the_rollup_publishes_a_named_zero_for_every_token_in_a_closed_vocabulary():
+    """A token missing from a census keyed on a closed set reads identically as
+    "this rule did not fire here" and "this rule is not in the model", and only
+    the first is a fact about the protocol. The vocabularies are derived from the
+    plane's own tuples, so a reason added there and not here cannot go
+    uncounted."""
+    empty = FOLD._sheet_ceiling_totals([], [], {})
+    assert set(empty["calls_refused_by_reason"]) == set(FOLD.CEILING_REFUSAL_REASONS)
+    assert set(empty["entities_by_ceiling_reason"]) == set(P.CEILING_ADMITTING_REASONS)
+    assert set(empty["entities_by_bound_direction"]) == set(FOLD.SHEET_CEILING_BOUND_DIRECTIONS)
+    assert set(empty["calls_refused_by_reason"].values()) == {0}
+    assert set(empty["entities_by_ceiling_reason"].values()) == {0}
+    # The refusal vocabulary is the closed ceiling set MINUS the two that admit,
+    # partitioned rather than listed twice.
+    assert set(FOLD.CEILING_REFUSAL_REASONS) | set(P.CEILING_ADMITTING_REASONS) == set(P.CEILING_REASONS)
+    assert not set(FOLD.CEILING_REFUSAL_REASONS) & set(P.CEILING_ADMITTING_REASONS)
+    # A floor is not a direction a sheet figure can earn, so it is not invented
+    # as a bucket either.
+    assert FOLD.BOUND_DIRECTION_FLOOR not in FOLD.SHEET_CEILING_BOUND_DIRECTIONS
+    # A token outside the vocabulary is counted, never dropped: a census smaller
+    # than its own carriers is the failure one level worse than a sparse one.
+    stray = FOLD._named_zeros({"unregistered": {"a", "b"}}, FOLD.CEILING_REFUSAL_REASONS)
+    assert stray["unregistered"] == 2
+    assert set(FOLD.CEILING_REFUSAL_REASONS) <= set(stray)
+
+
+def test_the_rollup_reading_says_whether_the_capability_buckets_sum_to_the_population():
+    """The dollars are deduped per entity and the capability breakdown is not, so
+    a reader adding the buckets over-counts the population wherever one node is
+    reached by two code-control capabilities. Counted and stated, both derived."""
+    one_each = FOLD._sheet_ceiling_totals(
+        [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xbbb", 7.0, "exec.arbitrary")], [], {}
+    )
+    shared = FOLD._sheet_ceiling_totals(
+        [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xaaa", 5.0, "exec.arbitrary")], [], {}
+    )
+    assert one_each["entities_in_more_than_one_capability"] == 0
+    assert shared["entities_in_more_than_one_capability"] == 1
+    # One entity, two buckets, one sheet's worth of dollars.
+    assert shared["entities_priced_from_a_sheet_ceiling"] == 1
+    assert sum(shared["entities_by_capability"].values()) == 2
+    assert shared["ceiling_usd_over_distinct_entities"] == 5.0
+    assert one_each["reading"] != shared["reading"]
+    assert "sums past the distinct-entity count" in shared["reading"]
+    assert "arithmetic coincidence of this corpus" in one_each["reading"]
+
+
+def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_absorbing_it():
+    """Dollars are summed over DISTINCT ENTITIES: a sheet ceiling is a fact about
+    one node, so two rows reading the same node publish the same number twice.
+    A disagreement between them would mean the per-key reconciliation let two
+    figures stand under one claim, so it is counted and published."""
+    agreeing = FOLD._sheet_ceiling_totals(
+        [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xaaa", 5.0)], [], {}
+    )
+    assert agreeing["entities_priced_from_a_sheet_ceiling"] == 1
+    assert agreeing["ceiling_usd_over_distinct_entities"] == 5.0
+    assert agreeing["rows_publishing_a_sheet_ceiling"] == {"findings": 2, "subsumed_rows": 0}
+    assert agreeing["entities_publishing_more_than_one_figure"] == []
+    assert "double-counts nothing" in agreeing["reading"]
+
+    disagreeing = FOLD._sheet_ceiling_totals(
+        [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xaaa", 9.0)], [], {}
+    )
+    assert disagreeing["entities_publishing_more_than_one_figure"] == ["ethereum::0xaaa"]
+    # The larger figure stands and the disagreement is NAMED, never averaged away.
+    assert disagreeing["ceiling_usd_over_distinct_entities"] == 9.0
+    assert "publish more than one figure" in disagreeing["reading"]
+
+    # Subsumed rows are counted in their own population, and their entities are
+    # deduped against the findings' rather than summed beside them.
+    subsumed = FOLD._sheet_ceiling_totals(
+        [_ceiling_row("ethereum::0xaaa", 5.0)], [_ceiling_row("ethereum::0xaaa", 5.0)], {}
+    )
+    assert subsumed["rows_publishing_a_sheet_ceiling"] == {"findings": 1, "subsumed_rows": 1}
+    assert subsumed["ceiling_usd_over_distinct_entities"] == 5.0

@@ -34,44 +34,45 @@ const view = projectScore(ETHERFI, []);
 
 describe("derive — principals", () => {
   it("reads the controller off the principal string, never principal_unit", () => {
-    // finding 9's principal_unit is a member of the Safe; the acting principal
+    // finding 2's principal_unit is a member of the Safe; the acting principal
     // is the Safe itself. Naming the member would attribute k-of-n power to one
     // key holder.
-    expect(F[9].principal_unit).toBe("ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde");
-    expect(controllerAddress(F[9])).toBe("0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52");
+    expect(F[2].principal_unit).toBe("ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde");
+    expect(controllerAddress(F[2])).toBe("0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5");
     expect(controllerAddress(F[15])).toBeNull(); // "ANYONE anyone" carries no address
   });
 
   it("parses the principal shape into a chip", () => {
-    expect(principalChip(F[2])).toEqual({ kind: "eoa", label: "EOA" });
-    expect(principalChip(F[6])).toEqual({ kind: "timelock", label: "Timelock 2d" });
-    expect(principalChip(F[9])).toEqual({ kind: "safe", label: "Safe 3/7" });
-    expect(principalChip(F[14])).toEqual({ kind: "timelock", label: "Timelock 10d" });
+    expect(principalChip(F[3])).toEqual({ kind: "eoa", label: "EOA" });
+    expect(principalChip(F[8])).toEqual({ kind: "timelock", label: "Timelock 2d" });
+    expect(principalChip(F[2])).toEqual({ kind: "safe", label: "Safe 4/8" });
+    expect(principalChip(F[4])).toEqual({ kind: "timelock", label: "Timelock 10d" });
     expect(principalChip(F[15])).toEqual({ kind: "anyone", label: "Anyone" });
   });
 
   it("names the coalition from k/n, not from the weakness rung", () => {
-    // 0.55 is both safe_minority and safe_uncredited on the ladder; inverting
-    // it would have to guess.
+    // 0.35 is safe_majority on the ladder and 4/8 is not a majority — exactly
+    // one signer short. Inverting the rung would have to guess, and here it
+    // would guess wrong.
     expect(coalitionWord(safeShape(F[0]))).toBe("majority"); // 4/6
-    expect(coalitionWord(safeShape(F[9]))).toBe("minority"); // 3/7
+    expect(coalitionWord(safeShape(F[2]))).toBe("minority"); // 4/8
     expect(coalitionWord({ k: 1, n: 5 })).toBe("single signer");
     expect(coalitionWord({ k: 5, n: 7 })).toBe("supermajority");
     expect(coalitionWord(null)).toBeNull();
   });
 
   it("distinguishes a routed timelock from an unproven proposer set", () => {
-    expect(timelockProposer(F[14])).toEqual({ text: "via Safe 6/10", proven: true });
-    expect(timelockProposer(F[6])).toEqual({ text: "proposer unproven", proven: false });
+    expect(timelockProposer(F[4])).toEqual({ text: "via Safe 6/10", proven: true });
+    expect(timelockProposer(F[8])).toEqual({ text: "proposer unproven", proven: false });
   });
 });
 
 describe("derive — value cell", () => {
   it("strips the band qualifier and carries the direction separately", () => {
     expect(valueCell(F[0])).toEqual({ determined: true, text: "$10M-$100M", direction: "not_determined" });
-    expect(valueCell(F[2])).toEqual({ determined: true, text: "<$100k", direction: "not_determined" });
+    expect(valueCell(F[3])).toEqual({ determined: true, text: "<$100k", direction: "not_determined" });
     // A band the producer never measured is a third state, not a $0 cell.
-    expect(valueCell(F[3])).toEqual({ determined: false, text: null, direction: null });
+    expect(valueCell(F[5])).toEqual({ determined: false, text: null, direction: null });
   });
 
   it("allow-lists every direction the producer actually publishes", () => {
@@ -205,15 +206,15 @@ describe("derive — rows and ledger", () => {
     expect(first.trackPct).toBeCloseTo(100, 6);
     expect(first.fillPct).toBeCloseTo(100, 6);
     expect(second.fillPct).toBeCloseTo((6.3 / 14.7) * 100, 6);
-    expect(third.trackPct).toBeCloseTo((7.29 / 14.7) * 100, 6);
+    expect(third.trackPct).toBeCloseTo((10.5 / 14.7) * 100, 6);
   });
 
   it("merges everything under 0.4 points into one tail segment", () => {
     const { kept, segments } = ledgerSegments(view.rows, ETHERFI.grade_lambda);
-    expect(kept).toBe(73.2508);
+    expect(kept).toBe(71.7053);
     expect(segments).toHaveLength(7);
     expect(segments.at(-1).id).toBe("tail");
-    expect(segments.at(-1).title).toBe("21 more findings · −0.55");
+    expect(segments.at(-1).title).toBe("21 more findings · −0.65");
     expect(segments[0].title).toBe("Safe 4/6 · authority.replace · −14.70");
     // Every segment plus the kept share accounts for the whole 100.
     const total = kept + segments.reduce((sum, s) => sum + s.basis, 0);
@@ -253,7 +254,11 @@ describe("derive — callouts", () => {
     expect(groups[0].kind).toBe("safe");
     expect(groups[0].sum).toBe(21);
     expect(groups[1].rows.map((r) => r.index)).toEqual([2]);
-    expect(groups[1].kind).toBe("eoa");
+    // Same kind as the group above it, split by CAPABILITY: rows 0-1 are
+    // authority.replace and row 2 is upgrade.implementation.
+    expect(groups[1].kind).toBe("safe");
+    expect(groups[2].rows.map((r) => r.index)).toEqual([3]);
+    expect(groups[2].kind).toBe("eoa");
   });
 
   it("keeps a recurrence of the same (kind, capability) apart when it is not adjacent", () => {
@@ -295,9 +300,9 @@ describe("derive — callouts", () => {
     const callouts = calloutsFor(view.rows, ETHERFI.grade_lambda);
     expect(callouts.map((c) => c.text)).toEqual(["two Safe authority holes", "25 others"]);
     expect(callouts[0].sum).toBe(21);
-    expect(callouts[1].sum).toBeCloseTo(5.7492, 3);
+    expect(callouts[1].sum).toBeCloseTo(7.2947, 3);
     // Positions are the midpoints of the spans each group occupies on the bar.
-    expect(callouts[0].centerPct).toBeCloseTo(83.7508, 3);
+    expect(callouts[0].centerPct).toBeCloseTo(82.2053, 3);
   });
 
   it("stops naming at the first group under the threshold", () => {
@@ -319,9 +324,9 @@ describe("derive — fix first", () => {
     expect(fix.count).toBe(2);
     expect(fix.subject).toBe("the two Safe authority holes");
     expect(fix.verb).toBe("Harden");
-    expect(fix.recovery).toBe(10.7787);
-    expect(fix.lambdaBefore).toBe(73.2508);
-    expect(fix.lambdaAfter).toBe(84.0295);
+    expect(fix.recovery).toBe(8.0313);
+    expect(fix.lambdaBefore).toBe(71.7053);
+    expect(fix.lambdaAfter).toBe(79.7366);
     expect(fix.subsumed).toContain("ownership.transfer");
     expect(fix.subsumed).toContain("pause.set");
     expect(fix.exampleFunction).toBe("setAuthority");
@@ -332,7 +337,7 @@ describe("derive — fix first", () => {
     const recoveries = groups
       .slice(0, 2)
       .map((g) => recoveryFrom(ETHERFI.findings, g.rows.map((r) => r.index)).recovery);
-    expect(recoveries).toEqual([10.7787, 0.541]);
+    expect(recoveries).toEqual([8.0313, 1.4367]);
     expect(fixFirst(ETHERFI, view.rows).recovery).toBe(Math.max(...recoveries));
   });
 
@@ -379,26 +384,29 @@ describe("derive — the withheld projection", () => {
     expect(withheld.callouts).toEqual([]);
     // The fold could still reconstruct the withheld quantity from the raws —
     // which is exactly why the projection must not ask it to.
-    expect(lambdaOf(WITHHELD.findings)).toBe(73.2508);
+    expect(lambdaOf(WITHHELD.findings)).toBe(71.7053);
   });
 });
 
 describe("derive — protections", () => {
   it("ranks by λ-delta, not by the finding's own net", () => {
     const rows = protectionRows(ETHERFI);
-    expect(rows.map((r) => r.index)).toEqual([0, 1, 14, 11]);
-    expect(rows.map((r) => r.delta)).toEqual([27.3, 17.82, 0.9402, 0.9372]);
-    // finding 14 charges a thousandth of a point and protects a whole one.
-    expect(rows[2].net).toBe(0.0007);
-    expect(rows[2].avoidedPct).toBeCloseTo(99.93, 1);
+    expect(rows.map((r) => r.index)).toEqual([4, 0, 1, 2]);
+    expect(rows.map((r) => r.delta)).toEqual([48.6371, 27.3, 17.82, 17.82]);
+    // finding 4 charges eight hundredths of a point and protects forty-eight:
+    // the 10-day timelock is what stands between a $3.62B ceiling and its
+    // holder, and the ranking has to read the delta rather than the charge to
+    // see that.
+    expect(rows[0].net).toBe(0.8211);
+    expect(rows[0].avoidedPct).toBeCloseTo(98.34, 1);
     expect(rows[0].widthPct).toBe(100);
-    expect(rows[1].widthPct).toBeCloseTo(57.43, 1);
+    expect(rows[1].widthPct).toBeCloseTo(84.92, 1);
   });
 
   it("describes who holds each protection", () => {
     const rows = protectionRows(ETHERFI);
-    expect(rows.map((r) => r.who)).toEqual(["majority", "majority", "via Safe 6/10", "majority"]);
-    expect(rows[0].what).toBe("authority.replace on $10M-$100M");
+    expect(rows.map((r) => r.who)).toEqual(["via Safe 6/10", "majority", "majority", "minority"]);
+    expect(rows[0].what).toBe("upgrade.implementation on >$1B");
   });
 
   it("excludes principals with no credited coordination", () => {
@@ -407,49 +415,49 @@ describe("derive — protections", () => {
       expect(["safe", "timelock"]).toContain(row.finding.principal_kind);
       expect(row.finding.weakness).toBeLessThan(0.9);
     }
-    expect(rows.some((r) => r.index === 2)).toBe(false); // EOA
+    expect(rows.some((r) => r.index === 3)).toBe(false); // EOA
     expect(rows.some((r) => r.index === 15)).toBe(false); // anyone
   });
 });
 
 describe("derive — cautions", () => {
   it("names a shared key set from the overlap table", () => {
-    const cautions = cautionsFor(ETHERFI, F[9]);
+    const cautions = cautionsFor(ETHERFI, F[2]);
     expect(cautions[0].text).toBe(
       "shares 7 owners with Safe 0x5ec5…adde — not an independent key set",
     );
   });
 
   it("matches every address the principal acts through, not just the displayed one", () => {
-    // finding 9's principal string carries 0xa000…cd52; its second address
-    // 0xf46d…e2b5 is witnessed only in principal_addresses[], and the overlap
-    // 0x5ec5…adde ↔ 0xf46d…e2b5 names neither the displayed address nor the
+    // finding 2's principal string carries 0xf46d…e2b5; its other address
+    // 0xa000…cd52 is witnessed only in principal_addresses[], and the overlap
+    // 0xa000…cd52 ↔ 0xf46d…e2b5 names neither the displayed address nor the
     // principal_unit. Parsing the string alone drops it.
-    expect(principalAddresses(F[9])).toEqual([
+    expect(principalAddresses(F[2])).toEqual([
       "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52",
       "0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5",
     ]);
-    const overlaps = keysetOverlapsFor(ETHERFI, F[9]);
+    const overlaps = keysetOverlapsFor(ETHERFI, F[2]);
     expect(overlaps.map((o) => [o.other, o.sharedOwners])).toEqual([
       ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 7],
       ["ethereum::0x5ec5e6b4eb6827914ca8bc3ae02c39417242adde", 5],
-      ["ethereum::0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5", 5],
+      ["ethereum::0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52", 5],
     ]);
-    expect(cautionsFor(ETHERFI, F[9])[1].text).toBe(
+    expect(cautionsFor(ETHERFI, F[2])[1].text).toBe(
       "shares 5 owners with Safe 0x5ec5…adde — not an independent key set",
     );
   });
 
   it("falls back to the principal string when no address list was published", () => {
-    const { principal_addresses, ...noList } = F[9];
+    const { principal_addresses, ...noList } = F[2];
     expect(principal_addresses).toHaveLength(2);
-    expect(principalAddresses(noList)).toEqual(["0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52"]);
+    expect(principalAddresses(noList)).toEqual(["0xf46d3734564ef9a5a16fc3b1216831a28f78e2b5"]);
     expect(principalAddresses({ principal: "ANYONE anyone" })).toEqual([]);
   });
 
   it("counts the upgrades that went round a timelock", () => {
     expect(upgradeBypassCount(ETHERFI)).toBe(12);
-    const cautions = cautionsFor(ETHERFI, F[14]);
+    const cautions = cautionsFor(ETHERFI, F[4]);
     expect(cautions.map((c) => c.text)).toContain(
       "12 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
     );
@@ -459,7 +467,7 @@ describe("derive — cautions", () => {
     expect(cautionsFor(ETHERFI, F[0]).map((c) => c.text)).toContain(
       "this owner can grant itself any role on the registry it governs",
     );
-    const timelock = cautionsFor(ETHERFI, F[6]);
+    const timelock = cautionsFor(ETHERFI, F[8]);
     expect(timelock.find((c) => c.tone === "attr").text).toBe(
       "no delay credit — the proposer set is unproven",
     );
@@ -468,10 +476,10 @@ describe("derive — cautions", () => {
   it("says nothing about a key set the document did not witness as shared", () => {
     // The timelock at 0x80ce… appears in no overlap row that proves a shared
     // coalition can act as both; absence of a witness is not a caution.
-    expect(cautionsFor(ETHERFI, F[6]).some((c) => c.text.includes("independent key set"))).toBe(false);
+    expect(cautionsFor(ETHERFI, F[8]).some((c) => c.text.includes("independent key set"))).toBe(false);
     // …while a Safe that IS witnessed as sharing its whole key set gets one.
-    expect(cautionsFor(ETHERFI, F[9])[2].text).toBe(
-      "shares 5 owners with Safe 0xf46d…e2b5 — not an independent key set",
+    expect(cautionsFor(ETHERFI, F[2])[2].text).toBe(
+      "shares 5 owners with Safe 0xa000…cd52 — not an independent key set",
     );
   });
 });
@@ -519,7 +527,7 @@ describe("derive — audit posture", () => {
 describe("derive — confidence", () => {
   it("tags whichever channel actually is the minimum", () => {
     const channels = confidenceChannels(ETHERFI);
-    expect(channels.map((c) => c.pct)).toEqual([45, 59.1, 18.6, 37.6]);
+    expect(channels.map((c) => c.pct)).toEqual([45, 59.1, 18.6, 40.9]);
     expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual(["value_priced_pct"]);
   });
 

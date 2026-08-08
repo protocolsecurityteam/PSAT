@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 
+import ETHERFI from "../test/fixtures/score_etherfi.json";
 import { bandsFor, letterFor, toneForLetter } from "./gradeBands.js";
 
 const MODEL = "1.0.1-provisional";
@@ -38,8 +39,12 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
   it("carries a table for the current model version, so the letter renders", () => {
     // The band table is keyed by model_version and an unknown version gets NO
     // letter by design, so a version bump with no entry here silently strips
-    // the published letter. This asserts the current version has one.
-    expect(bandsFor("1.1.0-provisional")).not.toBeNull();
+    // the published letter. This asserts the current version has one — and it
+    // reads that version off the GOLDEN rather than naming a literal, because a
+    // literal is exactly what goes stale at the bump this test exists to catch.
+    expect(bandsFor(ETHERFI.model_version)).not.toBeNull();
+    expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda).calibrated).toBe(true);
+    expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda).letter).not.toBeNull();
   });
 
   it("prices 1.1.0 λ on 1.0.1's cut points, and says what that moved", () => {
@@ -52,6 +57,24 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
     expect(letterFor("1.1.0-provisional", 84.017).letter).toBe("A−");
     expect(letterFor("1.1.0-provisional", 73.251).letter).toBe("B+");
     expect(bandsFor("1.1.0-provisional")).toEqual(bandsFor(MODEL));
+  });
+
+  it("prices 1.2.0 λ on the same cut points, and lets the letter FALL", () => {
+    // The carry-forward reasoned a second time, in the direction that tests it.
+    // 1.2.0 gives code control a magnitude, λ falls 73.2508 -> 71.7053, and
+    // 71.7053 is under the 72.0 B+ floor by 0.2947 — so the published letter
+    // honestly drops B+ -> B rather than being held up by a recut nobody
+    // calibrated. Both λ read against the SAME table is the whole claim.
+    expect(bandsFor("1.2.0-provisional")).toEqual(bandsFor("1.1.0-provisional"));
+    expect(letterFor("1.2.0-provisional", 73.2508).letter).toBe("B+");
+    expect(letterFor("1.2.0-provisional", 71.7053).letter).toBe("B");
+    // The published document lands on the B side of that boundary.
+    expect(ETHERFI.model_version).toBe("1.2.0-provisional");
+    expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda)).toEqual({
+      letter: "B",
+      tone: "b",
+      calibrated: true,
+    });
   });
 
   it("withholds the letter for a model version with no band table", () => {

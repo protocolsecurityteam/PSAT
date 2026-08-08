@@ -71,10 +71,10 @@ describe("ScoreBand — states", () => {
 describe("ScoreBand — computed grade", () => {
   it("renders the letter, λ, ledger and stats from the document", () => {
     const { container } = renderBand({ score: ETHERFI });
-    expect(screen.getByText("B+")).toBeInTheDocument();
-    expect(screen.getByText("73.3")).toBeInTheDocument();
+    expect(screen.getByText("B")).toBeInTheDocument();
+    expect(screen.getByText("71.7")).toBeInTheDocument();
     expect(screen.getByText(/provisional · confidence 18.6%/)).toBeInTheDocument();
-    expect(screen.getByText("73.3 kept")).toBeInTheDocument();
+    expect(screen.getByText("71.7 kept")).toBeInTheDocument();
     expect(screen.getByText("99.6")).toBeInTheDocument();
     expect(screen.getByText("+55 subsumed")).toBeInTheDocument();
     // kept + 6 deduction segments + the sub-0.4pt tail
@@ -98,8 +98,8 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
     const tail = screen.getByRole("button", { name: /19 more/ });
-    expect(tail.textContent).toContain("−0.18 combined");
-    expect(tail.textContent).toContain("18 with value not determined");
+    expect(tail.textContent).toContain("−0.19 combined");
+    expect(tail.textContent).toContain("16 with value not determined");
     await userEvent.setup().click(tail);
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(27);
   });
@@ -117,7 +117,7 @@ describe("ScoreBand — computed grade", () => {
     const priced = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
     expect(within(priced).getByText("bound not determined")).toBeInTheDocument();
     const nd = cells.filter((c) => c.querySelector(".sc-nd"));
-    expect(nd).toHaveLength(23);
+    expect(nd).toHaveLength(19);
     expect(nd[0].textContent).toBe("value not determined");
     expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
   });
@@ -188,8 +188,8 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     const fix = screen.getByText(/modeled recovery up to/).closest(".sc-fix");
     expect(fix.textContent).toContain("Harden the two Safe authority holes");
-    expect(fix.textContent).toContain("10.8 points");
-    expect(fix.textContent).toContain("λ 73.3 → 84.0");
+    expect(fix.textContent).toContain("8.0 points");
+    expect(fix.textContent).toContain("λ 71.7 → 79.7");
     expect(fix.textContent).toContain("ownership.transfer");
     expect(fix.textContent).toContain("fixing setAuthority alone does not release them");
   });
@@ -199,7 +199,7 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     expect(screen.getByText(/each dollar weighted by how dangerous/)).toBeInTheDocument();
     const saved = [...container.querySelectorAll(".sc-prot-saved")].map((n) => n.textContent);
-    expect(saved).toEqual(["+27.3", "+17.8", "+0.9", "+0.9"]);
+    expect(saved).toEqual(["+48.6", "+27.3", "+17.8", "+17.8"]);
     expect(screen.getByText("64 reports on file")).toBeInTheDocument();
     expect(screen.getByText(/12 witnessed upgrades bypassed this timelock/)).toBeInTheDocument();
     const byContract = screen.getByText(/contracts matched to an audit/);
@@ -249,8 +249,8 @@ describe("ScoreBand — computed grade", () => {
 
   it("renders λ with no letter when the model version has no band table", () => {
     renderBand({ score: { ...ETHERFI, model_version: "9.9.9-unreleased" } });
-    expect(screen.getByText("73.3")).toBeInTheDocument();
-    expect(screen.queryByText("B+")).not.toBeInTheDocument();
+    expect(screen.getByText("71.7")).toBeInTheDocument();
+    expect(screen.queryByText("B")).not.toBeInTheDocument();
     expect(screen.getByText(/bands uncalibrated for this model version/)).toBeInTheDocument();
   });
 
@@ -363,7 +363,7 @@ describe("ScoreBand — entities select on the surface", () => {
   // one host and a reach set wider than it — the row that HAS that shape moves
   // whenever the ranking does, so it is selected by index here and the index is
   // asserted against the principal below.
-  const ROW = 5;
+  const ROW = 7;
   const CONTROLLER = "0xf8553c8552f906c19286f21711721e206ee4909e";
   const FIRST_TARGET = "0x352180974c71f84a934953cf49c4e538a6f9c997";
   const HOST = "0x989468982b08aefa46e37cd0086142a86fa466d7";
@@ -540,11 +540,12 @@ describe("ScoreBand — entities select on the surface", () => {
     }
   });
 
-  // The keyset-overlap caution rides on the 3/7 Safe, which is not among this
-  // document's four strongest protections. It is put there by scoring the two
-  // rows alone rather than by hunting for a corpus row that happens to carry
-  // both — the caution's rendering is what these cases are about.
-  const KEYSET = { ...ETHERFI, findings: [ETHERFI.findings[0], ETHERFI.findings[9]] };
+  // The keyset-overlap caution rides on finding 2, published as "Safe 4/8
+  // 0xf46d…e2b5". Pairing it with finding 0 puts a caution row and a protection
+  // row in one two-row document by CONSTRUCTION, rather than by hunting for a
+  // corpus row that happens to carry both — the caution's rendering is what
+  // these cases are about, not which rows the full ranking puts where.
+  const KEYSET = { ...ETHERFI, findings: [ETHERFI.findings[0], ETHERFI.findings[2]] };
 
   it("makes every protection principal and every Safe named in a caution selectable", async () => {
     const onSelectEntity = vi.fn();
@@ -556,10 +557,13 @@ describe("ScoreBand — entities select on the surface", () => {
       expect(row.querySelector(".sc-kchip")).toHaveAttribute("role", "button");
     }
     await userEvent.setup().click(rows[0].querySelector(".sc-kchip"));
+    // The strongest protection on this document is the 10-day timelock, and the
+    // chip asks for the TIMELOCK's own address — the thing that would have to be
+    // removed for the delta to be realised — not the Safe that proposes to it.
     expect(onSelectEntity).toHaveBeenCalledWith({
       chain: "ethereum",
-      address: "0xcea8039076e35a825854c5c2f85659430b06ec96",
-      label: "Safe 4/6",
+      address: "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761",
+      label: "Timelock 10d",
     });
     container.remove();
 

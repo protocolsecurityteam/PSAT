@@ -556,7 +556,11 @@ class ScoreDocument:
     # of zero and not an unasked question, because the census runs on every fold
     # over the whole published population. The one thing absence cannot
     # distinguish is a fault-free document from one folded before this field
-    # existed, which ``model_version`` is the place to settle.
+    # existed — and ``model_version`` now SETTLES that, at the 1.2.0-provisional
+    # boundary: this field arrived mid-1.1.0 (PR #172), so on a document stamped
+    # 1.1.0-provisional or earlier an absent key is genuinely ambiguous and must
+    # be read as not_determined, while on one stamped 1.2.0-provisional or later
+    # the census provably ran and absence is the earned zero.
     execution_evidence_faults: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:

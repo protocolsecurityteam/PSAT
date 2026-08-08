@@ -310,8 +310,15 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     registered = block["registered"]
 
     # Seven arms this run added, plus the one pre-existing zero-population arm
-    # CAP-B ruled into the same register (ruling 2).
-    assert len(registered) == 8
+    # CAP-B ruled into the same register (ruling 2), plus the code-control
+    # ceiling's three zero-carrier arms: its two admission arms and the
+    # per-entity ceiling DIRECTION, which no published entry earns because every
+    # ceiling-bearing entity on this corpus holds assets nobody priced. The COUNT
+    # is derived and not chosen: the ceiling STATE itself fires here and is
+    # calibrated, so it is absent, and the row-header bound-direction arm stays
+    # because no row earns that direction — every one of those facts measured
+    # against protocol 1 rather than assumed.
+    assert len(registered) == 11
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -409,19 +416,29 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):  
 # CAP-B ruling 1 — the migration block is DATED HISTORY, not a live claim
 
 
+def _migration(from_version):
+    """The one record describing the bump that STARTED at `from_version`.
+
+    `next()` with no default on purpose: a renamed or dropped record must fail
+    the lookup loudly rather than let a test pass over a block that is no longer
+    there."""
+    records = K.model_parameters()["model_version_migrations"]
+    return next(record for record in records if record["from"] == from_version)
+
+
 def test_the_migration_block_dates_its_composition_figures_to_the_bump_that_measured_them():
     """CAP-B ruling 1. Two clauses of the only published record of the 1.0.1 ->
     1.1.0 bump were present tense and Phase A made both false. Both are now
     anchored — past tense, version-stamped, pointing at the census for the live
-    count — and the version is INTERPOLATED from `MODEL_VERSION`."""
-    from utils.scoring_status import MODEL_VERSION
-
-    block = K.model_parameters()["model_version_migration"]
+    count."""
+    block = _migration("1.0.1-provisional")
     recovered = block["what_composition_did_not_recover"]
     confidence = block["read_the_confidence_fall_correctly"]
 
-    # Past tense, stamped with the version whose measurement it reports.
-    assert f"At this bump's own measurement ({MODEL_VERSION}, before the execution-witness pass)" in recovered
+    # Past tense, stamped with the version whose measurement it reports — and
+    # that version is now the LITERAL 1.1.0, not `MODEL_VERSION`. See the
+    # frozen-literal test below for why the interpolation was retired here.
+    assert "At this bump's own measurement (1.1.0-provisional, before the execution-witness pass)" in recovered
     assert "those composed 13 entities and $46,164,146.29" in recovered
     # The present-tense forms are gone.
     assert "composing 13 entities" not in recovered
@@ -432,18 +449,71 @@ def test_the_migration_block_dates_its_composition_figures_to_the_bump_that_meas
     assert "28 of them publish a composed figure and 12 are withheld" in confidence
 
 
-def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
-    """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
-    today and drifts silently at the next bump."""
+def test_the_1_1_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(monkeypatch):
+    """The other half of the stamp discipline, and the half a passing suite
+    would otherwise never notice.
+
+    The 1.0.1 -> 1.1.0 record reports what was measured while 1.1.0 was the
+    CURRENT version. Once 1.2.0 shipped, an interpolated `MODEL_VERSION` there
+    would restamp that dated measurement with whatever is shipping now — a 1.1.0
+    figure wearing a 1.2.0 label, which is precisely the drift the interpolation
+    was originally added to prevent, running the other way. So the stamp is
+    frozen, and this test is what keeps it frozen: it fails the moment the
+    f-string comes back."""
     from services.scoring import constants as C
 
-    shipped = K.model_parameters()["model_version_migration"]["what_composition_did_not_recover"]
+    shipped = _migration("1.0.1-provisional")["what_composition_did_not_recover"]
     monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
-    moved = K.model_parameters()["model_version_migration"]["what_composition_did_not_recover"]
+    unmoved = _migration("1.0.1-provisional")["what_composition_did_not_recover"]
+
+    assert unmoved == shipped
+    assert "(1.1.0-provisional, before the execution-witness pass)" in unmoved
+    assert "9.9.9-fictional" not in unmoved
+    # The record's own endpoint is frozen with it: this bump ENDED at 1.1.0 and
+    # no later version can claim to be where it landed.
+    assert _migration("1.0.1-provisional")["to"] == "1.1.0-provisional"
+
+
+def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
+    """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
+    today and drifts silently at the next bump.
+
+    Moved onto the 1.1.0 -> 1.2.0 record, which is the one describing the
+    version that is CURRENT — the only record for which "moves with the version"
+    is the honest behaviour. Its predecessor is frozen by the test above."""
+    from services.scoring import constants as C
+
+    shipped = _migration("1.1.0-provisional")["measured_at"]
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    moved = _migration("1.1.0-provisional")["measured_at"]
 
     assert moved != shipped
-    assert "(9.9.9-fictional, before the execution-witness pass)" in moved
-    assert "1.1.0-provisional" not in moved
+    assert "at this bump's own tip (9.9.9-fictional)" in moved
+    assert "1.2.0-provisional" not in moved
+    # The endpoint interpolates too, so the record cannot name one version in
+    # its prose and a different one in its field.
+    assert _migration("1.1.0-provisional")["to"] == "9.9.9-fictional"
+
+
+def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
+    """The residual staleness hole in the version-bump checklist, closed on the
+    side that actually runs in CI.
+
+    `site/src/test/fixtures/score_etherfi.json` is the document the vitest
+    suites assert against, and a bump that edits `MODEL_VERSION` without
+    regenerating it leaves the page's tests pinned to the PREVIOUS model's
+    lambda, letter and ranking — all still internally consistent, so vitest
+    stays green and nothing anywhere reports that the golden is a version
+    behind. Asserting the stamp here makes the omission fail loudly in the
+    Python suite, which is where the bump is made."""
+    import json
+
+    golden = json.loads((ROOT / "site" / "src" / "test" / "fixtures" / "score_etherfi.json").read_text())
+    assert golden["model_version"] == K.MODEL_VERSION, (
+        f"the frontend golden is stamped {golden['model_version']!r} but MODEL_VERSION is "
+        f"{K.MODEL_VERSION!r} — regenerate site/src/test/fixtures/score_etherfi.json "
+        f"(see its README for the shape and the minified one-line write)"
+    )
 
 
 def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in_a_spec():
@@ -465,7 +535,19 @@ def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in
     # producer cannot emit it at all.
     assert entry["published_at"] == "findings[].value_at_stake_bound_direction"
     assert entry["population_census"] is None
-    assert "deferred" in entry["note"] and "derive.js" in entry["note"]
+    assert "derive.js" in entry["note"]
+    # The arm now has a SECOND producer — a sheet ceiling — so the note may no
+    # longer say the direction is unearnable. What it says instead is measured:
+    # earnable, and unearned on this corpus because every sheet-ceiling row also
+    # reaches entities it cannot price.
+    assert "0 rows before and 0 after" in entry["note"]
+    assert "unearnable" not in entry["note"]
+    # The measured blocker is the COVERAGE conjunct, and the note may not narrow
+    # it to the undetermined-instance half: one ceiling-bearing row here reaches
+    # exactly one entity and prices it, and is refused on the partly-priced half
+    # alone.
+    assert "NO COVERAGE GAP" in entry["note"]
+    assert "the priced sheet does not cover" in entry["note"]
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():
