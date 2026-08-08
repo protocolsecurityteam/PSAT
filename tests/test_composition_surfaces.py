@@ -311,11 +311,14 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
 
     # Seven arms this run added, plus the one pre-existing zero-population arm
     # CAP-B ruled into the same register (ruling 2), plus the code-control
-    # ceiling's two zero-carrier admission arms. The COUNT is derived and not
-    # chosen: the ceiling STATE itself fires on this corpus and is calibrated, so
-    # it is absent here, and the bound-direction arm stays because no row earns
-    # that direction — both facts measured against protocol 1, not assumed.
-    assert len(registered) == 10
+    # ceiling's three zero-carrier arms: its two admission arms and the
+    # per-entity ceiling DIRECTION, which no published entry earns because every
+    # ceiling-bearing entity on this corpus holds assets nobody priced. The COUNT
+    # is derived and not chosen: the ceiling STATE itself fires here and is
+    # calibrated, so it is absent, and the row-header bound-direction arm stays
+    # because no row earns that direction — every one of those facts measured
+    # against protocol 1 rather than assumed.
+    assert len(registered) == 11
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -476,7 +479,12 @@ def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in
     # reaches entities it cannot price.
     assert "0 rows before and 0 after" in entry["note"]
     assert "unearnable" not in entry["note"]
-    assert "coverage gap" in entry["note"]
+    # The measured blocker is the COVERAGE conjunct, and the note may not narrow
+    # it to the undetermined-instance half: one ceiling-bearing row here reaches
+    # exactly one entity and prices it, and is refused on the partly-priced half
+    # alone.
+    assert "NO COVERAGE GAP" in entry["note"]
+    assert "the priced sheet does not cover" in entry["note"]
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():

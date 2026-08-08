@@ -278,6 +278,7 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # constructed fixture.
     "code_control_ceiling:proven_empty",
     "code_control_ceiling_refused:alias_ambiguous",
+    "sheet_ceiling_bound_direction:ceiling",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -423,13 +424,34 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "ceiling-bearing on the same axis, deliberately, so the page carries ONE ceiling and "
             "not two. It is still 0 rows before and 0 after, and the reason is measured rather "
             "than deferred: the conjunction needs EVERY contributing entity to be a proven ceiling "
-            "with no coverage gap and no withheld hop, and every sheet-ceiling row on this corpus "
-            "also reaches entities it cannot price. So the direction is earnable — a constructed "
-            "row earns it, which is what exercised_by now names — and unearned here. Registered "
-            "because the obligation is a flag in this document and a spec deferral does not "
-            "discharge one, and because site/src/score/derive.js allow-lists this direction: the "
-            "page would render a <= badge for a state no ROW here earns, with nothing published "
-            "saying so"
+            "with NO COVERAGE GAP — no instance left not_determined and no entity holding assets "
+            "the priced sheet does not cover — and every ceiling-bearing row here fails the second "
+            "half, including the one that reaches a single entity and prices it. So the direction "
+            "is earnable, a constructed row earns it (exercised_by), and no row here does. "
+            "Registered because the obligation is a flag in this document and a spec deferral does "
+            "not discharge one, and because site/src/score/derive.js allow-lists this direction: "
+            "the page would render a <= badge for a state no ROW here earns, with nothing "
+            "published saying so"
+        ),
+    },
+    {
+        "arm": "sheet_ceiling_bound_direction:ceiling",
+        "state": "ceiling",
+        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].bound_direction",
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_redteam.py::test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet",
+        ),
+        "note": (
+            "the PER-ENTITY direction, which is a narrower question than the row header's and has "
+            "its own zero population. A priced sheet is a FLOOR over what was priced, so the "
+            "figure is an at-most on the move only where every asset observed at that entity was "
+            "priced and no position carries an absent USD column. Every ceiling-bearing entity on "
+            "this corpus holds assets nobody priced — one of them holds ninety-nine such assets "
+            "beside its one priced one — so every published entry takes the partial arm and says "
+            "what it bounds instead. This is the same conjunct the row header refuses on, asked at "
+            "one entity rather than over the sum, and it is registered separately because a "
+            "consumer reads the two fields separately"
         ),
     },
     {

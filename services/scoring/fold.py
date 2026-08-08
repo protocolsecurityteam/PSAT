@@ -357,40 +357,82 @@ _COMPOSED_SOURCE_READINGS = {
 CEILING_KIND_COMPOSED = "composed_extraction"
 CEILING_KIND_SHEET = "sheet"
 
-# Where a sheet ceiling's dollars came from, one sentence per ADMITTING reason.
-# Its own registry and not a third key in ``_COMPOSED_SOURCE_READINGS`` above:
-# that map is keyed on ``_ComposedMagnitude.bounded_by`` and a sheet ceiling
-# constructs no ``_ComposedMagnitude``, so an entry there is one nothing can
-# carry. Two entries, because the two admits are different proofs: a priced
-# sheet bounds the move at a number that was observed, while a proven-empty one
-# bounds it at zero because every quantity on it was witnessed zero — and a
-# single sentence would have to call one of them the other.
+# Where a sheet ceiling's dollars came from, keyed on the admitting reason AND
+# on whether the sheet covers everything the entity holds. Its own registry and
+# not a third key in ``_COMPOSED_SOURCE_READINGS`` above: that map is keyed on
+# ``_ComposedMagnitude.bounded_by`` and a sheet ceiling constructs no
+# ``_ComposedMagnitude``, so an entry there is one nothing can carry.
+#
+# FOUR entries, and the second axis is the one that was got wrong first. The two
+# ADMITS are different proofs — a priced sheet bounds at a number that was
+# observed, a proven-empty one bounds at zero because every quantity on it was
+# witnessed zero — and a single sentence would have to call one of them the
+# other. The COVERAGE axis is not a shade of either: ``SHEET_PRICED`` means the
+# total is a FLOOR over what was priced (``planes.ValuePlane.sheet_state``), so
+# on an entity holding assets nobody priced the figure is not an at-most on the
+# move at all. It is an at-most on the PRICED PORTION, and saying otherwise
+# claims a bound over holdings this fold never observed. Every published entry
+# on the reference corpus takes a partial arm; the full-coverage arms are
+# exercised by constructed carriers.
 _CEILING_SOURCE_READINGS = {
-    P.CEILING_ADMITTED: (
-        "the dollars are THIS entity's own priced holdings, and they are an upper bound rather "
-        "than an amount: the principal can replace this node's code, so none of the code that "
-        "would have stood between them and what the node holds is still standing — but nothing "
-        "here witnesses that replaced code reaches every asset on the sheet, and an accounting "
-        "entry or a balance held by another contract is inside the sheet and outside the move"
+    (P.CEILING_ADMITTED, True): (
+        "the dollars are THIS entity's own priced holdings, and every asset observed at it was "
+        "priced — so the figure is an AT-MOST on what replacing this node's code can move from "
+        "it. The principal can replace that code, so none of the code that would have stood "
+        "between them and these holdings is still standing; what is not witnessed is the other "
+        "direction, that replaced code reaches every asset in the total, and an accounting entry "
+        "rather than a held balance is inside the sheet and outside the move"
     ),
-    P.CEILING_PROVEN_EMPTY: (
+    (P.CEILING_ADMITTED, False): (
+        "the dollars are THIS entity's own priced holdings and they DO NOT bound the move: the "
+        "assets under assets_not_priced were observed at this entity and never priced, so the "
+        "total is a floor over what was priced and the entity holds more than it. What the figure "
+        "bounds from above is the PRICED PORTION — replacing this node's code can move no more of "
+        "those assets than the sum of them — and what the unpriced ones add is not_determined "
+        "here, which is why bound_direction is not a ceiling on this entry"
+    ),
+    (P.CEILING_PROVEN_EMPTY, True): (
         "the ceiling is a PROVEN ZERO and not a missing number: every asset observed at this "
         "entity carries a quantity witnessed zero, so replacing its code can move nothing from "
         "it. This is an earned negative — a sheet nobody priced publishes not_determined instead "
         "— and it bands at the floor for the same reason any small figure does"
     ),
+    (P.CEILING_PROVEN_EMPTY, False): (
+        "every asset PRICED at this entity carries a quantity witnessed zero, and the positions "
+        "under unpriced_positions carry no USD column at all — so the $0 is an earned negative "
+        "about the priced sheet and NOT a proof that replacing this node's code moves nothing. "
+        "What those positions are worth is not_determined here, which is why bound_direction is "
+        "not a ceiling on this entry"
+    ),
 }
 
-# True of every sheet ceiling whatever admitted it, so it is constant: it states
-# what the entry does NOT claim, and asserts nothing about the row's own data.
+# True of every sheet ceiling whatever admitted it and whatever its coverage, so
+# it is constant: it states what the entry does NOT claim, and asserts nothing
+# about the row's own data.
 _CEILING_CLOSING = (
-    ". The claim is an AT-MOST and never an amount — nothing here says the principal moves this, "
-    "only that they can move no more than it — and it is scoped to THIS node: what the node in "
-    "turn governs keeps its own rules, because that node's code is still standing. It charges no "
-    "exposure for the same reason: an upper bound on an unwitnessed move is not expected loss, "
-    "and spending an entity's exposure budget on one would displace a row that measured a real "
-    "extraction there"
+    ". Whatever it bounds, it bounds from ABOVE and is never an amount — nothing here says the "
+    "principal moves this — and it is scoped to THIS node: what the node in turn governs keeps "
+    "its own rules, because that node's code is still standing. It charges no exposure for the "
+    "same reason: an upper bound on an unwitnessed move is not expected loss, and spending an "
+    "entity's exposure budget on one would displace a row that measured a real extraction there"
 )
+
+# Why the per-entity figure is or is not an at-most on the move, derived from
+# that entity's OWN asset coverage. The row header asks the same question over
+# the whole row (:func:`_bound_direction`) and refuses on the same conjunct; two
+# surfaces answering it differently is the contradiction these strings exist to
+# stop.
+_SHEET_CEILING_DIRECTION_BASIS = {
+    True: (
+        "every asset observed at this entity was priced and no position carries an absent USD "
+        "column, so the total covers the holdings and bounds the move from above"
+    ),
+    False: (
+        "the priced sheet does not cover everything observed at this entity (assets_not_priced, "
+        "unpriced_positions), so the total is a floor over what was priced and bounds the "
+        "holdings in neither direction"
+    ),
+}
 
 # One name per component of :func:`_composed_order`'s key, positionally. The
 # published ``chosen_by`` reads the component that ACTUALLY separated this
@@ -879,11 +921,18 @@ class _RowValue:
     # own priced sheet, admitted because this row's capability replaces that
     # node's code.
     sheet_ceiling_entities: frozenset[str] = frozenset()
-    # The signals whose sheet-ceiling branch fired in this row, on
-    # ``composed_signals``' pattern. Rolled up to the protocol so the confidence
-    # pass can credit a proven bound as an answered magnitude question without
-    # re-deriving which signals produced one.
+    # The signals whose sheet ceiling STANDS as this row's published figure at
+    # some entity, on ``composed_signals``' pattern. Rolled up to the protocol so
+    # the confidence pass can credit a proven bound as an answered magnitude
+    # question without re-deriving which signals produced one. A signal whose
+    # ceiling was displaced by a larger figure is absent: a credited answer has
+    # to have a carrier in the document.
     ceiling_signals: frozenset[tuple[Any, ...]] = frozenset()
+    # Entities the S6 reconciliation refused the ceiling LABEL to, with both
+    # figures. Carried rather than dropped for the reason every refusal on this
+    # row is: an entity silently absent from the ceiling list is
+    # indistinguishable from one the branch never fired on.
+    sheet_ceilings_withheld: list[dict[str, Any]] = field(default_factory=list)
     # F5: the entities whose STANDING figure is PROVEN not to be
     # attribution-derived. An earned positive and NOT the complement of
     # ``ceiling_entities`` — that one says which BRANCH supplied a figure, this
@@ -2160,6 +2209,14 @@ def _aggregate(
                 "reach_sheet_ceiling_magnitudes": _sheet_ceiling_records(
                     valued.sheet_ceiling_entities, per_entity, value_plane, row.capability
                 ),
+                # Its refusal counterpart, published for the reason every refusal
+                # on this row is: an entity silently absent from the list above
+                # is indistinguishable from one the branch never fired on. These
+                # are entities whose standing figure did not reconcile against
+                # the sheet it claimed to be, so the ceiling LABEL was withheld —
+                # the dollars stand, graded in no direction, and they charge the
+                # exposure budget like any other figure.
+                "reach_sheet_ceiling_magnitudes_withheld": valued.sheet_ceilings_withheld,
                 "reach_composition_census": valued.composition_census,
                 # ``witnessed_magnitude_caps`` lists only the calls a witness
                 # actually TRIMMED. Read alone it says nothing about the calls
@@ -2275,17 +2332,39 @@ def _aggregate(
         # is a different access path — often an undelayed one — and charging the
         # delayed row's value at the undelayed fraction would re-merge in the
         # exposure term exactly what keying rows by access path separated.
+        #
+        # A SHEET CEILING is not occupancy. The top row publishes a figure at
+        # such an entity and charges nothing for it, so treating the key as
+        # taken would discard a subsumed row's genuinely witnessed value there
+        # and take it out of the exposure accounting altogether — a leak in the
+        # direction the budget exists to prevent.
+        occupied = set(top["value_by_entity"]) - set(top["entities_priced_from_a_sheet_ceiling"])
         exclusive: dict[str, dict[str, float]] = {}
+        # Which exclusive keys arrived as a SUBSUMED row's sheet ceiling. The
+        # skip in ``_grade`` reads the TOP row's ceilings, and value carried in
+        # from a subsumed row is not on that list — so without this the ceiling
+        # a subsumed row published would charge the budget the top row's own is
+        # kept out of. Tracked per key beside the winning figure, because the
+        # answer belongs to whichever row's figure actually won.
+        exclusive_ceilings: set[str] = set()
         for row in rest:
             per_entity_weakness = row["weakness_by_entity"]
+            row_ceilings = set(row["entities_priced_from_a_sheet_ceiling"])
             for key, held in row["value_by_entity"].items():
-                if key in top["value_by_entity"]:
+                if key in occupied:
                     continue
                 fraction = row["severity_proven"] * per_entity_weakness.get(key, row["weakness"])
                 previous = exclusive.get(key)
                 if previous is None or held * fraction > previous["usd"] * previous["fraction"]:
                     exclusive[key] = {"usd": held, "fraction": round(fraction, 6)}
+                    exclusive_ceilings.discard(key)
+                    if key in row_ceilings:
+                        exclusive_ceilings.add(key)
         top["subsumed_exclusive_value_by_entity"] = dict(sorted(exclusive.items()))
+        # Published rather than left to be re-derived from the subsumed rows: the
+        # exposure loop needs it, and a reader checking why an exclusive entity
+        # was not charged has nowhere else to look.
+        top["subsumed_exclusive_sheet_ceiling_entities"] = sorted(exclusive_ceilings)
         if rest:
             top["counterfactual"] += (
                 "; this row subsumes " + ", ".join(r["capability"] for r in rest) + " — fixing the top "
@@ -2386,6 +2465,92 @@ _PUBLISHED_CENT = 0.005
 _UNPRICED_ASSET_STATES = frozenset({P.ASSET_UNPRICED, P.ASSET_BELOW_RESOLUTION})
 
 
+def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]:
+    """What one entity's priced sheet does and does not cover, per asset.
+
+    The per-ASSET maps are read and the sheet STATE is not, for the reason
+    :func:`_partially_priced_entities` reads them: the state collapses a mixed
+    entity to whichever fact ranks highest, so an entity with one priced asset
+    and a hundred unanswered ones reads as ``priced`` there and the shortfall
+    disappears. ``below_resolution`` counts as not priced — an asset whose price
+    landed on the storage floor is a holding of at most half a cent that the
+    total does not carry, which is the same shortfall as one nobody priced — and
+    the restaking plane is the second source, with no USD column at all.
+
+    ``complete`` is the conjunct the ceiling claim turns on and it is an EARNED
+    positive: an entity with no observed assets at all does not clear it by
+    having nothing to fail on. Nothing here reads a block height or an observed
+    account: the plane reduces observations to the latest per (entity, asset) at
+    load, so those are gone by the time this runs and are not claimed.
+    """
+    values = value_plane.per_asset.get(canonical) or {}
+    states = value_plane.per_asset_state.get(canonical) or {}
+    positions = value_plane.unpriced_positions.get(canonical) or []
+    names = sorted(set(values) | set(states))
+    # A key present in ``per_asset`` with no state entry is read as determined,
+    # which is what that map means (see ``ValuePlane``'s docstring).
+    not_priced = sorted(name for name in names if states.get(name) in _UNPRICED_ASSET_STATES)
+    return {
+        "per_asset": [
+            {"asset": name, "usd": (round(values[name], 2) if name in values else None), "state": states.get(name)}
+            for name in names
+        ],
+        "assets_observed": len(names),
+        "assets_priced": len(names) - len(not_priced),
+        "assets_not_priced": not_priced,
+        "unpriced_positions": len(positions),
+        "complete": bool(names) and not not_priced and not positions,
+    }
+
+
+def _reconcile_sheet_ceilings(
+    ceiling_kinds: dict[str, str], per_entity: dict[str, float], value_plane: P.ValuePlane
+) -> list[dict[str, Any]]:
+    """Drop any sheet ceiling whose standing figure is not that node's sheet.
+
+    S6's invariant is PER KEY: a sheet ceiling is capped by its own node's sheet
+    by construction, because it IS that sheet, and the per-entity MAX only ever
+    replaces it with something larger that is no longer a ceiling. It may not be
+    checked on the row's total, which legitimately sums across priced hosts and
+    exceeds any single sheet — $4.217B over eight of them on the reference
+    corpus.
+
+    Checked at the published resolution rather than exactly, because that is the
+    resolution the claim is made at. Reconciled rather than raised: an
+    unreachable-by-construction mismatch is still a claim this fold cannot
+    support, and the honest response is to withhold the LABEL from that one key —
+    the figure stands, ungraded for direction, and charges the exposure budget
+    like any other — not to take a protocol's whole score down with it. Mutates
+    ``ceiling_kinds`` in place and returns what it withheld, so the caller
+    publishes the refusal rather than a silence.
+    """
+    withheld: list[dict[str, Any]] = []
+    for entity in sorted(ceiling_kinds):
+        if ceiling_kinds[entity] != CEILING_KIND_SHEET:
+            continue
+        usd, reason = P.ceiling_for(value_plane, entity)
+        if usd is not None and round(per_entity[entity], 2) == round(usd, 2):
+            continue
+        del ceiling_kinds[entity]
+        withheld.append(
+            {
+                "entity": entity,
+                "standing_usd": round(per_entity[entity], 2),
+                "sheet_usd": (round(usd, 2) if usd is not None else None),
+                "ceiling_reason": reason,
+                "why": "standing_figure_is_not_this_nodes_sheet(ceiling_label_withheld)",
+                "reading": (
+                    "the figure standing at this entity is not the one its own sheet answers, so "
+                    "it is not a sheet ceiling and is not labelled one. The dollars are published "
+                    "unchanged and graded in no direction, and they charge the exposure budget: "
+                    "the exemption belongs to a proven upper bound and this figure has not been "
+                    "shown to be one"
+                ),
+            }
+        )
+    return withheld
+
+
 def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> list[str]:
     """Reached entities whose priced sheet does not cover everything they hold.
 
@@ -2410,10 +2575,11 @@ def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> lis
         if value_plane.total(canonical) is None:
             # Nothing determined at all: an undetermined entity, not a floor.
             continue
-        states = value_plane.per_asset_state.get(canonical) or {}
-        if any(state in _UNPRICED_ASSET_STATES for state in states.values()):
-            partial.add(canonical)
-        elif value_plane.unpriced_positions.get(canonical):
+        # The same predicate the per-entity sheet-ceiling record publishes its
+        # bound direction from, called rather than restated: the row header and
+        # the per-entity record answer the same coverage question, and two
+        # copies of the rule are how they came to answer it differently.
+        if not _asset_coverage(value_plane, canonical)["complete"]:
             partial.add(canonical)
     return sorted(partial)
 
@@ -2458,11 +2624,19 @@ def _bound_direction(
     every one of its members must be in the proven-not-attributed set.
 
     ``ceiling`` is the mirror and is earned no more cheaply: EVERY contributing
-    entity's figure must be a composed ceiling (one ungraded contribution and
-    the sum is not bounded above by these), nothing may be missing from the sum
-    (a coverage gap or a withheld hop is value this row reaches that the total
-    does not carry, and either one breaks an at-most while leaving an at-least
+    entity's figure must be a proven ceiling (one ungraded contribution and the
+    sum is not bounded above by these), nothing may be missing from the sum (a
+    coverage gap or a withheld hop is value this row reaches that the total does
+    not carry, and either one breaks an at-most while leaving an at-least
     intact), and the two are checked here rather than asserted in the prose.
+
+    ``ceiling_entities`` carries TWO populations and this function reads neither
+    apart: a composed extraction ceiling and a controlled node's own sheet
+    ceiling are proven differently and narrowed differently, and both bound this
+    principal from above, which is the whole of what direction asks. The
+    per-entity records say which is which, and the coverage conjunct above is
+    what stops a partly priced sheet from being summed into an at-most — the
+    same conjunct the per-entity record derives its own direction from.
 
     Everything else is ``not_determined``, including a total with no gap and no
     ceiling in it: the contributions are then a mix this fold does not grade for
@@ -2531,32 +2705,44 @@ def _sheet_ceiling_records(
     the reason is outside :data:`EX.FAULT_REASONS` is load-bearing rather than
     incidental: the structural census walks every ``proving_execution`` key in
     the document and a fault reason here would qualify the whole grade as
-    fault-degraded on the strength of a proof that is intact.
+    fault-degraded on the strength of a proof that is intact. The observations
+    the record stands on are PUBLISHED here — the per-asset figures at the
+    canonical key — because a record whose reading names evidence the document
+    does not carry is the authored-string defect one level up from the one the
+    execution block exists to close.
+
+    ``bound_direction`` is DERIVED from this entity's own asset coverage and is
+    not the constant the branch's name suggests. A priced sheet is a floor over
+    what was priced, so on an entity holding assets nobody priced the figure
+    bounds the priced portion and not the move — publishing ``ceiling`` there
+    would claim an at-most over holdings this fold never observed, and would
+    contradict the row header, which refuses a ceiling on exactly this conjunct.
 
     ``sheet_state`` and ``ceiling_reason`` are read back off the plane instead of
     carried down from the branch, so the record cannot claim a state the plane
-    would not answer for the same key at the same moment. The reading is derived
-    from the reason for the same purpose one sentence per reason exists at all: a
-    proven-empty $0 ceiling and a priced one are different proofs, and a single
-    sentence would call one of them the other.
+    would not answer for the same key at the same moment.
     """
     records: list[dict[str, Any]] = []
     for entity in sorted(sheet_ceilings):
         usd, reason = P.ceiling_for(value_plane, entity)
+        coverage = _asset_coverage(value_plane, entity)
+        complete = coverage.pop("complete")
         records.append(
             {
                 "entity": entity,
                 "capability": capability,
                 "published_usd": round(per_entity[entity], 2),
                 # What the plane answers now, beside the figure the fold took.
-                # Equal by construction; published so the equality is checkable
-                # rather than asserted in prose.
+                # Equal by construction and RECONCILED before this runs, so an
+                # entry reaching here has been checked rather than asserted.
                 "sheet_usd": (round(usd, 2) if usd is not None else None),
                 "sheet_state": value_plane.sheet_state(entity),
                 "ceiling_reason": reason,
-                "bound_direction": BOUND_DIRECTION_CEILING,
+                "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
+                "bound_direction_basis": _SHEET_CEILING_DIRECTION_BASIS[complete],
+                **coverage,
                 PROVING_EXECUTION_KEY: EX.not_determined(EX.REASON_NOT_PROVEN_BY_A_CALL).as_json(),
-                "reading": _CEILING_SOURCE_READINGS[reason] + _CEILING_CLOSING,
+                "reading": _CEILING_SOURCE_READINGS[(reason, complete)] + _CEILING_CLOSING,
             }
         )
     return records
@@ -2786,11 +2972,13 @@ def _row_value(
     # the call it refused so two instances reaching it report one refusal.
     withheld_composed: dict[tuple[str, str], _WithheldComposition] = {}
     composed_signals: set[tuple[Any, ...]] = set()
-    # The signals whose SHEET CEILING branch fired inside this row. Built on
-    # ``composed_signals``' pattern and kept apart from it: a ceiling and a
-    # composed destination witness answer the same question with different
-    # evidence, and a consumer crediting either has to be able to say which.
-    ceiling_signals: set[tuple[Any, ...]] = set()
+    # The signals whose sheet ceiling is the STANDING figure at each entity,
+    # kept per entity so a figure the MAX later replaces takes its credit with
+    # it. Built on ``composed_signals``' pattern and kept apart from it: a
+    # ceiling and a composed destination witness answer the same question with
+    # different evidence, and a consumer crediting either has to be able to say
+    # which.
+    ceiling_signals_by_entity: dict[str, set[tuple[Any, ...]]] = {}
     hops: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
     census: dict[str, Any] = dict.fromkeys(
@@ -2926,19 +3114,30 @@ def _row_value(
         undetermined.extend(gaps)
         if cap is not None:
             magnitude_caps.append(cap)
-        if CEILING_KIND_SHEET in from_ceilings.values():
-            ceiling_signals.add(_signal_identity(instance.signal))
         for canonical, contribution in contributions.items():
             previous = per_entity.get(canonical)
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
                 ceiling_kinds.pop(canonical, None)
+                # The credit goes with the figure it proved. A ceiling a larger
+                # contribution has just displaced proves nothing the row
+                # publishes, and leaving its signal credited would answer the
+                # magnitude question with a number no carrier in the document
+                # holds.
+                ceiling_signals_by_entity.pop(canonical, None)
                 non_attributed_entities.discard(canonical)
             # The bound travels with the figure that stands, and a tie is
             # settled by the weaker of the two claims: an extraction ceiling
             # equal to a witnessed figure is still only a ceiling.
             if canonical in from_ceilings and contribution >= per_entity[canonical]:
                 ceiling_kinds[canonical] = from_ceilings[canonical]
+                if from_ceilings[canonical] == CEILING_KIND_SHEET:
+                    # Ties are the common case and not an edge: several calls on
+                    # one node read the same sheet and produce the identical
+                    # figure, so each of them proved the number the row
+                    # publishes. Only a ceiling STRICTLY beaten above loses its
+                    # credit.
+                    ceiling_signals_by_entity.setdefault(canonical, set()).add(_signal_identity(instance.signal))
             # Same rule, same direction: an attribution-derived figure tying the
             # standing one revokes the grade, because either candidate may be
             # the number published.
@@ -2947,6 +3146,12 @@ def _row_value(
                     non_attributed_entities.add(canonical)
                 else:
                     non_attributed_entities.discard(canonical)
+
+    # Every ceiling label the row is about to publish, checked against the sheet
+    # it claims to be — per KEY, which is the only level the cap holds at.
+    sheet_ceilings_withheld = _reconcile_sheet_ceilings(ceiling_kinds, per_entity, value_plane)
+    for record in sheet_ceilings_withheld:
+        ceiling_signals_by_entity.pop(record["entity"], None)
 
     # One selection over every instance's candidates, not a running MAX: the
     # figure is the same either way, but the selector, destination function,
@@ -2999,7 +3204,6 @@ def _row_value(
             composition,
             composition_report,
             frozenset(composed_signals),
-            ceiling_signals=frozenset(ceiling_signals),
             withheld_composed_magnitudes=withheld_out,
             refused_composed_magnitudes=refusals_out,
         )
@@ -3040,7 +3244,10 @@ def _row_value(
         frozenset(composed_signals),
         ceiling_entities=frozenset(ceiling_kinds),
         sheet_ceiling_entities=frozenset(k for k, v in ceiling_kinds.items() if v == CEILING_KIND_SHEET),
-        ceiling_signals=frozenset(ceiling_signals),
+        ceiling_signals=frozenset().union(*ceiling_signals_by_entity.values())
+        if ceiling_signals_by_entity
+        else frozenset(),
+        sheet_ceilings_withheld=sheet_ceilings_withheld,
         non_attributed_entities=frozenset(non_attributed_entities),
         withheld_composed_magnitudes=withheld_out,
         refused_composed_magnitudes=refusals_out,
@@ -4063,10 +4270,12 @@ def _instance_contributions(
         # A tie between a ceiling and a witnessed figure publishes the ceiling's
         # bound: the weaker claim is the one both candidates support. The guard
         # is WIDENED past the composed branch rather than satisfied by having the
-        # sheet branch claim ``from_composed``: that flag is a truthful "this
-        # figure came from a ``_ComposedMagnitude``" and is read again downstream
-        # for the accounting, so borrowing it to get onto this axis would put a
-        # sheet ceiling into the composed population everywhere it is counted.
+        # sheet branch claim ``from_composed``. That flag answers one question —
+        # did this figure come from a ``_ComposedMagnitude`` — and it is what
+        # separates the two kinds one line below, which is what keeps a sheet
+        # ceiling out of the composed population on the published row and out of
+        # the exposure skip's complement. Setting it true here would collapse
+        # both of those into the composed answer.
         kind = _ceiling_kind(from_composed, state)
         if kind is not None and contribution >= per_key[canonical]:
             ceilings[canonical] = kind
@@ -4932,14 +5141,9 @@ def _grade(
         # and keeps charging: the two are published apart precisely so this loop
         # can tell them apart.
         sheet_ceilings = set(finding.get("entities_priced_from_a_sheet_ceiling") or [])
+        exclusive_ceilings = set(finding.get("subsumed_exclusive_sheet_ceiling_entities") or [])
         ceilings_excluded: list[str] = []
         for key in charged_entities:
-            if key in sheet_ceilings:
-                # Named, not silently skipped. A row whose every priced entity is
-                # a sheet ceiling publishes exposure_usd null, and a null with no
-                # stated reason is indistinguishable from one nobody could price.
-                ceilings_excluded.append(key)
-                continue
             # The row's OWN per-entity contribution, not its total: charging the
             # row total against each entity would multiply one witnessed
             # magnitude by the number of entities it was spread across.
@@ -4947,10 +5151,37 @@ def _grade(
             # An entity only a subsumed row reaches is charged at THAT row's
             # fraction, never at this one's.
             key_fraction = finding["severity_proven"] * per_entity_weakness.get(key, finding["weakness"])
+            excluded = False
+            if key in sheet_ceilings:
+                # §6.4: this row's own figure here is a proven upper bound on a
+                # move nobody witnessed. It charges nothing — which is not the
+                # same as the entity being unmeasurable, so the fall-through to a
+                # subsumed row's WITNESSED figure below still runs.
+                held = None
+                excluded = True
             if held is None and key in exclusive:
-                held = exclusive[key]["usd"]
-                key_fraction = exclusive[key]["fraction"]
+                if key in exclusive_ceilings:
+                    # The exclusive figure is itself a sheet ceiling, published by
+                    # a subsumed row. The skip is about the FIGURE, so it applies
+                    # wherever the figure came from: the top row's ceiling list
+                    # does not name this key, and reading only that list is how a
+                    # ceiling charges a budget its own row's copy is exempt from.
+                    excluded = True
+                else:
+                    held = exclusive[key]["usd"]
+                    key_fraction = exclusive[key]["fraction"]
+                    # A real measurement is charged after all. The row's own
+                    # ceiling here was skipped and nothing was lost by it, so
+                    # there is nothing to disclose as excluded at this key.
+                    excluded = False
             if held is None:
+                if excluded:
+                    # Named, not silently skipped. A row whose every priced entity
+                    # is a sheet ceiling publishes exposure_usd null, and a null
+                    # with no stated reason is indistinguishable from one nobody
+                    # could price.
+                    ceilings_excluded.append(key)
+                    continue
                 # An unpriced entity contributes nothing AND is disclosed. Reading
                 # it as $0.00 publishes "this capability exposes nothing" out of a
                 # price lookup that never answered.
@@ -4989,10 +5220,16 @@ def _grade(
                     }
                 )
                 mine += take * held
+        # The keys a ceiling left contributing nothing are not "charged", and the
+        # set is the loop's own answer rather than the two ceiling lists re-read:
+        # a key whose ceiling was skipped and whose witnessed exclusive figure
+        # was then charged belongs here, and no re-derivation off the lists can
+        # tell that case from a key that charged nothing.
+        ceiling_only = set(ceilings_excluded)
         finding["exposure_entities_charged"] = sorted(
             key
             for key in charged_entities
-            if key not in sheet_ceilings and (finding["value_by_entity"].get(key) is not None or key in exclusive)
+            if key not in ceiling_only and (finding["value_by_entity"].get(key) is not None or key in exclusive)
         )
         if measured_entities:
             any_priced = True

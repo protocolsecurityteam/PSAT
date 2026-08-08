@@ -5971,7 +5971,18 @@ def test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet(f
     assert entry["published_usd"] == entry["sheet_usd"] == 5_000_000.0
     assert entry["sheet_state"] == P.SHEET_PRICED
     assert entry["ceiling_reason"] == P.CEILING_ADMITTED
+    # The full-coverage carrier of the per-entity direction, which the reference
+    # corpus has none of: every asset observed here was priced, so the figure
+    # bounds the move from above and the entry says so. The observations it
+    # stands on are published beside it — a reading naming evidence the document
+    # does not carry is the defect the execution block exists on the far side of.
     assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert entry["assets_observed"] == entry["assets_priced"] == 1
+    assert entry["assets_not_priced"] == []
+    assert entry["unpriced_positions"] == 0
+    assert entry["per_asset"] == [{"asset": "usdc", "usd": 5_000_000.0, "state": P.ASSET_PRICED}]
+    assert "every asset observed at this entity was priced" in entry["bound_direction_basis"]
+    assert finding["reach_sheet_ceiling_magnitudes_withheld"] == []
     # The #170 answer. A sheet ceiling is proven by a BALANCE OBSERVATION, so
     # there is no execution to name — and the reason saying so must never be a
     # fault, which would qualify the whole document off an intact proof.
@@ -6131,7 +6142,12 @@ def test_cc4_a_proven_empty_sheet_is_a_zero_ceiling_not_a_missing_one(fold):
     # Its own sentence. A proven zero described with the priced sheet's sentence
     # would call an earned negative an observation of holdings.
     assert "PROVEN ZERO" in entry["reading"]
-    assert entry["reading"] != FOLD._CEILING_SOURCE_READINGS[P.CEILING_ADMITTED] + FOLD._CEILING_CLOSING
+    assert entry["reading"] != FOLD._CEILING_SOURCE_READINGS[(P.CEILING_ADMITTED, True)] + FOLD._CEILING_CLOSING
+    # Every observed asset is a witnessed zero and no position carries an absent
+    # USD column, so this $0 IS an at-most on the move — the one arm where the
+    # coverage conjunct and the earned negative agree.
+    assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert entry["assets_not_priced"] == [] and entry["unpriced_positions"] == 0
 
 
 def test_cc4_a_shared_implementation_earns_no_ceiling(fold):
@@ -6341,3 +6357,144 @@ def test_cc_the_ceiling_reason_vocabulary_is_closed_and_ordered():
     )
     assert P.CEILING_ADMITTING_REASONS == ("admitted", "proven_empty")
     assert set(P.CEILING_ADMITTING_REASONS) < set(P.CEILING_REASONS)
+
+
+def test_cc1_a_partly_priced_sheet_bounds_the_priced_portion_and_not_the_move(fold):
+    """SHEET_PRICED is a FLOOR over what was priced, so the ceiling is conditional.
+
+    An entity with one priced asset and one nobody priced holds MORE than its
+    total, so "at most $X" is false of it — the figure bounds the priced portion
+    and says nothing about the rest. Publishing ``ceiling`` on that entry would
+    claim an at-most over holdings this fold never observed, and would contradict
+    the row header, which refuses a ceiling on exactly this conjunct. Both
+    surfaces read the same predicate so they cannot answer it differently.
+
+    The dollars, the band and the admission are untouched: this is what the row
+    CLAIMS about its figure, not which figure it publishes.
+    """
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
+    )
+    finding = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane))
+    assert finding["value_at_stake_usd"] == 5_000_000.0
+    assert finding["entities_priced_from_a_sheet_ceiling"] == [KEY_C]
+
+    entry = finding["reach_sheet_ceiling_magnitudes"][0]
+    assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert entry["assets_observed"] == 2 and entry["assets_priced"] == 1
+    assert entry["assets_not_priced"] == ["wsteth"]
+    assert {a["asset"]: a["usd"] for a in entry["per_asset"]} == {"usdc": 5_000_000.0, "wsteth": None}
+    assert "DO NOT bound the move" in entry["reading"]
+    assert "AT-MOST" not in entry["reading"].split(". Whatever it bounds")[0]
+    # The row header refuses on the same fact, from the same predicate.
+    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # A below-resolution reading is the same shortfall as an unpriced one: a
+    # holding of at most half a cent the total does not carry.
+    dust = value_plane(
+        {KEY_C: {"usdc": 5_000_000.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "weth": P.ASSET_BELOW_RESOLUTION}},
+    )
+    dusty = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=dust))
+    assert dusty["reach_sheet_ceiling_magnitudes"][0]["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # And an unpriced POSITION defeats it with every asset priced: the restaking
+    # plane has no USD column at all, so a position there is unpriced by
+    # construction and the sheet does not cover the entity either.
+    positions = value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
+    positions.unpriced_positions = {KEY_C: [{"asset": "eigenlayer_beacon_shares_wei", "quantity_wei": 3e19}]}
+    with_positions = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=positions))
+    held = with_positions["reach_sheet_ceiling_magnitudes"][0]
+    assert held["unpriced_positions"] == 1
+    assert held["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+
+
+def test_cc7_a_subsumed_rows_sheet_ceiling_leaks_into_the_budget_in_neither_direction(fold):
+    """The subsumption path, both leaks, on ONE principal unit.
+
+    Subsumption keeps a unit's top row and folds the rest away, but value only a
+    subsumed row reaches still charges the top row's exposure. Two things go
+    wrong there once a sheet ceiling exists, and they go wrong in opposite
+    directions.
+
+    IN: a subsumed row's ceiling at an entity the top row does not price is
+    exclusive value, and the exposure skip reads the TOP row's ceiling list —
+    which does not name it. The ceiling would charge a budget its own row's copy
+    is exempt from.
+
+    OUT: the top row's ceiling at an entity makes the occupancy test treat that
+    key as taken, so a subsumed row's genuinely WITNESSED value there is
+    discarded — and the top row charges nothing for it either, so measured
+    dollars leave the accounting altogether.
+    """
+    # Top row: upgrade.implementation at C, ceilinged at C's own sheet.
+    top = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    # Subsumed, same unit: a witnessed figure at the entity the top row ceilings
+    # (the OUT leak), and a ceiling of its own at an entity the top row does not
+    # reach (the IN leak).
+    witnessed_at_c = sig(
+        claim_id="authority.replace",
+        function_name="setAuthority",
+        selector="0x11112222",
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(400_000.0),
+        **proven(0.5),
+        **reaches(KEY_C),
+    )
+    ceiling_at_v = sig(
+        claim_id="exec.arbitrary",
+        function_name="execute",
+        selector="0x33334444",
+        deployment_address=VAULT,
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(0.4),
+        **reaches(KEY_V),
+    )
+    document = fold(
+        [top, witnessed_at_c, ceiling_at_v],
+        principals={1: facts(1, EOA, "eoa")},
+        value=value_plane({KEY_C: {"usdc": 5_000_000.0}, KEY_V: {"usdc": 900_000.0}}),
+    )
+    finding = _cc_row(document)
+    assert finding["capability"] == "upgrade.implementation"
+    assert [r["capability"] for r in finding["subsumed_capabilities"]] == ["authority.replace", "exec.arbitrary"]
+
+    exclusive = finding["subsumed_exclusive_value_by_entity"]
+    # OUT: the top row prices C from a ceiling and charges nothing there, so the
+    # key is NOT occupied and the subsumed row's witnessed $400k survives.
+    assert KEY_C in exclusive and exclusive[KEY_C]["usd"] == 400_000.0
+    # IN: the vault arrives as exclusive value AND is named as a ceiling, so the
+    # exposure loop can tell it apart from the witnessed figure beside it.
+    assert KEY_V in exclusive
+    assert finding["subsumed_exclusive_sheet_ceiling_entities"] == [KEY_V]
+
+    # The budget charges the witnessed dollars and only those.
+    assert finding["exposure_usd"] == pytest.approx(400_000.0 * exclusive[KEY_C]["fraction"])
+    assert finding["exposure_entities_charged"] == [KEY_C]
+    gap = next(
+        g
+        for g in document.provenance["exposure_gaps"]
+        if (g["principal_unit"], g["capability"]) == (finding["principal_unit"], "upgrade.implementation")
+    )
+    # Only the vault. The top row's ceiling at C was skipped and the subsumed
+    # row's witnessed figure charged in its place, so nothing at C was lost to a
+    # ceiling and nothing is disclosed as excluded there.
+    assert gap["ceiling_entities_excluded_from_exposure"] == [KEY_V]
+    assert gap["budget_exhausted_entities"] == [] and gap["budget_partially_exhausted_entities"] == []

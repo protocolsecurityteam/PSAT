@@ -169,10 +169,12 @@ _REASON_READINGS = {
     ),
     REASON_NOT_PROVEN_BY_A_CALL: (
         "no call proved this figure and none was looked for: the witness is a BALANCE OBSERVATION "
-        "of the entity's own sheet, and what it bounds is what replacing that entity's code can "
-        "move. There is no probe here whose transcript could be read, so this absence is the shape "
-        "of the proof and not a gap in it — the observations themselves are published beside the "
-        "figure, and the claim they support is an upper bound and never an amount"
+        "of the entity's own sheet, read at the entity and not at a call. There is no probe here "
+        "whose transcript could be read, so this absence is the shape of the proof and not a gap "
+        "in it. What stands in for a transcript is published beside the figure — the per-asset "
+        "dollars at the canonical key, and the assets observed there that nobody priced — and "
+        "that is the whole of it: the caller, the block and the observing account are reduced away "
+        "when the sheet is loaded, so none of them is claimed here"
     ),
 }
 
