@@ -1605,7 +1605,12 @@ class ContractBalanceFetch(Base):
     # read this column would see no typed receipt, believe the set complete, and
     # publish the earned negative the earlier scan refused. NULL = no sweep has
     # answered for this contract; ``[]`` = a scan answered and found none.
-    typed_assets: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ``none_as_null`` is load-bearing, not style: without it SQLAlchemy stores a
+    # Python ``None`` as the JSON scalar ``null``, which is a THIRD shape beside
+    # SQL NULL and ``[]`` — and every reader here keys on "NULL means no scan has
+    # answered". The CHECK below refuses that shape outright, so the distinction
+    # the code leans on is enforced rather than hoped for.
+    typed_assets: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # The FIRST block of the union of every scan that produced the current asset
     # set — not this cycle's window start. The basis string publishes the extent
     # of the claim, and an incremental cycle whose window is 63 blocks wide still
@@ -1637,6 +1642,13 @@ class ContractBalanceFetch(Base):
         CheckConstraint(
             f"swept_through_block IS NULL OR sweep_status = '{SWEEP_STATUS_COMPLETED}'",
             name="ck_cbf_swept_block_requires_completed_sweep",
+        ),
+        # NULL means "no scan has answered"; ``[]`` means "a scan answered and
+        # found none". A scalar or an object would be neither, and every reader
+        # of this column depends on that distinction being real.
+        CheckConstraint(
+            "typed_assets IS NULL OR jsonb_typeof(typed_assets) = 'array'",
+            name="ck_cbf_typed_assets_is_array",
         ),
     )
 

@@ -259,7 +259,7 @@ def sweep_from_block(session: Session, *, contract_id: int) -> int:
     cannot show what it saw, so the scan is redone from the beginning instead.
     """
     current = _current_asset_fetch(session, contract_id=contract_id)
-    if current is not None and current.swept_through_block is not None and current.typed_assets is None:
+    if current is not None and current.swept_through_block is not None and not _typed_record_is_readable(current):
         return 0
     through = session.execute(
         select(func.max(ContractBalanceFetch.swept_through_block)).where(
@@ -305,10 +305,29 @@ def known_typed_assets(session: Session, *, contract_id: int) -> tuple[str, ...]
     lasted exactly one cycle and the next one published the empty sheet.
     """
     fetch = _current_asset_fetch(session, contract_id=contract_id)
-    entries = (fetch.typed_assets if fetch is not None else None) or []
+    if fetch is None or not _typed_record_is_readable(fetch):
+        return ()
     return tuple(
-        sorted({str(entry["address"]).lower() for entry in entries if isinstance(entry, dict) and entry.get("address")})
+        sorted(
+            {str(entry["address"]).lower() for entry in (fetch.typed_assets or []) if entry.get("address")}  # type: ignore[union-attr]
+        )
     )
+
+
+def _typed_record_is_readable(fetch: ContractBalanceFetch) -> bool:
+    """Whether this fetch's typed-receipt record can be read as one.
+
+    A missing record and an unreadable one are the same thing to every caller
+    here: no statement about typed receipts survives from that scan, so the scan
+    is redone rather than its conclusions inherited. Silently degrading a
+    malformed blob to "no typed receipts" would resurrect exactly the bug this
+    column closes — a completeness claim published because the evidence against
+    it could not be read.
+    """
+    entries = fetch.typed_assets
+    if entries is None or not isinstance(entries, list):
+        return False
+    return all(isinstance(entry, dict) and entry.get("address") for entry in entries)
 
 
 def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
@@ -316,7 +335,7 @@ def scanned_from_block(session: Session, *, contract_id: int) -> int | None:
     fetch = _current_asset_fetch(session, contract_id=contract_id)
     if fetch is None:
         return None
-    if fetch.typed_assets is None and fetch.swept_through_block is not None:
+    if fetch.swept_through_block is not None and not _typed_record_is_readable(fetch):
         # Same rule as :func:`sweep_from_block`: a scan that kept no typed-receipt
         # record is being redone, so the union extent restarts with it.
         return None
@@ -339,6 +358,23 @@ def _current_asset_fetch(session: Session, *, contract_id: int) -> ContractBalan
         )
         .scalars()
         .first()
+    )
+
+
+def _has_scan_record(session: Session, *, contract_id: int) -> bool:
+    """Whether any fetch for this contract carries a completed scan."""
+    return (
+        session.execute(
+            select(ContractBalanceFetch.id)
+            .where(
+                ContractBalanceFetch.contract_id == contract_id,
+                ContractBalanceFetch.swept_through_block.is_not(None),
+            )
+            .limit(1)
+        )
+        .scalars()
+        .first()
+        is not None
     )
 
 
@@ -564,6 +600,22 @@ def record_observation(
                 f"{basis}; chain sweep ABORTED, asset set NOT proven complete: "
                 f"{sweep.failure_reason or 'no reason recorded'}"
             )
+            if _has_scan_record(session, contract_id=contract.id):
+                # A scan already established this contract's asset set, and this
+                # cycle's scan aborted. The Etherscan page is not a replacement
+                # for it: it is the answer whose incompleteness triggered the
+                # escalation in the first place. Recorded as a FAILED asset class
+                # so the earlier, better-evidenced fetch keeps winning the view —
+                # otherwise this row becomes current and takes the whole record
+                # with it: the sweep-discovered holdings withdraw (a fetch's rows
+                # are its set, wholesale), the typed evidence behind a withheld
+                # completeness disappears, and the cursor is inherited by a fetch
+                # that scanned nothing.
+                asset_set_status = ASSET_SET_STATUS_FETCH_FAILED
+                basis = (
+                    f"{basis}; the asset class is recorded as FAILED because a previous scan "
+                    f"had established this set and this cycle could not"
+                )
 
     if cost_note and sweep is not None:
         basis = f"{basis}; {cost_note}"

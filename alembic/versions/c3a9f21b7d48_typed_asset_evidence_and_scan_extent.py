@@ -41,6 +41,15 @@ def upgrade() -> None:
         sa.Column("typed_assets", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     )
     op.add_column("contract_balance_fetches", sa.Column("swept_from_block", sa.BigInteger(), nullable=True))
+    # The whole column turns on NULL meaning "no scan has answered" and ``[]``
+    # meaning "a scan answered and found none". A scalar or an object in there
+    # would be neither, and the readers would have to guess which — so the shape
+    # is enforced rather than assumed.
+    op.create_check_constraint(
+        "ck_cbf_typed_assets_is_array",
+        "contract_balance_fetches",
+        "typed_assets IS NULL OR jsonb_typeof(typed_assets) = 'array'",
+    )
     # No backfill. A row written before this column existed carries no statement
     # about typed receipts, and NULL is that third state — writing ``[]`` would
     # assert a scan found none, which is exactly the false completeness this
@@ -48,5 +57,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_constraint("ck_cbf_typed_assets_is_array", "contract_balance_fetches", type_="check")
     op.drop_column("contract_balance_fetches", "swept_from_block")
     op.drop_column("contract_balance_fetches", "typed_assets")

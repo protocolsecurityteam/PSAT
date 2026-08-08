@@ -32,6 +32,7 @@ from services.monitoring.balance_observation import (
     SWEEP_FAILURE_RUN,
     NativeReading,
     escalation_reason,
+    known_swept_assets,
     known_typed_assets,
     observation_contract,
     record_observation,
@@ -375,7 +376,12 @@ class TestSweepDiscovery:
             rpc_url="http://rpc.invalid",
             chain_id=1,
             from_block_by_address={HOLDER: 100},
-            known_assets_by_address={HOLDER: (TOKEN,)},
+            # THE OVERLAPPING SHAPE THE CORPUS PRODUCES. A typed asset with a
+            # readable count is stored as a row, and the stored-row reader behind
+            # ``known_assets`` cannot tell a count row from a quantity row — so
+            # the NFT appears in BOTH carried lists. Passing disjoint lists here
+            # would test a shape the producer never hands over.
+            known_assets_by_address={HOLDER: (TOKEN, NFT)},
             known_typed_by_address={HOLDER: (NFT,)},
             union_from_by_address={HOLDER: 0},
             cost=SweepCost(),
@@ -384,9 +390,10 @@ class TestSweepDiscovery:
         outcome = outcomes[HOLDER]
         assert outcome.status == SWEEP_COMPLETED
         assert cost.get_logs == 0
+        # The NFT must NOT come back as a fungible asset: its decimals() reverts,
+        # and an erc20-kinded row would then store an item count at 18 decimals.
         assert [(a.token_address, a.raw_balance) for a in outcome.assets] == [(TOKEN, 3)]
-        # ...and the typed receipt survives, so the completeness refusal does too.
-        assert [(a.token_address, a.raw_balance) for a in outcome.typed_assets] == [(NFT, None)]
+        assert [(a.token_address, a.kind) for a in outcome.typed_assets] == [(NFT, "typed")]
         assert outcome.swept_from_block == 0
 
     def test_the_basis_names_the_union_extent_not_the_incremental_window(self, monkeypatch):
@@ -538,6 +545,91 @@ class TestEscalationAndRecording:
         assert sweep_from_block(db_session, contract_id=contract.id) == 0
         assert scanned_from_block(db_session, contract_id=contract.id) is None
 
+    def test_an_abort_after_a_completed_scan_never_becomes_the_current_answer(self, db_session):
+        """The budget is DESIGNED to abort, so this path has to hold.
+
+        An aborted cycle's Etherscan page is not a replacement for a scan that
+        already established the set — it is the answer whose incompleteness
+        triggered the escalation. Letting it become current would withdraw the
+        sweep-discovered holdings (a fetch's rows are its set, wholesale), drop
+        the typed evidence behind a withheld completeness, and hand the cursor to
+        a fetch that scanned nothing.
+        """
+        from services.monitoring.asset_sweep import SweepOutcome
+
+        _proto, contract = self._fixture(db_session, address="0x" + "d1" * 20)
+        first = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_COMPLETED,
+                swept_from_block=0,
+                swept_through_block=1234,
+                assets=(SweptAsset(token_address=TOKEN, raw_balance=5, decimals=6, kind="erc20"),),
+                typed_assets=(SweptAsset(token_address=NFT, raw_balance=None, decimals=None, kind="typed"),),
+                basis="scan",
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+        db_session.flush()
+        assert first.asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
+
+        aborted = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=self._native(),
+            page=page([]),
+            writer=BALANCE_WRITER_TVL,
+            sweep=SweepOutcome(
+                address=contract.address,
+                status=SWEEP_FAILED,
+                swept_from_block=1235,
+                swept_through_block=None,
+                failure_reason="sweep request budget of 1500 reached",
+            ),
+            escalation=ESCALATE_RETURNED_EMPTY,
+        )
+        db_session.flush()
+        assert aborted.asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
+        assert aborted.fetch.sweep_status == SWEEP_STATUS_FAILED
+        assert "could not" in (aborted.fetch.asset_set_basis or "")
+        # The earlier fetch is still the record: its rows still publish, its typed
+        # evidence still refuses completeness, and its cursor is still the cursor.
+        assert known_swept_assets(db_session, contract_id=contract.id) == (TOKEN,)
+        assert known_typed_assets(db_session, contract_id=contract.id) == (NFT,)
+        assert scanned_from_block(db_session, contract_id=contract.id) == 0
+        assert sweep_from_block(db_session, contract_id=contract.id) == 1235
+
+    def test_a_malformed_typed_record_is_distrusted_not_read_as_none(self, db_session):
+        # Degrading an unreadable record to "no typed receipts" would republish a
+        # completeness claim because the evidence AGAINST it could not be read.
+        _proto, contract = self._fixture(db_session, address="0x" + "d2" * 20)
+        db_session.add(
+            ContractBalanceFetch(
+                contract_id=contract.id,
+                chain_id=1,
+                observed_address=contract.address,
+                native_status="not_determined",
+                asset_set_status=ASSET_SET_STATUS_RETURNED_EMPTY,
+                asset_set_source=ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+                sweep_status=SWEEP_STATUS_COMPLETED,
+                swept_through_block=1234,
+                swept_from_block=0,
+                typed_assets=[{"kind": "typed"}],  # no address: not readable as a record
+                writer=BALANCE_WRITER_TVL,
+            )
+        )
+        db_session.flush()
+        assert known_typed_assets(db_session, contract_id=contract.id) == ()
+        assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        assert scanned_from_block(db_session, contract_id=contract.id) is None
+
     def test_a_failed_sweep_publishes_no_completeness_and_no_cursor(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome
 
@@ -568,6 +660,10 @@ class TestEscalationAndRecording:
         assert recorded.fetch.swept_through_block is None
         assert "ABORTED" in (recorded.fetch.asset_set_basis or "")
         assert sweep_from_block(db_session, contract_id=contract.id) == 0
+        # With NO prior scan on record there is nothing to protect, so the
+        # Etherscan answer stands as the asset class's answer. The sibling arm
+        # above covers the case where a scan HAS established the set.
+        assert recorded.asset_set_status != ASSET_SET_STATUS_FETCH_FAILED
 
     def test_a_typed_receipt_with_no_readable_holding_refuses_the_empty(self, db_session):
         from services.monitoring.asset_sweep import SweepOutcome

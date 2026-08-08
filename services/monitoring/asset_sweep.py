@@ -516,9 +516,19 @@ def _read_carried_set(
     head: int,
     cost: SweepCost,
 ) -> SweepOutcome:
-    """Re-read a holder's already-discovered set when no window has to be scanned."""
+    """Re-read a holder's already-discovered set when no window has to be scanned.
+
+    The typed set is subtracted from the fungible one FIRST, exactly as the
+    windowed path does. The two carried lists overlap by construction — a typed
+    asset with a readable count is stored as a row, and the stored-row reader
+    that supplies ``known_assets`` cannot tell a count row from a quantity row —
+    so partitioning ``known_assets`` on its own would re-emit an ERC-721 as
+    ``erc20``, and its reverting ``decimals()`` would then present a count as an
+    18-decimal quantity.
+    """
+    fungible = tuple(t for t in known_assets if t not in set(known_typed))
     balances, balance_failed = read_balances(
-        address, list(known_assets), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
+        address, list(fungible), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
     )
     typed_balances, typed_failed = read_balances(
         address, list(known_typed), rpc_url=rpc_url, chain_id=chain_id, block=head, cost=cost
@@ -531,8 +541,8 @@ def _read_carried_set(
             swept_through_block=None,
             failure_reason="balanceOf batch did not answer; no holdings were read",
         )
-    unreadable = [t for t in known_assets if t not in balances]
-    readable = [t for t in known_assets if t in balances]
+    unreadable = [t for t in fungible if t not in balances]
+    readable = [t for t in fungible if t in balances]
     return SweepOutcome(
         address=address,
         status=SWEEP_COMPLETED,
