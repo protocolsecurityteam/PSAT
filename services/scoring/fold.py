@@ -35,7 +35,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,9 @@ from utils.scoring_status import (
     VALUE_STATE_PROVEN_NO_REACH,
     VALUE_STATE_PROVEN_REACH,
 )
+
+if TYPE_CHECKING:
+    from services.scoring.distill import ProtocolUniverse
 
 ANYONE = "anyone"
 
@@ -343,6 +346,25 @@ _COMPOSED_SOURCE_READINGS = {
     ),
 }
 
+# The token a figure carries where a sheet EXISTS, is determined, and still may
+# not bound a witness. One token, used at both trim sites and published on both
+# surfaces, so the two cannot drift into describing the same fact differently.
+SHEET_BOUND_REFUSED_BY_DISPOSITION = "sheet_determined_by_disposition_does_not_bound"
+
+# And what that token means, in the one sentence both surfaces publish. It says
+# what the sheet DOES determine as well as what it does not, because the
+# alternative reading — "the sheet is not determined" — is false here and is the
+# word a reader would otherwise act on.
+_DISPOSED_SHEET_DOES_NOT_BOUND = (
+    "a witnessed magnitude charged against an entity whose sheet IS determined, at $0, by "
+    "delivery-shape disposition: every reading on it arrived only in transactions distributing "
+    "the same token to at least the published fan-out threshold. That determination is over the "
+    "readings observed, on an asset list that is NOT proven whole, and it is a claim about how "
+    "the holdings arrived and never about what they are worth — two of the tokens measured into "
+    "that state on this corpus are real ones. So the $0 bounds what the entity HOLDS and not "
+    "what is there to MOVE, the sheet does not trim this figure, and the witness stands alone"
+)
+
 # --- the two ceilings, kept apart ------------------------------------------
 # A row's figure can be an upper bound for two unrelated reasons, and the
 # document may not spell them the same. The COMPOSED extraction ceiling is a
@@ -378,7 +400,7 @@ CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILI
 # ``_ComposedMagnitude.bounded_by`` and a sheet ceiling constructs no
 # ``_ComposedMagnitude``, so an entry there is one nothing can carry.
 #
-# FOUR entries, and the second axis is the one that was got wrong first. The two
+# The second axis is the one that was got wrong first. The three
 # ADMITS are different proofs — a priced sheet bounds at a number that was
 # observed, a proven-empty one bounds at zero because every quantity on it was
 # witnessed zero — and a single sentence would have to call one of them the
@@ -391,6 +413,14 @@ CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILI
 # priced — while the PROVEN-EMPTY ones take the full-coverage arm, which is the
 # only shape in which coverage is trivially whole: a sheet whose every quantity
 # is witnessed zero has nothing left over to be uncovered.
+#
+# The AIRDROP-DETERMINED admit carries BOTH arms, and its partial one is the
+# COMMON case rather than an unreachable combination. Coverage there is earned,
+# not implied: a disposition says an asset's contribution is nil and says
+# nothing about whether the LIST is whole, so a disposed sheet clears
+# ``_asset_coverage["complete"]`` only where the list is separately proven — and
+# the below-resolution readings that sit beside the disposed ones on this corpus
+# are not disposed and not priced, which is exactly the partial arm.
 _CEILING_SOURCE_READINGS = {
     (P.CEILING_ADMITTED, True): (
         "the dollars are THIS entity's own priced holdings, and every asset observed at it was "
@@ -413,6 +443,22 @@ _CEILING_SOURCE_READINGS = {
         "entity carries a quantity witnessed zero, so replacing its code can move nothing from "
         "it. This is an earned negative — a sheet nobody priced publishes not_determined instead "
         "— and it bands at the floor for the same reason any small figure does"
+    ),
+    (P.CEILING_AIRDROP_DETERMINED, True): (
+        "the ceiling is a DETERMINED ZERO of a different kind: every asset observed at this "
+        "entity either carries a quantity witnessed zero or arrived ONLY in transactions "
+        "distributing the same token to at least the published fan-out threshold, so this "
+        "sheet's determined content is nil and replacing the node's code moves nothing the "
+        "document can price. The claim is DELIVERY SHAPE and never worth — real tokens have "
+        "been measured arriving this way — and the asset list it covers is the one the index "
+        "returned, refused only where that list was read AT the page cap"
+    ),
+    (P.CEILING_AIRDROP_DETERMINED, False): (
+        "the ceiling is a determined zero over the assets this entity's dispositions and "
+        "witnessed zeros cover, and the coverage is NOT whole: the assets under "
+        "assets_not_priced were observed here and are neither priced nor disposed, so what "
+        "they add is not_determined and this figure bounds only the covered portion. The "
+        "disposed part of that portion is a DELIVERY-SHAPE claim and never a claim about worth"
     ),
     # ``(PROVEN_EMPTY, False)`` is ABSENT, and its absence is a rule rather than
     # an omission. It described a proven-empty priced sheet at a node the
@@ -510,6 +556,12 @@ class _ComposedMagnitude:
     # claiming nothing about the call — which is the state every entry is in
     # today and precisely what this field exists to make visible.
     execution: EX.ProvingExecution
+    # Why the destination's sheet did not bound this figure, where a sheet
+    # EXISTS and is determined and still may not trim. ``None`` on every other
+    # entry, including the ones with no sheet at all: "there is no number here"
+    # and "there is a number and it does not answer this question" are different
+    # facts, and ``sheet_not_determined`` may only ever spell the first.
+    sheet_bound_refused: str | None = None
     tied_with: tuple[_ComposedMagnitude, ...] = ()
     # Which arm of the composition rule this entry took, and the two witnesses
     # the arm was taken from. All three are set by :func:`_admit_composed` after
@@ -733,7 +785,11 @@ class _ComposedMagnitude:
             # flow_out_witness.state, which says whether the destination's own
             # dollar figure for one call is exact or a priced floor.
             "bounded_by": self.bounded_by,
-            "sheet_not_determined": self.sheet_usd is None,
+            # STRICTLY "no number was available". A sheet that carries a number
+            # and is barred from trimming publishes its bar under its own key
+            # below, so this one never has to stand for two facts.
+            "sheet_not_determined": self.sheet_usd is None and self.sheet_bound_refused is None,
+            "sheet_bound_refused": self.sheet_bound_refused,
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
             "destination_predicates": self._predicates_json(),
@@ -741,7 +797,9 @@ class _ComposedMagnitude:
             # here", which is a different fact from a field nobody filled in.
             "composed_selector_tie": self._tie_json(),
             "reading": (
-                _COMPOSED_SOURCE_READINGS[self.bounded_by] + ". "
+                _COMPOSED_SOURCE_READINGS[self.bounded_by]
+                + (f". {_DISPOSED_SHEET_DOES_NOT_BOUND}" if self.sheet_bound_refused else "")
+                + ". "
                 "Every hop from the seized node to it carries "
                 "its own act-as witness, in one of two admissible shapes named per step under "
                 "witness_kind: "
@@ -991,6 +1049,7 @@ def compute_protocol_score(
     trigger: str = SCORE_TRIGGER_MANUAL,
     trigger_job_id: Any | None = None,
     computed_at: datetime | None = None,
+    universe: ProtocolUniverse | None = None,
 ) -> ScoreDocument:
     """The protocol's score document, folded over its current signal rows.
 
@@ -999,6 +1058,13 @@ def compute_protocol_score(
     population order :func:`order_signals` pins. Left unset — every persisted
     path — the population comes from the one pinned query and from nowhere else,
     so no caller can hand the fold a filtered or re-ordered population.
+
+    ``universe`` is the protocol's discovered address set, built in ``distill``
+    because assembling it reads object storage and this fold may not. UNSET is
+    the fail-closed default and it means no reading is disposed anywhere: the
+    predicate it feeds condemns what is ABSENT from the set, so an absent set
+    would condemn everything. Every hand-built plane in the suite relies on that
+    default, and so does every caller that has no storage to read.
     """
     row_faults: list[dict[str, Any]] = []
     if signals is None:
@@ -1008,7 +1074,7 @@ def compute_protocol_score(
         # score over one bad column.
         signals, row_faults = current_signals_with_faults(session, protocol_id)
 
-    value_plane = P.load_value_plane(session, protocol_id)
+    value_plane = P.load_value_plane(session, protocol_id, universe=universe)
     closure = P.load_control_closure(session, protocol_id)
     conditions = P.load_condition_plane(session, protocol_id)
     conferral = P.load_conferral_plane(session, protocol_id)
@@ -2524,6 +2590,19 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     having nothing to fail on. Nothing here reads a block height or an observed
     account: the plane reduces observations to the latest per (entity, asset) at
     load, so those are gone by the time this runs and are not claimed.
+
+    Two conjuncts of ``complete`` are about the LIST rather than the readings on
+    it, and both are asked because a per-reading answer cannot reach them:
+
+    * a list read AT the endpoint's page cap can never be complete. The stored
+      rows are a prefix of the holdings, so every one of them being answered
+      says nothing about the entries the page never reached.
+    * a DISPOSED reading does not extend coverage over the list. A disposition
+      says one asset's contribution is nil; it does not say the list is whole,
+      and reading it as though it did is how a sheet assembled from a
+      third-party page would come to publish a full-coverage upper bound. So a
+      sheet carrying any disposed asset must have its list separately proven —
+      by the chain's own transfer history — before it clears here.
     """
     values = value_plane.per_asset.get(canonical) or {}
     states = value_plane.per_asset_state.get(canonical) or {}
@@ -2532,6 +2611,10 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     # A key present in ``per_asset`` with no state entry is read as determined,
     # which is what that map means (see ``ValuePlane``'s docstring).
     not_priced = sorted(name for name in names if states.get(name) in _UNPRICED_ASSET_STATES)
+    disposed = sorted(name for name in names if states.get(name) == P.ASSET_AIRDROP_DELIVERED)
+    list_is_whole = not value_plane.asset_set_is_truncated(canonical) and (
+        not disposed or value_plane.asset_set_is_proven_complete(canonical)
+    )
     return {
         "per_asset": [
             {"asset": name, "usd": (round(values[name], 2) if name in values else None), "state": states.get(name)}
@@ -2540,8 +2623,9 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
         "assets_observed": len(names),
         "assets_priced": len(names) - len(not_priced),
         "assets_not_priced": not_priced,
+        "assets_disposed": disposed,
         "unpriced_positions": len(positions),
-        "complete": bool(names) and not not_priced and not positions,
+        "complete": bool(names) and not not_priced and not positions and list_is_whole,
     }
 
 
@@ -4360,7 +4444,18 @@ def _compose(
                         continue
                     census["destination_magnitude_witnessed"] += 1
                     key = value_plane.canonical(hop.destination)
-                    sheet = value_plane.total(key)
+                    sheet = value_plane.trimming_total(key)
+                    # A sheet DETERMINED at $0 by delivery-shape disposition may
+                    # not trim: the disposed assets are still held and delivery
+                    # shape is not a claim about worth, so the sheet bounds what
+                    # the entity holds and not what is there to move. Recorded
+                    # rather than merged into "no sheet" — the entry publishes
+                    # ``sheet_not_determined``, and that word would be false.
+                    refused = (
+                        SHEET_BOUND_REFUSED_BY_DISPOSITION
+                        if sheet is None and value_plane.total(key) is not None
+                        else None
+                    )
                     # R4: the witness bounds the call, the sheet bounds what is
                     # there to move. Neither alone, and never their sum.
                     usd = min(magnitude.usd, sheet) if sheet is not None else magnitude.usd
@@ -4384,6 +4479,7 @@ def _compose(
                             witnessed_usd=magnitude.usd,
                             usd=usd,
                             sheet_usd=sheet,
+                            sheet_bound_refused=refused,
                             chain=chain,
                             predicates=conditions.predicates(hop.destination, licensed.selector),
                             # The destination witness's OWN execution, carried
@@ -4709,9 +4805,21 @@ def _entity_contribution(
             return None, "native_only_flow+absent_native_row(not_determined)", None, False, None
         # Proven, and proven zero carries 0.0 — the pairing is enforced by Tri.
         held: float | None = float(native.value if native.value is not None else 0.0)
+        # A native-only flow is valued against the native holding, which no
+        # delivery-shape disposition touches — native ETH emits no Transfer log
+        # and has no delivery shape to read — so the trimming figure IS the held
+        # one on this arm.
+        trim: float | None = held
         basis = "native_only_flow x native_balance"
     else:
+        # TWO figures, and they answer two questions. ``held`` is what the sheet
+        # DETERMINES the entity holds and is what the fallthrough below reports
+        # on; ``trim`` is what the sheet may BOUND A WITNESS with, which a
+        # disposed sheet's determined $0 may not do (``ValuePlane.trimming_total``
+        # states why). Reading one off the other would either trim a witnessed
+        # magnitude to a false zero or publish a determined sheet as unknown.
         held = value_plane.total(key)
+        trim = value_plane.trimming_total(key)
         basis = "entity_holdings"
 
     magnitude = _witnessed_magnitude(instance)
@@ -4722,14 +4830,37 @@ def _entity_contribution(
             # what is there to move. Neither alone is the answer, and the sheet
             # alone is the balance-sheet-as-a-reach error.
             return (
-                (min(held, magnitude) if held is not None else magnitude),
+                (min(trim, magnitude) if trim is not None else magnitude),
                 f"witnessed_reach(exact) x {basis}",
                 None,
                 False,
                 state,
             )
+        if trim is not None:
+            return min(trim, magnitude), f"witnessed_reach({_state_word(state)}) x {basis}", None, False, state
         if held is not None:
-            return min(held, magnitude), f"witnessed_reach({_state_word(state)}) x {basis}", None, False, state
+            # The sheet IS determined and still may not trim. Its own state says
+            # why: every reading on it arrived as a mass distribution, over an
+            # asset list that is not proven whole, so the $0 bounds what the
+            # entity HOLDS as a determined figure and says nothing about what is
+            # there to MOVE — the disposed assets are still held, and delivery
+            # shape is not a claim about worth. Published under its own token
+            # rather than the not_determined one below, because "the sheet is
+            # not determined" is FALSE here and a reader acts on that word.
+            return (
+                magnitude,
+                f"witnessed_reach({_state_word(state)})+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
+                {
+                    "function": instance.signal.function_name,
+                    "capability": instance.signal.claim_id,
+                    "entity": key,
+                    "witness_state": state,
+                    **_unbounded_figure(state, magnitude),
+                    "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
+                },
+                False,
+                state,
+            )
         # NEITHER a floor NOR an upper bound may be charged against an entity
         # whose priced sheet is not_determined without saying so. The arithmetic
         # is the same on both — nothing was available to bound the figure with —

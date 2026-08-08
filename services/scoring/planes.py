@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Text
 from sqlalchemy import func as sql_func
@@ -32,6 +32,9 @@ from utils.scoring_status import (
     PERIMETER_SETTLED,
     PERIMETER_UNSETTLED,
 )
+
+if TYPE_CHECKING:
+    from services.scoring.distill import ProtocolUniverse
 
 NATIVE_ASSET = "native"
 
@@ -102,6 +105,16 @@ ASSET_PRICED = "priced"
 ASSET_BELOW_RESOLUTION = "priced_below_resolution"
 ASSET_PROVEN_ZERO = "proven_zero"
 ASSET_UNPRICED = "unpriced"
+# Every incoming delivery of this asset to this entity's accounts arrived in a
+# transaction that delivered the same token to at least K recipients. The claim
+# is DELIVERY SHAPE and nothing else — never worth, never "spam", never "scam",
+# never "worthless". Two REAL tokens are in this state on the reference corpus —
+# uniETH, whose one delivery fanned out to 101 recipients, and USDtb, whose one
+# delivery fanned out to 175 — and a third, HEX (199/399/399), carries the same
+# delivery shape and is held out only by the protocol-reference conjunct. Any
+# worth-naming of this state would be a lie about all three; "arrived by mass
+# distribution" is true of every member.
+ASSET_AIRDROP_DELIVERED = "airdrop_delivered"
 
 # --- what a whole balance sheet proves ---------------------------------------
 SHEET_PRICED = "priced"
@@ -109,6 +122,12 @@ SHEET_BELOW_RESOLUTION = "priced_below_resolution"
 SHEET_UNPRICED = "unpriced"
 SHEET_PROVEN_EMPTY = "proven_empty"
 SHEET_NO_ROWS = "no_rows"
+# The sixth state, and DISTINCT from ``proven_empty`` all the way to the
+# consumer: they are different witnesses. Proven-empty says nothing ever arrived
+# (every quantity witnessed zero over a list proven whole); this says what DID
+# arrive arrived as a mass distribution, so the sheet's determined content is
+# nil. Collapsing them would publish one witness under the other's name.
+SHEET_AIRDROP_DETERMINED = "airdrop_determined"
 
 # The states in which a sheet total is NOT a number. Kept apart from each other
 # all the way to the consumer: "every price lookup answered below the column's
@@ -133,6 +152,28 @@ EMPTY_REFUSALS = (
     EMPTY_REFUSED_UNSCANNED_ACCOUNT,
     EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED,
     EMPTY_REFUSED_UNPRICED_POSITIONS,
+)
+
+# --- why a sheet whose every reading is disposed may still not be determined --
+# The disposition claim has its OWN conjuncts and they are NOT proven-empty's,
+# which is why they are named apart rather than reusing the tokens above. The
+# completeness conjunct in particular is a different question: proven-empty
+# needs the asset LIST proven whole, because zeros over a list nobody
+# established say nothing; a disposition says only that the readings that ARE on
+# the sheet contribute nothing, so what it needs is that the list was not
+# observably CUT OFF. Requiring the stronger witness here would refuse every
+# sheet on the reference corpus (the sweep publishes ``returned_assets`` as
+# not_determined by design), so the claim is scoped in the basis instead: the
+# asset set is Etherscan-page-derived and is not proven whole.
+DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED = "typed_receipt_unresolved"
+DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED = "asset_list_truncated"
+DISPOSITION_REFUSED_UNSCANNED_ACCOUNT = "folded_account_never_scanned"
+DISPOSITION_REFUSED_UNPRICED_POSITIONS = "unpriced_positions_at_this_entity"
+DISPOSITION_REFUSALS = (
+    DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED,
+    DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED,
+    DISPOSITION_REFUSED_UNSCANNED_ACCOUNT,
+    DISPOSITION_REFUSED_UNPRICED_POSITIONS,
 )
 
 
@@ -239,6 +280,15 @@ class ValuePlane:
     # named here and aliased nowhere.
     alias_ambiguous: set[str] = field(default_factory=set)
     unpriced_positions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Per (canonical entity, asset), the CARRIER RECORD of the delivery evidence
+    # that disposed that reading — the shape, K, the smallest fan-out measured,
+    # the delivery count, the block range the receipts were read across, the
+    # accounts the evidence was held at, and the carriers' own basis strings.
+    # Everything a narration says about a disposition derives from these fields,
+    # so a published sentence quotes the evidence rather than a claim authored
+    # beside it. Empty unless a universe was supplied to the loader: no universe,
+    # no condemnation.
+    asset_disposition: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
 
@@ -317,8 +367,50 @@ class ValuePlane:
             return EMPTY_REFUSED_UNPRICED_POSITIONS
         return None
 
+    def asset_is_disposed(self, key: str, asset: str) -> bool:
+        """Whether THIS reading's every incoming delivery was a mass distribution.
+
+        Read at the canonical key, like every other sheet question. ``False`` is
+        the absence of the evidence and never a proof that the asset arrived
+        some other way.
+        """
+        return asset in (self.asset_disposition.get(self.canonical(key)) or {})
+
+    def disposition_refusal(self, key: str) -> str | None:
+        """Why this sheet's dispositions may not DETERMINE it, or ``None``.
+
+        The disposition claim's own conjuncts, in the order that names the
+        ACTIONABLE cause rather than the order they nest in:
+
+        * a typed ERC-721/1155 receipt nobody could resolve. A disposition is a
+          fact about fungible deliveries and says nothing about an item the
+          entity may still hold, so a sheet carrying one is not determined at
+          any total.
+        * an asset list read AT the endpoint's page cap. The rows are a PREFIX
+          of the holdings, so disposing every one of them says nothing about the
+          entries the page never reached. This is the D1-parity gate, and it is
+          the only completeness conjunct: the stronger "list proven whole" is
+          not available on this corpus, so the claim is scoped in the basis
+          instead of being refused into silence.
+        * an account of this sheet that no scan reached at its own address — a
+          named, closable gap in a scan that otherwise ran.
+        * the cross-plane one, last: the restaking plane publishes quantities at
+          this node with no USD column, and a determined sheet beside them would
+          contradict a plane already in the same document.
+        """
+        canonical = self.canonical(key)
+        if self.typed_receipts_unresolved.get(canonical):
+            return DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED
+        if canonical in self.asset_set_truncated:
+            return DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED
+        if self.asset_set_accounts_unscanned.get(canonical):
+            return DISPOSITION_REFUSED_UNSCANNED_ACCOUNT
+        if self.unpriced_positions.get(canonical):
+            return DISPOSITION_REFUSED_UNPRICED_POSITIONS
+        return None
+
     def sheet_state(self, key: str) -> str:
-        """What the entity's balance sheet PROVES, in one of five states.
+        """What the entity's balance sheet PROVES, in one of six states.
 
         ``priced`` — at least one determined non-zero reading, so ``total`` is a
         floor over what was priced. ``priced_below_resolution`` — every price
@@ -327,7 +419,17 @@ class ValuePlane:
         ``unpriced`` — rows exist and no lookup answered. ``proven_empty`` — every
         asset's QUANTITY is proven zero AND the asset list those quantities cover
         is proven whole, the only witness under which 0.00 is a number rather
-        than a rounding artefact. ``no_rows`` — nothing observed.
+        than a rounding artefact. ``airdrop_determined`` — every asset left on
+        the sheet either arrived only in mass distributions or is a witnessed
+        zero. ``no_rows`` — nothing observed.
+
+        ``proven_empty`` and ``airdrop_determined`` are DIFFERENT witnesses and
+        never collapse: "nothing ever arrived" is not "what arrived arrived as a
+        mass distribution", and only the first says the accounts are bare. The
+        disposition arm is asked AFTER ``priced_below_resolution`` and
+        ``unpriced``, so a sheet holding junk beside one real unpriced asset
+        stays ``unpriced`` — the disposition covers the readings it names and
+        nothing else.
 
         The empty claim is the only one with a SET conjunct, and it is fail-
         closed: zeros over a list nobody established say nothing about the
@@ -346,6 +448,13 @@ class ValuePlane:
             return SHEET_BELOW_RESOLUTION
         if any(state == ASSET_UNPRICED for state in states.values()):
             return SHEET_UNPRICED
+        if any(state == ASSET_AIRDROP_DELIVERED for state in states.values()) and all(
+            state in (ASSET_AIRDROP_DELIVERED, ASSET_PROVEN_ZERO) for state in states.values()
+        ):
+            # Refused, this sheet publishes ``unpriced``: something WAS observed
+            # here and no number covers it, which is what that state means. The
+            # direction that cannot publish a false determination.
+            return SHEET_AIRDROP_DETERMINED if self.disposition_refusal(canonical) is None else SHEET_UNPRICED
         if values or any(state == ASSET_PROVEN_ZERO for state in states.values()):
             return SHEET_PROVEN_EMPTY if self.proven_empty_refusal(canonical) is None else SHEET_UNPRICED
         if self.typed_receipts_unresolved.get(canonical):
@@ -363,14 +472,44 @@ class ValuePlane:
         apart in ``sheet_state``: an entity whose every row is unpriced, one whose
         every price rounded to the storage floor, and one proven to hold nothing
         are different facts, and only the last may reach a consumer as ``0.0``.
+
+        A sheet whose every reading is disposed answers ``0.0`` too, under its
+        own state and its own witness: the determined content of the sheet is
+        nil. What that number may be USED for is narrower than what a priced
+        total may be used for — see :meth:`trimming_total`.
         """
         state = self.sheet_state(key)
-        if state == SHEET_PROVEN_EMPTY:
+        if state in (SHEET_PROVEN_EMPTY, SHEET_AIRDROP_DETERMINED):
             return 0.0
         if state in SHEET_NOT_DETERMINED:
             return None
         assets = self.per_asset.get(self.canonical(key)) or {}
         return round(sum(sorted(assets.values())), 6)
+
+    def trimming_total(self, key: str) -> float | None:
+        """:meth:`total`, except that a DISPOSED sheet trims nothing.
+
+        The two accessors differ on exactly one state, and the difference is the
+        difference between two questions a sheet is asked.
+
+        ``total`` answers "what does this entity HOLD, as a determined figure" —
+        and on an ``airdrop_determined`` sheet a determined $0 is the honest
+        answer: nothing on it carries a number, and what is on it arrived as a
+        mass distribution.
+
+        A trim site asks something else: "how much is there to MOVE", used to
+        bound a witnessed magnitude from above. The disposed assets are still
+        HELD — a delivery-shape claim says how they arrived and never that they
+        are worth nothing, and two of the tokens measured into this state are
+        real — so trimming a witnessed magnitude to $0 here would publish "this
+        call moves nothing" on the strength of evidence that says no such thing.
+        A determined $0 is a real ceiling on what the sheet HOLDS and is not a
+        witness of what is there to MOVE, so the trim sites get ``None`` and the
+        witness stands alone.
+        """
+        if self.sheet_state(key) == SHEET_AIRDROP_DETERMINED:
+            return None
+        return self.total(key)
 
     @property
     def tracked_total(self) -> float:
@@ -382,17 +521,21 @@ class ValuePlane:
 
 
 # --- the sheet ceiling -------------------------------------------------------
-# The closed vocabulary ``ceiling_for`` answers in. Two of the seven are ADMITS
-# and five are refusals, and the split is not readable from the names —
+# The closed vocabulary ``ceiling_for`` answers in. Three of the eight are
+# ADMITS and five are refusals, and the split is not readable from the names —
 # ``no_rows``, ``below_resolution`` and ``unpriced`` refuse for three different
 # unmeasured reasons and ``asset_list_truncated`` for a fourth, while
-# ``proven_empty`` is an EARNED NEGATIVE that admits a $0 ceiling. Kept as seven
-# tokens rather than a bool plus a note because the refusals are the work list:
-# "no balance was ever observed", "the price lookup never answered" and "the
-# asset list was cut off at the endpoint's page cap" are answered by different
-# pipelines.
+# ``proven_empty`` and ``airdrop_determined`` are EARNED NEGATIVES that admit a
+# $0 ceiling on two different witnesses. Kept as eight tokens rather than a bool
+# plus a note because the refusals are the work list: "no balance was ever
+# observed", "the price lookup never answered" and "the asset list was cut off
+# at the endpoint's page cap" are answered by different pipelines.
 CEILING_ADMITTED = "admitted"
 CEILING_PROVEN_EMPTY = "proven_empty"
+# The third admit. Grouped with the admits below because it produces a figure:
+# the sheet's determined content is nil. Its claim is DELIVERY SHAPE and never
+# worth — see :data:`ASSET_AIRDROP_DELIVERED`.
+CEILING_AIRDROP_DETERMINED = "airdrop_determined"
 CEILING_NO_ROWS = "no_rows"
 CEILING_BELOW_RESOLUTION = "below_resolution"
 CEILING_UNPRICED = "unpriced"
@@ -402,6 +545,7 @@ CEILING_ALIAS_AMBIGUOUS = "alias_ambiguous"
 CEILING_REASONS = (
     CEILING_ADMITTED,
     CEILING_PROVEN_EMPTY,
+    CEILING_AIRDROP_DETERMINED,
     CEILING_NO_ROWS,
     CEILING_BELOW_RESOLUTION,
     CEILING_UNPRICED,
@@ -412,7 +556,7 @@ CEILING_REASONS = (
 # The reasons under which a ceiling WAS established. Named, because a census that
 # counted admits by testing ``reason == "admitted"`` would drop every proven-zero
 # ceiling into the refusals and report an under-claim as a coverage gap.
-CEILING_ADMITTING_REASONS = (CEILING_ADMITTED, CEILING_PROVEN_EMPTY)
+CEILING_ADMITTING_REASONS = (CEILING_ADMITTED, CEILING_PROVEN_EMPTY, CEILING_AIRDROP_DETERMINED)
 
 # The three sheet states that are not a number, each under its own token. A
 # ``.get`` with a default would let a sixth sheet state refuse under a reason
@@ -478,6 +622,12 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
         # witness here is the state — every quantity proven zero — and the
         # figure it implies is $0 whatever the sum of an empty sheet computes to.
         return 0.0, CEILING_PROVEN_EMPTY
+    if state == SHEET_AIRDROP_DETERMINED:
+        # A literal for the same reason the branch above is one: the witness is
+        # the state — every reading on the sheet arrived as a mass distribution,
+        # or is a proven zero — and the figure it implies is $0 whatever the sum
+        # of a sheet with no determined readings computes to.
+        return 0.0, CEILING_AIRDROP_DETERMINED
     refusal = _CEILING_REFUSALS.get(state)
     if refusal is None:
         raise ValueError(f"sheet state {state!r} has no registered ceiling reason")
@@ -677,9 +827,128 @@ def _alias_fixed_point(alias: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
+# The states a reading may be disposed OUT OF. Pricing-agnostic per the ruling —
+# delivery shape is a pricing-independent fact and dust airdrops land in
+# ``priced_below_resolution`` — but a PRICED reading is never disposed: a number
+# was determined for it, and disposing it would delete a measured dollar from
+# the document on evidence about how the token arrived.
+_DISPOSABLE_ASSET_STATES = (ASSET_UNPRICED, ASSET_BELOW_RESOLUTION)
+
+
+def _resolve_asset_disposition(
+    session: Session,
+    plane: ValuePlane,
+    accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]],
+    universe: ProtocolUniverse | None,
+) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, int]]:
+    """Which (entity, asset) readings arrived only as mass distributions.
+
+    Five conjuncts, every one of them fail-closed:
+
+    1. A UNIVERSE was supplied. No universe, no condemnation — an unset argument
+       means the caller could not build the protocol's address set (object
+       storage refused, or the fold was handed a plane by hand), and a predicate
+       that condemns everything absent from an empty set condemns everything.
+    2. The asset is not the native coin. Native ETH has no ``Transfer`` log to
+       have a delivery shape, so there is no evidence to read.
+    3. The reading's reduced state is unpriced or below-resolution. A PRICED
+       reading is never disposed.
+    4. P4 — the token address is absent from the protocol's discovered universe,
+       tested CHAIN-BLIND. Chain scoping is banned here and the ban is measured,
+       not stylistic: on this corpus a chain-scoped P4 falsely condemns
+       $3,272,829.37 of real holdings ($2,203,581.37 on optimism, whose contracts
+       carry no dependency, control-graph or signal rows at all, and $1,069,248.00
+       on base) and buys nothing on base's unpriced population. Absence of chain
+       attribution is not proof of absence from a chain — 5.28% of the universe
+       has no chain column at all — so an address discovered anywhere admits
+       everywhere, and chain-blind is the superset that reading requires.
+    5. P2 — EVERY observed account that contributed a reading to this bucket
+       holds a delivery fact whose all-quantifier passed. A missing fact for any
+       one contributing account refuses the whole bucket: the entity's holding is
+       the sum over its accounts, so evidence at one account answers nothing
+       about another's.
+
+    Returns the carrier records and a census. Both are published; the census
+    names its zeros so a conjunct that never fired is visible.
+    """
+    from services.monitoring.delivery_evidence import load_delivery_evidence
+
+    census: dict[str, int] = dict.fromkeys(DISPOSITION_REFUSALS, 0)
+    if universe is None:
+        return {}, census
+
+    from utils.chains import UnknownChainError, chain_by_name
+
+    chain_ids: dict[str, int] = {}
+    for chain_name, _ in {account for accounts in accounts_by_bucket.values() for account in accounts}:
+        if chain_name in chain_ids:
+            continue
+        try:
+            chain_ids[chain_name] = int(chain_by_name(chain_name).chain_id)
+        except (UnknownChainError, ValueError, TypeError):
+            # A chain name nothing maps to an id. The evidence table is keyed by
+            # id, so there is no row to ask for — and guessing one would ask the
+            # wrong chain's question. Refused by omission below.
+            continue
+
+    holders = {
+        (chain_ids[chain_name], address)
+        for accounts in accounts_by_bucket.values()
+        for chain_name, address in accounts
+        if chain_name in chain_ids and address
+    }
+    evidence = load_delivery_evidence(session, holders)
+
+    disposition: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for (key, asset), accounts in sorted(accounts_by_bucket.items()):
+        if asset == NATIVE_ASSET:
+            continue
+        if (plane.per_asset_state.get(key) or {}).get(asset) not in _DISPOSABLE_ASSET_STATES:
+            continue
+        if asset in universe.addresses:
+            continue
+        facts = []
+        for chain_name, address in sorted(accounts):
+            chain_id = chain_ids.get(chain_name)
+            if chain_id is None or not address:
+                facts = []
+                break
+            fact = evidence.get((chain_id, address, asset))
+            if fact is None or not fact.is_airdrop_only:
+                facts = []
+                break
+            facts.append(fact)
+        if not facts:
+            continue
+        disposition[key][asset] = {
+            "shape": facts[0].shape,
+            "fan_out_threshold_k": max(fact.fan_out_threshold_k for fact in facts),
+            # The WEAKEST end of the accounts' evidence, because the claim only
+            # holds where all of them do: the smallest fan-out any account
+            # measured, the latest block any scan started at, the earliest block
+            # any of them ran through.
+            "min_fan_out": min((fact.min_fan_out for fact in facts if fact.min_fan_out is not None), default=None),
+            "delivery_count": sum(fact.delivery_count for fact in facts),
+            "scanned_from_block": max(fact.scanned_from_block for fact in facts),
+            "measured_through_block": min(fact.measured_through_block for fact in facts),
+            "accounts": [fact.holder_address for fact in facts],
+            # The carriers' own basis strings, verbatim, so a published claim
+            # quotes stored evidence rather than a sentence re-authored here.
+            "basis": [fact.basis for fact in facts if fact.basis],
+        }
+
+    out = {key: dict(sorted(assets.items())) for key, assets in sorted(disposition.items())}
+    for key in sorted(out):
+        refusal = plane.disposition_refusal(key)
+        if refusal is not None:
+            census[refusal] += len(out[key])
+    return out, census
+
+
+def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import native_balance_fact, winning_asset_fetches
+    from services.monitoring.delivery_evidence import FAN_OUT_CALIBRATION_CORPUS, FAN_OUT_THRESHOLD_K
 
     plane = ValuePlane()
     contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
@@ -725,6 +994,11 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     # are the SAME on-chain account read twice at two heights by two writers —
     # not two holdings — so the account is what a reading has to be reduced over.
     observations: dict[tuple[str, str], dict[str, list[Any]]] = defaultdict(lambda: defaultdict(list))
+    # The same buckets, carrying the (chain, ACCOUNT) identities the readings
+    # were issued against. The delivery-evidence table is keyed on that account —
+    # never on a folded entity key — so the disposition's all-quantifier is
+    # evaluated over exactly the addresses that contributed to the bucket.
+    accounts_by_bucket: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
     observed_contracts: set[int] = set()
     for row in rows:
         key = plane.canonical(entity_key(chain_of.get(row.contract_id), address_of.get(row.contract_id)))
@@ -737,6 +1011,7 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             fetched.append(row.fetched_at)
         observed_contracts.add(row.contract_id)
         observations[(key, asset)][_lower(row.observed_address)].append(row)
+        accounts_by_bucket[(key, asset)].add((chain_of.get(row.contract_id) or "", _lower(row.observed_address)))
 
     per_asset, per_asset_state, reduction = _reduce_observations(observations)
     plane.per_asset = per_asset
@@ -931,6 +1206,23 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             }
         )
 
+    # The disposition pass, run HERE and not beside the reduction: its refusal
+    # conjuncts read the typed receipts, the truncation flag, the unscanned
+    # accounts and the restaking positions, all of which are resolved above.
+    plane.asset_disposition, disposition_refused = _resolve_asset_disposition(
+        session, plane, accounts_by_bucket, universe
+    )
+    # The reading's state is rewritten in place, so every consumer of
+    # ``per_asset_state`` — the sheet state, the coverage census, the fold's
+    # per-asset publication — sees the determination rather than an unpriced
+    # reading with a note attached somewhere else. The row itself is never
+    # dropped: a disposed asset stays visible and stays labelled.
+    disposed_readings = 0
+    for key, assets in sorted(plane.asset_disposition.items()):
+        for asset in sorted(assets):
+            plane.per_asset_state.setdefault(key, {})[asset] = ASSET_AIRDROP_DELIVERED
+            disposed_readings += 1
+
     # ``native_status = proven_zero`` becomes a real ASSET reading, on the sheets
     # whose asset list a chain scan proved whole. The pair is what carries the
     # claim: the scan says the ERC-20 list is everything that ever arrived, the
@@ -959,7 +1251,15 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     # state with no entities read the same way to a consumer, and only one of
     # them is a fact about the protocol.
     sheet_states: dict[str, int] = dict.fromkeys(
-        (SHEET_PRICED, SHEET_BELOW_RESOLUTION, SHEET_UNPRICED, SHEET_PROVEN_EMPTY, SHEET_NO_ROWS), 0
+        (
+            SHEET_PRICED,
+            SHEET_BELOW_RESOLUTION,
+            SHEET_UNPRICED,
+            SHEET_PROVEN_EMPTY,
+            SHEET_AIRDROP_DETERMINED,
+            SHEET_NO_ROWS,
+        ),
+        0,
     )
     # The union INCLUDES entities carried only by a typed receipt. They hold no
     # fungible reading, so the two per-asset maps do not name them — and they are
@@ -1052,9 +1352,46 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             "priced = a determined non-zero reading, so the total is a floor; "
             "priced_below_resolution = every price that answered landed on the numeric(20,2) "
             "floor and the total is NOT a number; unpriced = no price answered; proven_empty = "
-            "every quantity proven zero, the only state in which 0.00 is a number; no_rows = "
-            "nothing observed"
+            "every quantity proven zero, the only state in which 0.00 is a number; "
+            "airdrop_determined = every reading left on the sheet arrived only in mass "
+            "distributions or is a witnessed zero, which is a DIFFERENT witness from proven_empty "
+            "and never the same one: proven_empty says nothing ever arrived, airdrop_determined "
+            "says what arrived arrived as a mass distribution; no_rows = nothing observed"
         ),
+        "asset_disposition": {
+            "entities_determined": sheet_states[SHEET_AIRDROP_DETERMINED],
+            "readings_disposed": disposed_readings,
+            "tokens_disposed": len({asset for assets in plane.asset_disposition.values() for asset in assets}),
+            "readings_refused_by_reason": dict(sorted(disposition_refused.items())),
+            "fan_out_threshold_k": FAN_OUT_THRESHOLD_K,
+            "fan_out_calibration_corpus": FAN_OUT_CALIBRATION_CORPUS,
+            "protocol_universe": (
+                None
+                if universe is None
+                else {
+                    "addresses": len(universe.addresses),
+                    "sources": dict(sorted(universe.sources.items())),
+                    "chain_scope": "chain_blind",
+                    "basis": universe.basis,
+                }
+            ),
+            "reading": (
+                "what is published here is DELIVERY SHAPE and never worth. A disposed reading "
+                "says every incoming delivery of that token to that account arrived in a "
+                "transaction distributing the same token to at least fan_out_threshold_k "
+                "recipients; it does not say the token is worthless, and two of the tokens in "
+                "this state on the reference corpus are real (uniETH at fan-out 101, USDtb at "
+                "175). The two conjuncts do NOT carry equal weight on every "
+                "chain: the protocol-reference conjunct is near-vacuous on base, where it "
+                "condemns 1,175 of 1,175 unpriced tokens and so partitions nothing, which means "
+                "delivery shape CARRIES THE CLAIM ALONE on base over 1,745 readings. The asset "
+                "list a disposition covers is the Etherscan-page-derived one and is NOT proven "
+                "whole — the gate here refuses only a list read AT the page cap — so the "
+                "determination is over the readings observed and never over the holdings. "
+                "protocol_universe is null where no universe was supplied, and no reading is "
+                "disposed there: no universe, no condemnation"
+            ),
+        },
         "asset_set_completeness": {
             "entities_proven_complete": len(plane.asset_set_proven_complete),
             "entities_proven_truncated": len(plane.asset_set_truncated),
@@ -4619,12 +4956,14 @@ __all__ = [
     "ACT_AS_WITNESSED",
     "ACT_AS_WITNESS_CALLER_STATE_VARIABLE",
     "ACT_AS_WITNESS_DESTINATION_ACL",
+    "ASSET_AIRDROP_DELIVERED",
     "ASSET_BELOW_RESOLUTION",
     "ASSET_PRICED",
     "ASSET_PROVEN_ZERO",
     "ASSET_UNPRICED",
     "CEILING_ADMITTED",
     "CEILING_ADMITTING_REASONS",
+    "CEILING_AIRDROP_DETERMINED",
     "CEILING_ALIAS_AMBIGUOUS",
     "CEILING_ASSET_LIST_TRUNCATED",
     "CEILING_BELOW_RESOLUTION",
@@ -4632,6 +4971,11 @@ __all__ = [
     "CEILING_PROVEN_EMPTY",
     "CEILING_REASONS",
     "CEILING_UNPRICED",
+    "DISPOSITION_REFUSALS",
+    "DISPOSITION_REFUSED_ASSET_LIST_TRUNCATED",
+    "DISPOSITION_REFUSED_TYPED_RECEIPT_UNRESOLVED",
+    "DISPOSITION_REFUSED_UNPRICED_POSITIONS",
+    "DISPOSITION_REFUSED_UNSCANNED_ACCOUNT",
     "EMPTY_REFUSALS",
     "EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE",
     "EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED",
@@ -4681,6 +5025,7 @@ __all__ = [
     "SCOPE_NOT_DETERMINED",
     "SCOPE_ROLES",
     "SCOPE_STATE_VAR",
+    "SHEET_AIRDROP_DETERMINED",
     "SHEET_BELOW_RESOLUTION",
     "SHEET_NOT_DETERMINED",
     "SHEET_NO_ROWS",

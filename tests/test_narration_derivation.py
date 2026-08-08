@@ -882,17 +882,31 @@ def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_a
 def test_the_ceiling_source_readings_are_a_closed_keyed_vocabulary():
     """One sentence per (admitting reason, coverage) pair that can be reached.
 
-    Three keys, not four. ``(PROVEN_EMPTY, False)`` is deliberately absent: the
+    Five keys, not six. ``(PROVEN_EMPTY, False)`` is deliberately absent: the
     cross-plane gate refuses the empty state wherever an unpriced position sits
     at the node, so a proven-empty sheet reaching this map is always
-    coverage-complete. The lookup stays strict, so a fourth combination raises
-    rather than borrowing a neighbour's sentence.
+    coverage-complete. ``AIRDROP_DETERMINED`` carries both arms for the opposite
+    reason — its coverage is earned rather than implied. The lookup stays
+    strict, so an unregistered combination raises rather than borrowing a
+    neighbour's sentence.
     """
     assert set(FOLD._CEILING_SOURCE_READINGS) == {
         (P.CEILING_ADMITTED, True),
         (P.CEILING_ADMITTED, False),
         (P.CEILING_PROVEN_EMPTY, True),
+        # BOTH arms, unlike proven-empty's: a disposition says one asset's
+        # contribution is nil and says nothing about whether the LIST is whole,
+        # so a disposed sheet is coverage-complete only where the list is
+        # separately proven — and the partial arm is the ordinary case.
+        (P.CEILING_AIRDROP_DETERMINED, True),
+        (P.CEILING_AIRDROP_DETERMINED, False),
     }
+    # The claim these two sentences make is delivery shape, and neither may
+    # restate it as a claim about what the holdings are worth.
+    for complete in (True, False):
+        sentence = FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, complete)]
+        assert "DELIVERY SHAPE" in sentence or "DELIVERY-SHAPE" in sentence
+        assert "worthless" not in sentence and "spam" not in sentence
     assert len(set(FOLD._CEILING_SOURCE_READINGS.values())) == len(FOLD._CEILING_SOURCE_READINGS)
     assert (P.CEILING_PROVEN_EMPTY, False) not in FOLD._CEILING_SOURCE_READINGS
     # Both coverage sentences must survive a proven-ZERO reading being the thing
@@ -966,6 +980,90 @@ def test_the_completeness_block_on_a_ceiling_row_is_the_carriers_own_record(fold
     )
     admitted = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=priced))
     assert admitted["reach_sheet_ceiling_magnitudes"][0]["asset_set_completeness"] is None
+
+
+# The carrier record the plane copies off the delivery-evidence rows. Every
+# field a published sentence about a disposition may quote comes from here.
+DELIVERED = {
+    "shape": "fan_out_all",
+    "fan_out_threshold_k": 25,
+    "min_fan_out": 199,
+    "delivery_count": 3,
+    "scanned_from_block": 0,
+    "measured_through_block": 21_000_000,
+    "accounts": ["0x" + "c" * 40],
+    "basis": ["delivery receipts read over blocks 0-21000000; every delivery fanned out to >= 25 recipients"],
+}
+
+
+def _airdrop_determined_ceiling_row(fold):  # noqa: F811
+    """The smallest real fold that publishes a DISPOSED sheet ceiling."""
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane(per_asset_state={KEY_C: {"junk": P.ASSET_AIRDROP_DELIVERED}})
+    plane.asset_disposition = {KEY_C: {"junk": dict(DELIVERED)}}
+    document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane)
+    return _cc_row(document)["reach_sheet_ceiling_magnitudes"][0], plane
+
+
+def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):  # noqa: F811
+    """#171 walked end to end on a real DISPOSED carrier.
+
+    The row's every claim has to come off the delivery evidence the plane copied
+    — its threshold, its block range, its delivery count — and the state it
+    publishes has to be the disposition's own, not proven-empty's. The sentence
+    may not name a concept the document does not publish, and it may not restate
+    a delivery-shape fact as a fact about worth.
+    """
+    entry, plane = _airdrop_determined_ceiling_row(fold)
+    carrier = plane.asset_disposition[KEY_C]["junk"]
+
+    # The state and the reason are the disposition's own and NEVER proven-empty's:
+    # "what arrived arrived as a mass distribution" is not "nothing ever arrived".
+    assert entry["sheet_state"] == P.SHEET_AIRDROP_DETERMINED
+    assert entry["ceiling_reason"] == P.CEILING_AIRDROP_DETERMINED
+    assert entry["sheet_state"] != P.SHEET_PROVEN_EMPTY
+    assert entry["ceiling_reason"] != P.CEILING_PROVEN_EMPTY
+    assert entry["sheet_usd"] == 0.0
+
+    # The reading is the one keyed by what admitted it, and the coverage arm is
+    # the EARNED one: this sheet's asset list is not proven whole, so it takes
+    # the partial arm rather than claiming a bound over the holdings.
+    complete = entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert complete is False
+    assert (
+        entry["reading"] == FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, False)] + FOLD._CEILING_CLOSING
+    )
+    assert entry["asset_set_completeness"] is None
+
+    # Every figure the carrier proves, published beside the sentence so a reader
+    # can check it — and the plane re-derives none of them.
+    assert carrier["fan_out_threshold_k"] == 25
+    assert carrier["min_fan_out"] >= carrier["fan_out_threshold_k"]
+    assert carrier["delivery_count"] == 3
+    assert (carrier["scanned_from_block"], carrier["measured_through_block"]) == (0, 21_000_000)
+    assert carrier["basis"] == DELIVERED["basis"]
+    assert plane.asset_is_disposed(KEY_C, "junk")
+
+    # The per-asset evidence the sentence stands on says airdrop_delivered, so
+    # the row's own data carries the claim.
+    assert entry["per_asset"] == [{"asset": "junk", "usd": None, "state": P.ASSET_AIRDROP_DELIVERED}]
+    assert entry["assets_disposed"] == ["junk"]
+
+    # The sentence names no concept the row does not publish, and no claim about
+    # worth. "spam"/"worthless" would be false of the real tokens measured into
+    # this state.
+    published = set(entry)
+    for concept in ("assets_not_priced", "assets_disposed", "unpriced_positions", "per_asset"):
+        if concept in entry["reading"]:
+            assert concept in published, concept
+    for banned in ("spam", "scam", "worthless"):
+        assert banned not in entry["reading"].lower()
 
 
 def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):  # noqa: F811

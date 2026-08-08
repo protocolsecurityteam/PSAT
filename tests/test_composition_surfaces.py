@@ -321,7 +321,11 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # The COUNT is authored, not derived — nothing in this suite counts a corpus
     # — so it is checked by a reader against the scored document and moves only
     # with such a reading.
-    assert len(registered) == 8
+    # Plus the disposition run's own zero-carrier arm, ``code_control_ceiling:
+    # airdrop_determined``: the delivery-evidence table exists and is empty, so
+    # no sheet on this corpus is in that state and nothing published was fitted
+    # to it. It comes off by hand when a carrier lands.
+    assert len(registered) == 9
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -499,29 +503,50 @@ def test_the_1_2_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(
     assert unmoved["to"] == "1.2.0-provisional"
 
 
+def test_the_1_3_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(monkeypatch):
+    """The same freeze, one bump later again.
+
+    The 1.2.0 -> 1.3.0 record reports what was measured while 1.3.0 was CURRENT.
+    Once 1.4.0 shipped, an interpolated `MODEL_VERSION` there would restamp those
+    dated figures — the revoked $0.05 ceiling, the 11 -> 10 entity fall — with
+    whatever is shipping now. Frozen, and this is what keeps it frozen."""
+    from services.scoring import constants as C
+
+    shipped = _migration("1.2.0-provisional")
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    unmoved = _migration("1.2.0-provisional")
+
+    assert unmoved == shipped
+    assert "this bump's own tip (1.3.0-provisional)" in unmoved["measured_at"]
+    assert "9.9.9-fictional" not in unmoved["measured_at"]
+    # The record's own endpoint is frozen with it: this bump ENDED at 1.3.0 and
+    # no later version can claim to be where it landed.
+    assert unmoved["to"] == "1.3.0-provisional"
+
+
 def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
     """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
     today and drifts silently at the next bump.
 
-    Moved onto the 1.2.0 -> 1.3.0 record, which is the one describing the
+    Moved onto the 1.3.0 -> 1.4.0 record, which is the one describing the
     version that is CURRENT — the only record for which "moves with the version"
-    is the honest behaviour. Its two predecessors are frozen by the tests
+    is the honest behaviour. Its three predecessors are frozen by the tests
     above."""
     from services.scoring import constants as C
 
-    shipped = _migration("1.2.0-provisional")["measured_at"]
+    shipped = _migration("1.3.0-provisional")["measured_at"]
     monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
-    moved = _migration("1.2.0-provisional")["measured_at"]
+    moved = _migration("1.3.0-provisional")["measured_at"]
 
     assert moved != shipped
     assert "at this bump's own tip (9.9.9-fictional)" in moved
-    assert "1.3.0-provisional" not in moved
+    assert "1.4.0-provisional" not in moved
     # The endpoint interpolates too, so the record cannot name one version in
     # its prose and a different one in its field.
-    assert _migration("1.2.0-provisional")["to"] == "9.9.9-fictional"
+    assert _migration("1.3.0-provisional")["to"] == "9.9.9-fictional"
 
 
-def test_the_current_migration_record_states_its_invariant_6_exception():
+def test_the_1_3_0_migration_record_states_its_invariant_6_exception():
     """A bump that LOWERS a term has to say so where the model is published.
 
     1.3.0's guard un-publishes a sheet ceiling, which moves a confidence term
@@ -542,6 +567,37 @@ def test_the_current_migration_record_states_its_invariant_6_exception():
     unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
     assert "grade_lambda stays 71.7053" in unmoved
     assert "$4,218,707,276.09 -> $4,218,707,276.04" in unmoved
+
+
+def test_the_current_migration_record_states_its_invariant_6_exception():
+    """1.4.0 takes its own, and of the opposite shape.
+
+    The disposition rule's protocol-reference conjunct is ANTI-MONOTONE:
+    discovery growing moves a token INTO the universe and WITHDRAWS a
+    determination. The ruling is that withdrawal is the safe direction — and the
+    consequence a reader has to carry is that the document is not stable across
+    discovery growth. Both single points of failure the measurement found are
+    named on the record itself, not left in a spec no consumer can see."""
+    record = _migration("1.3.0-provisional")
+    exception = record["the_invariant_6_exception_this_bump_takes"]
+
+    assert "invariant 6" in exception
+    assert "ANTI-MONOTONE" in exception
+    assert "NOT STABLE ACROSS DISCOVERY GROWTH" in exception
+    # The two named tokens, and the reason the condemnation of a REAL one is not
+    # a lie: the published state is a delivery-shape claim.
+    assert "HEX" in exception and "SINGLE effect_verdicts row" in exception
+    assert "uniETH" in exception and "delivery-shape claim" in exception
+    # What the bump does not close travels with it, on its own key.
+    open_items = record["what_this_bump_does_not_close"]
+    assert "INERT ON BASE" in open_items
+    assert "1,175 of 1,175" in open_items
+    assert "NOT proven whole" in open_items
+    # And the measured no-move, which is what makes this a rule change with no
+    # data behind it yet.
+    unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
+    assert "grade_lambda stays 71.7053" in unmoved
+    assert "confidence_pct stays 42.5" in unmoved
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():

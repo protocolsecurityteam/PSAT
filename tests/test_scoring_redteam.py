@@ -349,7 +349,10 @@ def fold(monkeypatch):
         ``tests/test_three_arm_composition.py``.
         """
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
-        monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
+        # ``universe`` is accepted and ignored: a hand-built plane carries
+        # whatever disposition its own builder set, and the fold's default is
+        # None anyway, so no test plane is disposed by accident.
+        monkeypatch.setattr(P, "load_value_plane", lambda s, p, universe=None: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
         monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or conferral_plane())
@@ -6401,14 +6404,21 @@ def test_cc_the_ceiling_reason_vocabulary_is_closed_and_ordered():
     assert P.CEILING_REASONS == (
         "admitted",
         "proven_empty",
+        "airdrop_determined",
         "no_rows",
         "below_resolution",
         "unpriced",
         "asset_list_truncated",
         "alias_ambiguous",
     )
-    assert P.CEILING_ADMITTING_REASONS == ("admitted", "proven_empty")
+    assert P.CEILING_ADMITTING_REASONS == ("admitted", "proven_empty", "airdrop_determined")
     assert set(P.CEILING_ADMITTING_REASONS) < set(P.CEILING_REASONS)
+    # The three admits are three PROOFS and stay three tokens: a priced sheet
+    # bounds at an observed number, a proven-empty one at a witnessed zero, and
+    # an airdrop-determined one at a zero earned from DELIVERY SHAPE. Nothing
+    # here may be renamed to a claim about worth.
+    assert len(set(P.CEILING_ADMITTING_REASONS)) == 3
+    assert not {"spam", "scam", "worthless"} & set(P.CEILING_REASONS)
 
 
 def test_cc1_a_partly_priced_sheet_bounds_the_priced_portion_and_not_the_move(fold):
@@ -6774,7 +6784,11 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
     # Named zeros over the closed vocabularies: a reason absent from the map
     # would read identically as "this rule did not fire here" and "this rule is
     # not in the model", and only the first is a fact about the protocol.
-    assert block["entities_by_ceiling_reason"] == {P.CEILING_ADMITTED: 1, P.CEILING_PROVEN_EMPTY: 0}
+    assert block["entities_by_ceiling_reason"] == {
+        P.CEILING_ADMITTED: 1,
+        P.CEILING_PROVEN_EMPTY: 0,
+        P.CEILING_AIRDROP_DETERMINED: 0,
+    }
     assert block["calls_refused_by_reason"] == {
         P.CEILING_NO_ROWS: 1,
         P.CEILING_BELOW_RESOLUTION: 0,

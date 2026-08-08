@@ -271,6 +271,15 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         # and one that cannot go through the spot-balance readers precisely
         # because a node has no ``contracts`` row.
         root / "services" / "scoring" / "planes.py",
+        # The scorer's P4 universe builder, and an ADDRESS-ONLY read: it selects
+        # node_address and eigenpod, unions them into a flat set of strings, and
+        # folds no quantity, no share basis and no dollar. The rule this list
+        # protects is about VALUE readers — a node has no ``contracts`` row, so a
+        # spot-balance reader that learned to see one would double-count or
+        # mis-key it — and reading an address out of the table cannot do either.
+        # The universe is assembled here rather than in the plane because its
+        # source-literal arm reads object storage, which the fold may not.
+        root / "services" / "scoring" / "distill.py",
         # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),
     }

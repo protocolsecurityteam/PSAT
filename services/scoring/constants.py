@@ -281,6 +281,11 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # implementation before any magnitude branch reads a sheet, so no row can
     # carry it and only a direct call to the resolver reaches it.
     "code_control_ceiling_refused:alias_ambiguous",
+    # The disposition run's own arm, added at 1.4.0 with ZERO carriers: the
+    # delivery-evidence table exists and is empty, so no sheet on the corpus the
+    # model was calibrated against is airdrop_determined. Comes off by hand once
+    # one is.
+    "code_control_ceiling:airdrop_determined",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -424,6 +429,27 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "so the double guard holds and this token is answerable only where the resolver is "
             "called on its own. Registered so the redundancy is a stated fact — a reader who "
             "removed either guard would otherwise find no record that the other was relied on"
+        ),
+    },
+    {
+        "arm": "code_control_ceiling:airdrop_determined",
+        "state": "airdrop_determined",
+        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].ceiling_reason",
+        "population_census": "sheet_ceilings.entities_by_ceiling_reason",
+        "exercised_by": (
+            "tests/test_value_plane_ceiling.py::test_every_sheet_shape_answers_under_its_own_reason[airdrop_determined]",
+            "tests/test_asset_disposition.py::test_a_disposed_sheet_admits_a_zero_ceiling_under_its_own_reason",
+        ),
+        "note": (
+            "the third admitting ceiling reason: a sheet DETERMINED at $0 because every reading "
+            "on it arrived only in mass distributions or is a witnessed zero. Its claim is "
+            "delivery shape and never worth. At authoring time the delivery-evidence table is "
+            "EMPTY, so no entity is in this state on the corpus the model was calibrated against "
+            "and nothing published was fitted to it. ⚠ This entry must be HAND-REMOVED once a "
+            "carrier lands — the register's own rule is that an entry whose positive branch has "
+            "fired comes off — and that removal is a manual authoring convention, not a derived "
+            "one: nothing in this module reads data, and a reader must check the scored "
+            "document's entities_by_ceiling_reason to know"
         ),
     },
 )
@@ -879,12 +905,13 @@ def model_parameters() -> dict[str, Any]:
             },
             {
                 "from": "1.2.0-provisional",
-                # INTERPOLATED, and that is the point: while this is the CURRENT
-                # version the record and the document it describes must not be
-                # able to drift apart. The next bump freezes this to its literal
-                # — the way the two records above are frozen — and adds its own
-                # interpolated record.
-                "to": MODEL_VERSION,
+                # FROZEN at the 1.3.0 -> 1.4.0 bump, the way the two records
+                # above are frozen. Every figure below was measured while 1.3.0
+                # was CURRENT, and interpolating MODEL_VERSION here now would
+                # restamp a 1.3.0 measurement with whatever is shipping — a
+                # dated figure wearing a live label. The record below, which
+                # describes the version that IS current, interpolates instead.
+                "to": "1.3.0-provisional",
                 "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
                 # One point repeated, and that is the measurement rather than a
                 # placeholder: this bump REVOKES a $0.05 ceiling, and $0.05 does
@@ -896,8 +923,8 @@ def model_parameters() -> dict[str, Any]:
                 "exposure_usd": [18059003.86, 18059003.86],
                 "measured_at": (
                     "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
-                    f"this bump's own tip ({MODEL_VERSION}), as the last published "
-                    f"1.2.0-provisional document read against the first {MODEL_VERSION} one. None "
+                    "this bump's own tip (1.3.0-provisional), as the last published "
+                    "1.2.0-provisional document read against the first 1.3.0-provisional one. None "
                     "of it is a projection onto a corpus this model has never scored, and there is "
                     "no second corpus these cut points could have been calibrated against"
                 ),
@@ -964,6 +991,112 @@ def model_parameters() -> dict[str, Any]:
                     "$4,218,707,276.09 -> $4,218,707,276.04, which is the revoked $0.05 and nothing "
                     "else. The band table carries 1.2.0's cut points forward unchanged: no letter "
                     "moved, so nothing here was recut to hold one"
+                ),
+            },
+            {
+                "from": "1.3.0-provisional",
+                # INTERPOLATED, and that is the point: while this is the CURRENT
+                # version the record and the document it describes must not be
+                # able to drift apart. The next bump freezes this to its literal
+                # — the way the three records above are frozen — and adds its own
+                # interpolated record.
+                "to": MODEL_VERSION,
+                "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+                # One point repeated, and that is the measurement rather than a
+                # placeholder: at this bump's own tip nothing has written a
+                # delivery-evidence row, so the rule ships with zero carriers and
+                # every figure it can move is unmoved. The letter is quoted twice
+                # for the same reason.
+                "grade_lambda": [71.7053, 71.7053],
+                "letter": ["B", "B"],
+                "confidence_pct": [42.5, 42.5],
+                "exposure_usd": [18061300.76, 18061300.76],
+                "measured_at": (
+                    "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
+                    f"this bump's own tip ({MODEL_VERSION}), as the last published "
+                    f"1.3.0-provisional document read against the first {MODEL_VERSION} one. None "
+                    "of it is a projection onto a corpus this model has never scored, and there is "
+                    "no second corpus these cut points could have been calibrated against"
+                ),
+                "what_moved": (
+                    "a sheet may now be DETERMINED at $0 by the delivery shape of what arrived on "
+                    "it. A reading is disposed only where all of: the protocol's discovered "
+                    "address universe was assembled at all, the asset is not the native coin, the "
+                    "reading is unpriced or below the storage column's resolution (a PRICED "
+                    "reading is never disposed), the token address is absent from that universe "
+                    "tested CHAIN-BLIND, and EVERY observed account contributing to the reading "
+                    "carries stored delivery evidence whose every incoming delivery fanned out to "
+                    "at least K = 25 recipients of the same token in one transaction. Such a "
+                    "sheet answers a sixth state, airdrop_determined, and an eighth ceiling "
+                    "reason of the same name in the ADMITTING set. WHAT THE STATE CLAIMS IS "
+                    "DELIVERY SHAPE AND NEVER WORTH. It is BARRED from the two min(witness, "
+                    "sheet) trim sites: the disposed assets are still held, so trimming a "
+                    "witnessed magnitude to $0 there would publish a false zero on a security "
+                    "surface. And it does not by itself earn asset-set coverage: a disposition "
+                    "says one asset's contribution is nil and says nothing about whether the "
+                    "LIST is whole, so a disposed sheet clears the full-coverage conjunct only "
+                    "where the chain's own transfer history proves its list - which closes "
+                    "SHEET_OBSERVATION_SPEC.md 9.3-addendum item 2. Measured at this bump: zero "
+                    "delivery-evidence rows exist, so entities_determined is 0, readings_disposed "
+                    "is 0, and the arm ships uncalibrated and registered as such"
+                ),
+                "the_invariant_6_exception_this_bump_takes": (
+                    "invariant 6 says the model is monotone in resolution work, and the "
+                    "protocol-reference conjunct of this rule is ANTI-MONOTONE: growing the "
+                    "protocol's discovered universe can move a token INTO it and withdraw a "
+                    "determination that was published. The ruling is that withdrawal is the SAFE "
+                    "direction - the universe growing means the protocol demonstrably refers to "
+                    "that token, and un-condemning it is the correction - so the exception is "
+                    "taken deliberately and in one direction only. The consequence a reader must "
+                    "carry: THIS DOCUMENT IS NOT STABLE ACROSS DISCOVERY GROWTH, and a "
+                    "disposition withdrawn between two folds is not a regression. Two named "
+                    "single points of failure follow from it, both measured on this corpus. "
+                    "(1) HEX (0x2b591e99afe9f32eaa6214f7b7629768c40eeb39), a REAL token whose "
+                    "deliveries are genuine mass distributions at fan-out 199/399/399, is spared "
+                    "ONLY by its presence in the universe, and its presence rests on a SINGLE "
+                    "effect_verdicts row: if that row moves, a real token is condemned. (2) "
+                    "uniETH (0xf1376bcef0f78459c0ed0ba5ddce976f1ddf51f4) is a measured, "
+                    "unavoidable condemnation of a real token - one delivery, fan-out 101, absent "
+                    "from the universe under every variant - and no K spares it without losing "
+                    "real airdrop batches (the smallest observed is 48). That is acceptable ONLY "
+                    "because the published state is a delivery-shape claim, which is TRUE of "
+                    "uniETH: it did arrive by mass distribution. It would be a lie under any "
+                    "spam/worthless naming, and no consumer may rename it so. (3) THE LIVE RUN "
+                    "FOUND A SECOND MEMBER OF uniETH's CLASS that the pre-run census did not "
+                    "predict: USDtb (0xc139190f447e929f090edeb554d95abb8b18ac1c), a real token "
+                    "held at three accounts, each by a single delivery that fanned out to 175 "
+                    "recipients. It is the same true claim under the same naming, and it is "
+                    "recorded here because the class is evidently larger than the two tokens the "
+                    "pre-run analysis named - a reader must expect real tokens in it, not treat "
+                    "each one as a defect. Neither uniETH nor USDtb sits on a sheet this run "
+                    "determined: all 13 determined sheets are free of any reading the census "
+                    "calls known-real, so no real holding was published as a determined $0"
+                ),
+                "what_this_bump_does_not_close": (
+                    "the protocol-reference conjunct is INERT ON BASE. Measured: it condemns "
+                    "1,175 of 1,175 base unpriced tokens and 1,745 of 1,745 base unpriced "
+                    "readings, so it partitions nothing there, and its precision on base is "
+                    "not_determined - the priced control set is 6 tokens and n=6 is not a "
+                    "validation. Base disposition therefore rests on DELIVERY SHAPE ALONE over "
+                    "1,745 readings, and base is the bulk of the population. The universe is "
+                    "tested chain-blind for a measured reason: chain-scoping it falsely condemns "
+                    "$3,272,829.37 of real holdings ($2,203,581.37 on optimism, whose contracts "
+                    "carry no dependency, control-graph or signal rows at all, and $1,069,248.00 "
+                    "on base) and buys no extra condemnation where the mass-distribution readings "
+                    "are. The asset list a disposition covers is also NOT proven whole - the "
+                    "gate refuses only a list read AT the page cap - so the determination is over "
+                    "the readings observed and never over the holdings"
+                ),
+                "what_did_not_move_and_why_that_was_a_ruling": (
+                    "grade_lambda stays 71.7053, grade_exposure stays 99.582 and exposure_usd "
+                    "stays $18,061,300.76 - byte-unchanged, and checked field by field rather "
+                    "than assumed. confidence_pct stays 42.5, with value_priced_pct 42.5 and "
+                    "reach_magnitude_witnessed_pct 43.1 unmoved. Nothing moved because nothing "
+                    "has yet MEASURED a delivery: the evidence table exists and is empty, so "
+                    "every conjunct of the rule fails closed on every reading and the bump is a "
+                    "rule change with no data behind it yet. The band table carries 1.3.0's cut "
+                    "points forward unchanged: no letter moved, so nothing here was recut to "
+                    "hold one"
                 ),
             },
         ],

@@ -331,4 +331,49 @@ NO_SELECTOR = ""
 # confidence term (see the migration record's invariant-6 exception). Invariant
 # 6 governs earning evidence; un-publishing an at-most that was never earned is
 # outside it.
-MODEL_VERSION = "1.3.0-provisional"
+#
+# 1.4.0: a sheet may now be DETERMINED at $0 by the DELIVERY SHAPE of what
+# arrived on it. A (entity, asset) reading is disposed only where every one of
+# five conjuncts holds: the protocol's discovered address universe was assembled
+# at all (unset ⇒ nothing is disposed anywhere), the asset is not the native
+# coin, the reading is unpriced or below the storage column's resolution (a
+# PRICED reading is never disposed), the token address is absent from that
+# universe tested CHAIN-BLIND, and EVERY observed account contributing to the
+# reading carries stored delivery evidence whose every incoming delivery fanned
+# out to at least K = 25 same-token recipients in one transaction. Such a sheet
+# answers a sixth state (``airdrop_determined``, distinct from ``proven_empty``
+# — "what arrived arrived as a mass distribution" is not "nothing ever arrived")
+# and an eighth ``ceiling_for`` reason of the same name, in the ADMITTING set.
+#
+# WHAT IT CLAIMS IS DELIVERY SHAPE AND NEVER WORTH, and that is load-bearing
+# rather than decorative: the live run put two REAL tokens into this state on
+# this corpus — uniETH (one delivery, fan-out 101) and USDtb (one delivery,
+# fan-out 175) — and a third, HEX (199/399/399), carries the same delivery shape
+# and is held out of the state only by the protocol-reference conjunct. No
+# consumer may rename it spam, scam or worthless: under any such name the
+# published claim would be false of all three.
+#
+# What this bump does NOT close, stated because the version stamp is what a
+# reader joins on:
+#   * the protocol-reference conjunct is INERT ON BASE — it condemns 1,175 of
+#     1,175 base unpriced tokens, so it partitions nothing there and delivery
+#     shape carries the claim alone over 1,745 readings; its precision on base
+#     is not_determined at n=6.
+#   * the asset list a disposition covers is NOT proven whole. The gate refuses
+#     only a list read AT the page cap (D1 parity), so the determination is over
+#     the readings observed and never over the holdings. That is exactly why the
+#     state is BARRED from the two min(witness, sheet) trim sites — the disposed
+#     assets are still held, and trimming a witnessed magnitude to $0 there
+#     would publish a false zero — and why a disposition alone does not earn
+#     asset-set coverage completeness.
+#   * the rule is ANTI-MONOTONE in discovery (see the migration record's
+#     invariant-6 exception): growing the universe withdraws determinations,
+#     which is the safe direction, but this document is NOT stable across
+#     discovery growth. HEX is spared by a single effect_verdicts row.
+# Measured on protocol 1 at this bump: the delivery-evidence table is EMPTY, so
+# entities_determined 0, readings_disposed 0, and every published figure is
+# unchanged — confidence_pct 42.5, lambda 71.7053, grade_exposure 99.582,
+# exposure_usd $18,061,300.76, letter B. The gradeBands.js obligation is live
+# for this bump too: it carries a 1.4.0-provisional entry reasoning 1.3.0's cut
+# points forward.
+MODEL_VERSION = "1.4.0-provisional"

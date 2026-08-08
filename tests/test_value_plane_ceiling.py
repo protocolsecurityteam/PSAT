@@ -3,9 +3,10 @@
 ``planes.ceiling_for`` answers the value-side half of the code-control ceiling
 rule — is this node's sheet determined, is its asset list whole, and is its key
 one two proxies share — and the corpus cannot exercise it. Protocol 1 carries no
-proven-empty sheet and no ambiguous alias, so two of the seven reasons have zero
-carriers there and the unregistered-sheet-state guard has none anywhere. Every
-reason is therefore pinned here over hand-built planes instead.
+ambiguous alias and no airdrop-determined sheet (nothing has yet measured a
+delivery), so two of the eight reasons have zero carriers there and the
+unregistered-sheet-state guard has none anywhere. Every reason is therefore
+pinned here over hand-built planes instead.
 
 The one that matters most is ``proven_empty``. A sheet whose every quantity is
 witnessed zero is an EARNED NEGATIVE — the ceiling is provably $0 — and both of
@@ -37,6 +38,7 @@ def _plane(
     asset_set_accounts_unscanned: dict[str, list[str]] | None = None,
     typed_receipts_unresolved: dict[str, list[dict]] | None = None,
     unpriced_positions: dict[str, list[dict]] | None = None,
+    asset_disposition: dict[str, dict[str, dict]] | None = None,
 ) -> P.ValuePlane:
     plane = P.ValuePlane()
     plane.per_asset = per_asset or {}
@@ -48,6 +50,7 @@ def _plane(
     plane.asset_set_accounts_unscanned = asset_set_accounts_unscanned or {}
     plane.typed_receipts_unresolved = typed_receipts_unresolved or {}
     plane.unpriced_positions = unpriced_positions or {}
+    plane.asset_disposition = asset_disposition or {}
     plane.contract_entities = set(plane.per_asset) | set(plane.per_asset_state)
     return plane
 
@@ -124,9 +127,36 @@ def _truncated() -> P.ValuePlane:
     )
 
 
+# The carrier record a disposed reading is published from — the delivery
+# evidence's own stored fields, not a sentence written here.
+DELIVERED = {
+    "shape": "fan_out_all",
+    "fan_out_threshold_k": 25,
+    "min_fan_out": 199,
+    "delivery_count": 1,
+    "scanned_from_block": 0,
+    "measured_through_block": 21_000_000,
+    "accounts": ["0x" + "a" * 40],
+    "basis": ["delivery receipts read over blocks 0-21000000; every delivery fanned out to >= 25 recipients"],
+}
+
+
+def _airdrop_determined() -> P.ValuePlane:
+    """A sheet whose only reading arrived as a mass distribution.
+
+    The claim is DELIVERY SHAPE: this says how the holding arrived and never
+    that it is worth nothing — real tokens have been measured arriving this way.
+    """
+    return _plane(
+        per_asset_state={KEY: {"junk": P.ASSET_AIRDROP_DELIVERED}},
+        asset_disposition={KEY: {"junk": DELIVERED}},
+    )
+
+
 ALL_SHAPES = {
     "priced": (_priced, 3_000_001.5, P.CEILING_ADMITTED),
     "proven_empty": (_proven_empty, 0.0, P.CEILING_PROVEN_EMPTY),
+    "airdrop_determined": (_airdrop_determined, 0.0, P.CEILING_AIRDROP_DETERMINED),
     "below_resolution": (_below_resolution, None, P.CEILING_BELOW_RESOLUTION),
     "unpriced": (_unpriced, None, P.CEILING_UNPRICED),
     "asset_list_truncated": (_truncated, None, P.CEILING_ASSET_LIST_TRUNCATED),
@@ -142,7 +172,7 @@ def test_every_sheet_shape_answers_under_its_own_reason(shape: str):
     assert (usd, reason) == (expected_usd, expected_reason)
 
 
-def test_the_seven_shapes_cover_the_whole_vocabulary():
+def test_the_eight_shapes_cover_the_whole_vocabulary():
     """No reason may ship without a case: an unexercised token is a claim."""
     assert {reason for _, _, reason in ALL_SHAPES.values()} == set(P.CEILING_REASONS)
 

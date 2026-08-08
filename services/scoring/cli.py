@@ -19,7 +19,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from services.scoring.distill import distill_contract_signals
+from services.scoring.distill import distill_contract_signals, load_protocol_universe
 from services.scoring.fold import compute_protocol_score
 from services.scoring.population import order_signals
 from services.scoring.schema import FunctionSignal, ScoreDocument
@@ -38,7 +38,11 @@ def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[Funct
 
 def score(session: Session, protocol_id: int) -> ScoreDocument:
     signals = distill_protocol_in_memory(session, protocol_id)
-    return compute_protocol_score(session, protocol_id, signals=signals)
+    # Built here and not in the fold: assembling it reads source artifacts out of
+    # object storage, which the fold's planes may not do. ``None`` — an
+    # unreadable artifact body — disposes nothing anywhere downstream.
+    universe = load_protocol_universe(session, protocol_id)
+    return compute_protocol_score(session, protocol_id, signals=signals, universe=universe)
 
 
 def document_json(document: ScoreDocument) -> dict[str, Any]:
