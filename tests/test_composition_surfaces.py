@@ -309,18 +309,19 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     block = parameters["uncalibrated_arm_disclosures"]
     registered = block["registered"]
 
-    # Seven arms this run added, plus the one pre-existing zero-population arm
-    # CAP-B ruled into the same register (ruling 2), plus the code-control
-    # ceiling's one surviving zero-carrier arm — the shared-implementation
-    # refusal, which no row can publish because the fold refuses such a key
-    # before any magnitude branch reads a sheet. TWO came off when the chain-log
-    # sweep gave them carriers: ``code_control_ceiling:proven_empty`` and the
-    # per-entity ``sheet_ceiling_bound_direction:ceiling``, both of which the
-    # 115 proven-empty sheets on this corpus now earn. The COUNT is authored,
-    # not derived — nothing in this suite counts a corpus — so it is checked by
-    # a reader against the scored document and moves only with such a reading.
-    # The row-header bound-direction arm stays: no ROW earns that direction.
-    assert len(registered) == 9
+    # Seven arms this run added, plus the code-control ceiling's one surviving
+    # zero-carrier arm — the shared-implementation refusal, which no row can
+    # publish because the fold refuses such a key before any magnitude branch
+    # reads a sheet. THREE came off when the chain-log sweep earned this corpus
+    # its first proven-empty sheets: ``code_control_ceiling:proven_empty`` and
+    # the per-entity ``sheet_ceiling_bound_direction:ceiling`` gained carriers on
+    # 115 such sheets, and the pre-existing row-header
+    # ``value_at_stake_bound_direction:ceiling`` gained its first carrying row (a
+    # subsumed one, every contributing entity a proven $0 with no coverage gap).
+    # The COUNT is authored, not derived — nothing in this suite counts a corpus
+    # — so it is checked by a reader against the scored document and moves only
+    # with such a reading.
+    assert len(registered) == 8
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -564,38 +565,32 @@ def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
     )
 
 
-def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in_a_spec():
-    """CAP-B ruling 2. The arm has 0 rows before Phase A and 0 after, and a spec
-    deferral does not discharge §8's obligation to flag it in the DOCUMENT —
-    `site/src/score/derive.js` allow-lists the direction, so a `<=` badge would
-    render for a state nothing can earn. Registering it does not reopen its
-    earnability."""
+def test_the_pre_existing_ceiling_arm_came_off_when_a_row_finally_earned_it():
+    """CAP-B ruling 2, discharged by evidence rather than by a deferral.
+
+    The arm was registered while ``value_at_stake_bound_direction: ceiling`` had
+    0 carrying rows before Phase A and 0 after — ``site/src/score/derive.js``
+    allow-lists the direction, so a ``<=`` badge would have rendered for a state
+    nothing could earn. The chain-log sweep changed the corpus, not the rule: a
+    row every one of whose contributing entities is a PROVEN $0 with no coverage
+    gap satisfies the conjunction, and one such row now publishes the direction.
+
+    The register's own rule (``constants.py``: entries are rules whose positive
+    branch has never fired) then requires REMOVAL, and removal rather than a
+    narrowing of scope: an entry kept because some slice of the population still
+    reads zero would say the model was never fitted to a state the document
+    publishes, which is the one thing this register must not say. The removal is
+    authored and reader-checked against the scored corpus; what is asserted here
+    is only that no half-removed reference survives in either list.
+    """
     parameters = K.model_parameters()
-    entry = next(
-        item
-        for item in parameters["uncalibrated_arm_disclosures"]["registered"]
-        if item["arm"] == "value_at_stake_bound_direction:ceiling"
-    )
-    assert entry["arm"] in parameters["uncalibrated_arms"]
-    assert entry["state"] == FOLD.BOUND_DIRECTION_CEILING
-    # The FIELD is published on every row; it is the VALUE that has no carrier,
-    # so the path is named rather than nulled — unlike the retired token, whose
-    # producer cannot emit it at all.
-    assert entry["published_at"] == "findings[].value_at_stake_bound_direction"
-    assert entry["population_census"] is None
-    assert "derive.js" in entry["note"]
-    # The arm now has a SECOND producer — a sheet ceiling — so the note may no
-    # longer say the direction is unearnable. What it says instead is measured:
-    # earnable, and unearned on this corpus because every sheet-ceiling row also
-    # reaches entities it cannot price.
-    assert "0 rows before and 0 after" in entry["note"]
-    assert "unearnable" not in entry["note"]
-    # The measured blocker is the COVERAGE conjunct, and the note may not narrow
-    # it to the undetermined-instance half: one ceiling-bearing row here reaches
-    # exactly one entity and prices it, and is refused on the partly-priced half
-    # alone.
-    assert "NO COVERAGE GAP" in entry["note"]
-    assert "the priced sheet does not cover" in entry["note"]
+    assert "value_at_stake_bound_direction:ceiling" not in parameters["uncalibrated_arms"]
+    assert "value_at_stake_bound_direction:ceiling" not in {
+        entry["arm"] for entry in parameters["uncalibrated_arm_disclosures"]["registered"]
+    }
+    # The direction itself is untouched and still earnable — the arm came off
+    # because it fired, not because the state was withdrawn.
+    assert FOLD.BOUND_DIRECTION_CEILING == "ceiling"
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():

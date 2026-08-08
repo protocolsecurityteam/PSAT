@@ -26,11 +26,15 @@ from tests.test_scoring_redteam import (
     EOA,
     KEY_C,
     KEY_V,
+    SCANNED,
+    _cc_row,
     _composing_signals,
+    facts,
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
     proven,
     reaches,
     sig,
+    value_plane,
 )
 from utils import execution_record as EX
 
@@ -865,3 +869,110 @@ def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_a
     )
     assert subsumed["rows_publishing_a_sheet_ceiling"] == {"findings": 1, "subsumed_rows": 1}
     assert subsumed["ceiling_usd_over_distinct_entities"] == 5.0
+
+
+# --- the proven-empty sheet's own sentences ----------------------------------
+# These shipped with zero carriers on the reference corpus, so nothing walked
+# them: a sentence in ``_CEILING_SOURCE_READINGS`` claiming "every asset observed
+# at this entity was priced" rode a proven-ZERO reading green through this whole
+# suite. The corpus carries such sheets now, and the strings they publish are
+# derivation-checked here like every other published reading.
+
+
+def test_the_ceiling_source_readings_are_a_closed_keyed_vocabulary():
+    """One sentence per (admitting reason, coverage) pair that can be reached.
+
+    Three keys, not four. ``(PROVEN_EMPTY, False)`` is deliberately absent: the
+    cross-plane gate refuses the empty state wherever an unpriced position sits
+    at the node, so a proven-empty sheet reaching this map is always
+    coverage-complete. The lookup stays strict, so a fourth combination raises
+    rather than borrowing a neighbour's sentence.
+    """
+    assert set(FOLD._CEILING_SOURCE_READINGS) == {
+        (P.CEILING_ADMITTED, True),
+        (P.CEILING_ADMITTED, False),
+        (P.CEILING_PROVEN_EMPTY, True),
+    }
+    assert len(set(FOLD._CEILING_SOURCE_READINGS.values())) == len(FOLD._CEILING_SOURCE_READINGS)
+    assert (P.CEILING_PROVEN_EMPTY, False) not in FOLD._CEILING_SOURCE_READINGS
+    # Both coverage sentences must survive a proven-ZERO reading being the thing
+    # observed. "was priced" is false of a witnessed zero, and the coverage
+    # sentence is shared with the admitted arm, so it may not say it.
+    assert "was priced" not in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
+    assert "determined reading" in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
+
+
+def _proven_empty_ceiling_row(fold):  # noqa: F811
+    """The smallest real fold that publishes a proven-empty sheet ceiling."""
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane(
+        {KEY_C: {"native": 0.0}},
+        per_asset_state={KEY_C: {"native": P.ASSET_PROVEN_ZERO}},
+        asset_set_proven_complete={KEY_C: SCANNED},
+    )
+    document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane)
+    return _cc_row(document)["reach_sheet_ceiling_magnitudes"][0], plane
+
+
+def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(fold):  # noqa: F811
+    """The published sentence is the one keyed by what actually admitted it."""
+    entry, _ = _proven_empty_ceiling_row(fold)
+    assert entry["ceiling_reason"] == P.CEILING_PROVEN_EMPTY
+    assert entry["sheet_state"] == P.SHEET_PROVEN_EMPTY
+    assert entry["reading"] == FOLD._CEILING_SOURCE_READINGS[(P.CEILING_PROVEN_EMPTY, True)] + FOLD._CEILING_CLOSING
+    assert entry["reading"] != FOLD._CEILING_SOURCE_READINGS[(P.CEILING_ADMITTED, True)] + FOLD._CEILING_CLOSING
+    # And it does not describe the holdings as priced ones.
+    assert "priced holdings" not in entry["reading"]
+
+
+def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold):  # noqa: F811
+    """The coverage sentence has to be true of a witnessed ZERO, not only of a price."""
+    entry, _ = _proven_empty_ceiling_row(fold)
+    assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert entry["bound_direction_basis"] == FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
+    # The per-asset evidence the sentence stands on is published beside it, and
+    # it says proven_zero — so a reader can check the sentence against the row.
+    assert entry["per_asset"] == [{"asset": "native", "usd": 0.0, "state": P.ASSET_PROVEN_ZERO}]
+    assert entry["assets_not_priced"] == [] and entry["unpriced_positions"] == 0
+
+
+def test_the_completeness_block_on_a_ceiling_row_is_the_carriers_own_record(fold):  # noqa: F811
+    """#171: what the document says about a scan is what the scan's record said.
+
+    The basis strings are the producer's ``asset_set_basis`` values, copied and
+    not re-authored, and the account arithmetic travels with them so a sheet that
+    folds two accounts cannot read as fully scanned on the strength of one.
+    """
+    entry, plane = _proven_empty_ceiling_row(fold)
+    published = entry["asset_set_completeness"]
+    assert published == plane.asset_set_proven_complete[KEY_C]
+    assert published["basis"] == SCANNED["basis"]
+    assert published["source"] == "chain_log_sweep"
+    assert published["accounts_scanned"] == published["accounts_folded"]
+    # An ADMITTED row carries the third state rather than a fabricated record.
+    priced = value_plane({KEY_C: {"usdc": 5.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    admitted = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=priced))
+    assert admitted["reach_sheet_ceiling_magnitudes"][0]["asset_set_completeness"] is None
+
+
+def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):  # noqa: F811
+    """The suite's standing rule, applied to the strings this run added."""
+    entry, _ = _proven_empty_ceiling_row(fold)
+    published = set(entry)
+    for sentence in (entry["reading"], entry["bound_direction_basis"]):
+        for concept in ("assets_not_priced", "unpriced_positions", "per_asset"):
+            if concept in sentence:
+                assert concept in published, concept

@@ -34,6 +34,7 @@ def _plane(
     alias_ambiguous: set[str] | None = None,
     asset_set_truncated: set[str] | None = None,
     asset_set_proven_complete: dict[str, dict] | None = None,
+    asset_set_accounts_unscanned: dict[str, list[str]] | None = None,
     typed_receipts_unresolved: dict[str, list[dict]] | None = None,
     unpriced_positions: dict[str, list[dict]] | None = None,
 ) -> P.ValuePlane:
@@ -44,6 +45,7 @@ def _plane(
     plane.alias_ambiguous = alias_ambiguous or set()
     plane.asset_set_truncated = asset_set_truncated or set()
     plane.asset_set_proven_complete = asset_set_proven_complete or {}
+    plane.asset_set_accounts_unscanned = asset_set_accounts_unscanned or {}
     plane.typed_receipts_unresolved = typed_receipts_unresolved or {}
     plane.unpriced_positions = unpriced_positions or {}
     plane.contract_entities = set(plane.per_asset) | set(plane.per_asset_state)
@@ -63,7 +65,12 @@ def _priced() -> P.ValuePlane:
 # answers ``unpriced`` and not $0.
 SCANNED = {
     "source": "chain_log_sweep",
+    # Both figures, as the plane publishes them: a sheet is whole only where
+    # every account it folds was scanned, so the denominator travels with the
+    # numerator.
     "accounts_scanned": 1,
+    "accounts_folded": 1,
+    "accounts": ["0x" + "a" * 40],
     "swept_from_block": 0,
     "swept_through_block": 21_000_000,
     "basis": ["chain scan of blocks 0-21000000 over Transfer/TransferSingle/TransferBatch"],
@@ -422,6 +429,13 @@ def test_every_refusal_token_has_a_case_and_they_do_not_collapse():
     for refusal, plane in (
         (P.EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE, _plane(per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}})),
         (
+            P.EMPTY_REFUSED_UNSCANNED_ACCOUNT,
+            _plane(
+                per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}},
+                asset_set_accounts_unscanned={KEY: ["0x" + "c" * 40]},
+            ),
+        ),
+        (
             P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED,
             _plane(
                 per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}},
@@ -471,3 +485,43 @@ def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
     blank = _plane()
     blank.native_fact = {KEY: "not_determined"}
     assert P.native_value_state(blank, KEY).is_determined is False
+
+
+def test_an_account_of_the_sheet_nobody_scanned_refuses_it_under_its_own_token():
+    """A scan that covered one of two addresses did not cover the sheet.
+
+    The two refusals are different work: "nobody has scanned this entity" waits
+    on the escalation reaching it at all, while "one folded account was never
+    read at its own address" is closed by one producer cycle over a named list —
+    so the addresses are published and the token is its own.
+    """
+    plane = _plane(
+        per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        asset_set_accounts_unscanned={KEY: ["0x" + "c" * 40]},
+    )
+    assert plane.asset_set_is_proven_complete(KEY) is False
+    assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
+    assert plane.sheet_state(KEY) == P.SHEET_UNPRICED
+    assert plane.total(KEY) is None
+    assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
+
+    # Scanned at last: the same sheet, the same readings, and now an admit.
+    plane.asset_set_accounts_unscanned.clear()
+    plane.asset_set_proven_complete[KEY] = SCANNED
+    assert plane.proven_empty_refusal(KEY) is None
+    assert P.ceiling_for(plane, KEY) == (0.0, P.CEILING_PROVEN_EMPTY)
+
+
+def test_the_typed_cause_is_named_ahead_of_the_completeness_it_caused():
+    """The published token has to aim a reader at the pipeline that closes it.
+
+    A producer withholds the scan's completeness BECAUSE a typed receipt had no
+    readable holding, so a sheet carrying both is refused for the receipt. Saying
+    "nobody scanned this" there points at a scan that ran.
+    """
+    plane = _plane(
+        per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
+        typed_receipts_unresolved={KEY: [{"address": "0xnft", "quantity_readable": False, "quantity": None}]},
+    )
+    assert plane.asset_set_is_proven_complete(KEY) is False
+    assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED

@@ -87,6 +87,18 @@ describe("derive — value cell", () => {
     );
     expect(published.size).toBeGreaterThan(0);
     for (const direction of published) expect(BOUND_DIRECTIONS).toContain(direction);
+    // "ceiling" is no longer a token only a constructed row can carry: the
+    // chain-log sweep proved sheets empty, and a row every one of whose
+    // contributing entities is a proven $0 with no coverage gap publishes it.
+    // The uncalibrated-arm register was updated to match, so this asserts the
+    // corpus side of that removal.
+    expect(published.has("ceiling")).toBe(true);
+    const carrier = [...ETHERFI.findings, ...(ETHERFI.provenance?.subsumed_rows || [])].find(
+      (f) => f.value_at_stake_bound_direction === "ceiling",
+    );
+    // And it reaches the cell as a real badge rather than being nulled away.
+    expect(valueCell(carrier).direction).toBe("ceiling");
+    expect(valueCell(carrier).determined).toBe(true);
   });
 
   it("reads a ceiling and a two-sided unknown as their own directions, never as a floor", () => {
@@ -456,10 +468,12 @@ describe("derive — cautions", () => {
   });
 
   it("counts the upgrades that went round a timelock", () => {
-    expect(upgradeBypassCount(ETHERFI)).toBe(12);
+    // 14, not 12: the producer's protocol_id backfill gave two code-bearing
+    // contracts a protocol, so their upgrade witnesses are distilled now.
+    expect(upgradeBypassCount(ETHERFI)).toBe(14);
     const cautions = cautionsFor(ETHERFI, F[4]);
     expect(cautions.map((c) => c.text)).toContain(
-      "12 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
+      "14 witnessed upgrades bypassed this timelock (executed directly by a Safe)",
     );
   });
 
@@ -490,10 +504,12 @@ describe("derive — audit posture", () => {
     expect(posture.reportsOnFile).toBe(64);
     expect(posture.contractsCovered).toBe(57);
     expect(posture.contractsProven).toBe(35);
-    expect(posture.contractsTotal).toBe(234);
-    expect(posture.trackedTotalUsd).toBe(4323839515.29);
-    expect(posture.valueProvenPct).toBeCloseTo(97.49, 2);
-    expect(posture.contractProvenPct).toBeCloseTo(14.96, 2);
+    // 236: the same two contracts the backfill admitted.
+    expect(posture.contractsTotal).toBe(236);
+    // Price drift on re-observed contracts between the two folds; no rule moved.
+    expect(posture.trackedTotalUsd).toBe(4322770988.76);
+    expect(posture.valueProvenPct).toBeCloseTo(97.52, 2);
+    expect(posture.contractProvenPct).toBeCloseTo(14.83, 2);
     expect(posture.provablyDiffers).toBe(13);
   });
 
@@ -527,7 +543,10 @@ describe("derive — audit posture", () => {
 describe("derive — confidence", () => {
   it("tags whichever channel actually is the minimum", () => {
     const channels = confidenceChannels(ETHERFI);
-    expect(channels.map((c) => c.pct)).toEqual([45, 59.1, 18.6, 40.9]);
+    // The whole point of the sweep, read off the page: value_priced_pct is no
+    // longer the floor by a mile — it is 40.6 against a magnitude term of 43.1,
+    // and it is still the minimum, so the tag has not moved.
+    expect(channels.map((c) => c.pct)).toEqual([45.4, 59.6, 40.6, 43.1]);
     expect(channels.filter((c) => c.isMin).map((c) => c.id)).toEqual(["value_priced_pct"]);
   });
 

@@ -49,10 +49,12 @@ from services.monitoring.balance_reads import (
 )
 from services.monitoring.chain_rpc import chain_id_for
 from utils.balance_status import (
+    ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
     BALANCE_WRITER_TVL,
     NATIVE_STATUS_FETCH_FAILED,
+    SWEEP_STATUS_COMPLETED,
 )
 from utils.chains import chain_by_id
 from utils.etherscan import TokenBalancePage
@@ -132,23 +134,53 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract]:
     """Return contracts to fetch balances for, excluding implementation-behind-proxy.
 
-    With ONE exception, and it is a correctness exception rather than a
-    convenience: an excluded implementation row whose CURRENT asset fetch says
-    ``at_page_cap`` is a permanently stuck truncation. The value plane unions
-    completeness over every contract that folds onto one entity key, so that
-    stale prefix keeps the proxy's sheet marked incomplete — and refuses it a
-    ceiling — no matter how many times the proxy itself is re-observed, because
-    nothing is ever allowed to re-observe the implementation. Re-observing it is
-    the only thing that can clear a flag it is the sole carrier of.
+    With TWO exceptions, and both are correctness exceptions rather than
+    conveniences. The value plane folds an implementation's rows onto its
+    proxy's key, so the two addresses are ONE sheet — and every claim that sheet
+    makes about its asset list is a claim about both addresses, which nothing
+    could earn while nothing was ever allowed to read the implementation.
+
+    1. **Stuck at the page cap.** An excluded implementation row whose CURRENT
+       asset fetch says ``at_page_cap`` is a permanently stuck truncation: that
+       stale prefix keeps the proxy's sheet marked incomplete, and refuses it a
+       ceiling, no matter how many times the proxy itself is re-observed.
+    2. **Folded into a sheet that is proving itself whole.** Where the entity an
+       implementation folds onto carries a completed chain-log scan, that sheet
+       is trying to publish an asset list as COMPLETE — and it may only do so
+       where every account it sums was scanned at its own address. Without this,
+       the implementation's address is never read, the sheet can never be shown
+       whole, and the honest outcome is a permanent not_determined on entities
+       whose proxies swept clean. Re-observed every cycle rather than once: the
+       scan is incremental behind ``swept_through_block`` (about one request),
+       and a cursor that stops advancing is what makes a completeness claim go
+       stale without saying so.
     """
     from services.aggregations.company_overview import _entity_key
     from services.monitoring.balance_reads import winning_asset_fetches
 
     contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
+    winning = winning_asset_fetches(session, protocol_id)
     stuck_at_cap = {
-        contract_id
-        for contract_id, fetch in winning_asset_fetches(session, protocol_id).items()
-        if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP
+        contract_id for contract_id, fetch in winning.items() if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP
+    }
+    by_id = {c.id: c for c in contracts}
+    scanning_entities = {
+        _entity_key(by_id[contract_id].chain, by_id[contract_id].address)
+        for contract_id, fetch in winning.items()
+        if contract_id in by_id
+        and fetch.asset_set_source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
+        and fetch.sweep_status == SWEEP_STATUS_COMPLETED
+        and fetch.swept_through_block is not None
+    }
+    folded_into_a_scanning_sheet = {
+        c.id
+        for c in contracts
+        if c.is_proxy and c.implementation and _entity_key(c.chain, c.address) in scanning_entities
+    }
+    # The IMPLEMENTATION rows of those proxies, matched the same chain-scoped way
+    # the exclusion below is built.
+    scanning_impl_tokens = {
+        _entity_key(by_id[cid].chain, by_id[cid].implementation) for cid in folded_into_a_scanning_sheet
     }
 
     # Impl-behind-proxy tokens, keyed by the composite "<chain>::<address>": an
@@ -165,7 +197,12 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
     return [
         c
         for c in contracts
-        if c.address and (_entity_key(c.chain, c.address) not in impl_tokens or c.id in stuck_at_cap)
+        if c.address
+        and (
+            _entity_key(c.chain, c.address) not in impl_tokens
+            or c.id in stuck_at_cap
+            or _entity_key(c.chain, c.address) in scanning_impl_tokens
+        )
     ]
 
 

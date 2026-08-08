@@ -124,10 +124,12 @@ SHEET_NOT_DETERMINED = (SHEET_BELOW_RESOLUTION, SHEET_UNPRICED, SHEET_NO_ROWS)
 # observed at the entity and no number covers it, which is what that state
 # means — never ``proven_empty`` and never a $0.
 EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE = "asset_set_not_proven_complete"
+EMPTY_REFUSED_UNSCANNED_ACCOUNT = "folded_account_never_scanned"
 EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED = "typed_receipt_unresolved"
 EMPTY_REFUSED_UNPRICED_POSITIONS = "unpriced_positions_at_this_entity"
 EMPTY_REFUSALS = (
     EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE,
+    EMPTY_REFUSED_UNSCANNED_ACCOUNT,
     EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED,
     EMPTY_REFUSED_UNPRICED_POSITIONS,
 )
@@ -207,6 +209,13 @@ class ValuePlane:
     # published claim derives from stored evidence rather than being re-authored
     # here.
     asset_set_proven_complete: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Accounts of a sheet that a scan reached at some OTHER account but never at
+    # their own address. Kept as its own map, and as its own refusal token, so
+    # "one of this sheet's two accounts was never looked at" cannot be read as
+    # "nobody has scanned this sheet" — they are closed by different work, and
+    # the first is the one that silently publishes a $0 over an address nothing
+    # has ever read.
+    asset_set_accounts_unscanned: dict[str, list[str]] = field(default_factory=dict)
     # ERC-721/1155 receipts at an entity whose CURRENT holding is not resolved.
     # A receipt proves a typed token arrived; until its holding reads back zero
     # the entity may hold it, so "holds nothing" is false and the sheet refuses
@@ -267,10 +276,20 @@ class ValuePlane:
         """Why this entity's sheet may not be published as a proven $0, or ``None``.
 
         The conjuncts of the empty claim, each answered from its own witness and
-        each fail-closed. The chain-scan conjunct is asked FIRST because it is
-        the one that carries the claim: without it the zeros in hand are readings
-        over a list nobody established, and their sum is not a statement about
-        the entity at all.
+        each fail-closed. They are asked in the order that names the ACTIONABLE
+        cause rather than the order they are logically nested in, because the
+        token is published and a reader acts on it:
+
+        * a typed ERC-721/1155 receipt nobody could resolve is asked first. It is
+          the reason the producer withheld the scan's completeness in the first
+          place, so answering "nothing scanned this" there would point a reader
+          at a scan that ran and send them to the wrong pipeline.
+        * an account of this sheet that no scan reached at its own address is
+          asked next: a named, closable gap in a scan that otherwise ran.
+        * the generic refusal — no scan on record at all — is what is left.
+        * the cross-plane one is last: the restaking plane already publishes
+          quantities at this node with no USD column, and a $0 sheet beside them
+          would contradict a plane already in the same document.
 
         Deliberately NOT a conjunct: the third-party index's empty answer. It is
         the trigger that sends the producer to the chain and never the proof, so
@@ -278,14 +297,13 @@ class ValuePlane:
         ``empty``, answered at its page cap, or never answered at all.
         """
         canonical = self.canonical(key)
-        if canonical not in self.asset_set_proven_complete:
-            return EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE
         if self.typed_receipts_unresolved.get(canonical):
             return EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED
+        if canonical not in self.asset_set_proven_complete:
+            if self.asset_set_accounts_unscanned.get(canonical):
+                return EMPTY_REFUSED_UNSCANNED_ACCOUNT
+            return EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE
         if self.unpriced_positions.get(canonical):
-            # The restaking plane already publishes quantities at this node with
-            # no USD column. A $0 sheet beside them would contradict a plane
-            # already in the same document.
             return EMPTY_REFUSED_UNPRICED_POSITIONS
         return None
 
@@ -431,12 +449,12 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     because "the list is incomplete" is closed by paging or sweeping the chain,
     which is not the pipeline that answers "nobody priced these rows".
 
-    ``fold._entity_contribution`` will be the only caller, and it calls with the
-    canonical key. Nothing in the fold calls it yet — the resolver is landed
-    ahead of the branch that consumes it — so every reason it can answer is
-    pinned by ``tests/test_value_plane_ceiling.py`` over hand-built planes
-    rather than by the corpus, which carries no proven-empty sheet and no
-    ambiguous alias to exercise two of them.
+    ``fold._entity_contribution`` is the only caller, and it calls with the
+    canonical key. Every reason is pinned by ``tests/test_value_plane_ceiling.py``
+    over hand-built planes, because the corpus does not carry all of them: it now
+    carries proven-empty sheets in quantity — the chain-log sweep earned them —
+    but no ambiguous alias and no unregistered sheet state, so those two are
+    reachable only by construction.
     """
     if key in plane.alias_ambiguous:
         return None, CEILING_ALIAS_AMBIGUOUS
@@ -729,22 +747,19 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     # be a later failure that would withdraw the truncation while the truncated
     # prefix rows are still what the sheet sums.
     winning_asset_fetch = winning_asset_fetches(session, protocol_id)
-    # Every account that CONTRIBUTES to a key's sheet, so completeness is asked
-    # of the sheet rather than of one of its accounts. Three kinds qualify and
-    # the third is the point: the entity's own address, any folded account that
-    # carries balance evidence of its own, and any folded account whose rows this
-    # plane just summed. An implementation the producers have never read is
-    # deliberately NOT one of them — it folds onto the proxy so a MIS-FILED
-    # reading is not lost, and demanding a scan of an address no writer observes
-    # would make every proxy with such a row permanently unprovable. The moment
-    # one carries a reading it is back in, which is the shape the eviction bug
-    # (§3.4) actually took.
+    # EVERY account that folds onto a key, with no exemption. The sheet is the
+    # sum over its accounts, so its asset list is whole only where every one of
+    # those addresses was scanned AT ITSELF. An implementation nothing has ever
+    # read is the case this exists for: its rows fold into the proxy's sheet, so
+    # publishing that sheet empty asserts the implementation's address holds
+    # nothing — which nobody looked at. "We never looked" is not_determined, and
+    # neither a missing fetch nor a failed one nor a fetch filed at some other
+    # address is a reading of that account. The producer's population is what
+    # closes this (``tvl._get_protocol_addresses`` reads the folded
+    # implementations of a scanning entity), not a weaker rule here.
     accounts_of: dict[str, set[int]] = defaultdict(set)
     for contract in contracts:
-        own_key = entity_key(chain_of[contract.id], address_of[contract.id])
-        key = plane.canonical(own_key)
-        if key == own_key or contract.id in observed_contracts or contract.id in winning_asset_fetch:
-            accounts_of[key].add(contract.id)
+        accounts_of[plane.canonical(entity_key(chain_of[contract.id], address_of[contract.id]))].add(contract.id)
     scanned: dict[str, list[dict[str, Any]]] = defaultdict(list)
     typed_unresolved: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for contract_id, fetch in sorted(winning_asset_fetch.items()):
@@ -775,6 +790,14 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             and fetch.sweep_status == SWEEP_STATUS_COMPLETED
             and fetch.swept_through_block is not None
             and entries is not None
+            # The scan has to have been issued AT this account's own address. A
+            # fetch row names the contract it belongs to and, separately, the
+            # address the read went to; the recipient-topic filter that makes the
+            # scan a proof is built from the second. A scan of the proxy filed
+            # against the implementation's row proves nothing about the
+            # implementation's address, and that is the exact shape on this
+            # corpus.
+            and _lower(fetch.observed_address) == address_of.get(contract_id)
         ):
             scanned[key].append(
                 {
@@ -787,9 +810,14 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             )
     plane.typed_receipts_unresolved = {key: records for key, records in sorted(typed_unresolved.items())}
     for key, records in sorted(scanned.items()):
-        if {record["contract_id"] for record in records} != accounts_of.get(key, set()):
-            # An account of this sheet has no scan of its own. Its list is a
-            # third state, and a sum over it is not proven whole.
+        unscanned = accounts_of.get(key, set()) - {record["contract_id"] for record in records}
+        if unscanned:
+            # A scan ran at some of this sheet's accounts and never at these.
+            # Named rather than merely refused: it is the one refusal a producer
+            # cycle can close, and the addresses are the work list.
+            plane.asset_set_accounts_unscanned[key] = sorted(
+                address_of.get(contract_id) or "" for contract_id in unscanned
+            )
             continue
         if key in plane.asset_set_truncated:
             # One account scanned and another came back at the index's page cap.
@@ -799,7 +827,13 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             continue
         plane.asset_set_proven_complete[key] = {
             "source": ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+            # Both figures, always, and equal by the rule above. A lone
+            # "accounts_scanned: 1" lets a two-account sheet read as fully
+            # scanned when one of its addresses was; publishing the denominator
+            # beside it makes the claim checkable at a glance.
             "accounts_scanned": len(records),
+            "accounts_folded": len(accounts_of.get(key, ())),
+            "accounts": sorted(address_of.get(record["contract_id"]) or "" for record in records),
             # The WEAKEST end of the accounts' scans, because the sheet is only
             # covered where all of them are: the latest first block any account's
             # scan started at, and the earliest block any of them ran through.
@@ -810,11 +844,35 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             # re-authored here.
             "basis": [record["basis"] for record in records if record["basis"]],
         }
+    # The native discriminator for an ABSENT native row, decided per ENTITY and
+    # not by whichever folded contract row sorted last. Two rules, and the corpus
+    # shows why each is needed:
+    #
+    #   * the fact must come from the fetch of the account that IS the entity —
+    #     the canonical address. A folded implementation's fetch is a reading of
+    #     some address (often, on this corpus, of the PROXY, filed against the
+    #     implementation's row), and letting it win publishes a height and a
+    #     polarity the entity never earned. Live shape: a proxy holding 19.06 ETH
+    #     read ``proven_nonzero`` at its own address while its implementation row
+    #     carried a stale ``proven_zero``, and the higher ``contracts.id`` won.
+    #   * where two accounts disagree on the POLARITY, nothing is published. One
+    #     of them is wrong about this entity and the plane cannot say which, so
+    #     the honest answer is the third state rather than the majority or the
+    #     latest.
+    native_by_account: dict[str, dict[str, str]] = defaultdict(dict)
     for contract_id, fetch in sorted(latest_fetch.items()):
-        key = plane.canonical(entity_key(chain_of.get(contract_id), address_of.get(contract_id)))
+        own = entity_key(chain_of.get(contract_id), address_of.get(contract_id))
+        native_by_account[plane.canonical(own)][own] = native_balance_fact(fetch.native_status, fetch.block_number)
+    native_facts_refused_on_disagreement = 0
+    for key, by_account in sorted(native_by_account.items()):
         if key in native_seen:
             continue
-        plane.native_fact[key] = native_balance_fact(fetch.native_status, fetch.block_number)
+        polarities = {fact.split("_at_block")[0] for fact in by_account.values()}
+        if len(polarities) > 1:
+            native_facts_refused_on_disagreement += 1
+            plane.native_fact[key] = "not_determined"
+            continue
+        plane.native_fact[key] = by_account.get(key, "not_determined")
 
     # The restaking plane is separate by construction and carries NO USD column,
     # so its positions cannot enter the band arithmetic. They keep a MAX-per-node
@@ -873,9 +931,10 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     #
     # A stored native ROW always wins: ``native_seen`` is the account actually
     # read, and the fetch record's status is the discriminator for an ABSENT row
-    # only. ``native_fact`` itself is left untouched, so
-    # :func:`native_value_state` — its existing consumer — reads exactly what it
-    # read before.
+    # only. The fact itself is the entity's OWN — resolved above at the canonical
+    # address and refused outright where two folded accounts disagree — so a
+    # sheet can no longer be published empty on a zero read at a neighbouring
+    # address.
     native_proven_zero_readings = 0
     for key in sorted(plane.asset_set_proven_complete):
         if key in native_seen:
@@ -892,7 +951,12 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     sheet_states: dict[str, int] = dict.fromkeys(
         (SHEET_PRICED, SHEET_BELOW_RESOLUTION, SHEET_UNPRICED, SHEET_PROVEN_EMPTY, SHEET_NO_ROWS), 0
     )
-    for key in sorted(set(plane.per_asset) | set(plane.per_asset_state)):
+    # The union INCLUDES entities carried only by a typed receipt. They hold no
+    # fungible reading, so the two per-asset maps do not name them — and they are
+    # exactly the entities whose state the typed gate moves off ``no_rows``. A
+    # census taken over the maps alone published 14 unpriced sheets while the
+    # plane answered ``unpriced`` for 29 of them.
+    for key in sorted(set(plane.per_asset) | set(plane.per_asset_state) | set(plane.typed_receipts_unresolved)):
         sheet_states[plane.sheet_state(key)] += 1
 
     # The empty claim's own census, over the sheets whose EVERY observed quantity
@@ -901,7 +965,14 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     # rule nobody wired up.
     empty_refused: dict[str, int] = dict.fromkeys(EMPTY_REFUSALS, 0)
     empty_admitted = 0
-    for key in sorted(set(plane.per_asset_state) | set(plane.typed_receipts_unresolved)):
+    # The population includes sheets refused for an UNSCANNED ACCOUNT even though
+    # they carry no reading at all: the reading is missing precisely because the
+    # refusal fired — the native proven-zero is only promoted onto a sheet whose
+    # list is whole — so a census over readings alone would report the refusal it
+    # was written to count as zero.
+    for key in sorted(
+        set(plane.per_asset_state) | set(plane.typed_receipts_unresolved) | set(plane.asset_set_accounts_unscanned)
+    ):
         states_at_key = plane.per_asset_state.get(key) or {}
         if any(state != ASSET_PROVEN_ZERO for state in states_at_key.values()):
             continue
@@ -965,19 +1036,34 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
             "entities_proven_truncated": len(plane.asset_set_truncated),
             "completeness_source": ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
             "native_proven_zero_sheet_readings": native_proven_zero_readings,
+            "native_facts_refused_on_cross_account_disagreement": native_facts_refused_on_disagreement,
             "entities_with_unresolved_typed_receipts": len(plane.typed_receipts_unresolved),
             "unresolved_typed_receipts": sum(len(v) for v in plane.typed_receipts_unresolved.values()),
+            "entities_with_an_unscanned_folded_account": len(plane.asset_set_accounts_unscanned),
+            "unscanned_folded_accounts": sum(len(v) for v in plane.asset_set_accounts_unscanned.values()),
+            "accounts_scanned_over_accounts_folded": {
+                "scanned": sum(int(r["accounts_scanned"]) for r in plane.asset_set_proven_complete.values()),
+                "folded": sum(int(r["accounts_folded"]) for r in plane.asset_set_proven_complete.values()),
+            },
             "sheets_published_empty": empty_admitted,
             "sheets_refused_empty_by_reason": dict(sorted(empty_refused.items())),
             "reading": (
                 "the two completeness figures are NOT complements: proven_complete is an earned "
-                "positive (the chain's own transfer history through a named block, read at every "
-                "account the sheet folds), proven_truncated is an earned negative (a read that "
-                "came back at the index's page cap), and an entity in neither is the third state. "
-                "Only the first admits an empty sheet as a proven $0; a refused one publishes "
-                "unpriced, never a zero. A typed ERC-721/1155 receipt resolves only where its "
-                "current holding read back zero — an unreadable balanceOf and a non-zero count "
-                "both refuse, and a count is never summed into a USD total"
+                "positive and proven_truncated an earned negative, and an entity in neither is the "
+                "third state. The positive is earned PER ACCOUNT: a sheet sums over every contract "
+                "row that folds onto its key, so it is whole only where the chain's transfer "
+                "history was scanned at EVERY one of those addresses, at that address itself — a "
+                "scan of a proxy filed against its implementation's row proves nothing about the "
+                "implementation's address, which is why accounts_scanned is published beside "
+                "accounts_folded and why folded_account_never_scanned is its own refusal rather "
+                "than a shade of 'nobody scanned this'. Only a proven-complete sheet admits an "
+                "empty one as a proven $0; every refusal publishes unpriced, never a zero. The "
+                "refusal counted under typed_receipt_unresolved is also the UPSTREAM cause of most "
+                "completeness withholding: the producer records the third-party source rather than "
+                "the scan's whenever a receipt's holding has no readable balanceOf answer, so those "
+                "sheets are refused for the receipts and not for a scan that failed to run — "
+                "entities_with_unresolved_typed_receipts beside it is the population, and reading "
+                "those two together is how a reader finds the pipeline that closes them"
             ),
         },
         # The fold's own exposure denominator, published rather than left to be
@@ -4518,6 +4604,7 @@ __all__ = [
     "EMPTY_REFUSALS",
     "EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE",
     "EMPTY_REFUSED_TYPED_RECEIPT_UNRESOLVED",
+    "EMPTY_REFUSED_UNSCANNED_ACCOUNT",
     "EMPTY_REFUSED_UNPRICED_POSITIONS",
     "CONFERRAL_CONFERRED",
     "CONFERRAL_OUTCOMES",

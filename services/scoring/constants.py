@@ -265,21 +265,21 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     "authority_deletability_basis_arm:gating_authority",
     "route_comparison_verdict:route_match",
     "retired:destination_callee_is_restricted_by_the_intermediate",
-    # Not one of the run's own arms — it predates them, with 0 rows before Phase A
-    # and 0 after. Registered here anyway (CAP-B ruling 2) because §8's obligation
-    # is a flag in the DOCUMENT and a spec deferral does not discharge it, and
-    # because the page allow-lists this direction: it would render a badge for a
-    # state nothing can earn, with nothing published saying so.
-    "value_at_stake_bound_direction:ceiling",
-    # The code-control ceiling's one remaining zero-carrier arm. Its siblings
-    # ``code_control_ceiling:proven_empty`` and
-    # ``sheet_ceiling_bound_direction:ceiling`` were registered here while no
-    # entity on the reference corpus held a sheet proven empty; the chain-log
-    # sweep gave them carriers, and an entry whose positive branch has fired is
-    # removed rather than left standing — a register that keeps a fired arm
-    # tells a reader the model was never fitted to something it now publishes.
-    # The refusal below still has none: the fold refuses a shared implementation
-    # before any magnitude branch reads a sheet, so no row can carry it.
+    # The code-control ceiling's one remaining zero-carrier arm. THREE came off
+    # when the chain-log sweep earned the reference corpus its first proven-empty
+    # sheets: ``code_control_ceiling:proven_empty`` and
+    # ``sheet_ceiling_bound_direction:ceiling`` gained per-entity carriers, and
+    # the row-header ``value_at_stake_bound_direction:ceiling`` — the one that
+    # predated this run — gained its first carrying ROW, a subsumed one whose
+    # every contributing entity is a proven $0 with no coverage gap. An entry
+    # whose positive branch has fired is removed rather than narrowed to whatever
+    # scope still reads zero: the register exists to say the model was never
+    # fitted to a state the document publishes, and that sentence is now false
+    # for all three however the population is sliced.
+    #
+    # The refusal below still has none, and cannot: the fold refuses a shared
+    # implementation before any magnitude branch reads a sheet, so no row can
+    # carry it and only a direct call to the resolver reaches it.
     "code_control_ceiling_refused:alias_ambiguous",
 )
 
@@ -402,38 +402,6 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "constrains the destination call's counterparty ARGUMENT, and no stored witness says an "
             "intermediate restricts the callee SET. A genuine callee-set restriction — the Manager's "
             "merkle verification — is not witnessed in this data and is not claimed"
-        ),
-    },
-    {
-        "arm": "value_at_stake_bound_direction:ceiling",
-        "state": "ceiling",
-        # The FIELD is published on every row — it is the value `ceiling` that has
-        # no carrier — so the path is named rather than nulled. That is the
-        # difference between this and the retired token above, whose producer
-        # cannot emit it at all.
-        "published_at": "findings[].value_at_stake_bound_direction",
-        "population_census": None,
-        "exercised_by": (
-            "tests/test_scoring_redteam.py::"
-            "test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling",
-            "tests/test_scoring_redteam.py::test_b7_a_direction_is_published_only_where_one_was_proven",
-            "tests/test_scoring_redteam.py::test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet",
-        ),
-        "note": (
-            "the one arm here that PREDATES this run, and the only one whose REASON for having no "
-            "carrier has changed. It had exactly one producer — a composed extraction ceiling — and "
-            "it now has two: a code-control row priced from the controlled node's own sheet is "
-            "ceiling-bearing on the same axis, deliberately, so the page carries ONE ceiling and "
-            "not two. It is still 0 rows before and 0 after, and the reason is measured rather "
-            "than deferred: the conjunction needs EVERY contributing entity to be a proven ceiling "
-            "with NO COVERAGE GAP — no instance left not_determined and no entity holding assets "
-            "the priced sheet does not cover — and every ceiling-bearing row here fails the second "
-            "half, including the one that reaches a single entity and prices it. So the direction "
-            "is earnable, a constructed row earns it (exercised_by), and no row here does. "
-            "Registered because the obligation is a flag in this document and a spec deferral does "
-            "not discharge one, and because site/src/score/derive.js allow-lists this direction: "
-            "the page would render a <= badge for a state no ROW here earns, with nothing "
-            "published saying so"
         ),
     },
     {

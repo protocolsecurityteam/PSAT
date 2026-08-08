@@ -195,7 +195,12 @@ def value_plane(
 # under test is the plane's rule and not one corpus's data.
 SCANNED = {
     "source": "chain_log_sweep",
+    # Both figures, as the plane publishes them: a sheet is whole only where
+    # every account it folds was scanned, so the denominator travels with the
+    # numerator.
     "accounts_scanned": 1,
+    "accounts_folded": 1,
+    "accounts": ["0x" + "a" * 40],
     "swept_from_block": 0,
     "swept_through_block": 21_000_000,
     "basis": ["chain scan of blocks 0-21000000 over Transfer/TransferSingle/TransferBatch"],

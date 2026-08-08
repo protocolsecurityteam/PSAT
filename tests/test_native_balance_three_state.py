@@ -856,9 +856,10 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_an_unscanned_account_of_the_same_sheet_refuses_it(self, db_session):
         """The alias fold makes two accounts one asset list, so both must be scanned.
 
-        The implementation carries a reading of its own here — the shape the
-        mis-attribution bug took — so its list is part of this sheet's and its
-        absence from the scan is the sheet's absence.
+        No exemption for an implementation nothing has read: its rows fold into
+        this sheet, so publishing the sheet empty asserts that its address holds
+        nothing, and nobody looked. The refusal carries its own token and names
+        the address, because one producer cycle closes it.
         """
         from services.scoring import planes as P
 
@@ -883,6 +884,8 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         proxy_key = f"ethereum::{proxy.address.lower()}"
         assert plane.canonical(f"ethereum::{impl_address.lower()}") == proxy_key
         assert plane.asset_set_is_proven_complete(proxy_key) is False
+        assert plane.asset_set_accounts_unscanned[proxy_key] == [impl_address.lower()]
+        assert plane.proven_empty_refusal(proxy_key) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
         assert plane.sheet_state(proxy_key) == P.SHEET_UNPRICED
 
     def test_a_capped_account_contradicts_the_scan_and_the_refusal_wins(self, db_session):
@@ -913,3 +916,121 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         # sheet reading and the sheet is back to having observed nothing.
         assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
         assert P.ceiling_for(plane, proxy_key) == (None, P.CEILING_ASSET_LIST_TRUNCATED)
+
+    def test_an_implementation_nobody_ever_read_refuses_the_sheet(self, db_session):
+        """The fail-open this rule closes, in its live shape.
+
+        The implementation has one fetch and it was observed AT THE PROXY — the
+        divergent-address policy's legacy. Nothing has ever read the
+        implementation's own address, so the proxy's sheet cannot be shown whole
+        however cleanly the proxy itself sweeps, and "we never looked" is
+        not_determined rather than $0.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-unread-impl")
+        impl_address = _addr("fc")
+        proxy = _contract(db_session, proto.id, _addr("fb"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy)
+        # The implementation's only fetch: a read of the PROXY, filed here.
+        _fetch(
+            db_session,
+            impl,
+            native=NATIVE_STATUS_PROVEN_ZERO,
+            block=99,
+            assets=ASSET_SET_STATUS_FETCH_FAILED,
+            observed=proxy.address,
+        )
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.asset_set_is_proven_complete(proxy_key) is False
+        assert plane.proven_empty_refusal(proxy_key) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
+        assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
+
+        # One producer cycle at the implementation's OWN address closes it.
+        self._swept(db_session, impl)
+        db_session.commit()
+        reread = P.load_value_plane(db_session, proto.id)
+        assert reread.asset_set_is_proven_complete(proxy_key) is True
+        record = reread.asset_set_proven_complete[proxy_key]
+        assert record["accounts_scanned"] == record["accounts_folded"] == 2
+        assert reread.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
+
+    def test_a_scan_filed_against_a_row_but_issued_elsewhere_scans_nothing(self, db_session):
+        """A fetch names the contract it belongs to and the address it read.
+
+        The recipient-topic filter that makes a scan a proof is built from the
+        second, so a scan of one address filed against another contract's row
+        proves nothing about that contract's address.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-foreign-scan")
+        c = _contract(db_session, proto.id, _addr("fd"))
+        other = _addr("fe")
+        f = self._swept(db_session, c)
+        f.observed_address = other
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        key = f"ethereum::{c.address.lower()}"
+        assert plane.asset_set_is_proven_complete(key) is False
+        assert plane.sheet_state(key) == P.SHEET_NO_ROWS
+
+    def test_two_accounts_that_disagree_about_the_native_balance_publish_neither(self, db_session):
+        """A folded account's zero is not this entity's zero.
+
+        Live shape: a proxy holding ETH read ``proven_nonzero`` at its own
+        address while its implementation row carried a stale ``proven_zero``, and
+        the higher ``contracts.id`` won the map. The polarities disagree, one of
+        them is wrong about this entity, and the plane cannot say which — so it
+        publishes the third state and the sheet earns no empty.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-native-disagree")
+        impl_address = _addr("e8")
+        proxy = _contract(db_session, proto.id, _addr("e7"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        proxy_fetch = self._swept(db_session, proxy, native_block=200)
+        proxy_fetch.native_status = NATIVE_STATUS_PROVEN_NONZERO
+        self._swept(db_session, impl, native_block=100)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.asset_set_is_proven_complete(proxy_key) is True
+        assert plane.native_fact[proxy_key] == "not_determined"
+        assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
+        assert plane.provenance["asset_set_completeness"]["native_facts_refused_on_cross_account_disagreement"] == 1
+
+    def test_the_entitys_own_account_is_what_answers_its_native_balance(self, db_session):
+        """Agreeing polarities, different heights: the entity's own read wins.
+
+        Both accounts say proven_zero, so nothing is refused — but the block
+        published is the one read AT the entity, not whichever folded row sorted
+        last.
+        """
+        from services.scoring import planes as P
+
+        proto = _protocol(db_session, "3s-plane-native-own")
+        impl_address = _addr("ea")
+        proxy = _contract(db_session, proto.id, _addr("e9"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        self._swept(db_session, proxy, native_block=777)
+        self._swept(db_session, impl, native_block=111)
+        db_session.commit()
+
+        plane = P.load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.native_fact[proxy_key] == "proven_zero_at_block_777"
+        assert plane.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
