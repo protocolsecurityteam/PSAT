@@ -265,4 +265,38 @@ NO_SELECTOR = ""
 # unpriced band's floor and the missing magnitude is charged to confidence.
 # ``site/src/score/gradeBands.js`` carries the matching band table; without an
 # entry there the bump would strip the published letter.
-MODEL_VERSION = "1.1.0-provisional"
+#
+# 1.2.0: code control gets a magnitude. 1.1.0 left it with none — "which
+# function does replacing the whole implementation let you call?" has no answer,
+# so every code-control row fell to the unpriced floor and total control of a
+# $3.62B proxy ranked below a $90.06 withdrawal. The answer that needs no
+# further witness is the controlled node's OWN priced sheet: replacing what that
+# node does removes the one thing that stood between the principal and its
+# holdings, so the sheet bounds the move from above. It is published as a
+# ``proven_ceiling`` — an at-most, never an amount — only at the node the code
+# control is over (a downstream node's own code still stands), and only where
+# the sheet is priced; dust, unpriced and no-rows sheets stay not_determined,
+# and a provably empty sheet is an earned $0 ceiling. Gate control and pause.set
+# are untouched. Ceilings move lambda and the ranking; they stay OUT of
+# exposure_usd, because an upper bound on a move nobody witnessed is not
+# expected loss. Measured on protocol 1: lambda 73.2508 -> 71.7053, letter
+# B+ -> B, exposure_usd unchanged at $18,059,003.86, confidence headline
+# unchanged at 18.6 with its magnitude term 37.6 -> 40.9.
+#
+# The gradeBands.js obligation above is LIVE for this bump: it carries a
+# 1.2.0-provisional entry that reasons 1.1.0's cut points forward rather than
+# recutting them, so the letter drop is published rather than absorbed.
+#
+# 1.2.0 is also the SETTLING EVENT for one absence this model could not read.
+# ``execution_evidence_faults`` (``services/scoring/schema.py``) omits its key
+# when the fold walked every published magnitude's proving execution and found
+# no fault — absence is meant to be a completed count of zero. But the field
+# arrived MID-1.1.0 (PR #172), so on a 1.1.0 document absence cannot tell a
+# fault-free fold from one that predates the census, and it has to be read as
+# not_determined. Every document stamped 1.2.0-provisional or later ran the
+# census unconditionally (``fold.py`` calls it on every fold, before the grade
+# is assembled), so from this version on an absent key IS the earned zero. The
+# boundary is the version stamp and nothing else: readers join on
+# model_version, which is why the settlement is recorded here and republished
+# on the migration record rather than left in a spec.
+MODEL_VERSION = "1.2.0-provisional"

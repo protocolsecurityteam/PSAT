@@ -744,90 +744,204 @@ def model_parameters() -> dict[str, Any]:
                 "numerator because an at-most is not expected loss"
             ),
         },
-        "model_version_migration": {
-            "from": "1.0.1-provisional",
-            "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
-            # Three points, not two: the version floors an unwitnessed magnitude
-            # (lambda RISES) and then composes a witnessed one back (lambda
-            # FALLS), and a before/after pair hides that they move opposite ways.
-            "grade_lambda": [54.1614, 84.0166, 73.2508],
-            "letter": ["C+", "A−", "B+"],
-            "grade_lambda_reading": (
-                "shipped 1.0.1 -> magnitudes floored -> destination witnesses composed back; "
-                "only the first and last are published documents, the middle is this version's "
-                "own intermediate and is quoted so the two halves are not read as one move"
-            ),
-            "confidence_pct": [29.0, 18.6],
-            "exposure_usd": [1227107593.64, 18059003.86],
-            "what_moved": (
-                "a reach whose MAGNITUDE no witness proved stops charging the reached entity's "
-                "balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced "
-                "floor of 0.15, so lambda RISES and exposure collapses without any protocol "
-                "becoming safer. The composition pass then gives part of that class a WITNESSED "
-                "magnitude back - the destination function's own flow.out figure, reached along "
-                "a path every hop of which carries an act-as witness - which pushes lambda back "
-                "down from 84.0166 to 73.2508 and exposure back up from $76.07 to $18,059,003.86 "
-                "on witnesses, not on sheets. The band table carries 1.0.1's cut points forward "
-                "unchanged, so the letter delta is published rather than absorbed by a recut "
-                "nobody calibrated"
-            ),
-            "read_the_confidence_fall_correctly": (
-                "(a) the reach-magnitude term does NOT bind the headline on this corpus - the "
-                "min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; "
-                "(b) the strictest magnitude figure published, "
-                "reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and "
-                "composition is the only thing in this version that moves it: flooring an "
-                "unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the "
-                "40 signals composition was asked of and on nothing else - 28 of them publish a "
-                "composed figure and 12 are withheld under typed refusals since the "
-                "execution-witness pass; (c) the 29.0 -> 18.6 fall "
-                "happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude "
-                "term: the dust third state stopped counting a sheet whose only priced rows are "
-                "storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became "
-                "discovery-fixed, widening 295 -> 468 entities by admitting every recorded "
-                "discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal "
-                "principals — so the term now answers 'what share of {protocol contracts UNION "
-                "signer wallets} did we price', a strictly harder question than the one 33.7 "
-                "answered. The letter improvement here was NOT paid for by a "
-                "confidence fall in this change; both are real, and neither is the other's price"
-            ),
-            "what_composition_did_not_recover": (
-                "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities "
-                "carrying a flow.out magnitude covering 100% of reached priced value - is "
-                "PARTIALLY REFUTED on this corpus, because it counted the destination witness "
-                "and never the act-as step. Of 64 (hop, licensed selector) pairs the walk "
-                "offered, 27 carry an act-as witness and 19 of those also have a destination "
-                "flow.out witness. At this bump's own measurement "
-                f"({MODEL_VERSION}, before the execution-witness pass) those composed 13 entities "
-                "and $46,164,146.29 across two findings; that pass then made every composed figure "
-                "conditional on its proving execution and the authority-deletability join, and "
-                "what survives is counted in reach_composition_census rather than asserted here. "
-                "The rest stay not_determined and are charged to confidence. The single largest "
-                "refusal class is a call site whose receiver is a PARAMETER, which is the whole "
-                "AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER "
-                "admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not "
-                "regain a witnessed magnitude, it and the two EOAs the shipped document "
-                "over-charged all sit at not_determined together"
-            ),
-            "operational_hazard_the_gate_conferral_test_introduces": (
-                "the state-variable branch reads the gate's OWN function through "
-                "function_score_signals.function_id, which is ON DELETE SET NULL against "
-                "effective_functions - and a re-analysis DELETES and reinserts a contract's "
-                "function rows. So a persisted signal that outlives one re-analysis of its "
-                "contract points at nothing, every one of its state-variable hops degrades to "
-                "capability_state_writes_not_extracted, and the row silently loses reach it held "
-                "the day before. The withhold is counted, but its cause would read as an "
-                "extraction that never ran rather than a stale foreign key. A dangling reference "
-                "therefore falls back to the signal's own (deployment entity, selector), which "
-                "the re-analysis preserves, admitted only where every function under that key "
-                "agrees on what it rewrites; the recovery population and the keys two functions "
-                "disagree under are published in "
-                "provenance.reach_bounds.gate_conferral.stale_function_reference_recovery. "
-                "Operators re-folding a protocol whose signals predate its last re-analysis "
-                "should expect that block to be non-zero and should read it before reading a "
-                "reach delta"
-            ),
-        },
+        # Two records, not one extended path. 1.0.1 -> 1.1.0 and 1.1.0 -> 1.2.0
+        # are two bumps, and a single list of lambda points spanning both would
+        # publish a path no document ever walked — a reader could not tell which
+        # bump moved which number, and the two bumps move lambda in opposite
+        # directions. Each record names the version it moved FROM and the one it
+        # moved TO, so a persisted score's model_version joins to exactly one.
+        "model_version_migrations": [
+            {
+                "from": "1.0.1-provisional",
+                "to": "1.1.0-provisional",
+                "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+                # Three points, not two: the version floors an unwitnessed magnitude
+                # (lambda RISES) and then composes a witnessed one back (lambda
+                # FALLS), and a before/after pair hides that they move opposite ways.
+                "grade_lambda": [54.1614, 84.0166, 73.2508],
+                "letter": ["C+", "A−", "B+"],
+                "grade_lambda_reading": (
+                    "shipped 1.0.1 -> magnitudes floored -> destination witnesses composed back; "
+                    "only the first and last are published documents, the middle is this version's "
+                    "own intermediate and is quoted so the two halves are not read as one move"
+                ),
+                "confidence_pct": [29.0, 18.6],
+                "exposure_usd": [1227107593.64, 18059003.86],
+                "what_moved": (
+                    "a reach whose MAGNITUDE no witness proved stops charging the reached entity's "
+                    "balance sheet: those rows fall from a value band of 0.5-1.0 to the unpriced "
+                    "floor of 0.15, so lambda RISES and exposure collapses without any protocol "
+                    "becoming safer. The composition pass then gives part of that class a WITNESSED "
+                    "magnitude back - the destination function's own flow.out figure, reached along "
+                    "a path every hop of which carries an act-as witness - which pushes lambda back "
+                    "down from 84.0166 to 73.2508 and exposure back up from $76.07 to $18,059,003.86 "
+                    "on witnesses, not on sheets. The band table carries 1.0.1's cut points forward "
+                    "unchanged, so the letter delta is published rather than absorbed by a recut "
+                    "nobody calibrated"
+                ),
+                "read_the_confidence_fall_correctly": (
+                    "(a) the reach-magnitude term does NOT bind the headline on this corpus - the "
+                    "min() is value_priced_pct 18.6 and the magnitude term sits 19.0pp clear at 37.6; "
+                    "(b) the strictest magnitude figure published, "
+                    "reach_magnitude_witnessed_of_reaching_pct, WOULD bind if it were the term, and "
+                    "composition is the only thing in this version that moves it: flooring an "
+                    "unwitnessed magnitude mints no witness, and the figure went 15.3 -> 25.6 on the "
+                    "40 signals composition was asked of and on nothing else - 28 of them publish a "
+                    "composed figure and 12 are withheld under typed refusals since the "
+                    "execution-witness pass; (c) the 29.0 -> 18.6 fall "
+                    "happened WITHIN 1.0.1 and in the BINDING value_priced term, not the magnitude "
+                    "term: the dust third state stopped counting a sheet whose only priced rows are "
+                    "storage-rounding zeros as priced (33.7 -> 27.8 alone), and the perimeter became "
+                    "discovery-fixed, widening 295 -> 468 entities by admitting every recorded "
+                    "discovery endpoint — 108 safe_owner signer wallets and 65 capability_principal "
+                    "principals — so the term now answers 'what share of {protocol contracts UNION "
+                    "signer wallets} did we price', a strictly harder question than the one 33.7 "
+                    "answered. The letter improvement here was NOT paid for by a "
+                    "confidence fall in this change; both are real, and neither is the other's price"
+                ),
+                "what_composition_did_not_recover": (
+                    "the spec's Phase-6 coverage claim - 14 of 24 gate-control reached entities "
+                    "carrying a flow.out magnitude covering 100% of reached priced value - is "
+                    "PARTIALLY REFUTED on this corpus, because it counted the destination witness "
+                    "and never the act-as step. Of 64 (hop, licensed selector) pairs the walk "
+                    "offered, 27 carry an act-as witness and 19 of those also have a destination "
+                    "flow.out witness. At this bump's own measurement "
+                    # FROZEN at the 1.1.0 -> 1.2.0 bump. This sentence reports what
+                    # was measured while 1.1.0 was CURRENT, and interpolating
+                    # MODEL_VERSION here now would restamp a 1.1.0 measurement with
+                    # whatever version happens to be shipping — a dated figure
+                    # wearing a live label. The record below, which describes the
+                    # version that IS current, interpolates instead; freezing this
+                    # one is what makes that interpolation honest.
+                    "(1.1.0-provisional, before the execution-witness pass) those composed 13 entities "
+                    "and $46,164,146.29 across two findings; that pass then made every composed figure "
+                    "conditional on its proving execution and the authority-deletability join, and "
+                    "what survives is counted in reach_composition_census rather than asserted here. "
+                    "The rest stay not_determined and are charged to confidence. The single largest "
+                    "refusal class is a call site whose receiver is a PARAMETER, which is the whole "
+                    "AtomicSolverV3 family - and it is why SPEC 9.5 case 2 lands on its OTHER "
+                    "admissible outcome: the timelock behind RolesAuthority 0x4df6b733 does not "
+                    "regain a witnessed magnitude, it and the two EOAs the shipped document "
+                    "over-charged all sit at not_determined together"
+                ),
+                "operational_hazard_the_gate_conferral_test_introduces": (
+                    "the state-variable branch reads the gate's OWN function through "
+                    "function_score_signals.function_id, which is ON DELETE SET NULL against "
+                    "effective_functions - and a re-analysis DELETES and reinserts a contract's "
+                    "function rows. So a persisted signal that outlives one re-analysis of its "
+                    "contract points at nothing, every one of its state-variable hops degrades to "
+                    "capability_state_writes_not_extracted, and the row silently loses reach it held "
+                    "the day before. The withhold is counted, but its cause would read as an "
+                    "extraction that never ran rather than a stale foreign key. A dangling reference "
+                    "therefore falls back to the signal's own (deployment entity, selector), which "
+                    "the re-analysis preserves, admitted only where every function under that key "
+                    "agrees on what it rewrites; the recovery population and the keys two functions "
+                    "disagree under are published in "
+                    "provenance.reach_bounds.gate_conferral.stale_function_reference_recovery. "
+                    "Operators re-folding a protocol whose signals predate its last re-analysis "
+                    "should expect that block to be non-zero and should read it before reading a "
+                    "reach delta"
+                ),
+            },
+            {
+                "from": "1.1.0-provisional",
+                # INTERPOLATED, and that is the point: while this is the CURRENT
+                # version the record and the document it describes must not be
+                # able to drift apart. The next bump freezes this to its literal
+                # — the way the 1.0.1 record above is frozen — and adds its own
+                # interpolated record.
+                "to": MODEL_VERSION,
+                "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+                # Two points, not three: unlike the bump above, this one has no
+                # intermediate document. Both halves of the change — the ceiling
+                # branch and its confidence credit — ship together, so there is
+                # no floored-then-recovered lambda to quote.
+                "grade_lambda": [73.2508, 71.7053],
+                "letter": ["B+", "B"],
+                "confidence_pct": [18.6, 18.6],
+                "exposure_usd": [18059003.86, 18059003.86],
+                "measured_at": (
+                    "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
+                    f"this bump's own tip ({MODEL_VERSION}), as the last published 1.1.0-provisional "
+                    f"document read against the first {MODEL_VERSION} one. None of it is a "
+                    "projection onto a corpus this model has never scored, and there is no second "
+                    "corpus these cut points could have been calibrated against"
+                ),
+                "what_moved": (
+                    "code control gains the magnitude path it never had. Replacing a node's "
+                    "implementation removes the one thing that stood between the principal and that "
+                    "node's own holdings, so the node's own priced sheet is a PROVEN CEILING on what "
+                    "the reach can move there - published as an at-most and never as an amount. Gate "
+                    "control is untouched: seizing who may call a vault leaves the vault's own code, "
+                    "its share math and its caller conditions all standing, so it still needs a "
+                    "destination witness and an act-as step. pause.set is untouched: a freeze "
+                    "rewrites nothing, and no witness sizes the share of a sheet it immobilises. On "
+                    "this corpus 4 published rows gain a band and none appears or vanishes. The two "
+                    "that move raw_points are an upgrade.implementation behind a 10-day timelock via "
+                    "6/10 over $4,217,100,556.98 of priced hosts (0.9504 -> 6.336) - that figure is "
+                    "the SUM of that row's 8 priced hosts, of which the $3,622,582,124.76 proxy is "
+                    "the largest, and it is why the row's total exceeds any single sheet while each "
+                    "host's own ceiling is still capped by its own sheet - and one behind a "
+                    "Safe 4/8 over $1,606,719.06 (4.95 -> 10.5, whose published weakness also "
+                    "refines 0.55 -> 0.35, because the per-entity rung was dormant until a ceiling "
+                    "populated it; that refinement also RENAMES the row, whose published principal "
+                    "flips from 'Safe 3/7 0xa000...cd52' to 'Safe 4/8 0xf46d...e2b5' - same "
+                    "principal_unit and the same two principal_addresses, re-derived because the "
+                    "rung now names the Safe that gates the priced entity, so a reader diffing the "
+                    "row sees a different name for the same holder). lambda FALLS 73.2508 -> 71.7053 "
+                    "because total code control over "
+                    "billions now outranks a $90.06 withdrawal, which is the defect this version "
+                    "corrects. The band table carries 1.1.0's cut points forward unchanged, so the "
+                    "letter drop B+ -> B is published rather than absorbed by a recut nobody "
+                    "calibrated"
+                ),
+                "read_the_flat_headline_correctly": (
+                    "the headline confidence does not move, and that is the meter working rather "
+                    "than the ceiling failing. confidence_pct is the min() of four terms, and on "
+                    "this corpus the binding term is value_priced_pct 18.6 - what share of the "
+                    "perimeter anyone priced at all - which this change does not touch. What the "
+                    "ceiling moves is the magnitude term: reach_magnitude_witnessed_pct 37.6 -> "
+                    "40.9, and the strictest magnitude figure published, "
+                    "reach_magnitude_witnessed_of_reaching_pct, 25.6 -> 35.6. Credit goes to the 21 "
+                    "signals whose ceiling produces a published row and to no others: 38 signals "
+                    "pass the admission conjuncts, but crediting the 17 whose rows never enter the "
+                    "grade would count an answer no published row carries. "
+                    "reach_magnitude_vacuous_credit_pct stays 29.2 - a ceiling credit rests on a "
+                    "real balance observation, so it is not vacuous credit. reachability_answered_pct "
+                    "59.1 and capability_scored_pct 45.0 are untouched. The credit divides 20 "
+                    "upgrade.implementation signals and 1 exec.arbitrary; delegatecall.execute earns "
+                    "none here. What this rule refuses is overwhelmingly a BALANCE OBSERVATION gap "
+                    "rather than a price-feed one - a sheet with no rows, not a sheet nobody could "
+                    "price - and the refusals are counted by reason in "
+                    "provenance.sheet_ceilings.calls_refused_by_reason rather than restated here, "
+                    "where the figure would drift the first time the pipeline observes one more "
+                    "balance"
+                ),
+                "what_this_version_settles": (
+                    "an absence, and it is the version stamp that settles it. execution_evidence_faults "
+                    "OMITS its key when the fold walked every published magnitude's proving execution "
+                    "and found no fault, so absence is meant to read as a completed count of zero. That "
+                    "field arrived MID-1.1.0, which left absence on a 1.1.0 document unable to "
+                    "distinguish a fault-free fold from one folded before the census existed - it has "
+                    "to be read as not_determined there. Every document stamped 1.2.0-provisional or "
+                    "later ran the census unconditionally over the whole published population, so from "
+                    "this version on an absent execution_evidence_faults IS the earned zero and may be "
+                    "read as one. Join on model_version to decide which rule a document is under; there "
+                    "is no other signal in the document that separates the two cases"
+                ),
+                "what_did_not_move_and_why_that_was_a_ruling": (
+                    "exposure_usd stays $18,059,003.86 and grade_exposure stays 99.582, because a "
+                    "ceiling is an at-most and not expected loss. Sheet ceilings are kept out of the "
+                    "exposure numerator and charge no entity's exposure budget, so the coverage "
+                    "disclosure keeps saying what it said before: 1.483% of the tracked total was "
+                    "measured. Admitting them would have flipped perimeter_usd_reached_unmeasured "
+                    "from $4,218,224,731.61 to $0.00 and tracked_share_measured_pct from 1.483 to "
+                    "99.04 - a document built to say almost nothing was measurable would instead "
+                    "claim near-total coverage on the strength of upper bounds, which is the "
+                    "opposite of what that disclosure exists to say"
+                ),
+            },
+        ],
         "uncalibrated_arms": list(UNCALIBRATED_ARMS),
         "uncalibrated_arm_disclosures": {
             "reading": (

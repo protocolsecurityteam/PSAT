@@ -17,7 +17,7 @@ describe("fold — reconstruction of the published grade", () => {
   it("reproduces the document's λ to 4dp", () => {
     // The pin that makes every counterfactual on this page trustworthy: if the
     // fold drifts from the producer's, the modeled recoveries are fiction.
-    expect(lambdaOf(FINDINGS)).toBe(73.2508);
+    expect(lambdaOf(FINDINGS)).toBe(71.7053);
     expect(lambdaOf(FINDINGS)).toBe(ETHERFI.grade_lambda);
   });
 
@@ -77,9 +77,9 @@ describe("fold — an unwitnessed raw refuses the reconstruction", () => {
 describe("fold — counterfactuals", () => {
   it("recovers more than the removed nets, because rank decay promotes survivors", () => {
     const { before, after, recovery } = recoveryFrom(FINDINGS, [0, 1]);
-    expect(before).toBe(73.2508);
-    expect(after).toBe(84.0295);
-    expect(recovery).toBe(10.7787);
+    expect(before).toBe(71.7053);
+    expect(after).toBe(79.7366);
+    expect(recovery).toBe(8.0313);
     // The nets of the two removed rows sum to 21 — the naive answer, and the
     // wrong one by more than 10 points in the other direction.
     const naive = FINDINGS[0].net_points_lambda + FINDINGS[1].net_points_lambda;
@@ -92,16 +92,17 @@ describe("fold — counterfactuals", () => {
     // Pinned against the approved prototype's protection column.
     expect(protectionDelta(FINDINGS, 0)).toBe(27.3);
     expect(protectionDelta(FINDINGS, 1)).toBe(17.82);
-    expect(protectionDelta(FINDINGS, 6)).toBe(0.9305);
-    expect(protectionDelta(FINDINGS, 7)).toBe(0.9305);
+    expect(protectionDelta(FINDINGS, 8)).toBe(0.5323);
+    expect(protectionDelta(FINDINGS, 9)).toBe(0.5323);
   });
 
   it("re-ranks the weakened finding rather than scaling its net in place", () => {
-    // finding 7 is rank 7 today; at weakness 1.0 its raw rises from 4.95 to 9
-    // and it takes a rank above four of the rows now ahead of it. Scaling its
-    // own net in place would have moved λ by a tenth of a point.
-    expect(lambdaAtWeaknessOne(FINDINGS, 7)).toBe(72.3203);
-    expect(rankedFindings(FINDINGS)[7].index).toBe(7);
+    // finding 9 is rank 9 today; at weakness 1.0 its raw rises from 4.95 to 9
+    // and it takes a rank above six of the rows now ahead of it. Scaling its
+    // own net in place would have moved λ by four hundredths of a point — its
+    // net is 0.0499 — against the 0.5323 the re-rank actually costs.
+    expect(lambdaAtWeaknessOne(FINDINGS, 9)).toBe(71.173);
+    expect(rankedFindings(FINDINGS)[9].index).toBe(9);
   });
 
   it("has no protection delta to report for an already-unconditional principal", () => {

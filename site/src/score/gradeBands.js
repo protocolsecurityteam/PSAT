@@ -75,9 +75,75 @@ const LETTER_CUTS = [
 //      behind a familiar-looking letter.
 //
 // So the letter delta is published as a migration fact rather than absorbed.
+//
+// ---------------------------------------------------------------------------
+//
+// 1.2.0-provisional carries the same cut points forward AGAIN — and this time
+// carrying them forward is what publishes a letter DROP rather than what
+// preserves one. That direction is the argument's own test: a table that is
+// only ever re-cut when the letter would fall is not a calibration, it is a
+// ratchet, and 1.1.0's three reasons would be worth nothing if they only ever
+// got applied when they were free.
+//
+// What moved. 1.2.0 gives code control the magnitude it never had. "Which
+// function does replacing the whole implementation let you call?" has no
+// answer — the answer is all of them, including ones that do not exist yet — so
+// 1.1.0 left every upgrade.implementation, exec.arbitrary and
+// delegatecall.execute row at the unpriced floor. The row holding
+// upgrade.implementation over a $3,622,582,124.76 proxy scored 0.9504 while a
+// $90.06 withdrawal scored 7.29. (That proxy is the LARGEST of the eight priced
+// hosts that row reaches; the row's own published total is their sum,
+// $4,217,100,556.98, which is the figure the migration record quotes.) The
+// answer that needs no further witness is
+// the controlled node's OWN priced sheet: replacing what that node does removes
+// the one thing that stood between the principal and its holdings. It is
+// published as a proven CEILING — an at-most, never an amount — only at the
+// node the code control is over, and only where a balance was actually
+// observed and priced. Measured across the version boundary, again on the only
+// local protocol (etherfi, protocol 1):
+//
+//     λ             73.2508 → 71.7053         letter B+ → B
+//     confidence       18.6 → 18.6            (its magnitude term 37.6 → 40.9)
+//     exposure_usd  $18,059,003.86 → $18,059,003.86
+//
+// Why the cuts do not move with it either. The 1.1.0 reasons above are not
+// simply re-asserted; each has a different force here:
+//   1. Fitting to one protocol is now WORSE, not better. 1.1.0's objection was
+//      that a nine-band table cut against a single λ is not a calibration. The
+//      only way to preserve B+ here is to move the 72.0 floor below 71.7053 —
+//      a cut point chosen by reading this one protocol's λ after the fact, and
+//      by 0.2947 of a point. That is reason 1 with the sign flipped, and it is
+//      the most direct form of the thing this file exists to prevent.
+//   2. Nothing a band table is calibrated AGAINST changed. 1.1.0 changed what
+//      counts as a witnessed magnitude and did not earn a recut; 1.2.0 changes
+//      strictly less. BASE_SEVERITY, the weakness ladder, VALUE_BANDS' own cut
+//      points and the λ discount are untouched, and raw_points is the same
+//      product it was. What changed is that one class of finding now HAS a
+//      magnitude to band, so it enters arithmetic the table was already cut
+//      for. Re-cutting the letters because more findings can be priced would
+//      fit the table to the pipeline's coverage rather than to the model.
+//   3. The half-settled objection applies here too, and points the same way. A
+//      ceiling lands only where a balance was observed: on this corpus 49
+//      code-control calls were refused one, 36 of them because no balance has
+//      ever been recorded at that node. That is an observation gap the pipeline
+//      is expected to close, and every balance it learns to see moves λ down
+//      again from here. Cut points fitted to today's observation coverage would
+//      be recalibrated on the next one — and in the interim they would hide the
+//      movement they were fitted to.
+//
+// One thing to read with the drop, because the letter alone will mislead:
+// nothing at etherfi got worse between these two documents. The same timelock
+// behind the same 6-of-10 multisig holds the same capability over the same
+// proxy. What changed is that the tool can now see how much is behind that
+// door. A model that could not see it would publish B+ for a protocol whose
+// upgrade key was a single EOA, which is the defect this version corrects.
+//
+// So, again: the letter delta is published as a migration fact rather than
+// absorbed.
 const BANDS = {
   "1.0.1-provisional": LETTER_CUTS,
   "1.1.0-provisional": LETTER_CUTS,
+  "1.2.0-provisional": LETTER_CUTS,
 };
 
 export function bandsFor(modelVersion) {
