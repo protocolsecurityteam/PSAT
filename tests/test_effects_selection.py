@@ -2156,8 +2156,11 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
 
     assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
-    assert any("FULL page" in w for w in warnings), "a full page went unreported because the filter shrank the list"
-    assert any(f"({cap} entries, {cap - 1} with a balance)" in w for w in warnings)
+    # The stub re-serves page 1 for every request, so paging cannot reach a short
+    # page and the list stays a declared PREFIX — which is the same fail-closed
+    # answer a full first page always produced, reported in the paged wording.
+    assert any("PREFIX" in w for w in warnings), "a full page went unreported because the filter shrank the list"
+    assert any(f"({cap} entries over 2 page(s), {cap - 1} with a balance)" in w for w in warnings)
     # NEGATIVE CONTROL: a genuinely short page reports nothing.
     monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
     warnings.clear()

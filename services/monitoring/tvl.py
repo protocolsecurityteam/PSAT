@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 
@@ -23,8 +24,6 @@ from sqlalchemy.orm import Session
 
 from db.models import (
     Contract,
-    ContractBalance,
-    ContractBalanceFetch,
     ContractBalanceLatest,
     Protocol,
     SessionLocal,
@@ -32,11 +31,19 @@ from db.models import (
 )
 from db.queue import record_heartbeat
 from services.monitoring import HEARTBEAT_PROTOCOL_TVL, emit_monitor_cycle
+from services.monitoring.balance_observation import (
+    NativeReading,
+    SweepRequest,
+    escalation_reason,
+    fetch_asset_page,
+    known_swept_assets,
+    record_observation,
+    run_sweeps,
+    sweep_from_block,
+)
 from services.monitoring.balance_reads import (
     contracts_missing_current_rows,
-    native_status_for,
     pinned_native_balances,
-    prune_balance_fetches,
 )
 from services.monitoring.chain_rpc import chain_id_for
 from utils.balance_status import (
@@ -46,6 +53,7 @@ from utils.balance_status import (
 )
 from utils.chains import chain_by_id
 from utils.etherscan import TokenBalancePage
+from utils.rpc import rpc_url_for_chain_id
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -138,9 +146,22 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
     return [c for c in contracts if c.address and _entity_key(c.chain, c.address) not in impl_tokens]
 
 
+@dataclass(frozen=True)
+class _PendingObservation:
+    """One contract read but not yet written, held over the escalation pass."""
+
+    contract: Contract
+    chain_id: int
+    native: NativeReading
+    page: TokenBalancePage
+    escalation: str | None
+
+
 def refresh_contract_balances(
     session: Session,
     protocol_id: int,
+    *,
+    contract_ids: set[int] | None = None,
 ) -> tuple[dict[str, dict], bool]:
     """Refresh on-chain balances for all contracts in a protocol.
 
@@ -161,11 +182,20 @@ def refresh_contract_balances(
     contract is SKIPPED (its prior balances left intact, ``partial`` flagged) —
     we never quote a non-ETH balance at the ETH price, and one unpriceable chain
     no longer aborts the whole protocol's snapshot.
+
+    ``contract_ids`` narrows the pass to a named subset. It only ever INTERSECTS
+    the population ``_get_protocol_addresses`` returns — it cannot admit a
+    contract the unscoped pass would skip — so a targeted re-observation reads
+    exactly what the hourly loop would have read for those contracts and nothing
+    else. The returned breakdown is then partial by construction and is not a
+    protocol total, so a caller that snapshots TVL leaves it ``None``.
     """
     from services.aggregations.company_overview import _entity_key
-    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price, get_token_balances_page
+    from utils.etherscan import get_eth_balance, get_eth_price, get_native_price
 
     contracts = _get_protocol_addresses(session, protocol_id)
+    if contract_ids is not None:
+        contracts = [c for c in contracts if c.id in contract_ids]
     if not contracts:
         return {}, False
 
@@ -198,6 +228,10 @@ def refresh_contract_balances(
     native_price_by_chain: dict[int, float | None] = {}
     breakdown: dict[str, dict] = {}
     partial = False
+    # Read first, escalate once, write after: the sweep is batched across the
+    # whole cycle, so the per-contract reads cannot also be the per-contract
+    # writes.
+    pending: list[_PendingObservation] = []
 
     for contract in contracts:
         address = contract.address
@@ -242,14 +276,10 @@ def refresh_contract_balances(
                 continue
             native_symbol, native_name = native_asset, native_asset
 
-        contract_total = 0.0
-        tokens: list[dict] = []
-
-        # This writer reads the contract's OWN address and never a proxy address
-        # (unlike the resolution worker, which reads ``request['proxy_address']``);
-        # ``_get_protocol_addresses`` has already excluded impls fronted by a
-        # proxy. Captured verbatim so the row records which address the quantity
-        # actually belongs to instead of leaving it to be re-derived.
+        # Every writer reads the contract's OWN address — the one
+        # ``observed_address`` policy, which lives in
+        # ``balance_observation.record_observation`` so neither producer can
+        # drift from it.
         observed_address = address
         pinned_block, pinned_wei = pinned_by_chain.get(chain_id, (None, {}))
 
@@ -272,87 +302,79 @@ def refresh_contract_balances(
                 eth_wei = None
                 native_failed = True
 
-        try:
-            page = get_token_balances_page(address, chain_id=chain_id)
-        except Exception as exc:
-            # The second swallow: ``token_list = []`` followed by a destructive
-            # DELETE published "holds no tokens" from a failed fetch. Note the
-            # common Etherscan failure never reaches here at all — it is caught
-            # one layer down and returns an empty page carrying ``fetch_failed``.
-            logger.warning("Token balance failed for %s: %s", address, exc)
-            page = TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
-        token_list = page.rows
-
-        native_status = native_status_for(wei=eth_wei, pinned=native_block is not None, failed=native_failed)
-        fetch = ContractBalanceFetch(
-            contract_id=contract.id,
-            chain_id=chain_id,
-            observed_address=observed_address,
-            block_number=native_block,
-            native_status=native_status,
-            asset_set_status=page.status,
-            asset_page_length=page.page_length,
-            writer=BALANCE_WRITER_TVL,
-        )
-        session.add(fetch)
-        session.flush()
-
-        # No DELETE. The writers are insert-only and ``contract_balances_latest``
-        # decides what is current, per row class, so a failed fetch can no longer
-        # wipe a holdings set it knows nothing about.
-
-        # Native coin (ETH / POL / BNB / ... — symbol is the chain's native_asset)
-        if eth_wei is not None and eth_wei > 0:
-            eth_usd = (eth_wei / 1e18) * native_price if native_price is not None else None
-            session.add(
-                ContractBalance(
-                    contract_id=contract.id,
-                    token_address=None,
-                    token_name=native_name,
-                    token_symbol=native_symbol,
-                    decimals=18,
-                    raw_balance=str(eth_wei),
-                    price_usd=native_price,
-                    usd_value=round(eth_usd, 2) if eth_usd is not None else None,
-                    observed_address=observed_address,
+        page = fetch_asset_page(address, chain_id=chain_id)
+        escalation = escalation_reason(session, contract_id=contract.id, page=page)
+        pending.append(
+            _PendingObservation(
+                contract=contract,
+                chain_id=chain_id,
+                native=NativeReading(
+                    wei=eth_wei,
                     block_number=native_block,
-                    fetch_id=fetch.id,
-                )
+                    failed=native_failed,
+                    price_usd=native_price,
+                    symbol=native_symbol,
+                    name=native_name,
+                ),
+                page=page,
+                escalation=escalation,
             )
-            if eth_usd is not None:
-                contract_total += eth_usd
-                tokens.append({"symbol": native_symbol, "usd_value": round(eth_usd, 2)})
+        )
 
-        # ERC-20 tokens. ``block_number`` stays NULL here even when the native
-        # read above was pinned: these quantities come from Etherscan's unpinned
-        # page, and inheriting the fetch's native height would assert a height
-        # they were never read at. DB-enforced by
-        # ``ck_contract_balances_token_block_null``.
-        for tok in token_list:
-            session.add(
-                ContractBalance(
-                    contract_id=contract.id,
-                    token_address=tok["token_address"],
-                    token_name=tok["token_name"],
-                    token_symbol=tok["token_symbol"],
-                    decimals=tok["decimals"],
-                    raw_balance=str(tok["balance"]),
-                    price_usd=tok.get("price_usd"),
-                    usd_value=tok.get("usd_value"),
-                    observed_address=observed_address,
-                    block_number=None,
-                    fetch_id=fetch.id,
-                )
-            )
-            usd = tok.get("usd_value")
-            if usd is not None:
-                contract_total += usd
-                tokens.append(
-                    {
-                        "symbol": tok["token_symbol"],
-                        "usd_value": round(usd, 2),
-                    }
-                )
+    # ONE escalation pass for the whole cycle, batched per chain. Per-contract
+    # scans would multiply the request count by the number of candidates: the
+    # recipient filter is an OR-set in one topic position, so a batch of holders
+    # costs the same windows as a single holder.
+    sweep_requests = [
+        SweepRequest(
+            contract_id=p.contract.id,
+            address=p.contract.address,
+            chain_id=p.chain_id,
+            from_block=sweep_from_block(session, contract_id=p.contract.id),
+            reason=p.escalation,
+            known_assets=known_swept_assets(session, contract_id=p.contract.id),
+        )
+        for p in pending
+        if p.escalation is not None and p.contract.address
+    ]
+    sweeps, sweep_cost = run_sweeps(sweep_requests, rpc_url_for=lambda cid: rpc_url_for_chain_id(cid))
+    if sweep_requests:
+        logger.info(
+            "asset sweep: %d contract(s) escalated, %d getLogs + %d multicall + %d head request(s)",
+            len(sweep_requests),
+            sweep_cost.get_logs,
+            sweep_cost.multicall,
+            sweep_cost.head_reads,
+        )
+
+    for entry in pending:
+        contract = entry.contract
+        address = contract.address
+        chain_id = entry.chain_id
+        observed_address = address
+        page = entry.page
+        native_price = entry.native.price_usd
+        eth_wei = entry.native.wei
+        recorded = record_observation(
+            session,
+            contract=contract,
+            chain_id=chain_id,
+            native=entry.native,
+            page=page,
+            writer=BALANCE_WRITER_TVL,
+            sweep=sweeps.get(contract.id),
+            escalation=entry.escalation,
+        )
+        native_status = recorded.native_status
+
+        contract_total = 0.0
+        tokens: list[dict] = []
+        for row in recorded.rows:
+            usd = float(row.usd_value) if row.usd_value is not None else None
+            if usd is None:
+                continue
+            contract_total += usd
+            tokens.append({"symbol": row.token_symbol, "usd_value": round(usd, 2)})
 
         # Whether a total over this contract measures anything. Same rule as the
         # sibling read-existing branch (``_read_existing_balances`` via
@@ -365,13 +387,13 @@ def refresh_contract_balances(
         #
         # Unpriced counts as unpublishable for the same reason a failed read
         # does: holdings we could not value are not holdings worth 0. Only the
-        # native class is checked for it here — the ETH branch above keeps
-        # writing NULL-priced rows (its non-ETH twin skips the contract
-        # outright), so this is where that asymmetry stops being published as a
-        # number. Individual unpriced ERC-20s are NOT covered; that would need a
+        # native class is checked for it here — the ETH branch keeps writing
+        # NULL-priced rows (its non-ETH twin skips the contract outright), so
+        # this is where that asymmetry stops being published as a number.
+        # Individual unpriced ERC-20s are NOT covered; that would need a
         # per-token witness this loop does not have.
         native_class_failed = native_status == NATIVE_STATUS_FETCH_FAILED
-        assets_class_failed = page.status == ASSET_SET_STATUS_FETCH_FAILED
+        assets_class_failed = recorded.asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
         native_unpriced = native_price is None and eth_wei is not None and eth_wei > 0
         if native_class_failed or assets_class_failed or native_unpriced:
             partial = True
@@ -396,7 +418,7 @@ def refresh_contract_balances(
                 observed_address,
                 chain_id,
                 native_status,
-                page.status,
+                recorded.asset_set_status,
             )
         elif native_unpriced:
             logger.info(
@@ -404,8 +426,6 @@ def refresh_contract_balances(
                 observed_address,
                 chain_id,
             )
-
-        prune_balance_fetches(session, contract.id, observed_address)
 
     session.commit()
     return breakdown, partial

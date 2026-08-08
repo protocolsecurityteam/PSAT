@@ -277,12 +277,41 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-def get(module: str, action: str, chain_id: int, **params) -> dict:
+# The ONE ``status=0`` shape that is an answer rather than a failure: the
+# ``addresstokenbalance`` endpoint's reply for an address whose token list is
+# empty. The conjunction is exact — status, message and an empty LIST result —
+# and every other ``status=0`` shape (rate limits, invalid keys, upstream
+# errors, a message-bearing string result) stays a failure. It is opt-in per
+# call site (:func:`get`'s ``empty_result_ok``) so no other endpoint's error can
+# reach a caller as data.
+_EMPTY_TOKEN_LIST_MESSAGE = "No token found"
+
+
+def _is_empty_result(data: dict) -> bool:
+    """Whether *data* is exactly the empty-token-list triple."""
+    result = data.get("result")
+    return (
+        str(data.get("status")).strip() == "0"
+        and str(data.get("message", "")).strip() == _EMPTY_TOKEN_LIST_MESSAGE
+        and isinstance(result, list)
+        and not result
+    )
+
+
+def get(module: str, action: str, chain_id: int, empty_result_ok: bool = False, **params) -> dict:
     """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
 
     *chain_id* is required: the v2 endpoint is chain-scoped via the
     ``chainid`` query param, so a call with no chain can no longer silently hit
     mainnet. Callers thread the job/contract chain explicitly.
+
+    ``empty_result_ok`` returns the empty-token-list triple (see
+    ``_is_empty_result``) to the caller instead of raising. It is NOT a
+    relaxation of the error contract: the triple is a distinct answer the
+    endpoint gives, and raising on it made "this address holds no tokens"
+    indistinguishable from a transport failure at the one call site that can
+    tell them apart. The answer is deliberately NOT cached — an empty list is a
+    statement about one moment, and a cached negative would outlive it.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -340,6 +369,9 @@ def get(module: str, action: str, chain_id: int, **params) -> dict:
             if source_cached:
                 _source_cache_put(key, module, action, data)
             _pg_cache_put(module, action, chain_id, params, data)
+            return data
+
+        if empty_result_ok and _is_empty_result(data):
             return data
 
         result_str = str(data.get("result", ""))
@@ -617,23 +649,31 @@ def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
 
 @dataclass(frozen=True)
 class TokenBalancePage:
-    """One ``addresstokenbalance`` page, with what the ENDPOINT actually said.
+    """An ``addresstokenbalance`` read, with what the ENDPOINT actually said.
 
     ``rows`` is the filtered holdings list :func:`get_token_balances` returns.
-    ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter —
-    the only thing that can witness the at-cap case, and the signal the filter
-    destroys. ``None`` means not_determined (the fetch failed).
+    ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter,
+    summed over the pages read — the only thing that can witness the at-cap case,
+    and the signal the filter destroys. ``None`` means not_determined (the fetch
+    failed).
 
     ``status`` exists because ``rows == []`` is three states at once: the fetch
-    failed, the address holds nothing, or the page was capped. The failure is
+    failed, the address holds nothing, or the list was cut off. The failure is
     swallowed one layer down (a ``RuntimeError`` becomes ``[]``), so a caller that
     only sees the list cannot tell, and a caller that writes rows from it turns a
     failure into "holds nothing".
+
+    ``pages_read`` is how many pages the endpoint actually answered. ``basis``
+    states what the asset list is a list OF, in the endpoint's own terms — a
+    paged read that ended on a short page is a complete Etherscan list; one that
+    ran out of page budget is a prefix, and says so.
     """
 
     rows: list[dict]
     page_length: int | None
     status: str
+    pages_read: int = 0
+    basis: str = ""
 
 
 def get_token_balances(address: str, chain_id: int) -> list[dict]:
@@ -664,15 +704,26 @@ def get_token_balances(address: str, chain_id: int) -> list[dict]:
     return get_token_balances_page(address, chain_id=chain_id).rows
 
 
-def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
-    """:func:`get_token_balances`, plus what the endpoint said about the page.
+def token_balance_page_budget() -> int:
+    """How many ``addresstokenbalance`` pages one read may spend.
 
-    Same wire call, same rate limit, same parsing, same ``record_degraded`` on
-    failure — the only addition is that the raw page length and the fetch outcome
-    come back to the caller instead of collapsing into ``[]``.
+    Raises rather than defaulting on a bad value: a budget of 0 would end every
+    read at the cap and publish "list incomplete" for addresses whose list is a
+    single short page.
     """
+    raw = os.getenv("PSAT_TOKEN_BALANCE_MAX_PAGES", "20")
+    try:
+        budget = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"PSAT_TOKEN_BALANCE_MAX_PAGES must be an integer >= 1, got {raw!r}") from exc
+    if budget < 1:
+        raise ValueError(f"PSAT_TOKEN_BALANCE_MAX_PAGES must be >= 1, got {budget}")
+    return budget
+
+
+def _throttle_token_balance_call() -> None:
+    """Hardcoded 1 req/s for this endpoint, applied PER PAGE."""
     global _token_balance_last_call
-    # Hardcoded 1 req/s rate limit for this endpoint
     with _token_balance_lock:
         now = time.monotonic()
         elapsed = now - _token_balance_last_call
@@ -680,30 +731,112 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
             time.sleep(1.0 - elapsed)
         _token_balance_last_call = time.monotonic()
 
-    try:
-        data = get(
-            "account",
-            "addresstokenbalance",
-            chain_id=chain_id,
-            address=address,
-            page="1",
-            offset=str(TOKEN_BALANCE_PAGE_SIZE),
-        )
-    except RuntimeError as exc:
-        # NOT silent: the caller writes an empty holdings set from this, which is
-        # indistinguishable downstream from "this contract holds no tokens".
-        record_degraded(
-            phase="token_balance_fetch",
-            exc=exc,
-            context={"address": address, "chain_id": chain_id},
-        )
-        logger.warning("token balance fetch failed for %s on chain %s: %s", address, chain_id, exc)
-        # page_length None, not 0: nothing was learned about the page, and a 0
-        # here would read as a proven-empty page.
-        return TokenBalancePage(rows=[], page_length=None, status=ASSET_SET_STATUS_FETCH_FAILED)
+
+def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
+    """:func:`get_token_balances`, plus what the endpoint said about the list.
+
+    Pages until the endpoint answers a SHORT page, which is the only thing that
+    witnesses the end of the list; one page is still one request for the
+    overwhelming majority of addresses, because their first page is short. A
+    read that stops for any other reason — the page budget, a mid-paging
+    failure, an endpoint that re-serves page 1 — keeps ``at_page_cap``: the list
+    in hand is then a prefix, i.e. a LOWER bound, and the status is what stops a
+    consumer publishing it as an at-most.
+
+    ``status`` distinguishes the empty answer from the failed one: the endpoint
+    replies ``status=0 / 'No token found' / []`` for an address holding no
+    tokens, and that triple reaches here as data (see :func:`get`'s
+    ``empty_result_ok``) instead of as a ``RuntimeError``.
+    """
+    budget = token_balance_page_budget()
+    raw_entries: list[dict] = []
+    seen_tokens: set[str] = set()
+    pages_read = 0
+    # None = the list ended on a short page, i.e. Etherscan's list is complete.
+    # Any string is the reason the list in hand may be a prefix.
+    incomplete_because: str | None = None
+
+    while pages_read < budget:
+        _throttle_token_balance_call()
+        try:
+            data = get(
+                "account",
+                "addresstokenbalance",
+                chain_id=chain_id,
+                empty_result_ok=True,
+                address=address,
+                page=str(pages_read + 1),
+                offset=str(TOKEN_BALANCE_PAGE_SIZE),
+            )
+        except RuntimeError as exc:
+            # NOT silent: the caller writes an empty holdings set from this, which is
+            # indistinguishable downstream from "this contract holds no tokens".
+            record_degraded(
+                phase="token_balance_fetch",
+                exc=exc,
+                context={"address": address, "chain_id": chain_id, "page": pages_read + 1},
+            )
+            logger.warning(
+                "token balance fetch failed for %s on chain %s (page %d): %s", address, chain_id, pages_read + 1, exc
+            )
+            if pages_read == 0:
+                # page_length None, not 0: nothing was learned about the list, and a 0
+                # here would read as a proven-empty list.
+                return TokenBalancePage(
+                    rows=[],
+                    page_length=None,
+                    status=ASSET_SET_STATUS_FETCH_FAILED,
+                    pages_read=0,
+                    basis="etherscan addresstokenbalance: page 1 failed, nothing observed",
+                )
+            # Pages already in hand are a real observation and stay — as a prefix.
+            incomplete_because = f"page {pages_read + 1} failed"
+            break
+
+        page = data.get("result")
+        if not isinstance(page, list):
+            logger.warning(
+                "token balance fetch for %s on chain %s returned a non-list page %d", address, chain_id, pages_read + 1
+            )
+            if pages_read == 0:
+                return TokenBalancePage(
+                    rows=[],
+                    page_length=None,
+                    status=ASSET_SET_STATUS_FETCH_FAILED,
+                    pages_read=0,
+                    basis="etherscan addresstokenbalance: page 1 was not a list, nothing observed",
+                )
+            incomplete_because = f"page {pages_read + 1} was not a list"
+            break
+
+        pages_read += 1
+        fresh = 0
+        for entry in page:
+            if not isinstance(entry, dict):
+                continue
+            token = str(entry.get("TokenAddress") or "").lower()
+            if token and token in seen_tokens:
+                continue
+            if token:
+                seen_tokens.add(token)
+            raw_entries.append(entry)
+            fresh += 1
+
+        if len(page) < TOKEN_BALANCE_PAGE_SIZE:
+            # THE one witness that the list ended: the endpoint had fewer entries
+            # left than it was asked for.
+            break
+        if fresh == 0:
+            # A full page that repeats what page N-1 already carried means the
+            # endpoint is not honouring ``page`` — paging further would loop, and
+            # the list in hand cannot be shown to be whole.
+            incomplete_because = f"page {pages_read} repeated entries already seen; paging not honoured"
+            break
+    else:
+        incomplete_because = f"page budget of {budget} exhausted with a full page in hand"
 
     results = []
-    for entry in data.get("result", []):
+    for entry in raw_entries:
         raw_balance = int(entry.get("TokenQuantity", "0") or "0")
         if raw_balance > 0:
             raw_divisor = entry.get("TokenDivisor")
@@ -732,30 +865,44 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     "usd_value": usd_value,
                 }
             )
-    # The page-size question is asked of the RAW response, never of ``results``. The
-    # loop above drops every zero-balance entry, so a full 100-entry page with any
-    # zero-balance entry produces fewer than 100 results and would read as "not
-    # truncated" — the signal destroyed one line above where it is read. ``returned``
-    # is what the endpoint actually paged.
-    returned = len(data.get("result") or [])
-    if token_balances_may_be_truncated(returned):
+    # The completeness question is asked of the RAW entries, never of ``results``.
+    # The loop above drops every zero-balance entry, so a full page with any
+    # zero-balance entry produces fewer results and would read as "not truncated"
+    # — the signal destroyed one line above where it is read. ``returned`` is what
+    # the endpoint actually paged.
+    returned = len(raw_entries)
+    if incomplete_because is not None:
         logger.warning(
-            "token balance fetch for %s on chain %s returned a FULL page (%d entries, %d with a balance): "
-            "holdings may be truncated and any total derived from them is a lower bound",
+            "token balance list for %s on chain %s is a PREFIX (%d entries over %d page(s), %d with a balance): %s — "
+            "any total derived from it is a lower bound",
             address,
             chain_id,
             returned,
+            pages_read,
             len(results),
+            incomplete_because,
         )
         status = ASSET_SET_STATUS_AT_PAGE_CAP
+        basis = (
+            f"etherscan addresstokenbalance, {pages_read} page(s) of {TOKEN_BALANCE_PAGE_SIZE}; "
+            f"INCOMPLETE: {incomplete_because}"
+        )
     elif returned:
         status = ASSET_SET_STATUS_RETURNED_ASSETS
+        basis = (
+            f"etherscan addresstokenbalance, {pages_read} page(s) of {TOKEN_BALANCE_PAGE_SIZE}, ended on a short page"
+        )
     else:
-        # A proven-empty PAGE. NOT "this address holds no tokens" — the endpoint
-        # is one page deep and this is what it answered, nothing more.
+        # A proven-empty LIST, as Etherscan's index has it. NOT "this address
+        # holds no tokens" — it is what one third-party index answered, and §2 of
+        # SHEET_OBSERVATION_SPEC.md makes that a trigger to look at the chain, never
+        # a witness of nothing held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
+        basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
     return TokenBalancePage(
         rows=sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True),
         page_length=returned,
         status=status,
+        pages_read=pages_read,
+        basis=basis,
     )

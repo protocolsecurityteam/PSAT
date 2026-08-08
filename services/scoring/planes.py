@@ -533,7 +533,7 @@ def _alias_fixed_point(alias: dict[str, str]) -> dict[str, str]:
 
 def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
-    from services.monitoring.balance_reads import native_balance_fact
+    from services.monitoring.balance_reads import native_balance_fact, winning_asset_fetches
 
     plane = ValuePlane()
     contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
@@ -604,15 +604,22 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         .all()
     ):
         latest_fetch[fetch.contract_id] = fetch
-    for contract_id, fetch in sorted(latest_fetch.items()):
+    # Completeness is a property of THE ROW SET, so it is read from the fetch
+    # whose rows this plane just loaded — never from the latest fetch, which may
+    # be a later failure that would withdraw the truncation while the truncated
+    # prefix rows are still what the sheet sums.
+    winning_asset_fetch = winning_asset_fetches(session, protocol_id)
+    for contract_id, fetch in sorted(winning_asset_fetch.items()):
         key = plane.canonical(entity_key(chain_of.get(contract_id), address_of.get(contract_id)))
-        # Recorded for EVERY contract, ahead of the native-row shortcut below: a
-        # truncated asset list is a fact about the ERC-20 page and holds whether
-        # or not a native row was also stored. Unioned over the contracts that
-        # fold onto one key, because one account read at its cap truncates the
-        # list the whole sheet is assembled from.
+        # Recorded for EVERY contract, independently of the native-row shortcut
+        # below: a truncated asset list is a fact about the ERC-20 list and holds
+        # whether or not a native row was also stored. Unioned over the contracts
+        # that fold onto one key, because one account read at its cap truncates
+        # the list the whole sheet is assembled from.
         if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP:
             plane.asset_set_truncated.add(key)
+    for contract_id, fetch in sorted(latest_fetch.items()):
+        key = plane.canonical(entity_key(chain_of.get(contract_id), address_of.get(contract_id)))
         if key in native_seen:
             continue
         plane.native_fact[key] = native_balance_fact(fetch.native_status, fetch.block_number)

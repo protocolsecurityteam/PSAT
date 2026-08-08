@@ -229,7 +229,7 @@ class TestProcessHappyPath:
     def test_writes_controller_values_to_db(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         session.execute.return_value.scalar_one_or_none.return_value = fake_contract
 
         snapshot = {
@@ -250,7 +250,7 @@ class TestProcessHappyPath:
     def test_writes_graph_nodes_and_edges(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         session.execute.return_value.scalar_one_or_none.return_value = fake_contract
 
         graph = _resolved_graph(
@@ -335,7 +335,7 @@ class TestFetchBalancesHappyPath:
     def test_stores_eth_and_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)  # 1 ETH
@@ -370,7 +370,7 @@ class TestFetchBalancesHappyPath:
     def test_price_failure_still_stores_eth(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 1_000_000_000_000_000_000)
@@ -390,7 +390,7 @@ class TestFetchBalancesHappyPath:
     ) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", MagicMock(side_effect=Exception("Network error")))
@@ -413,7 +413,7 @@ class TestFetchBalancesHappyPath:
         never an ETH label — the native asset comes from the chain registry."""
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job(request={"chain": "bsc", "chain_id": 56})
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 2_000_000_000_000_000_000)  # 2 BNB
@@ -444,7 +444,7 @@ class TestFetchBalancesEarlyReturn:
         worker = ResolutionWorker()
         session = MagicMock()
         job = _job(address=None)
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
         session.add.assert_not_called()
@@ -815,7 +815,7 @@ class TestFetchBalancesZeroEth:
     def test_zero_eth_no_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
         job = _job()
 
         monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
@@ -843,12 +843,22 @@ class TestFetchBalancesZeroEth:
 
 
 class TestFetchBalancesProxyAddress:
-    """_fetch_balances uses proxy_address when present in request."""
+    """Which address is read, and which row the answer is filed against.
 
-    def test_uses_proxy_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    These are ONE decision now. Reading the proxy and filing the answer against
+    the implementation's row is what let a later read at the implementation's own
+    address win the native class wholesale and evict a real balance, so the row
+    that owns the address owns the fetch. When no contract row owns the requested
+    address, the read falls back to this row's OWN address rather than filing a
+    foreign address against it — the DB-backed arm in
+    ``test_contract_balance_provenance.py`` covers the case where the proxy does
+    have a row.
+    """
+
+    def test_an_unowned_proxy_address_is_not_read_against_a_foreign_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        fake_contract = SimpleNamespace(id=42)
+        fake_contract = SimpleNamespace(id=42, address=TARGET_ADDRESS, protocol_id=None)
 
         captured_addrs: list[str] = []
 
@@ -863,7 +873,7 @@ class TestFetchBalancesProxyAddress:
         job = _job(request={"proxy_address": PROXY_ADDRESS})
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        assert captured_addrs[0] == PROXY_ADDRESS
+        assert captured_addrs[0] == TARGET_ADDRESS
 
 
 # ---------------------------------------------------------------------------

@@ -220,7 +220,7 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch):
     worker = ResolutionWorker()
     session = MagicMock()
     job = _row(id="job-1", address="0x" + "11" * 20, request={"chain": "base"})
-    contract_row = _row(id=7)
+    contract_row = _row(id=7, address=job.address, protocol_id=None)
 
     worker._fetch_balances(session, job, contract_row, chain_id=_BASE_ID)
 

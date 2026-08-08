@@ -431,6 +431,28 @@ def _force_resolution_multicall_off(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_balance_asset_sweep(monkeypatch):
+    """Keep the offline suite hermetic against the balance producers' escalation.
+
+    Both producers now escalate to a chain log sweep whenever Etherscan's asset
+    list comes back empty, at its page cap, or persistently unobtainable — and an
+    empty page is exactly what the stubbed wire returns in most balance tests, so
+    without this every one of them would issue real ``eth_getLogs`` traffic. The
+    stub returns "no contract was swept", which is the state those tests already
+    asserted against. The sweep's own arms (``test_asset_sweep.py``) call
+    ``sweep_holders`` / ``record_observation`` directly with a stubbed fetcher, so
+    they still exercise it."""
+    monkeypatch.setattr(
+        "services.monitoring.asset_sweep.sweep_head_block",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "services.monitoring.asset_sweep.sweep_holders",
+        lambda addresses, **kwargs: ({}, kwargs.get("cost")),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _force_differential_probe_off(monkeypatch):
     """Keep the offline suite hermetic against the differential probe (default ON in
     code, so real runs need no env). With the flag on, in-process resolution tests

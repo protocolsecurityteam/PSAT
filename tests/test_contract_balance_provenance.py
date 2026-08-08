@@ -380,7 +380,15 @@ class TestAtPageCapAsksTheRawPage:
 
 @requires_postgres
 class TestObservedAddressPerWriter:
-    """Arms 8/9 — the two writers observe different addresses, on purpose."""
+    """Arms 8/9 — ONE observed-address policy, shared by both writers.
+
+    These arms once encoded the opposite: the two writers observed different
+    addresses "on purpose". That divergence had a live consequence — a proxy's
+    19.06 ETH filed against the implementation's row, then evicted when a later
+    read at the implementation's own address won the native class wholesale. The
+    policy is now structural: a fetch row's ``observed_address`` is its OWN
+    contract's address, and a read meant for some other address is filed against
+    the row that owns it."""
 
     def test_tvl_records_the_contract_address_even_for_a_proxy(self, db_session, monkeypatch):
         """The TVL loop never reads ``request['proxy_address']``.
@@ -406,38 +414,47 @@ class TestObservedAddressPerWriter:
         assert fetches[0].observed_address == proxy_addr
         assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
 
-    def test_resolution_worker_records_the_proxy_it_read(self, monkeypatch):
+    def test_the_resolution_worker_files_a_proxy_read_against_the_proxy_row(self, db_session, monkeypatch):
+        """A job on the implementation, reading the proxy, writes the PROXY's row.
+
+        The old shape filed it against the job's contract row — the
+        implementation — where the TVL loop's next read at the implementation's
+        OWN address won the native class and withdrew the holding.
+        """
         from types import SimpleNamespace
         from typing import Any, cast
-        from unittest.mock import MagicMock
 
         from workers.resolution_worker import ResolutionWorker
 
-        impl = "0x" + "11" * 20
-        proxy = "0x" + "22" * 20
-        worker = ResolutionWorker()
-        session = MagicMock()
-        job = SimpleNamespace(id="j", address=impl, request={"proxy_address": proxy}, chain_id=1)
+        proto = _protocol(db_session, "prov-obs-res")
+        proxy_addr = _addr("83")
+        impl_addr = _addr("84")
+        proxy = _contract(db_session, proto.id, proxy_addr)
+        impl = _contract(db_session, proto.id, impl_addr)
+        db_session.commit()
 
-        monkeypatch.setattr("services.monitoring.balance_reads.rpc_request", lambda *a, **k: hex(HEAD))
-        monkeypatch.setattr(
-            "services.monitoring.balance_reads.multicall3_aggregate3",
-            lambda url, calls, block_tag, **kw: [(True, _word(4))],
-        )
-        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda a, **k: 0)
+        worker = ResolutionWorker()
+        job = SimpleNamespace(id="j", address=impl_addr, request={"proxy_address": proxy_addr}, chain_id=1)
+
+        read_at: list[str] = []
+        _stub_pinned(monkeypatch, {proxy_addr: 4})
+        monkeypatch.setattr("utils.etherscan.get_eth_balance", lambda a, **k: read_at.append(a) or 0)
         monkeypatch.setattr("utils.etherscan.get_native_price", lambda *a, **k: 1.0)
         monkeypatch.setattr("utils.etherscan.get_token_balances_page", lambda a, **k: page([]))
         monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
 
-        cast(Any, worker)._fetch_balances(session, job, SimpleNamespace(id=42), chain_id=1)
+        cast(Any, worker)._fetch_balances(db_session, job, impl, chain_id=1)
 
-        added = [c.args[0] for c in session.add.call_args_list if c.args]
-        fetch = [o for o in added if isinstance(o, ContractBalanceFetch)][0]
-        balances = [o for o in added if isinstance(o, ContractBalance)]
-        assert fetch.observed_address == proxy
-        assert fetch.block_number == BLOCK
-        assert [b.observed_address for b in balances] == [proxy]
-        assert [b.block_number for b in balances] == [BLOCK]
+        assert read_at == [proxy_addr]
+        fetches = _fetches(db_session, proxy.id)
+        assert len(fetches) == 1
+        assert fetches[0].observed_address == proxy_addr
+        assert fetches[0].block_number == BLOCK
+        assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
+        assert [r.block_number for r in _rows(db_session, proxy.id)] == [BLOCK]
+        # ...and nothing at all is filed against the implementation's row.
+        assert _fetches(db_session, impl.id) == []
+        assert _rows(db_session, impl.id) == []
 
 
 @requires_postgres

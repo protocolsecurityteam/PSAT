@@ -56,6 +56,41 @@ def default_result_cap() -> int | None:
     return parsed if parsed > 0 else None
 
 
+def normalize_topic_filter(topics: Sequence[Any]) -> list[list[str] | None]:
+    """The ``topics`` argument in its one on-the-wire form.
+
+    Returns the positional array ``eth_getLogs`` takes: index *i* is the
+    constraint on topic position *i*, ``None`` meaning unconstrained.
+
+    A flat sequence of strings is the historical topic0 OR-set and normalizes to
+    ``[[t0, ...]]`` — byte-identical to what this fetcher has always sent, which
+    is why no existing caller changes. Any other element type (a sequence or
+    ``None``) means the caller is addressing positions explicitly, and each slot
+    is taken as written. An empty slot list is refused rather than sent: ``[]``
+    in a topic position matches NOTHING at some upstreams and EVERYTHING at
+    others, so a batch that happened to come out empty would silently read as
+    either "no transfers" or "every transfer on the chain".
+    """
+    entries = list(topics)
+    if all(isinstance(entry, str) for entry in entries):
+        # ``[[]]`` for an empty sequence, not ``[]`` — that is the exact payload
+        # this fetcher has always sent, and the two are not the same filter.
+        return [[str(t).lower() for t in entries]]
+    out: list[list[str] | None] = []
+    for index, entry in enumerate(entries):
+        if entry is None:
+            out.append(None)
+            continue
+        if isinstance(entry, str):
+            out.append([entry.lower()])
+            continue
+        values = [str(t).lower() for t in entry]
+        if not values:
+            raise ValueError(f"topic position {index} was given an empty value list")
+        out.append(values)
+    return out
+
+
 @dataclass(frozen=True)
 class FetchWindowStat:
     """One accepted ``eth_getLogs`` page: the window, how many logs came back,
@@ -126,57 +161,78 @@ class RpcEventLogFetcher:
     def fetch_logs(
         self,
         *,
-        event_address: str | Sequence[str],
-        topics: Sequence[str],
+        event_address: str | Sequence[str] | None = None,
+        topics: Sequence[Any],
         from_block: int,
         to_block: int,
         window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]:
-        """Fetch logs matching ANY of ``topics`` in topic position 0.
+        """Fetch logs matching ``topics``, optionally restricted to ``event_address``.
 
-        Multiple topic0 values fold into one request (`"topics": [[t1, t2]]`
-        is OR semantics) so same-address cursors don't each rescan the same
-        range — the request, not the range, is what the upstream budget meters.
+        ``topics`` takes two shapes and :func:`normalize_topic_filter` decides
+        which by inspecting the elements, so no existing call site changes:
 
-        ``event_address`` may be a single address (existing per-cursor callers)
-        or a list — a multi-address filter serves a whole cohort of monitored
-        contracts in one request. Per-emitter attribution is on each result's
-        ``.address``. Both shapes share this one bisect-on-reject implementation.
+        * a flat sequence of topic strings — the historical shape — is an OR-set
+          over topic position 0. Multiple topic0 values fold into one request
+          (``"topics": [[t1, t2]]`` is OR semantics) so same-address cursors
+          don't each rescan the same range; the request, not the range, is what
+          the upstream budget meters.
+        * a sequence whose elements are themselves sequences or ``None`` is the
+          FULL positional topic array: element *i* constrains topic position *i*,
+          ``None`` constrains nothing there. This is what an
+          asset-discovery sweep needs — a recipient in topic position 2 or 3 with
+          no emitter known in advance.
+
+        ``event_address`` may be a single address (existing per-cursor callers),
+        a list — a multi-address filter serves a whole cohort of monitored
+        contracts in one request — or ``None``, which emits NO address key and
+        matches every emitter. Per-emitter attribution is on each result's
+        ``.address``. All shapes share this one bisect-on-reject implementation.
+
+        A filter that constrains neither address nor any topic position is
+        refused: it asks the upstream for every log on the chain, and the answer
+        would be truncated in ways no cap check here can see.
 
         Pass ``window_stats`` to collect one :class:`FetchWindowStat` per
         ACCEPTED page (bisected windows contribute their leaves, not the rejected
         parent). Omitting it — what every caller that does not persist coverage
         does — leaves behaviour and the request sequence unchanged.
         """
-        if isinstance(event_address, str):
-            address_filter: str | list[str] = event_address
+        address_filter: str | list[str] | None
+        if event_address is None or isinstance(event_address, str):
+            address_filter = event_address
         else:
             address_filter = list(event_address)
-        topic_list = [str(t).lower() for t in topics]
+        topic_filter = normalize_topic_filter(topics)
+        if address_filter is None and not any(slot for slot in topic_filter):
+            raise ValueError("eth_getLogs filter constrains neither address nor any topic position")
         out: list[FetchedEventLog] = []
         start = from_block
         while start <= to_block:
             end = min(to_block, start + self.max_block_range - 1)
-            out.extend(self._fetch_range(address_filter, topic_list, start, end, window_stats))
+            out.extend(self._fetch_range(address_filter, topic_filter, start, end, window_stats))
             start = end + 1
         return out
 
     def _fetch_range(
         self,
-        event_address: str | list[str],
-        topics: list[str],
+        event_address: str | list[str] | None,
+        topics: list[list[str] | None],
         from_block: int,
         to_block: int,
         window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]:
-        params = [
-            {
-                "address": event_address,
-                "topics": [topics],
-                "fromBlock": hex(from_block),
-                "toBlock": hex(to_block),
-            }
-        ]
+        log_filter: dict[str, Any] = {
+            "topics": topics,
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+        }
+        # The key is OMITTED rather than sent as null: an explicit null address
+        # is not a documented filter shape and upstreams differ on it, while an
+        # absent key is the spec's own "any emitter".
+        if event_address is not None:
+            log_filter["address"] = event_address
+        params = [log_filter]
         try:
             raw_logs = rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
         except RuntimeError as exc:
@@ -244,8 +300,8 @@ class RpcEventLogFetcher:
 
     def _bisect_halves(
         self,
-        event_address: str | list[str],
-        topics: list[str],
+        event_address: str | list[str] | None,
+        topics: list[list[str] | None],
         from_block: int,
         to_block: int,
         span: int,

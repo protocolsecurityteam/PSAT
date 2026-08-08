@@ -36,7 +36,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
-from utils.balance_status import NATIVE_STATUS_PROVEN_ZERO
+from utils.balance_status import (
+    ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
+    ASSET_SET_SOURCE_ETHERSCAN_PAGES,
+    NATIVE_STATUS_PROVEN_ZERO,
+    SWEEP_STATUS_COMPLETED,
+)
 from utils.chains import UnknownChainError, chain_by_name
 from utils.restaking_status import (
     CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
@@ -1577,6 +1582,25 @@ class ContractBalanceFetch(Base):
     # entries. NULL = not_determined. This is the only thing that can witness
     # the at-cap case; a stored-row count cannot (the filter destroys it).
     asset_page_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # WHOSE answer the asset set is. ``asset_set_status`` says what the answer
+    # was; only the pair is a claim. An empty set from
+    # ``etherscan_pages`` is one index's negative and proves nothing about the
+    # chain; an empty set from ``chain_log_sweep`` is an earned negative scoped
+    # by ``asset_set_basis`` and ``swept_through_block``.
+    asset_set_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=ASSET_SET_SOURCE_ETHERSCAN_PAGES
+    )
+    # What the asset set is a set OF, in the terms it was obtained by — the
+    # sentence a published claim derives its scope from, never re-invented
+    # downstream.
+    asset_set_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL = no sweep was attempted (a third state, not a failure).
+    sweep_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The block the log scan ran through. Present ONLY on a completed sweep
+    # (CHECK below), because it is the extent of the claim and a failed scan has
+    # no extent. It is also the cursor: the next cycle scans from here, which is
+    # what keeps a full-history sweep a once-per-contract cost.
+    swept_through_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     writer: Mapped[str] = mapped_column(String(32), nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -1585,6 +1609,19 @@ class ContractBalanceFetch(Base):
         CheckConstraint(
             f"native_status <> '{NATIVE_STATUS_PROVEN_ZERO}' OR block_number IS NOT NULL",
             name="ck_cbf_proven_zero_requires_block",
+        ),
+        # A sweep-sourced asset set without a through-block would be an unbounded
+        # claim: "the chain says this is everything" with no statement of how far
+        # the chain was read.
+        CheckConstraint(
+            f"asset_set_source <> '{ASSET_SET_SOURCE_CHAIN_LOG_SWEEP}' OR swept_through_block IS NOT NULL",
+            name="ck_cbf_sweep_source_requires_block",
+        ),
+        # A cursor written by a scan that could not be shown whole would let the
+        # next cycle skip the blocks the failed one never proved it read.
+        CheckConstraint(
+            f"swept_through_block IS NULL OR sweep_status = '{SWEEP_STATUS_COMPLETED}'",
+            name="ck_cbf_swept_block_requires_completed_sweep",
         ),
     )
 
@@ -1620,10 +1657,19 @@ class ContractBalance(Base):
     # DB-enforced by ``ck_contract_balances_price_block_null``.
     price_block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # The fetch that observed this row. NULL = legacy row, provenance
-    # not_determined. The ``contract_balances_latest`` view keys off it.
+    # not_determined. The ``contract_balances_latest`` view keys off it, which
+    # also makes it the row set's completeness handle: a row's OWN fetch carries
+    # the asset-set status/source/basis that the row set was assembled under, so
+    # a consumer asks the winning fetch rather than the latest one (see
+    # ``balance_reads.winning_asset_fetches``).
     fetch_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("contract_balance_fetches.id", ondelete="CASCADE"), nullable=True
     )
+    # Which mechanism read this quantity. NULL = legacy row, not_determined.
+    # Stated per row because one fetch's row set can mix them: a page-derived
+    # PRICED row and a sweep-derived unpriced one are both current holdings and
+    # neither is the other's basis.
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="balances")
 
@@ -1685,6 +1731,7 @@ class ContractBalanceLatest(Base):
     block_number: Mapped[int | None] = mapped_column(BigInteger)
     price_block_number: Mapped[int | None] = mapped_column(BigInteger)
     fetch_id: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str | None] = mapped_column(String(32))
 
 
 class RestakingPosition(Base):

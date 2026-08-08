@@ -219,6 +219,43 @@ def prune_balance_fetches(session: Session, contract_id: int, observed_address: 
     return len(doomed)
 
 
+def winning_asset_fetches(session: Session, protocol_id: int) -> dict[int, ContractBalanceFetch]:
+    """Per contract, the fetch whose ERC-20 row set ``contract_balances_latest`` publishes.
+
+    The completeness of a published asset list is a property of THE ROW SET, so
+    it must be read from the fetch that owns those rows — not from the latest
+    fetch, which may be a later failure. The two differ exactly when they matter:
+    a ``fetch_failed`` (or a shorter page) arriving after an ``at_page_cap`` read
+    would withdraw the truncation while the truncated-prefix rows are still what
+    the view returns and still what a sheet sums. Same rule as the view's ERC-20
+    arm — latest non-failed wins — so the two cannot disagree.
+
+    A contract whose asset class has NO non-failed fetch is absent from the
+    mapping: nothing current is known about its list, which is a third state and
+    not a completeness verdict either way.
+    """
+    from db.models import Contract
+
+    rows = (
+        session.query(ContractBalanceFetch)
+        .join(Contract, Contract.id == ContractBalanceFetch.contract_id)
+        .filter(
+            Contract.protocol_id == protocol_id,
+            ContractBalanceFetch.asset_set_status != STATUS_FETCH_FAILED,
+        )
+        .order_by(
+            ContractBalanceFetch.contract_id,
+            ContractBalanceFetch.fetched_at.desc(),
+            ContractBalanceFetch.id.desc(),
+        )
+        .all()
+    )
+    winners: dict[int, ContractBalanceFetch] = {}
+    for fetch in rows:
+        winners.setdefault(fetch.contract_id, fetch)
+    return winners
+
+
 def contracts_missing_current_rows(session: Session, contract_ids: list[int]) -> set[int]:
     """Contracts whose current holdings the view cannot publish for some row class.
 
@@ -323,6 +360,7 @@ __all__ = [
     "PINNED_FINALITY_MARGIN",
     "balance_history_depth",
     "contracts_missing_current_rows",
+    "winning_asset_fetches",
     "native_balance_fact",
     "native_status_for",
     "pinned_native_balances",
