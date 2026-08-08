@@ -550,6 +550,15 @@ class ScoreDocument:
     trigger_job_id: Any | None = None
     uncalibrated_arms: tuple[str, ...] = field(default_factory=tuple)
 
+    # The census of published magnitudes whose proving execution could not be
+    # read, or ``None`` where the fold walked every one of them and found no
+    # fault. ``None`` therefore OMITS the key: absence here is a completed count
+    # of zero and not an unasked question, because the census runs on every fold
+    # over the whole published population. The one thing absence cannot
+    # distinguish is a fault-free document from one folded before this field
+    # existed, which ``model_version`` is the place to settle.
+    execution_evidence_faults: dict[str, Any] | None = None
+
     def __post_init__(self) -> None:
         _check_member("trigger", self.trigger, SCORE_TRIGGERS)
         _check_member("perimeter_state", self.perimeter_state, PERIMETER_STATES)
@@ -565,7 +574,7 @@ class ScoreDocument:
         every projection so far has been where a three-state collapsed back into
         two.
         """
-        return {
+        payload: dict[str, Any] = {
             "model_version": self.model_version,
             "grade_state": self.grade_state,
             "grade_lambda": self.grade_lambda,
@@ -578,6 +587,9 @@ class ScoreDocument:
             "model_parameters": self.model_parameters,
             "uncalibrated_arms": list(self.uncalibrated_arms),
         }
+        if self.execution_evidence_faults is not None:
+            payload["execution_evidence_faults"] = self.execution_evidence_faults
+        return payload
 
 
 __all__ = [
