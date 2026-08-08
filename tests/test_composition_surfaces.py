@@ -474,25 +474,71 @@ def test_the_1_1_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(
     assert _migration("1.0.1-provisional")["to"] == "1.1.0-provisional"
 
 
+def test_the_1_2_0_migration_stamp_is_frozen_and_cannot_silently_re_interpolate(monkeypatch):
+    """The same freeze, one bump later, on the record that has just stopped
+    describing the current version.
+
+    The 1.1.0 -> 1.2.0 record reports what was measured while 1.2.0 was CURRENT.
+    Once 1.3.0 shipped, an interpolated `MODEL_VERSION` there would restamp
+    those dated figures — the λ fall to 71.7053, the B+ -> B drop — with
+    whatever is shipping now. Frozen, and this is what keeps it frozen."""
+    from services.scoring import constants as C
+
+    shipped = _migration("1.1.0-provisional")
+    monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
+    unmoved = _migration("1.1.0-provisional")
+
+    assert unmoved == shipped
+    assert "this bump's own tip (1.2.0-provisional)" in unmoved["measured_at"]
+    assert "9.9.9-fictional" not in unmoved["measured_at"]
+    # The record's own endpoint is frozen with it: this bump ENDED at 1.2.0 and
+    # no later version can claim to be where it landed.
+    assert unmoved["to"] == "1.2.0-provisional"
+
+
 def test_the_migration_version_stamp_moves_with_the_version(monkeypatch):
     """B1's S1 lesson applied to CAP-B's stamp: a literal reads identically
     today and drifts silently at the next bump.
 
-    Moved onto the 1.1.0 -> 1.2.0 record, which is the one describing the
+    Moved onto the 1.2.0 -> 1.3.0 record, which is the one describing the
     version that is CURRENT — the only record for which "moves with the version"
-    is the honest behaviour. Its predecessor is frozen by the test above."""
+    is the honest behaviour. Its two predecessors are frozen by the tests
+    above."""
     from services.scoring import constants as C
 
-    shipped = _migration("1.1.0-provisional")["measured_at"]
+    shipped = _migration("1.2.0-provisional")["measured_at"]
     monkeypatch.setattr(C, "MODEL_VERSION", "9.9.9-fictional")
-    moved = _migration("1.1.0-provisional")["measured_at"]
+    moved = _migration("1.2.0-provisional")["measured_at"]
 
     assert moved != shipped
     assert "at this bump's own tip (9.9.9-fictional)" in moved
-    assert "1.2.0-provisional" not in moved
+    assert "1.3.0-provisional" not in moved
     # The endpoint interpolates too, so the record cannot name one version in
     # its prose and a different one in its field.
-    assert _migration("1.1.0-provisional")["to"] == "9.9.9-fictional"
+    assert _migration("1.2.0-provisional")["to"] == "9.9.9-fictional"
+
+
+def test_the_current_migration_record_states_its_invariant_6_exception():
+    """A bump that LOWERS a term has to say so where the model is published.
+
+    1.3.0's guard un-publishes a sheet ceiling, which moves a confidence term
+    DOWN — the one direction invariant 6 forbids. The exception is ruled and it
+    is ruled here, on the record a reader joins to by `model_version`, rather
+    than in a spec file no consumer of the document can see."""
+    record = _migration("1.2.0-provisional")
+    exception = record["the_invariant_6_exception_this_bump_takes"]
+
+    assert "invariant 6" in exception
+    # The ruling's own shape: what is withdrawn was never earned, so the fall is
+    # the correction rather than the price of one.
+    assert "reach_magnitude_witnessed_of_reaching_pct" in exception
+    assert "35.6 -> 35.5" in exception
+    assert "never earned" in exception
+    # And the grade surface it does NOT move, which is the other half of the
+    # ruling: only the ceiling dollars move, by the revoked $0.05.
+    unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
+    assert "grade_lambda stays 71.7053" in unmoved
+    assert "$4,218,707,276.09 -> $4,218,707,276.04" in unmoved
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():

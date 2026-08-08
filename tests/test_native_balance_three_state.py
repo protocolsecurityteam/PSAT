@@ -624,3 +624,68 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
         # And the per-contract sum is that one row, never 10 + 999.
         graph = build_authority_graph(db_session, proto.id)
         assert str(graph.balance[c.address.lower()]) == "999.00"
+
+
+@requires_postgres
+class TestValuePlaneReadsAssetSetCompleteness:
+    """The scorer's half of the at-cap fact: it reaches the sheet, not just the row.
+
+    ``asset_set_status`` was written by the producers and read by nothing on the
+    scoring side, so a sheet assembled from a list cut off at entry 100
+    published the same state as one assembled from a whole list — and
+    ``ceiling_for`` bounded a move from above with a prefix of the holdings. The
+    plane carries the truncated case per ENTITY so the ceiling can refuse it.
+    """
+
+    def test_the_latest_at_cap_fetch_marks_the_entity_truncated(self, db_session):
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap")
+        capped = _contract(db_session, proto.id, _addr("e1"))
+        whole = _contract(db_session, proto.id, _addr("e2"))
+        _fetch(
+            db_session,
+            capped,
+            assets=ASSET_SET_STATUS_AT_PAGE_CAP,
+            page_length=TOKEN_BALANCE_PAGE_SIZE,
+        )
+        _fetch(db_session, whole, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=5)
+        db_session.commit()
+
+        plane = load_value_plane(db_session, proto.id)
+        assert plane.asset_set_is_truncated(f"ethereum::{capped.address.lower()}")
+        # The other contract is not marked — and not thereby claimed complete.
+        assert plane.asset_set_is_truncated(f"ethereum::{whole.address.lower()}") is False
+
+    def test_a_later_uncapped_read_supersedes_the_capped_one(self, db_session):
+        """LATEST fetch, so re-reading a shorter list withdraws the refusal."""
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap-super")
+        c = _contract(db_session, proto.id, _addr("e3"))
+        _fetch(db_session, c, assets=ASSET_SET_STATUS_AT_PAGE_CAP, page_length=TOKEN_BALANCE_PAGE_SIZE)
+        db_session.commit()
+        assert load_value_plane(db_session, proto.id).asset_set_truncated
+
+        _fetch(db_session, c, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=7)
+        db_session.commit()
+        assert load_value_plane(db_session, proto.id).asset_set_truncated == set()
+
+    def test_a_capped_implementation_truncates_the_proxy_sheet_it_folds_onto(self, db_session):
+        """One sheet: the alias fold makes the two accounts one asset list."""
+        from services.scoring.planes import load_value_plane
+
+        proto = _protocol(db_session, "3s-plane-atcap-alias")
+        impl_address = _addr("e5")
+        proxy = _contract(db_session, proto.id, _addr("e4"))
+        proxy.implementation = impl_address
+        impl = _contract(db_session, proto.id, impl_address)
+        db_session.flush()
+        _fetch(db_session, proxy, assets=ASSET_SET_STATUS_RETURNED_ASSETS, page_length=3)
+        _fetch(db_session, impl, assets=ASSET_SET_STATUS_AT_PAGE_CAP, page_length=TOKEN_BALANCE_PAGE_SIZE)
+        db_session.commit()
+
+        plane = load_value_plane(db_session, proto.id)
+        proxy_key = f"ethereum::{proxy.address.lower()}"
+        assert plane.canonical(f"ethereum::{impl_address.lower()}") == proxy_key
+        assert plane.asset_set_truncated == {proxy_key}

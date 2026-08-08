@@ -299,4 +299,36 @@ NO_SELECTOR = ""
 # boundary is the version stamp and nothing else: readers join on
 # model_version, which is why the settlement is recorded here and republished
 # on the migration record rather than left in a spec.
-MODEL_VERSION = "1.2.0-provisional"
+#
+# 1.3.0: a truncated asset list no longer ADMITS A SHEET CEILING — that arm and
+# no other. The ERC-20 discovery endpoint answers one 100-entry page, so a
+# holder with more assets than that is stored as a PREFIX of its holdings — and
+# 1.2.0 admitted that prefix as a ceiling, because the sheet's state reads
+# ``priced`` whether the list was cut off or not. The plane now carries the
+# at-cap fact per entity (``planes.ValuePlane.asset_set_truncated``, off the
+# latest ``contract_balance_fetches.asset_set_status``) and ``ceiling_for``
+# refuses those sheets under a fifth refusal token, ``asset_list_truncated``,
+# which is closed by paging or a chain-derived sweep rather than by a price
+# lookup.
+#
+# What this bump does NOT close, stated because the version stamp is what a
+# reader joins on: a sheet caps a figure from above at two other sites — the
+# composed-magnitude cap in ``fold._compose`` and the entity-holdings cap in
+# ``fold._entity_contribution``, both a ``min(witness, sheet)`` — and
+# neither consults ``asset_set_truncated``, so a page-capped sheet still trims a
+# composed magnitude on a 1.3.0 document. Live here on
+# base::0x86b5780b606940eb59a062aa85a07959518c0161. Registered as open items in
+# SHEET_OBSERVATION_SPEC.md; extending the guard to those sites is a separate
+# change with its own measured differential.
+# Measured on protocol 1: one live ceiling revoked (the $0.05 row on
+# base::0x6c240dda…), ceiling entities 11 -> 10, signals credited 21 -> 20,
+# refused calls 49 -> 50 (one re-tokenised from unpriced, one new), lambda
+# 71.7053 and exposure_usd $18,059,003.86 UNCHANGED, letter B unchanged. The
+# gradeBands.js obligation above is live for this bump too: it carries a
+# 1.3.0-provisional entry that reasons 1.2.0's cut points forward.
+#
+# The direction is the point and it is ruled, not tolerated: this bump LOWERS a
+# confidence term (see the migration record's invariant-6 exception). Invariant
+# 6 governs earning evidence; un-publishing an at-most that was never earned is
+# outside it.
+MODEL_VERSION = "1.3.0-provisional"

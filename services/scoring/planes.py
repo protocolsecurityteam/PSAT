@@ -21,6 +21,7 @@ from sqlalchemy import func as sql_func
 from sqlalchemy.orm import Session
 
 from services.scoring.schema import Tri, coalesce_chain, entity_key, is_entity_key
+from utils.balance_status import ASSET_SET_STATUS_AT_PAGE_CAP
 from utils.scoring_status import (
     PERIMETER_NOT_DETERMINED,
     PERIMETER_SETTLED,
@@ -144,6 +145,14 @@ class ValuePlane:
     per_asset: dict[str, dict[str, float]] = field(default_factory=dict)
     per_asset_state: dict[str, dict[str, str]] = field(default_factory=dict)
     native_fact: dict[str, str] = field(default_factory=dict)
+    # Entities whose latest asset-list read came back AT the endpoint's page cap:
+    # the list is a prefix of what they hold, so the rows below it are a floor
+    # over the sheet and nothing here bounds it from above. Only the truncated
+    # case is carried, in one direction: a page shorter than the cap witnesses
+    # that THIS read was not cut off and never that the index is complete, so
+    # absence from this set is not a completeness witness (``balance_status``
+    # registers no ``complete`` token for the same reason).
+    asset_set_truncated: set[str] = field(default_factory=set)
     alias: dict[str, str] = field(default_factory=dict)
     # Implementation keys TWO proxies share. There is no proxy to fold them onto
     # — pinning one is a coin toss that charges the loser's sheet — so they are
@@ -163,6 +172,19 @@ class ValuePlane:
         implementation and neither owns it.
         """
         return self.alias.get(key, key)
+
+    def asset_set_is_truncated(self, key: str) -> bool:
+        """Whether the entity's asset list is known to be cut off at the page cap.
+
+        Read at the CANONICAL key, as every other sheet question is: a proxy and
+        its implementation are one sheet, and a truncated read of either account
+        truncates the list that sheet is assembled from.
+
+        The answer is one-directional. ``True`` is a witness — a stored fetch
+        record reported the page at its cap — and ``False`` is only the absence
+        of that witness, never a proof that the list is whole.
+        """
+        return self.canonical(key) in self.asset_set_truncated
 
     def sheet_state(self, key: str) -> str:
         """What the entity's balance sheet PROVES, in one of five states.
@@ -214,18 +236,21 @@ class ValuePlane:
 
 
 # --- the sheet ceiling -------------------------------------------------------
-# The closed vocabulary ``ceiling_for`` answers in. Two of the six are ADMITS and
-# four are refusals, and the split is not readable from the names — ``no_rows``,
-# ``below_resolution`` and ``unpriced`` refuse for three different unmeasured
-# reasons, while ``proven_empty`` is an EARNED NEGATIVE that admits a $0 ceiling.
-# Kept as six tokens rather than a bool plus a note because the refusals are the
-# work list: "no balance was ever observed" and "the price lookup never answered"
-# are answered by different pipelines.
+# The closed vocabulary ``ceiling_for`` answers in. Two of the seven are ADMITS
+# and five are refusals, and the split is not readable from the names —
+# ``no_rows``, ``below_resolution`` and ``unpriced`` refuse for three different
+# unmeasured reasons and ``asset_list_truncated`` for a fourth, while
+# ``proven_empty`` is an EARNED NEGATIVE that admits a $0 ceiling. Kept as seven
+# tokens rather than a bool plus a note because the refusals are the work list:
+# "no balance was ever observed", "the price lookup never answered" and "the
+# asset list was cut off at the endpoint's page cap" are answered by different
+# pipelines.
 CEILING_ADMITTED = "admitted"
 CEILING_PROVEN_EMPTY = "proven_empty"
 CEILING_NO_ROWS = "no_rows"
 CEILING_BELOW_RESOLUTION = "below_resolution"
 CEILING_UNPRICED = "unpriced"
+CEILING_ASSET_LIST_TRUNCATED = "asset_list_truncated"
 CEILING_ALIAS_AMBIGUOUS = "alias_ambiguous"
 
 CEILING_REASONS = (
@@ -234,6 +259,7 @@ CEILING_REASONS = (
     CEILING_NO_ROWS,
     CEILING_BELOW_RESOLUTION,
     CEILING_UNPRICED,
+    CEILING_ASSET_LIST_TRUNCATED,
     CEILING_ALIAS_AMBIGUOUS,
 )
 
@@ -276,6 +302,17 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     launder the ambiguity away. Everywhere else the sheet is read at the
     canonical key, which ``sheet_state`` and ``total`` already do for themselves.
 
+    A TRUNCATED asset list refuses before the state is read, and refuses the
+    admits as well as the refusals. The rows under a page-capped read are a
+    prefix of what the entity holds, so the sheet totals a floor over the
+    holdings — and a floor published as an at-most is a false upper bound on the
+    security claim this figure exists to make. The state cannot carry that fact:
+    ``priced`` says a reading was determined and says nothing about how much of
+    the list was read, so a capped sheet and a whole one answer it identically.
+    It is refused under its own token rather than folded into ``unpriced``
+    because "the list is incomplete" is closed by paging or sweeping the chain,
+    which is not the pipeline that answers "nobody priced these rows".
+
     ``fold._entity_contribution`` will be the only caller, and it calls with the
     canonical key. Nothing in the fold calls it yet — the resolver is landed
     ahead of the branch that consumes it — so every reason it can answer is
@@ -285,6 +322,8 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     """
     if key in plane.alias_ambiguous:
         return None, CEILING_ALIAS_AMBIGUOUS
+    if plane.asset_set_is_truncated(key):
+        return None, CEILING_ASSET_LIST_TRUNCATED
     state = plane.sheet_state(key)
     if state == SHEET_PRICED:
         return plane.total(key), CEILING_ADMITTED
@@ -567,6 +606,13 @@ def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
         latest_fetch[fetch.contract_id] = fetch
     for contract_id, fetch in sorted(latest_fetch.items()):
         key = plane.canonical(entity_key(chain_of.get(contract_id), address_of.get(contract_id)))
+        # Recorded for EVERY contract, ahead of the native-row shortcut below: a
+        # truncated asset list is a fact about the ERC-20 page and holds whether
+        # or not a native row was also stored. Unioned over the contracts that
+        # fold onto one key, because one account read at its cap truncates the
+        # list the whole sheet is assembled from.
+        if fetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP:
+            plane.asset_set_truncated.add(key)
         if key in native_seen:
             continue
         plane.native_fact[key] = native_balance_fact(fetch.native_status, fetch.block_number)
@@ -4196,6 +4242,7 @@ __all__ = [
     "CEILING_ADMITTED",
     "CEILING_ADMITTING_REASONS",
     "CEILING_ALIAS_AMBIGUOUS",
+    "CEILING_ASSET_LIST_TRUNCATED",
     "CEILING_BELOW_RESOLUTION",
     "CEILING_NO_ROWS",
     "CEILING_PROVEN_EMPTY",

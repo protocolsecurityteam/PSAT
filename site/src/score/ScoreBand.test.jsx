@@ -99,7 +99,10 @@ describe("ScoreBand — computed grade", () => {
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(8);
     const tail = screen.getByRole("button", { name: /19 more/ });
     expect(tail.textContent).toContain("−0.19 combined");
-    expect(tail.textContent).toContain("16 with value not determined");
+    // 17 from 1.3.0-provisional: the guard revoked the $0.05 sheet ceiling on
+    // the entity whose asset list was read at the page cap, so that row's value
+    // is not_determined here rather than banded.
+    expect(tail.textContent).toContain("17 with value not determined");
     await userEvent.setup().click(tail);
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(27);
   });
@@ -117,7 +120,9 @@ describe("ScoreBand — computed grade", () => {
     const priced = cells.find((c) => c.textContent.startsWith("$1M-$10M"));
     expect(within(priced).getByText("bound not determined")).toBeInTheDocument();
     const nd = cells.filter((c) => c.querySelector(".sc-nd"));
-    expect(nd).toHaveLength(19);
+    // 20 from 1.3.0-provisional, for the revoked at-cap ceiling — see the tail
+    // summary test above.
+    expect(nd).toHaveLength(20);
     expect(nd[0].textContent).toBe("value not determined");
     expect(cells.some((c) => c.textContent.trim() === "$0")).toBe(false);
   });

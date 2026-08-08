@@ -140,10 +140,52 @@ const LETTER_CUTS = [
 //
 // So, again: the letter delta is published as a migration fact rather than
 // absorbed.
+//
+// ---------------------------------------------------------------------------
+//
+// 1.3.0-provisional carries the same cut points forward a THIRD time, and this
+// time the argument has to answer a question the first two did not: the letter
+// does not move at all. A table that is only re-cut when nothing depends on it
+// would be as much a ratchet as one re-cut to hold a letter up, so the reason
+// for not moving it has to be a reason and not an absence of pressure.
+//
+// What moved. 1.3.0 refuses a sheet ceiling to any entity whose asset list was
+// read AT the discovery endpoint's 100-entry page cap. Those rows are a PREFIX
+// of what the entity holds, so their sum is a floor over the sheet — and 1.2.0
+// published it as an at-most, because the sheet's STATE answers "priced"
+// whether the list was cut off or not. On this corpus exactly one such ceiling
+// was live and it is revoked: $0.05 at
+// base::0x6c240dda6b5c336df09a4d011139beaaa1ea2aa2. Measured across the version
+// boundary on the only local protocol (etherfi, protocol 1):
+//
+//     λ             71.7053 → 71.7053         letter B → B
+//     confidence       18.6 → 18.6            (its magnitude term 40.9 → 40.9,
+//                                              exactly: 40.900042 → 40.852393,
+//                                              under the published resolution)
+//     exposure_usd  $18,059,003.86 → $18,059,003.86
+//
+// Why the cuts do not move with it. Two of the 1.2.0 reasons carry directly —
+// fitting a nine-band table to one protocol's λ is still not a calibration, and
+// nothing a band table is calibrated against changed (BASE_SEVERITY, the
+// weakness ladder, VALUE_BANDS and the λ discount are all untouched). The third
+// is specific to this bump and is the one that matters: λ does not move here
+// because the revoked figure is $0.05, and the <$100k band and not_determined
+// weight identically at that rung. A recut justified by "the letter held
+// anyway" would be a cut point chosen because it cost nothing to choose — which
+// is the same defect as one chosen because it saved a letter, with the pressure
+// removed.
+//
+// One thing to read with the flat letter, because flatness will mislead here in
+// the opposite direction from the 1.2.0 drop: this version makes the document
+// say LESS than it did. A published upper bound was withdrawn because the
+// evidence never supported it, and the confidence term that measures magnitude
+// coverage falls (below the published decimal, but it falls). Nothing at
+// etherfi got better between these two documents either.
 const BANDS = {
   "1.0.1-provisional": LETTER_CUTS,
   "1.1.0-provisional": LETTER_CUTS,
   "1.2.0-provisional": LETTER_CUTS,
+  "1.3.0-provisional": LETTER_CUTS,
 };
 
 export function bandsFor(modelVersion) {

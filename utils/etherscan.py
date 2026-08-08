@@ -584,12 +584,15 @@ _token_balance_last_call = 0.0
 
 
 # Etherscan's ``addresstokenbalance`` page size. ONE page is fetched, so a holder with
-# more assets than this is silently truncated — 7 local contracts sit exactly at the
-# cap, one of them holding $8.6B (all 7 have ``protocol_id IS NULL``, so no effects
-# holder set can reach them today; see ``selection._holdings_completeness`` for the
-# armed-population statement). Exported so a consumer can ask whether a holdings count
-# is at the cap (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in
-# a second place.
+# more assets than this is silently truncated. Locally, counting the LATEST fetch per
+# contract, 15 contracts sit exactly at the cap and they are SPLIT: 7 carry
+# ``protocol_id = 1`` and 8 carry ``protocol_id IS NULL`` (WETH9 ×2, DepositContract,
+# Lido, DAI, USDC, LINK, wstETH). The 7 are inside a scored perimeter, so a capped list
+# does reach consumers — ``planes.ValuePlane.asset_set_truncated`` carries the fact and
+# ``planes.ceiling_for`` refuses those sheets a ceiling under ``asset_list_truncated``;
+# see ``selection._holdings_completeness`` for the effects-side statement. Exported so a
+# consumer can ask whether a holdings count is at the cap
+# (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in a second place.
 TOKEN_BALANCE_PAGE_SIZE = 100
 
 

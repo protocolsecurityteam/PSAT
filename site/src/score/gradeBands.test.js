@@ -68,8 +68,21 @@ describe("gradeBands — letter from λ, keyed by model version", () => {
     expect(bandsFor("1.2.0-provisional")).toEqual(bandsFor("1.1.0-provisional"));
     expect(letterFor("1.2.0-provisional", 73.2508).letter).toBe("B+");
     expect(letterFor("1.2.0-provisional", 71.7053).letter).toBe("B");
-    // The published document lands on the B side of that boundary.
-    expect(ETHERFI.model_version).toBe("1.2.0-provisional");
+  });
+
+  it("prices 1.3.0 λ on the same cut points, with λ and the letter both flat", () => {
+    // The carry-forward reasoned a third time, in the case that tests it
+    // differently again: 1.3.0 revokes a $0.05 sheet ceiling whose entity's
+    // asset list was read at the page cap, and $0.05 does not move a λ
+    // published to four decimals. So the table is carried forward where nothing
+    // forced it — a cut point chosen because it costs nothing to choose is the
+    // same defect as one chosen to save a letter.
+    expect(bandsFor("1.3.0-provisional")).toEqual(bandsFor("1.2.0-provisional"));
+    expect(letterFor("1.3.0-provisional", 71.7053).letter).toBe("B");
+    // The published document lands on the B side of the 72.0 boundary, and the
+    // version it lands under is read off the GOLDEN, so the bump that moves the
+    // stamp has to move this test with it.
+    expect(ETHERFI.model_version).toBe("1.3.0-provisional");
     expect(letterFor(ETHERFI.model_version, ETHERFI.grade_lambda)).toEqual({
       letter: "B",
       tone: "b",

@@ -744,12 +744,13 @@ def model_parameters() -> dict[str, Any]:
                 "numerator because an at-most is not expected loss"
             ),
         },
-        # Two records, not one extended path. 1.0.1 -> 1.1.0 and 1.1.0 -> 1.2.0
-        # are two bumps, and a single list of lambda points spanning both would
-        # publish a path no document ever walked — a reader could not tell which
-        # bump moved which number, and the two bumps move lambda in opposite
-        # directions. Each record names the version it moved FROM and the one it
-        # moved TO, so a persisted score's model_version joins to exactly one.
+        # Three records, not one extended path. 1.0.1 -> 1.1.0, 1.1.0 -> 1.2.0
+        # and 1.2.0 -> 1.3.0 are three bumps, and a single list of lambda points
+        # spanning them would publish a path no document ever walked — a reader
+        # could not tell which bump moved which number, and the bumps move
+        # lambda in opposite directions. Each record names the version it moved
+        # FROM and the one it moved TO, so a persisted score's model_version
+        # joins to exactly one.
         "model_version_migrations": [
             {
                 "from": "1.0.1-provisional",
@@ -845,12 +846,13 @@ def model_parameters() -> dict[str, Any]:
             },
             {
                 "from": "1.1.0-provisional",
-                # INTERPOLATED, and that is the point: while this is the CURRENT
-                # version the record and the document it describes must not be
-                # able to drift apart. The next bump freezes this to its literal
-                # — the way the 1.0.1 record above is frozen — and adds its own
-                # interpolated record.
-                "to": MODEL_VERSION,
+                # FROZEN at the 1.2.0 -> 1.3.0 bump, the way the 1.0.1 record
+                # above is frozen. Every figure below was measured while 1.2.0
+                # was CURRENT, and interpolating MODEL_VERSION here now would
+                # restamp a 1.2.0 measurement with whatever is shipping — a
+                # dated figure wearing a live label. The record below, which
+                # describes the version that IS current, interpolates instead.
+                "to": "1.2.0-provisional",
                 "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
                 # Two points, not three: unlike the bump above, this one has no
                 # intermediate document. Both halves of the change — the ceiling
@@ -862,10 +864,10 @@ def model_parameters() -> dict[str, Any]:
                 "exposure_usd": [18059003.86, 18059003.86],
                 "measured_at": (
                     "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
-                    f"this bump's own tip ({MODEL_VERSION}), as the last published 1.1.0-provisional "
-                    f"document read against the first {MODEL_VERSION} one. None of it is a "
-                    "projection onto a corpus this model has never scored, and there is no second "
-                    "corpus these cut points could have been calibrated against"
+                    "this bump's own tip (1.2.0-provisional), as the last published "
+                    "1.1.0-provisional document read against the first 1.2.0-provisional one. None "
+                    "of it is a projection onto a corpus this model has never scored, and there is "
+                    "no second corpus these cut points could have been calibrated against"
                 ),
                 "what_moved": (
                     "code control gains the magnitude path it never had. Replacing a node's "
@@ -939,6 +941,90 @@ def model_parameters() -> dict[str, Any]:
                     "99.04 - a document built to say almost nothing was measurable would instead "
                     "claim near-total coverage on the strength of upper bounds, which is the "
                     "opposite of what that disclosure exists to say"
+                ),
+            },
+            {
+                "from": "1.2.0-provisional",
+                # INTERPOLATED, and that is the point: while this is the CURRENT
+                # version the record and the document it describes must not be
+                # able to drift apart. The next bump freezes this to its literal
+                # — the way the two records above are frozen — and adds its own
+                # interpolated record.
+                "to": MODEL_VERSION,
+                "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
+                # One point repeated, and that is the measurement rather than a
+                # placeholder: this bump REVOKES a $0.05 ceiling, and $0.05 does
+                # not move a lambda published to four decimals. The letter is
+                # quoted twice for the same reason.
+                "grade_lambda": [71.7053, 71.7053],
+                "letter": ["B", "B"],
+                "confidence_pct": [18.6, 18.6],
+                "exposure_usd": [18059003.86, 18059003.86],
+                "measured_at": (
+                    "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
+                    f"this bump's own tip ({MODEL_VERSION}), as the last published "
+                    f"1.2.0-provisional document read against the first {MODEL_VERSION} one. None "
+                    "of it is a projection onto a corpus this model has never scored, and there is "
+                    "no second corpus these cut points could have been calibrated against"
+                ),
+                "what_moved": (
+                    "a sheet whose asset list was read AT the endpoint's page cap no longer ADMITS "
+                    "A SHEET CEILING. That arm and no other, stated narrowly because the scope is "
+                    "smaller than the defect: a sheet also caps a figure from above at two OTHER "
+                    "sites - the composed-magnitude cap and the entity-holdings cap, both a "
+                    "min(witness, sheet) - and NEITHER consults the truncation, so both still cap "
+                    "against a page-capped sheet after this bump. That is live on this corpus: the "
+                    "composed figure on base::0x86b5780b606940eb59a062aa85a07959518c0161 publishes "
+                    "$150,410.13 under bounded_by 'destination sheet' against a $164,041.15 flow.out "
+                    "witness, and the sheet that trimmed it is truncated. Those two sites are "
+                    "registered as open items and are NOT closed here. "
+                    "The ERC-20 discovery endpoint returns one 100-entry page, "
+                    "and a holder with more assets than that comes back truncated - the rows stored "
+                    "are a PREFIX of the holdings, so their sum is a floor over the sheet. 1.2.0 "
+                    "read only the sheet's STATE, which answers priced for a capped list exactly as "
+                    "it does for a whole one, so those sheets were published as at-mosts. The plane "
+                    "now carries the truncation per entity and ceiling_for refuses them under their "
+                    "own token, asset_list_truncated - a refusal closed by paging or by a "
+                    "chain-derived sweep, which is a different pipeline from the one that answers "
+                    "'nobody priced these rows'. On this corpus 7 protocol-1 contracts are at the "
+                    "cap over 5 distinct sheets, and exactly ONE of them was publishing a ceiling: "
+                    "base::0x6c240dda6b5c336df09a4d011139beaaa1ea2aa2, the $0.05 row on the Safe 4/7 "
+                    "upgrade.implementation finding, which is revoked. Entities priced from a sheet "
+                    "ceiling fall 11 -> 10 (entity meter), signals credited in confidence 21 -> 20 "
+                    "(signal meter), and refused calls go 49 -> 50 (call meter): one previously "
+                    "unpriced refusal on base::0x566bfa809b88967c994d77ed924bebffe80bd00c is "
+                    "RE-TOKENISED rather than added, and the revoked call is the new one, so "
+                    "asset_list_truncated reads 2 while unpriced reads 0 and no_rows 36 / "
+                    "below_resolution 12 do not move. The other four capped sheets published no "
+                    "ceiling and lose none, and are ineligible for one until their lists are "
+                    "completed - which does not stop them capping a composed magnitude, per the "
+                    "open items above"
+                ),
+                "the_invariant_6_exception_this_bump_takes": (
+                    "invariant 6 says the model is monotone in resolution work - more evidence never "
+                    "lowers a term - and this bump LOWERS one: reach_magnitude_witnessed_pct falls "
+                    "40.900042 -> 40.852393 (below the document's 1-decimal resolution, so the "
+                    "published 40.9 does not move) and the strictest published magnitude figure, "
+                    "reach_magnitude_witnessed_of_reaching_pct, falls 35.6 -> 35.5. The exception is "
+                    "ruled and narrow: invariant 6 governs EARNING evidence, and nothing here was "
+                    "earned and then withdrawn. What is withdrawn is an at-most that was never "
+                    "earned in the first place - a prefix of an asset list published as a bound on "
+                    "the whole of it - so the fall is the correction and not the cost of one. The "
+                    "direction to expect from the rest of this program is the opposite: completing "
+                    "those lists, and proving the never-observed sheets empty, only adds evidence "
+                    "and only raises terms"
+                ),
+                "what_did_not_move_and_why_that_was_a_ruling": (
+                    "grade_lambda stays 71.7053, grade_exposure stays 99.582 and exposure_usd stays "
+                    "$18,059,003.86 - byte-unchanged, and checked field by field rather than "
+                    "assumed. A sheet ceiling charges no exposure, so revoking one cannot move the "
+                    "exposure figures; and the revoked row's raw_points stays 3.15 because the "
+                    "<$100k band and not_determined weight identically at that rung, which is why "
+                    "lambda holds through a revocation. The ONE grade-surface figure that moves is "
+                    "provenance.sheet_ceilings.ceiling_usd_over_distinct_entities, "
+                    "$4,218,707,276.09 -> $4,218,707,276.04, which is the revoked $0.05 and nothing "
+                    "else. The band table carries 1.2.0's cut points forward unchanged: no letter "
+                    "moved, so nothing here was recut to hold one"
                 ),
             },
         ],

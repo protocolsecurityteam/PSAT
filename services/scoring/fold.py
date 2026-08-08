@@ -3529,9 +3529,10 @@ def _sheet_ceiling_totals_reading(
     head = (
         f"{admitted} entity(ies) are priced from their own sheet here and "
         f"{refusals} code-control call(s) asked for a sheet ceiling and were refused one, "
-        "counted by the reason the SHEET gave — 'no balance was ever observed at this node' "
-        "and 'the price lookup never answered' are the work of two different pipelines and a "
-        "reader who cannot tell them apart cannot act on either"
+        "counted by the reason the SHEET gave — 'no balance was ever observed at this node', "
+        "'the price lookup never answered' and 'the asset list was read at its page cap' are "
+        "the work of three different pipelines and a reader who cannot tell them apart cannot "
+        "act on any of them"
         if admitted or refusals
         else "no entity is priced from its own sheet here and no code-control call was refused "
         "one: the branch had nothing to fire on, which is a measured zero and not a silence"
@@ -4807,13 +4808,13 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     sheet here would restore the balance-sheet-as-a-reach error under a new name,
     over a much larger population than the one this branch exists to price.
 
-    The SHEET must be determined, which is ``planes.ceiling_for``'s question and
-    not this one's. Its two admitting reasons both produce a figure — a proven
-    zero is a witness and publishes $0 rather than not_determined — and its four
-    refusals are published under their own tokens, because "no balance was ever
-    observed here" and "the price lookup never answered" are the work of two
-    different pipelines and a reader who cannot tell them apart cannot act on
-    either.
+    The SHEET must be determined AND COMPLETE, which is ``planes.ceiling_for``'s
+    question and not this one's. Its two admitting reasons both produce a figure
+    — a proven zero is a witness and publishes $0 rather than not_determined —
+    and its five refusals are published under their own tokens, because "no
+    balance was ever observed here", "the price lookup never answered" and "the
+    asset list was read at its page cap" are the work of three different
+    pipelines and a reader who cannot tell them apart cannot act on any of them.
 
     The claim's own provenness is not re-tested here: :func:`_row_value` admits an
     instance only where ``value_state`` is ``proven_reach``, so an unproven claim

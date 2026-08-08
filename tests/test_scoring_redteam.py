@@ -6367,6 +6367,7 @@ def test_cc_the_ceiling_reason_vocabulary_is_closed_and_ordered():
         "no_rows",
         "below_resolution",
         "unpriced",
+        "asset_list_truncated",
         "alias_ambiguous",
     )
     assert P.CEILING_ADMITTING_REASONS == ("admitted", "proven_empty")
@@ -6741,6 +6742,7 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
         P.CEILING_NO_ROWS: 1,
         P.CEILING_BELOW_RESOLUTION: 0,
         P.CEILING_UNPRICED: 0,
+        P.CEILING_ASSET_LIST_TRUNCATED: 0,
         P.CEILING_ALIAS_AMBIGUOUS: 0,
     }
     assert set(block["calls_refused_by_reason"]) == set(FOLD.CEILING_REFUSAL_REASONS)
