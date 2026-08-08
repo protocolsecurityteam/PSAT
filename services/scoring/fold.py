@@ -357,6 +357,21 @@ _COMPOSED_SOURCE_READINGS = {
 CEILING_KIND_COMPOSED = "composed_extraction"
 CEILING_KIND_SHEET = "sheet"
 
+# The refusal token a code-control call writes into a row's ``why`` vocabulary
+# when the capability qualified for a sheet ceiling and the SHEET did not. One
+# constant because it is written in one place and read back in another — the
+# document-level rollup counts these refusals off the published rows — and two
+# copies of the spelling would drift apart silently, publishing a census of
+# zero refusals over a corpus full of them.
+SHEET_CEILING_REFUSED_PREFIX = "code_control_sheet_ceiling_refused("
+
+# The reasons a sheet ceiling was REFUSED: the closed ceiling vocabulary minus
+# the two that admit. DERIVED from the plane's own tuples rather than listed
+# here, because a fifth refusal added there and not here would be published by
+# the fold and counted by nothing — the census would report it as absent, which
+# is the one thing a census of refusals must never do.
+CEILING_REFUSAL_REASONS = tuple(r for r in P.CEILING_REASONS if r not in P.CEILING_ADMITTING_REASONS)
+
 # Where a sheet ceiling's dollars came from, keyed on the admitting reason AND
 # on whether the sheet covers everything the entity holds. Its own registry and
 # not a third key in ``_COMPOSED_SOURCE_READINGS`` above: that map is keyed on
@@ -869,6 +884,15 @@ BOUND_DIRECTION_NOT_DETERMINED = NOT_DETERMINED
 # qualifier that cannot be earned is not written at all.
 _BAND_PREFIX = {BOUND_DIRECTION_FLOOR: ">= ", BOUND_DIRECTION_CEILING: "<= "}
 
+# The two directions a per-entity SHEET figure can earn, the same pair
+# ``_SHEET_CEILING_DIRECTION_BASIS`` is keyed on: an entity whose priced sheet
+# covers everything observed at it bounds the move from above, and one holding
+# assets nobody priced bounds it in neither direction. ``floor`` is absent
+# deliberately — a sheet figure is never one — so the rollup's census reports
+# the two that can be earned and does not invent a bucket for the one that
+# cannot.
+SHEET_CEILING_BOUND_DIRECTIONS = (BOUND_DIRECTION_CEILING, BOUND_DIRECTION_NOT_DETERMINED)
+
 
 @dataclass
 class _RowValue:
@@ -1206,6 +1230,18 @@ def compute_protocol_score(
         # whole priced perimeter) are not comparable quantities, and the figure
         # reads as a measurement of safety rather than of coverage.
         "exposure_coverage": exposure_coverage,
+        # The sheet-ceiling population at the document level. Every entry it
+        # counts is published per row too, and it is still worth assembling
+        # once: these dollars are the one class of published magnitude that is
+        # deliberately absent from exposure_usd, so a consumer that reads only
+        # the grade figures would have no way to see how much money the model
+        # bounded from above and then declined to charge. Its credited-signal
+        # count is the confidence pass's own, not a second derivation of it.
+        "sheet_ceilings": _sheet_ceiling_totals(
+            findings,
+            subsumed,
+            confidence["reach_magnitude_signals"]["sheet_ceiling_by_capability"],
+        ),
         "principal_units": units.published_units(),
         "safe_keyset_overlaps": units.overlaps,
         "unit_evidence_scope": (
@@ -3374,6 +3410,175 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
     }
 
 
+def _named_zeros(counted: dict[str, set[Any]], vocabulary: tuple[str, ...]) -> dict[str, int]:
+    """Every token in a CLOSED vocabulary, counted, including the ones at zero.
+
+    A census keyed on a closed set publishes the whole set or it publishes an
+    ambiguity: a token missing from the map reads identically as "this rule did
+    not fire on this corpus" and "this rule is not in the model", and only the
+    first of those is a fact about the protocol. The same rule the credit-path
+    reading follows one level up, and the same one ``planes._REDUCTION_COUNTERS``
+    follows for the value plane's own counters.
+
+    A token OUTSIDE the vocabulary is not silently dropped. It is a fact the
+    document carries and a census that cannot name it would publish a total
+    smaller than its own carriers — so it is counted beside the registered ones
+    and the caller's vocabulary is what needs fixing.
+    """
+    out = dict.fromkeys(vocabulary, 0)
+    for token, members in counted.items():
+        out[token] = len(members)
+    return {k: out[k] for k in sorted(out)}
+
+
+def _sheet_ceiling_totals(
+    findings: list[dict[str, Any]],
+    subsumed: list[dict[str, Any]],
+    credited_by_capability: dict[str, int],
+) -> dict[str, Any]:
+    """The sheet-ceiling population and its dollars, rolled up to the protocol.
+
+    Every figure here is DERIVED from what the rows published — the per-entity
+    records, the refusal tokens in their ``why`` vocabulary, the reconciliation
+    withholdings — and from the confidence pass's own credit census. Nothing is
+    carried down from the branch that fired: a rollup written at the moment of
+    firing would count candidates the per-entity MAX later displaced, which are
+    exactly the figures no row publishes.
+
+    Dollars are summed over DISTINCT ENTITIES and not over rows. A sheet ceiling
+    is a fact about one node's sheet, so two rows pricing the same node this way
+    publish the same number twice and summing them would report twice the money
+    that exists. That the two agree is checked rather than assumed: an entity
+    whose rows disagree is COUNTED and published, because a disagreement here
+    would mean the per-key reconciliation let two different figures stand under
+    one claim.
+
+    ``signals_credited_in_confidence`` is the OTHER meter and is deliberately in
+    a different unit: the confidence term counts SIGNALS whose magnitude question
+    a ceiling answered, while everything above it counts entities and dollars.
+    The two are related but not convertible — one node's sheet can answer several
+    signals — and the credited population is the standing one, so a ceiling
+    displaced by a larger figure or withdrawn by the reconciliation is in neither
+    this block's entity count nor that credit.
+    """
+    populations = (("findings", findings), ("subsumed_rows", subsumed))
+    figures: dict[str, set[float]] = defaultdict(set)
+    entities_by_capability: dict[str, set[str]] = defaultdict(set)
+    by_reason: dict[str, set[str]] = defaultdict(set)
+    by_direction: dict[str, set[str]] = defaultdict(set)
+    refused: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    withheld: set[str] = set()
+    rows_publishing = {name: 0 for name, _ in populations}
+    for name, rows in populations:
+        for row in rows:
+            records = row.get("reach_sheet_ceiling_magnitudes") or []
+            if records:
+                rows_publishing[name] += 1
+            for record in records:
+                entity = str(record["entity"])
+                figures[entity].add(round(float(record["published_usd"]), 2))
+                entities_by_capability[str(record["capability"])].add(entity)
+                by_reason[str(record["ceiling_reason"])].add(entity)
+                by_direction[str(record["bound_direction"])].add(entity)
+            for record in row.get("reach_sheet_ceiling_magnitudes_withheld") or []:
+                withheld.add(str(record["entity"]))
+            for gap in row.get("undetermined_instances") or []:
+                why = str(gap.get("why") or "")
+                if not why.startswith(SHEET_CEILING_REFUSED_PREFIX):
+                    continue
+                reason = why[len(SHEET_CEILING_REFUSED_PREFIX) :].removesuffix(")")
+                # Deduped on the CALL, so two rows reaching one call through two
+                # principals report the one refusal that happened rather than two.
+                refused[reason].add((str(gap.get("entity")), str(gap.get("function"))))
+    disagreeing = sorted(key for key, seen in figures.items() if len(seen) > 1)
+    # An entity reached by two code-control capabilities is priced this way under
+    # BOTH, so the capability buckets sum past the distinct-entity count and a
+    # reader adding them up over-counts the population. Counted rather than left
+    # to be noticed: the dollars are deduped and the breakdown is not, and only
+    # one of those two facts was published.
+    shared_capability = sorted(
+        key for key in figures if sum(1 for members in entities_by_capability.values() if key in members) > 1
+    )
+    return {
+        "entities_priced_from_a_sheet_ceiling": len(figures),
+        "entities_by_capability": {k: len(v) for k, v in sorted(entities_by_capability.items())},
+        "entities_in_more_than_one_capability": len(shared_capability),
+        "ceiling_usd_over_distinct_entities": round(sum(max(seen) for _, seen in sorted(figures.items())), 2),
+        "entities_publishing_more_than_one_figure": disagreeing,
+        "entities_by_ceiling_reason": _named_zeros(by_reason, P.CEILING_ADMITTING_REASONS),
+        "entities_by_bound_direction": _named_zeros(by_direction, SHEET_CEILING_BOUND_DIRECTIONS),
+        "rows_publishing_a_sheet_ceiling": rows_publishing,
+        "calls_refused_by_reason": _named_zeros(refused, CEILING_REFUSAL_REASONS),
+        "entities_withheld_on_sheet_reconciliation": len(withheld),
+        "signals_credited_in_confidence": sum(credited_by_capability.values()),
+        "signals_credited_by_capability": dict(sorted(credited_by_capability.items())),
+        "reading": _sheet_ceiling_totals_reading(figures, refused, withheld, disagreeing, shared_capability),
+    }
+
+
+def _sheet_ceiling_totals_reading(
+    figures: dict[str, set[float]],
+    refused: dict[str, set[tuple[str, str]]],
+    withheld: set[str],
+    disagreeing: list[str],
+    shared_capability: list[str],
+) -> str:
+    """The rollup's account of itself, with every count taken from its own data."""
+    admitted = len(figures)
+    refusals = sum(len(calls) for calls in refused.values())
+    head = (
+        f"{admitted} entity(ies) are priced from their own sheet here and "
+        f"{refusals} code-control call(s) asked for a sheet ceiling and were refused one, "
+        "counted by the reason the SHEET gave — 'no balance was ever observed at this node' "
+        "and 'the price lookup never answered' are the work of two different pipelines and a "
+        "reader who cannot tell them apart cannot act on either"
+        if admitted or refusals
+        else "no entity is priced from its own sheet here and no code-control call was refused "
+        "one: the branch had nothing to fire on, which is a measured zero and not a silence"
+    )
+    reconciled = (
+        f" {len(withheld)} entity(ies) carried a figure that did not reconcile against the sheet "
+        "it claimed to be, so the ceiling LABEL was withheld there while the dollars stand"
+        if withheld
+        else " Every figure reconciled against the sheet it claims to be; none was withheld"
+    )
+    disagreement = (
+        f" {len(disagreeing)} entity(ies) publish more than one figure across rows, which the "
+        "per-key reconciliation is supposed to make impossible — the total takes the largest and "
+        "names them here rather than absorbing the disagreement"
+        if disagreeing
+        else " No entity publishes two different figures across rows, so the total double-counts nothing"
+    )
+    # The dollars are deduped and the capability breakdown is NOT, so the two
+    # answer different questions and only saying so keeps a reader from adding
+    # the buckets up. Every count in the reading is of the entity population;
+    # entities_by_capability counts memberships in it.
+    buckets = (
+        f" The dollars, not the breakdown: {len(shared_capability)} entity(ies) are priced this way "
+        "under MORE THAN ONE code-control capability and appear in that many buckets, so "
+        "entities_by_capability sums past the distinct-entity count above and is a count of "
+        "memberships rather than of entities"
+        if shared_capability
+        else " No entity is priced this way under more than one capability, so the "
+        "entities_by_capability buckets happen to sum to the distinct-entity count here — an "
+        "arithmetic coincidence of this corpus and not a property of the breakdown"
+    )
+    return (
+        head
+        + "."
+        + reconciled
+        + "."
+        + disagreement
+        + "."
+        + buckets
+        + ". The dollars are an AT-MOST and never an amount: they bound what replacing each "
+        "node's code can move AT THAT NODE, they say nothing about what those nodes in turn "
+        "govern, and they are deliberately outside exposure_usd — an upper bound on a move "
+        "nobody witnessed is not expected loss, and charging one would displace a row that "
+        "measured a real extraction. They must never be rendered as dollars at risk"
+    )
+
+
 def _execution_carriers(node: Any) -> Iterator[dict[str, Any]]:
     """Every published dict carrying a ``proving_execution`` block, wherever it sits.
 
@@ -4627,7 +4832,7 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
         # rather than by a comment, since a ``None`` here would publish the
         # refusal path's shape under the admission's name.
         return usd, f"code_control_sheet_ceiling({reason}) x entity_holdings"
-    return None, f"code_control_sheet_ceiling_refused({reason})"
+    return None, f"{SHEET_CEILING_REFUSED_PREFIX}{reason})"
 
 
 def _state_word(state: str) -> str:
@@ -5363,6 +5568,80 @@ def _entities_outside_perimeter(
     return sorted(outside)
 
 
+# The three ways the reach-magnitude term counts a signal as ANSWERED, as
+# tokens, so the reading below is assembled from the same names the loop counts
+# under. Each clause states which evidence supplied the answer, because that is
+# the fact a consumer subtracting one class from the term needs: they are three
+# different proofs of three different strengths and one word for all of them
+# ("witnessed") is what made the split necessary in the first place.
+CREDIT_PATH_OWN = "own_call_witness"
+CREDIT_PATH_COMPOSED = "composed_destination_witness"
+CREDIT_PATH_SHEET_CEILING = "sheet_ceiling"
+
+_CREDIT_PATH_CLAUSES = {
+    CREDIT_PATH_OWN: "a witness on the signal's OWN call, which measures what that call moves",
+    CREDIT_PATH_COMPOSED: (
+        "the DESTINATION function's own flow.out witness, COMPOSED along a path every hop of "
+        "which carries an act-as witness — the same kind of answer reached through one more "
+        "join, itemised per row under reach_composed_magnitudes"
+    ),
+    CREDIT_PATH_SHEET_CEILING: (
+        "the controlled node's own priced SHEET, which bounds the move from ABOVE and never "
+        "measures it: replacing that node's code leaves none of that node's code between the "
+        "principal and what it holds, so at-most-what-is-there is proven without a call being "
+        "witnessed at all, itemised per row under reach_sheet_ceiling_magnitudes"
+    ),
+}
+
+
+def _credit_path_reading(counts: dict[str, int]) -> str:
+    """How the answered population splits across the three credit paths.
+
+    Every registered path is named whatever it counted, including zero. A clause
+    dropped for having no carriers would leave a reader unable to tell a path
+    that did not fire on this corpus from one this model does not have, and the
+    counts are the whole point of publishing the split.
+    """
+    parts = [f"{counts.get(path, 0)} from {clause}" for path, clause in _CREDIT_PATH_CLAUSES.items()]
+    return (
+        "an answer counts here from any of THREE witnesses, and the population splits "
+        + "; ".join(parts)
+        + ". They are not equally strong and are counted apart so a consumer can subtract "
+        "whichever of them it does not want to credit"
+    )
+
+
+def _mixed_witness_cause(mixed: int, composed: int, ceiling: int, fold_only: int) -> str:
+    """What put entities in the mixed population, counted rather than asserted.
+
+    An answer the FOLD supplied is what turns a 0/n entity into a mixed one, and
+    there are now two of those. The sentence names the counts of each because
+    naming only the mechanism would keep reading as though both fired on a corpus
+    where one of them has no carriers. The empty case is an earned negative: the
+    edge exists on its own, from entities that carry a call witness of their own
+    at some signals and not at others, and saying so is a different fact from
+    saying nothing.
+    """
+    if not mixed:
+        return (
+            "No entity is in this population, so the edge has no carriers here — a measured "
+            "zero and not an absence of the shape"
+        )
+    if not composed and not ceiling:
+        return (
+            f"None of the {mixed} entity(ies) here was put in this population by an answer the "
+            "FOLD supplied: every one of them carries a witness on some of its own calls and "
+            "none on others, which is the edge in its plainest form"
+        )
+    return (
+        f"Of the {mixed} entity(ies) here, {composed} carry a COMPOSED destination witness and "
+        f"{ceiling} a SHEET CEILING — answers the fold supplied rather than the signal — and "
+        f"{fold_only} of them carry no call witness of their own at all, so for those the "
+        "fold's own answer is the only thing that moved them off 0/n and is what put them in "
+        "this population"
+    )
+
+
 def _confidence(
     signals: list[FunctionSignal],
     value_plane: P.ValuePlane,
@@ -5400,13 +5679,21 @@ def _confidence(
     contributes zero either way, while a denominator scoped to entities that
     happen to carry a signal would RISE when a signal is lost.
 
-    ``ceiling_signals`` is the fold's OTHER answer to the magnitude question —
-    the signals whose controlled node was priced from its own sheet — and it is
-    threaded here without being credited yet. The build that adds the third
-    credit path owns that change; carrying the population now means the path is
-    added over a set the fold already produces rather than over one re-derived in
-    the confidence pass, which is where a second derivation of "which signals got
-    an answer" would drift from the rows that publish one.
+    ``ceiling_signals`` is the fold's OTHER answer to the magnitude question and
+    the THIRD credit path: the signals whose controlled node was priced from its
+    own SHEET. It is consumed exactly as the fold built it and is never
+    re-derived here — a second derivation of "which signals got an answer" is
+    precisely what drifts from the rows that publish one.
+
+    What that population IS matters as much as that it is credited. It is
+    per-entity and STANDING: the signals whose sheet ceiling is the figure the
+    row actually publishes at that entity. A ceiling a larger contribution
+    displaced is not in it, and neither is one the per-key sheet reconciliation
+    withdrew, so every credited answer has a carrier in the published document
+    rather than a number the fold computed and then discarded. Ties keep their
+    credit — several calls on one node read the same sheet and each of them
+    proved the figure the row publishes — and only a ceiling strictly beaten
+    loses it.
 
     Every key is admitted through ``value_plane.canonical``: an implementation
     is the same entity as the proxy that deploys it, and admitting both hands
@@ -5464,6 +5751,16 @@ def _confidence(
     magnitude: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     magnitude_census: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     composed_census: dict[str, int] = defaultdict(int)
+    ceiling_census: dict[str, int] = defaultdict(int)
+    # Counted rather than subtracted. The three credit paths are exclusive by the
+    # order they are tried below, and a count taken directly cannot report a
+    # population that an arithmetic residual would silently absorb if that ever
+    # stopped being true.
+    own_witness_signals = 0
+    # Which of the three paths answered at each entity, so the mixed-entity
+    # reading below can say what put an entity in that population instead of
+    # asserting a cause. Kept per key because "mixed" is a per-entity fact.
+    credit_paths_by_key: dict[str, set[str]] = defaultdict(set)
     for signal in signals:
         key = value_plane.canonical(entity_key(signal.chain, signal.deployment_address))
         answered = (
@@ -5511,15 +5808,41 @@ def _confidence(
             # the two supplied it, and composed answers are recorded per signal
             # rather than per entity — an entity carrying two proven reaches of
             # which one composed is 1/2 answered, not answered.
+            #
+            # A SHEET CEILING is the third path, credited on the same terms and
+            # counted apart for the same reason. "How much can this reach move"
+            # has been given a proven bound — the controlled node's own priced
+            # holdings, which bound it because the code that would have stood in
+            # the way is the code the principal can replace — and a question
+            # answered with an at-most is not the same as one nobody answered.
+            # The credit is NOT vacuous: unlike the codeless credit below it
+            # rests on a balance observation, which is why it moves the witnessed
+            # term without moving the vacuous share published beside it.
+            #
+            # The three paths are tried in a fixed order and each signal takes at
+            # most one, so the three counters partition the answered population
+            # instead of overlapping it. Composition and the sheet ceiling are
+            # disjoint by construction anyway — one fires only for gate control
+            # and the other only for code control — and the order is what keeps
+            # that a property of this loop rather than of a rule elsewhere.
             own = _gate(signal, "reach_magnitude_usd").is_determined
-            by_composition = not own and _signal_identity(signal) in (composed_signals or set())
+            identity = _signal_identity(signal)
+            by_composition = not own and identity in (composed_signals or set())
+            by_ceiling = not own and not by_composition and identity in (ceiling_signals or set())
             magnitude[key][1] += 1
             magnitude_census[signal.claim_id][1] += 1
-            if own or by_composition:
+            if own or by_composition or by_ceiling:
                 magnitude[key][0] += 1
                 magnitude_census[signal.claim_id][0] += 1
-            if by_composition:
-                composed_census[signal.claim_id] += 1
+                if by_composition:
+                    composed_census[signal.claim_id] += 1
+                    credit_paths_by_key[key].add(CREDIT_PATH_COMPOSED)
+                elif by_ceiling:
+                    ceiling_census[signal.claim_id] += 1
+                    credit_paths_by_key[key].add(CREDIT_PATH_SHEET_CEILING)
+                else:
+                    own_witness_signals += 1
+                    credit_paths_by_key[key].add(CREDIT_PATH_OWN)
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -5589,11 +5912,14 @@ def _confidence(
     # has the identical algebra and additionally breaks the min() comparability
     # with the other three terms.
     #
-    # So the exposure is SIZED and published rather than closed. Composition does
-    # widen it — it is what turns a 0/n entity into a mixed one — and the two
+    # So the exposure is SIZED and published rather than closed. An answer the
+    # FOLD supplied — a composed destination witness or a sheet ceiling — widens
+    # it, because that is what turns a 0/n entity into a mixed one, and the two
     # figures below say by exactly how much: the largest single deletion that
     # could move the term, and the move if every unwitnessed signal at every
-    # mixed entity vanished at once.
+    # mixed entity vanished at once. Which of the two did it is MEASURED rather
+    # than asserted: the reading names the counts, so a corpus where only one of
+    # them fires does not read as though both did.
     mixed = [key for key in sorted(magnitude) if key not in vacuous and 0 < magnitude[key][0] < magnitude[key][1]]
     single_gain = total_gain = 0.0
     for key in mixed:
@@ -5604,6 +5930,15 @@ def _confidence(
         total_gain += weight * (1.0 - answered / seen)
     mixed_single_pct = round(100.0 * single_gain / denominator, 2) if denominator else 0.0
     mixed_total_pct = round(100.0 * total_gain / denominator, 2) if denominator else 0.0
+    mixed_paths = {key: credit_paths_by_key.get(key, set()) for key in mixed}
+    mixed_composed = sum(1 for paths in mixed_paths.values() if CREDIT_PATH_COMPOSED in paths)
+    mixed_ceiling = sum(1 for paths in mixed_paths.values() if CREDIT_PATH_SHEET_CEILING in paths)
+    # The entities the fold's own answer is the ONLY thing that moved off 0/n:
+    # no signal at them carried a magnitude witness of its own, so without the
+    # composed figure or the sheet ceiling they would not be in this population
+    # at all. A stronger claim than "carries a fold-supplied answer" and the one
+    # worth publishing, so it is tested rather than inferred from the counts.
+    mixed_fold_only = sum(1 for paths in mixed_paths.values() if paths and CREDIT_PATH_OWN not in paths)
     return {
         "pct": min(reach_pct, capability_pct, priced_pct, magnitude_pct),
         "reachability_answered_pct": reach_pct,
@@ -5628,8 +5963,30 @@ def _confidence(
             # them.
             "magnitude_composed": sum(composed_census.values()),
             "composed_by_capability": {k: v for k, v in sorted(composed_census.items())},
+            # The THIRD answer, counted apart from both for the reason the
+            # composed one is: it carries no call witness at all. The controlled
+            # node's own priced sheet bounds the move from above, which is a
+            # different and weaker claim than either of the other two, so a
+            # reader sizing what the pipeline MEASURED has to be able to
+            # subtract it. The name says which ceiling this is —
+            # reach_magnitude_ceiling_pct beside it is the term's HEADROOM and
+            # is a different quantity entirely.
+            "magnitude_sheet_ceiling": sum(ceiling_census.values()),
+            "sheet_ceiling_by_capability": {k: v for k, v in sorted(ceiling_census.items())},
+            "credit_path_reading": _credit_path_reading(
+                {
+                    CREDIT_PATH_OWN: own_witness_signals,
+                    CREDIT_PATH_COMPOSED: sum(composed_census.values()),
+                    CREDIT_PATH_SHEET_CEILING: sum(ceiling_census.values()),
+                }
+            ),
             "by_capability": {k: v for k, v in sorted(magnitude_census.items())},
             "mixed_witness_entities": len(mixed),
+            "mixed_witness_entities_with_a_fold_supplied_answer": {
+                CREDIT_PATH_COMPOSED: mixed_composed,
+                CREDIT_PATH_SHEET_CEILING: mixed_ceiling,
+                "no_own_call_witness_at_all": mixed_fold_only,
+            },
             # The size of the monotonicity edge below, in the term's own units.
             # The first is the most the term could rise from deleting ONE
             # unwitnessed proven-reach signal; the second from deleting every
@@ -5637,21 +5994,30 @@ def _confidence(
             "mixed_witness_max_single_deletion_gain_pct": mixed_single_pct,
             "mixed_witness_total_deletion_gain_pct": mixed_total_pct,
             "mixed_witness_reading": (
-                "entities carrying BOTH a witnessed and an unwitnessed proven reach. The term "
-                "is a per-entity fraction, so deleting an unwitnessed signal from one of these "
+                "entities carrying BOTH an answered and an unanswered proven reach. The term "
+                "is a per-entity fraction, so deleting an unanswered signal from one of these "
                 "raises it — a monotonicity edge this model does not close, published rather "
                 "than hidden, because every denominator that closes it charges a signal for a "
                 "magnitude it does not owe. It is not this term's shape alone: the "
                 "reachability and capability terms are the same fraction over the same "
                 "population and move the same way. The two gain figures beside this bound the "
                 "exposure in the term's own units, so a reader can see what the edge is worth "
-                "rather than only that it exists"
+                "rather than only that it exists. "
+                + _mixed_witness_cause(len(mixed), mixed_composed, mixed_ceiling, mixed_fold_only)
             ),
             "denominator_rule": (
                 "EVERY proven-reach signal, with no per-capability exclusions: a capability "
                 "that publishes proven_reach is claiming it moves value, so 'how much' is a "
                 "question it owes an answer to. The freeze fraction (pause.set) is in the "
-                "denominator and unanswered by design until a witness for it exists"
+                "denominator and unanswered by design until a witness for it exists. On the "
+                "numerator side there is no single witness class either: "
+                + _credit_path_reading(
+                    {
+                        CREDIT_PATH_OWN: own_witness_signals,
+                        CREDIT_PATH_COMPOSED: sum(composed_census.values()),
+                        CREDIT_PATH_SHEET_CEILING: sum(ceiling_census.values()),
+                    }
+                )
             ),
         },
         "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
