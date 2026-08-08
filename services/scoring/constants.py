@@ -271,6 +271,13 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # because the page allow-lists this direction: it would render a badge for a
     # state nothing can earn, with nothing published saying so.
     "value_at_stake_bound_direction:ceiling",
+    # The code-control ceiling's own two zero-carrier arms. The STATE is
+    # calibrated — sheet ceilings fire on the reference corpus and move the
+    # ranking — so ``proven_ceiling`` itself is deliberately absent here; what has
+    # never fired is these two admission arms, and each is exercised only by a
+    # constructed fixture.
+    "code_control_ceiling:proven_empty",
+    "code_control_ceiling_refused:alias_ambiguous",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -407,17 +414,60 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "tests/test_scoring_redteam.py::"
             "test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling",
             "tests/test_scoring_redteam.py::test_b7_a_direction_is_published_only_where_one_was_proven",
+            "tests/test_scoring_redteam.py::test_cc1_code_control_over_a_priced_node_is_priced_at_that_nodes_own_sheet",
         ),
         "note": (
-            "the one arm here that PREDATES this run: 0 rows before Phase A and 0 after. It is "
-            "deliberately unearnable on this corpus — the conjunction requires every contribution "
-            "to be a proven ceiling with no coverage gap, and ruling 6.3 item 4 declined to relax "
-            "it to make it exercisable, which is why the flag rather than the relaxation is the "
-            "right disclosure. Earnability stays deferred with that ruling and is NOT reopened by "
-            "registering it. Registered because the obligation is a flag in this document and a "
-            "spec deferral does not discharge one, and because site/src/score/derive.js allow-lists "
-            "this direction: the page would render a <= badge for a state nothing can earn, with "
-            "nothing published saying so"
+            "the one arm here that PREDATES this run, and the only one whose REASON for having no "
+            "carrier has changed. It had exactly one producer — a composed extraction ceiling — and "
+            "it now has two: a code-control row priced from the controlled node's own sheet is "
+            "ceiling-bearing on the same axis, deliberately, so the page carries ONE ceiling and "
+            "not two. It is still 0 rows before and 0 after, and the reason is measured rather "
+            "than deferred: the conjunction needs EVERY contributing entity to be a proven ceiling "
+            "with no coverage gap and no withheld hop, and every sheet-ceiling row on this corpus "
+            "also reaches entities it cannot price. So the direction is earnable — a constructed "
+            "row earns it, which is what exercised_by now names — and unearned here. Registered "
+            "because the obligation is a flag in this document and a spec deferral does not "
+            "discharge one, and because site/src/score/derive.js allow-lists this direction: the "
+            "page would render a <= badge for a state no ROW here earns, with nothing published "
+            "saying so"
+        ),
+    },
+    {
+        "arm": "code_control_ceiling:proven_empty",
+        "state": "proven_empty",
+        "published_at": "findings[].reach_sheet_ceiling_magnitudes[].ceiling_reason",
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_redteam.py::test_cc4_a_proven_empty_sheet_is_a_zero_ceiling_not_a_missing_one",
+        ),
+        "note": (
+            "the sheet ceiling's EARNED-NEGATIVE admission: every asset at the node carries a "
+            "quantity witnessed zero, so the ceiling is a proven $0. No entity on this corpus "
+            "holds such a sheet, so the arm ships exercised only by a constructed fold case. It "
+            "is registered rather than the ceiling STATE, which fires here and is calibrated: "
+            "what has never fired is this one way of admitting it"
+        ),
+    },
+    {
+        "arm": "code_control_ceiling_refused:alias_ambiguous",
+        "state": "alias_ambiguous",
+        # No producer through the fold: the shared-implementation guard at the top
+        # of _entity_contribution refuses the key before any branch reads a sheet,
+        # so the ceiling resolver is never asked about one. The token is real and
+        # answerable — it is what planes.ceiling_for returns — and it is reachable
+        # only by calling that resolver directly.
+        "published_at": None,
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_redteam.py::test_cc4_a_shared_implementation_earns_no_ceiling",
+            "tests/test_value_plane_ceiling.py::test_an_ambiguous_implementation_refuses_however_the_key_was_folded",
+        ),
+        "note": (
+            "the ceiling resolver's refusal for an implementation two proxies share, which no row "
+            "can publish: the fold refuses such a key outright before any magnitude branch runs, "
+            "so the double guard holds and this token is answerable only where the resolver is "
+            "called on its own. Registered so the redundancy is a stated fact — a reader who "
+            "removed either guard would otherwise find no record that the other was relied on"
         ),
     },
 )
@@ -661,7 +711,15 @@ def model_parameters() -> dict[str, Any]:
             "magnitude": (
                 "membership is not a magnitude: where no witness proves how much value the "
                 "reach MOVES, the dollar figure is not_determined and the finding keeps the "
-                "unpriced band's floor weight. The entity's balance sheet is never the answer"
+                "unpriced band's floor weight. The entity's balance sheet is not the answer to "
+                "how much a GATE moves — seizing who may call a vault leaves the vault's own "
+                "code, its share math and its caller conditions all standing between the "
+                "principal and the assets, and none of that has been examined. It IS the answer "
+                "to how much CODE CONTROL moves, and only at the node the code control is over: "
+                "replacing what that node does removes the one thing that stood there, so the "
+                "node's own priced sheet bounds the move from above. That figure is published as "
+                "a proven CEILING and never as an amount, and it stays out of the exposure "
+                "numerator because an at-most is not expected loss"
             ),
         },
         "model_version_migration": {

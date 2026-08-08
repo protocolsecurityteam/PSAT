@@ -79,6 +79,14 @@ REASON_STORAGE_KEY_MISSING = "storage_key_missing"
 REASON_FETCH_FAILED = "fetch_failed"
 REASON_PTR_UNRESOLVABLE = "ptr_unresolvable"
 REASON_NO_PROVING_CALL = "transcript_names_no_proving_call"
+# The one reason that is not a gap in the evidence but the SHAPE of it. Every
+# other member says a call was made and its record could not be reached; this
+# one says the figure was never a call's magnitude at all — it is a balance
+# observation, and looking for an execution behind it would be looking for the
+# wrong kind of proof. Registered here rather than left to a bare absence
+# because a published magnitude with no ``proving_execution`` key would read as
+# a figure whose execution nobody asked about.
+REASON_NOT_PROVEN_BY_A_CALL = "magnitude_not_proven_by_a_call"
 NOT_DETERMINED_REASONS = (
     REASON_NOT_PERSISTED,
     REASON_NO_VERDICT,
@@ -88,6 +96,7 @@ NOT_DETERMINED_REASONS = (
     REASON_FETCH_FAILED,
     REASON_PTR_UNRESOLVABLE,
     REASON_NO_PROVING_CALL,
+    REASON_NOT_PROVEN_BY_A_CALL,
 )
 
 # The reasons that are a FAULT in reaching the evidence rather than a gap in what
@@ -157,6 +166,13 @@ _REASON_READINGS = {
         "was read off. The probe ran and its record is intact; what is not determined is which of "
         "the recorded calls is the proving one, and guessing among them would name an execution "
         "the verdict never rested on"
+    ),
+    REASON_NOT_PROVEN_BY_A_CALL: (
+        "no call proved this figure and none was looked for: the witness is a BALANCE OBSERVATION "
+        "of the entity's own sheet, and what it bounds is what replacing that entity's code can "
+        "move. There is no probe here whose transcript could be read, so this absence is the shape "
+        "of the proof and not a gap in it — the observations themselves are published beside the "
+        "figure, and the claim they support is an upper bound and never an amount"
     ),
 }
 

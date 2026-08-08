@@ -332,11 +332,22 @@ def test_an_unregistered_withholding_arm_cannot_reach_a_published_reading():
 # value_at_stake_basis — the concept the document no longer publishes
 
 
-def _basis(composed: dict[str, FOLD._ComposedMagnitude], ceiling: frozenset[str]) -> str:
+def _basis(
+    composed: dict[str, FOLD._ComposedMagnitude],
+    ceiling: frozenset[str],
+    sheet: frozenset[str] = frozenset(),
+) -> str:
+    """The basis for a ceiling-bearing row, composed entries by default.
+
+    ``sheet`` is the writer's OTHER kind and is empty here on purpose: these
+    cases pin the composed clause's counting, and a sheet ceiling counts a
+    different population against a different question.
+    """
     return FOLD._ceiling_bearing_basis(
         FOLD.BOUND_DIRECTION_NOT_DETERMINED,
-        {key: 1.0 for key in ceiling},
+        {key: 1.0 for key in ceiling | sheet},
         ceiling,
+        sheet,
         [{"instance": 1}],
         [],
         [],
@@ -398,7 +409,36 @@ def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
     assert "travel with 2 of those 5 figure(s)" in mixed
     assert "travel with 1 of those 1 figure(s)" in one
     assert "travel with 5 of those 5 figure(s)" not in mixed
-    assert "travel with 2 of those 2 figure(s)" not in mixed
+
+
+def test_the_two_ceiling_kinds_are_counted_apart_and_neither_borrows_the_others_clause():
+    """A row can carry a composed extraction ceiling and a sheet ceiling at once.
+
+    The two are proven by different evidence and narrowed by different evidence —
+    a destination function's own stored conditions against which of a node's
+    assets replaced code can actually reach — so one clause written over both
+    would be a claim about the row that is false of whichever half it was not
+    written for. Each kind counts its OWN population, and a row carrying only one
+    of them reads exactly as it did before the other existed.
+    """
+    composed, ceiling = _mixed_ceiling(2, 0)
+    sheet = frozenset({"ethereum::0x" + "f" * 40, "ethereum::0x" + "e" * 40, "ethereum::0x" + "d" * 40})
+    both = _basis(composed, ceiling, sheet)
+
+    # Counted apart, and neither count is the row's total of five.
+    assert "2 priced from a composed extraction CEILING" in both
+    assert "3 priced from a SHEET CEILING" in both
+    assert "5 of 5 entity(ies)" in both
+    # The composed clause counts composed entries only; the sheet clause counts
+    # sheet entries only. A shared denominator would be the frozen-pair defect
+    # one axis over.
+    assert "travel with 2 of those 2 figure(s)" in both
+    assert "each of the 3 sheet figure(s)" in both
+    assert "travel with 2 of those 5 figure(s)" not in both
+
+    # A single-kind row is untouched by the existence of the other.
+    assert "SHEET CEILING" not in _basis(composed, ceiling)
+    assert "composed extraction CEILING" not in _basis({}, frozenset(), sheet)
 
 
 # act_as_composition.census.reading — the corpus count in a literal
@@ -462,6 +502,13 @@ _DEAD_CONCEPTS = (
     "no finding walks it",
     "is not_determined wherever populated",
     "one composed subsumed entity does so here",
+    # Retired by the code-control ceiling. It was true of every capability class
+    # when it was written and is now false of exactly one: at the node whose CODE
+    # a principal can replace, that node's own sheet is the answer, because the
+    # code that would have stood in the way is the code being replaced. The
+    # replacement sentence states which class it holds for and which it does not,
+    # so the unqualified form must never come back.
+    "balance sheet is never the answer",
 )
 
 

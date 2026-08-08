@@ -310,8 +310,12 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     registered = block["registered"]
 
     # Seven arms this run added, plus the one pre-existing zero-population arm
-    # CAP-B ruled into the same register (ruling 2).
-    assert len(registered) == 8
+    # CAP-B ruled into the same register (ruling 2), plus the code-control
+    # ceiling's two zero-carrier admission arms. The COUNT is derived and not
+    # chosen: the ceiling STATE itself fires on this corpus and is calibrated, so
+    # it is absent here, and the bound-direction arm stays because no row earns
+    # that direction — both facts measured against protocol 1, not assumed.
+    assert len(registered) == 10
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -465,7 +469,14 @@ def test_the_pre_existing_ceiling_arm_is_flagged_in_the_document_and_not_only_in
     # producer cannot emit it at all.
     assert entry["published_at"] == "findings[].value_at_stake_bound_direction"
     assert entry["population_census"] is None
-    assert "deferred" in entry["note"] and "derive.js" in entry["note"]
+    assert "derive.js" in entry["note"]
+    # The arm now has a SECOND producer — a sheet ceiling — so the note may no
+    # longer say the direction is unearnable. What it says instead is measured:
+    # earnable, and unearned on this corpus because every sheet-ceiling row also
+    # reaches entities it cannot price.
+    assert "0 rows before and 0 after" in entry["note"]
+    assert "unearnable" not in entry["note"]
+    assert "coverage gap" in entry["note"]
 
 
 def test_the_ceiling_direction_stays_allow_listed_on_the_page():
