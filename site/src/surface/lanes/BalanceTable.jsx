@@ -50,27 +50,13 @@ export function isAirdropDelivered(row) {
 // Whether this contract's holdings list can be reported as the whole set.
 // `holdings_coverage.state` is two-valued by construction — the backend cannot
 // prove completeness (see company_overview) — so this only ever answers
-// "cannot rule truncation out".
-// TWO INDEPENDENT FACTS, and both are disclosed when both hold. Truncation is
-// about assets that were never read; unvalued rows are about assets that were read and
-// could not be priced. Returning the first and skipping the second — which this did —
-// silently dropped the pricing disclosure for exactly the contracts where the total is
-// least trustworthy: locally 7 of 7 at-the-cap contracts also carry unvalued rows.
+// "cannot rule truncation out". Truncation is about assets that were never read;
+// pricing coverage is a separate fact, and it is carried per row by the "not
+// priced" cell rather than by a sentence here.
 function coverageNote(machine) {
   const cov = machine?.holdings_coverage;
-  if (!cov) return null;
-  const parts = [];
-  if (cov.state === "may_be_incomplete") {
-    parts.push(
-      `Holdings may be incomplete: the fetch returned a full page (${cov.page_cap}). Assets beyond it were never read, so this list and any total from it are lower bounds.`,
-    );
-  }
-  if (cov.unvalued_rows > 0) {
-    parts.push(
-      `${cov.unvalued_rows} of ${cov.rows} holdings have no determined USD value, so the total below counts only the priced ones.`,
-    );
-  }
-  return parts.length ? parts.join(" ") : null;
+  if (cov?.state !== "may_be_incomplete") return null;
+  return `Holdings may be incomplete: the fetch returned a full page (${cov.page_cap}). Assets beyond it were never read, so this list and any total from it are lower bounds.`;
 }
 
 function BalanceRow({ row }) {
@@ -114,9 +100,8 @@ export function BalanceTable({ machine }) {
   // Unpriced rows are KEPT by the dust filter on the strength of their price
   // alone — a holding of unknown value is not known to be under $10, and hiding
   // it for being unpriced would be the same null-as-zero fold this table just
-  // stopped making in the value cell. That asymmetry used to be invisible: the
-  // button said "<$10" while silently applying two different rules. It is now
-  // counted out loud below.
+  // stopped making in the value cell. The button label below names every ground
+  // it is acting on, and each kept row carries its own "not priced" cell.
   const isUnpriced = (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null);
   const isDust = (b) => !isUnpriced(b) && b.usd_value < 10;
   // The SECOND reason to fold a row out of the default view, and the only one
@@ -137,7 +122,7 @@ export function BalanceTable({ machine }) {
   // ONE hidden group, two admissions into it. Splitting these into two toggles
   // would ask the reader to reason about a filter matrix to answer "what is this
   // contract holding"; folding them into one keeps the default view honest and
-  // the disclosure below states each ground separately.
+  // the button label names each ground it acted on.
   const isFolded = (b) => isDust(b) || isUnknownToProtocol(b);
   // Split BEFORE the fold filter: the two questions are independent, and an
   // airdrop-delivered row must be listed whatever it is worth.
@@ -145,7 +130,6 @@ export function BalanceTable({ machine }) {
   const airdropped = machine.balances.filter(isAirdropDelivered);
   const filtered = hideDust ? holdings.filter((b) => !isFolded(b)) : holdings;
   const hiddenCount = holdings.length - filtered.length;
-  const unpricedShown = filtered.filter(isUnpriced).length;
   const unknownFolded = hideDust ? holdings.filter(isUnknownToProtocol).length : 0;
   // The button names every ground it is acting on. When nothing was folded for
   // the reference ground the label must not mention it — a permanent mention
@@ -153,22 +137,6 @@ export function BalanceTable({ machine }) {
   const filterLabel = unknownFolded
     ? `Hide priced <$10 and unnamed by discovery (${hiddenCount})`
     : `Hide priced <$10 (${hiddenCount})`;
-  // Counts only the STILL-VISIBLE unpriced rows, and discloses the folded ones
-  // rather than letting them vanish silently — the whole point of the original
-  // sentence was that this filter's two rules are stated out loud.
-  const unpricedNote = () => {
-    const listed =
-      unpricedShown > 0
-        ? `${unpricedShown} unpriced ${unpricedShown === 1 ? "holding is" : "holdings are"} still listed — an unknown value is not a small one`
-        : null;
-    const folded =
-      unknownFolded > 0
-        ? `${unknownFolded} unpriced ${unknownFolded === 1 ? "holding this protocol's own discovery does not name is" : "holdings this protocol's own discovery does not name are"} hidden by the filter above`
-        : null;
-    if (!listed && !folded) return null;
-    return `${[listed, folded].filter(Boolean).join("; ")}.`;
-  };
-  const unpricedText = hideDust ? unpricedNote() : null;
 
   return (
     <section className="ps-balance-section">
@@ -183,11 +151,6 @@ export function BalanceTable({ machine }) {
       >
         {hideDust ? filterLabel : "Show all"}
       </button>
-      {unpricedText ? (
-        <div className="ps-balance-coverage" role="note">
-          {unpricedText}
-        </div>
-      ) : null}
       <div className="ps-balance-list">
         {filtered.map((b, i) => (
           <BalanceRow key={i} row={b} />
