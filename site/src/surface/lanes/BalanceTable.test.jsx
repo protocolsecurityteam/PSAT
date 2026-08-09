@@ -97,6 +97,111 @@ describe("BalanceTable — the dust filter's asymmetry is disclosed", () => {
   });
 });
 
+describe("BalanceTable — an unpriced token the protocol never names folds into the same hidden group", () => {
+  // THE EVIDENCE. Locally 2,432 unpriced readings carry `absent_from_universe`
+  // (CANA, SKIMCHI — hand-sent dust that never arrived by mass distribution, so
+  // the disposition rule correctly declines to withhold it) against 23 that carry
+  // `in_universe` (weETHs, an ether.fi wrapper). The first group is junk in
+  // substance; the second is a real holding whose price nobody determined.
+  const unknown = (symbol) =>
+    row({
+      token_symbol: symbol,
+      usd_value: null,
+      usd_value_state: "not_determined",
+      reference_shape: "absent_from_universe",
+      disposition_state: "presented",
+    });
+  const named = (symbol) =>
+    row({
+      token_symbol: symbol,
+      usd_value: null,
+      usd_value_state: "not_determined",
+      reference_shape: "in_universe",
+      disposition_state: "presented",
+    });
+
+  it("folds the unnamed ones and keeps the named one — an unknown value is not a small one", async () => {
+    render(<BalanceTable machine={machine([row({ token_symbol: "BIG" }), named("weETHs"), unknown("CANA"), unknown("SKIMCHI")])} />);
+
+    expect(screen.getByText("BIG")).toBeInTheDocument();
+    // The POSITIVE CONTROL, and the reason this rule is two conjuncts rather
+    // than "hide the unpriced": weETHs is unpriced and real.
+    expect(screen.getByText("weETHs")).toBeInTheDocument();
+    expect(screen.queryByText("CANA")).toBeNull();
+    expect(screen.queryByText("SKIMCHI")).toBeNull();
+
+    // ONE toggle, ONE combined count — never a second filter control.
+    expect(screen.getAllByRole("button").filter((b) => /Hide priced|Show all/i.test(b.textContent))).toHaveLength(1);
+    expect(dustButton()).toHaveTextContent("Hide priced <$10 and unnamed by discovery (2)");
+
+    await userEvent.click(dustButton());
+    expect(screen.getByText("CANA")).toBeInTheDocument();
+    expect(screen.getByText("SKIMCHI")).toBeInTheDocument();
+  });
+
+  it("counts only the STILL-VISIBLE unpriced rows and discloses the folded ones in one sentence", () => {
+    render(<BalanceTable machine={machine([row({ token_symbol: "BIG" }), named("weETHs"), unknown("CANA"), unknown("SKIMCHI")])} />);
+    const note = screen.getAllByRole("note").find((n) => /unpriced/i.test(n.textContent));
+    expect(note).toBeDefined();
+    // One visible unpriced row, not three: the note used to count rows the
+    // filter is now hiding.
+    expect(note).toHaveTextContent("1 unpriced holding is still listed — an unknown value is not a small one");
+    expect(note).toHaveTextContent("2 unpriced holdings this protocol's own discovery does not name are hidden by the filter above");
+    expect(note.textContent.match(/\./g)).toHaveLength(1);
+  });
+
+  it("keeps a NOT_DETERMINED reference row visible — absence of a verdict is not a proven absence", () => {
+    // FAIL-TOWARD-SHOWING CONTROL, both shapes of missing verdict: an explicit
+    // `not_determined` and a payload carrying no key at all. `absent_from_universe`
+    // is an EARNED negative; neither of these earns it.
+    render(
+      <BalanceTable
+        machine={machine([
+          row({ token_symbol: "BIG" }),
+          row({ token_symbol: "NOTDET", usd_value: null, usd_value_state: "not_determined", reference_shape: "not_determined" }),
+          row({ token_symbol: "NOKEY", usd_value: null, usd_value_state: "not_determined" }),
+        ])}
+      />,
+    );
+    expect(screen.getByText("NOTDET")).toBeInTheDocument();
+    expect(screen.getByText("NOKEY")).toBeInTheDocument();
+    expect(dustButton()).toHaveTextContent("Hide priced <$10 (0)");
+    const note = screen.getAllByRole("note").find((n) => /unpriced/i.test(n.textContent));
+    expect(note).toHaveTextContent("2 unpriced holdings are still listed");
+    expect(note.textContent).not.toMatch(/hidden by the filter above/i);
+  });
+
+  it("never folds a PRICED row on the reference ground", () => {
+    // A measured dollar figure is a fact about worth that discovery cannot
+    // overturn: only the $10 rule may act on a priced row.
+    render(
+      <BalanceTable
+        machine={machine([
+          row({ token_symbol: "REALBUTUNNAMED", usd_value: 5000, reference_shape: "absent_from_universe" }),
+        ])}
+      />,
+    );
+    expect(screen.getByText("REALBUTUNNAMED")).toBeInTheDocument();
+    expect(dustButton()).toHaveTextContent("Hide priced <$10 (0)");
+  });
+
+  it("does not name the reference ground on a view that folded nothing for it", () => {
+    // NEGATIVE CONTROL: a permanent mention would claim a filter this view is
+    // not applying.
+    render(<BalanceTable machine={machine([row({ token_symbol: "BIG" }), row({ token_symbol: "DUST", usd_value: 0 })])} />);
+    expect(dustButton()).toHaveTextContent("Hide priced <$10 (1)");
+    expect(document.body.textContent).not.toMatch(/unnamed by discovery/i);
+  });
+
+  it("says what the filter did when it folded every row", () => {
+    render(<BalanceTable machine={machine([unknown("CANA"), row({ token_symbol: "DUST", usd_value: 0 })])} />);
+    // NOT "No holdings priced above $10": that would be a false claim about a
+    // list which is also hiding an unpriced row.
+    expect(screen.getByText("Every holding is hidden by the filter above")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/No holdings priced above/i);
+  });
+});
+
 describe("BalanceTable — holdings coverage", () => {
   it("says the list may be incomplete when the fetch hit the page cap", () => {
     render(

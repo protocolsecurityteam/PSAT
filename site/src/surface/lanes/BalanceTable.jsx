@@ -111,24 +111,64 @@ export function BalanceTable({ machine }) {
     return <div className="ps-lane-empty">No token balances recorded</div>;
   }
 
-  // Unpriced rows are KEPT by the dust filter on purpose — a holding of unknown
-  // value is not known to be under $10, and hiding it would be the same
-  // null-as-zero fold this table just stopped making in the value cell. That
-  // asymmetry used to be invisible: the button said "<$10" while silently
-  // applying two different rules. It is now counted out loud below.
-  const isDust = (b) => {
-    const determined = b?.usd_value_state ? b.usd_value_state === "measured" : b?.usd_value != null;
-    return determined && b.usd_value < 10;
-  };
-  // Split BEFORE the dust filter: the two questions are independent, and an
+  // Unpriced rows are KEPT by the dust filter on the strength of their price
+  // alone — a holding of unknown value is not known to be under $10, and hiding
+  // it for being unpriced would be the same null-as-zero fold this table just
+  // stopped making in the value cell. That asymmetry used to be invisible: the
+  // button said "<$10" while silently applying two different rules. It is now
+  // counted out loud below.
+  const isUnpriced = (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null);
+  const isDust = (b) => !isUnpriced(b) && b.usd_value < 10;
+  // The SECOND reason to fold a row out of the default view, and the only one
+  // that may act on an unpriced row: the protocol's own discovery does not name
+  // this token at all. Locally that separates 2,432 unpriced readings (CANA,
+  // SKIMCHI — hand-sent dust the disposition rule correctly declines to withhold,
+  // because it did not arrive by mass distribution) from the 23 unpriced readings
+  // the protocol does name (weETHs, an ether.fi wrapper), which stay listed.
+  //
+  // TWO CONJUNCTS, BOTH REQUIRED, and the reference conjunct is READ, never
+  // re-derived: `absent_from_universe` is an EARNED negative (see
+  // utils/balance_status), so a missing reference row publishes `not_determined`
+  // and a row carrying no key at all reads as undefined — neither is a proven
+  // absence, and both stay VISIBLE. Fail toward showing, the same direction as
+  // the disposition rule above. A priced row is never folded on this ground: a
+  // measured dollar figure is a fact about worth that discovery cannot overturn.
+  const isUnknownToProtocol = (b) => isUnpriced(b) && b?.reference_shape === "absent_from_universe";
+  // ONE hidden group, two admissions into it. Splitting these into two toggles
+  // would ask the reader to reason about a filter matrix to answer "what is this
+  // contract holding"; folding them into one keeps the default view honest and
+  // the disclosure below states each ground separately.
+  const isFolded = (b) => isDust(b) || isUnknownToProtocol(b);
+  // Split BEFORE the fold filter: the two questions are independent, and an
   // airdrop-delivered row must be listed whatever it is worth.
   const holdings = machine.balances.filter((b) => !isAirdropDelivered(b));
   const airdropped = machine.balances.filter(isAirdropDelivered);
-  const filtered = hideDust ? holdings.filter((b) => !isDust(b)) : holdings;
+  const filtered = hideDust ? holdings.filter((b) => !isFolded(b)) : holdings;
   const hiddenCount = holdings.length - filtered.length;
-  const unpricedShown = filtered.filter(
-    (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null),
-  ).length;
+  const unpricedShown = filtered.filter(isUnpriced).length;
+  const unknownFolded = hideDust ? holdings.filter(isUnknownToProtocol).length : 0;
+  // The button names every ground it is acting on. When nothing was folded for
+  // the reference ground the label must not mention it — a permanent mention
+  // would claim a filter the view is not applying.
+  const filterLabel = unknownFolded
+    ? `Hide priced <$10 and unnamed by discovery (${hiddenCount})`
+    : `Hide priced <$10 (${hiddenCount})`;
+  // Counts only the STILL-VISIBLE unpriced rows, and discloses the folded ones
+  // rather than letting them vanish silently — the whole point of the original
+  // sentence was that this filter's two rules are stated out loud.
+  const unpricedNote = () => {
+    const listed =
+      unpricedShown > 0
+        ? `${unpricedShown} unpriced ${unpricedShown === 1 ? "holding is" : "holdings are"} still listed — an unknown value is not a small one`
+        : null;
+    const folded =
+      unknownFolded > 0
+        ? `${unknownFolded} unpriced ${unknownFolded === 1 ? "holding this protocol's own discovery does not name is" : "holdings this protocol's own discovery does not name are"} hidden by the filter above`
+        : null;
+    if (!listed && !folded) return null;
+    return `${[listed, folded].filter(Boolean).join("; ")}.`;
+  };
+  const unpricedText = hideDust ? unpricedNote() : null;
 
   return (
     <section className="ps-balance-section">
@@ -141,19 +181,25 @@ export function BalanceTable({ machine }) {
         className={`ps-balance-filter${hideDust ? " active" : ""}`}
         onClick={() => setHideDust(!hideDust)}
       >
-        {hideDust ? `Hide priced <$10 (${hiddenCount})` : "Show all"}
+        {hideDust ? filterLabel : "Show all"}
       </button>
-      {hideDust && unpricedShown > 0 ? (
+      {unpricedText ? (
         <div className="ps-balance-coverage" role="note">
-          {unpricedShown} unpriced {unpricedShown === 1 ? "holding is" : "holdings are"} still listed — an
-          unknown value is not a small one.
+          {unpricedText}
         </div>
       ) : null}
       <div className="ps-balance-list">
         {filtered.map((b, i) => (
           <BalanceRow key={i} row={b} />
         ))}
-        {filtered.length === 0 && <div className="ps-lane-empty">No holdings priced above $10</div>}
+        {filtered.length === 0 && (
+          // Says what the FILTER did, not what the contract holds: with the
+          // reference ground folding rows too, "nothing above $10" would be a
+          // false statement about a list that may also be hiding unpriced rows.
+          <div className="ps-lane-empty">
+            {hiddenCount > 0 ? "Every holding is hidden by the filter above" : "No holdings to list"}
+          </div>
+        )}
       </div>
       {airdropped.length > 0 ? (
         // COLLAPSED, NOT SUPPRESSED. The rows stay reachable in one click and
