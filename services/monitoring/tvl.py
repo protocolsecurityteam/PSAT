@@ -14,16 +14,18 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
     Contract,
+    ContractBalanceFetch,
     ContractBalanceLatest,
     Protocol,
     SessionLocal,
@@ -80,6 +82,12 @@ MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
 # Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
 # Etherscan/DefiLlama fan-out (design §2.7).
 DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
+# How stale the entity cohort's reading may get before the cycle re-reads it.
+# Deliberately a day rather than the TVL tick: these holders are the protocol's
+# signers and capability principals, not its deployments, and their scan is
+# batched — N holders sharing a cursor cost the same windows as one — so the
+# cadence, not the population, is what the spend is bought with.
+DEFAULT_ENTITY_BALANCE_INTERVAL = int(os.getenv("PSAT_ENTITY_BALANCE_INTERVAL", "86400"))
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol"
 
 
@@ -790,7 +798,19 @@ def refresh_entity_balances(
         for holder, _native, _page, escalation in pending
         if escalation is not None
     ]
-    sweeps, sweep_cost = run_sweeps(sweep_requests, rpc_url_for=lambda cid: rpc_url_for_chain_id(cid))
+    # The entity cohort spends its OWN request counter. ``SWEEP_REQUEST_BUDGET``
+    # is a ceiling on whatever counter ``run_sweeps`` carries, so a per-cohort
+    # counter is what makes the daily entity pass and the hourly contract sweep
+    # two separate allowances rather than one shared one. ``run_sweeps`` already
+    # mints a counter per call, so this argument states that invariant at the
+    # call site rather than establishing it — pinned here, and by a test,
+    # because the isolation is a property this producer depends on and not one
+    # a reader should have to infer from a default argument two modules away.
+    sweeps, sweep_cost = run_sweeps(
+        sweep_requests,
+        rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+        cost=SweepCost(),
+    )
     report.cost = sweep_cost
     cost_note = (
         f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
@@ -824,6 +844,71 @@ def refresh_entity_balances(
         )
     session.commit()
     return report
+
+
+def entity_cohort_oldest_reading(session: Session, holders: list[EntityHolder]) -> datetime | None:
+    """The OLDEST current reading in this cohort — the age the cohort really is.
+
+    Per holder its newest fetch, then the minimum across holders, because a
+    cohort is only as fresh as its stalest member. The newest-anywhere reading
+    would be the wrong anchor for a reason that is structural rather than
+    hypothetical: a fetch row's identity is ``(chain, address)`` and carries no
+    protocol, while this cohort is protocol-scoped, so one EOA reached from two
+    protocols' control graphs is ONE row. Anchoring on the maximum would let
+    protocol A's daily pass keep that shared row fresh and starve protocol B's
+    exclusive holders for as long as both protocols exist.
+
+    Holders that have never been read are deliberately NOT in the minimum. They
+    are not a stale reading, they are no reading, and folding them in as a
+    floor would make a cohort the producer keeps declining re-fire every tick.
+    Their first reading arrives with the next pass this anchor does open.
+
+    ``None`` = nobody in the cohort has ever been read, so nothing bounds how
+    old it is and the caller must read it.
+    """
+    if not holders:
+        return None
+    # Scoped by ``ObservationSubject.filters`` — the same predicate the
+    # observation modules select a subject's rows with, not a second spelling.
+    newest_per_holder = session.execute(
+        select(func.max(ContractBalanceFetch.fetched_at))
+        .where(or_(*[and_(*holder.subject.filters(ContractBalanceFetch)) for holder in holders]))
+        .group_by(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
+    ).scalars()
+    return min((ts for ts in newest_per_holder if ts is not None), default=None)
+
+
+def refresh_entity_balances_if_due(
+    session: Session,
+    protocol_id: int,
+    *,
+    now: datetime | None = None,
+    interval_s: int = DEFAULT_ENTITY_BALANCE_INTERVAL,
+) -> EntityObservationReport | None:
+    """The cycle's daily arm: read the entity cohort, or report it still fresh.
+
+    ``None`` means the pass did not run, and the two reasons are both honest
+    ones: the protocol has no proven-codeless holders, or every holder that has
+    ever been read was read inside the window.
+
+    The window is measured against the cohort's own fetch rows, the way
+    :func:`take_tvl_snapshot` measures ``MIN_SNAPSHOT_INTERVAL`` against its own
+    snapshots. The producer's output IS the schedule: a cadence held in
+    loop-local state re-spends the day's requests on every restart, and one held
+    in a second marker can claim a reading that was never written. What the
+    window is measured FROM is :func:`entity_cohort_oldest_reading` — read its
+    docstring before changing this to a maximum.
+    """
+    holders, _excluded = proven_codeless_holders(session, protocol_id)
+    if not holders:
+        return None
+    oldest = entity_cohort_oldest_reading(session, holders)
+    if oldest is not None:
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        if (now or datetime.now(timezone.utc)) - oldest < timedelta(seconds=interval_s):
+            return None
+    return refresh_entity_balances(session, protocol_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1109,32 @@ def refresh_all_protocols(session: Session) -> int:
             session.rollback()
             logger.warning(
                 "TVL snapshot failed for protocol %s: %s",
+                protocol.name,
+                exc,
+                extra={"exc_type": type(exc).__name__},
+            )
+        # The daily arm, after the snapshot and in a try of its own. These
+        # holders are the protocol's principals, not its deployments: they
+        # contribute nothing to the snapshot, so neither pass's failure may be
+        # reported as the other's and the snapshot cycle's counters stay a
+        # statement about the snapshot.
+        try:
+            entity_report = refresh_entity_balances_if_due(session, protocol.id)
+            if entity_report is not None:
+                logger.info(
+                    "entity balances for %s: %d holder(s) read, %d excluded, %d getLogs + "
+                    "%d multicall + %d head request(s)",
+                    protocol.name,
+                    len(entity_report.holders),
+                    len(entity_report.excluded),
+                    entity_report.cost.get_logs,
+                    entity_report.cost.multicall,
+                    entity_report.cost.head_reads,
+                )
+        except Exception as exc:
+            session.rollback()
+            logger.warning(
+                "entity balance refresh failed for protocol %s: %s",
                 protocol.name,
                 exc,
                 extra={"exc_type": type(exc).__name__},
