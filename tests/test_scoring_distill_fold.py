@@ -36,6 +36,7 @@ from services.scoring.planes import (
     REFUSAL_ZERO_ANCHOR,
     REFUSAL_ZERO_PRINCIPAL,
     SHEET_BELOW_RESOLUTION,
+    SHEET_NO_ROWS,
     SHEET_PROVEN_EMPTY,
     UNCONSUMED_REASON_UNCLASSIFIED,
     load_audit_posture,
@@ -1447,6 +1448,47 @@ def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_se
     assert plane.provenance["sheet_states"][SHEET_BELOW_RESOLUTION] == 1
     assert sum(plane.provenance["sheet_states"].values()) == 1
     assert plane.provenance["sheet_states"][SHEET_PROVEN_EMPTY] == 0
+
+
+def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_session):
+    """V2: ``no_rows`` was a STRUCTURAL zero, not a measurement.
+
+    The census walked the observation maps, and every key in those maps has by
+    construction something observed on it — so the one state meaning "nothing
+    observed" could never be incremented. A consumer reading
+    ``sheet_states.no_rows: 0`` was told the earned fact "every entity this
+    protocol names carries a balance sheet" by a counter that had no way to say
+    anything else. Here two of the three contracts have never been read, and the
+    census says two.
+    """
+    read = corpus.contract("0x" + "e1" * 20)
+    corpus.contract("0x" + "e2" * 20)
+    corpus.contract("0x" + "e3" * 20)
+    _balance_row(db_session, read, usd="1500.00", token="0x" + "e9" * 20, observed=read.address)
+
+    states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
+    assert states[SHEET_NO_ROWS] == 2
+    assert states["priced"] == 1
+    # The population is the whole base population, not the read part of it.
+    assert sum(states.values()) == 3
+
+
+def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_session):
+    """The base population is NOT canonical when the census runs.
+
+    ``contract_entities`` is folded onto proxies only after this block, so a
+    census that read it raw would count an implementation apart from the proxy
+    it folds onto and report two unread sheets where there is one. The fold is
+    the whole reason the count is taken over canonical keys.
+    """
+    proxy = "0x" + "e4" * 20
+    impl = "0x" + "e5" * 20
+    corpus.contract(proxy, implementation=impl)
+    corpus.contract(impl)
+
+    states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
+    assert states[SHEET_NO_ROWS] == 1
+    assert sum(states.values()) == 1
 
 
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):

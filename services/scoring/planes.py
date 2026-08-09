@@ -1391,7 +1391,24 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
     # exactly the entities whose state the typed gate moves off ``no_rows``. A
     # census taken over the maps alone published 14 unpriced sheets while the
     # plane answered ``unpriced`` for 29 of them.
-    for key in sorted(set(plane.per_asset) | set(plane.per_asset_state) | set(plane.typed_receipts_unresolved)):
+    #
+    # It also includes the BASE POPULATION, and that is what makes ``no_rows``
+    # answerable at all. Every key in the observation maps has, by construction,
+    # something observed on it, so a census over those maps alone can never
+    # report the one state that means "nothing observed": it published a
+    # structural 0 that reads as the earned fact "every entity this protocol
+    # names has a balance sheet". The entities with no reading are precisely the
+    # ones absent from the maps, and ``contract_entities`` — discovery-fixed, and
+    # this plane's own documented base population — is where they are named.
+    # Folded through ``canonical`` first: it is canonicalised only after this
+    # census runs, and an implementation counted apart from the proxy it folds
+    # onto would report one sheet twice.
+    for key in sorted(
+        {plane.canonical(key) for key in plane.contract_entities}
+        | set(plane.per_asset)
+        | set(plane.per_asset_state)
+        | set(plane.typed_receipts_unresolved)
+    ):
         sheet_states[plane.sheet_state(key)] += 1
 
     # The empty claim's own census, over the sheets whose EVERY observed quantity
@@ -1481,7 +1498,12 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             "airdrop_determined = every reading left on the sheet arrived only in mass "
             "distributions or is a witnessed zero, which is a DIFFERENT witness from proven_empty "
             "and never the same one: proven_empty says nothing ever arrived, airdrop_determined "
-            "says what arrived arrived as a mass distribution; no_rows = nothing observed"
+            "says what arrived arrived as a mass distribution; no_rows = nothing observed. "
+            "The census is taken over this plane's BASE POPULATION (contract_entities, folded "
+            "onto canonical keys) unioned with every entity the observation maps carry, so "
+            "no_rows counts the entities the protocol names and nobody has read — a count "
+            "taken over the observations alone could only ever report 0 there, which is not "
+            "the same fact"
         ),
         "asset_disposition": {
             "entities_determined": sheet_states[SHEET_AIRDROP_DETERMINED],

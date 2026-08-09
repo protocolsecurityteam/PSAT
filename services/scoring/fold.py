@@ -331,20 +331,41 @@ _WITNESS_STATE_UNRANKED = len(_WITNESS_STATE_CLAIM) + 1
 # beside it equals ``published_usd``, so the document contradicts itself in two
 # adjacent keys. Neither sentence asserts which ceiling is the smaller in
 # general; each says which one bound THIS figure and points at the other.
+_BOUNDED_BY_WITNESS = "flow.out witness"
+_BOUNDED_BY_SHEET = "destination sheet"
+
 _COMPOSED_SOURCE_READINGS = {
-    "flow.out witness": (
+    _BOUNDED_BY_WITNESS: (
         "the dollars are the DESTINATION function's own flow.out witness, and not this row's "
         "balance sheet. The destination entity's own sheet did not bind them here — bounded_by "
         "beside destination_sheet_usd and sheet_not_determined says which of the two ceilings "
         "did and what the other one was"
     ),
-    "destination sheet": (
+    _BOUNDED_BY_SHEET: (
         "the dollars are the DESTINATION entity's own BALANCE SHEET, and not this row's. The "
         "sheet is BELOW that function's flow.out witness here and is what capped the figure — "
         "bounded_by beside destination_sheet_usd and flow_out_witness.usd says which of the two "
         "ceilings did and what the other one was"
     ),
 }
+
+# The publication rounding this document applies to dollar figures. Cents are
+# the unit a reader reads a balance in, and that is all this rounding is for —
+# so, as in the value plane's own presentation rounding (``planes._round_presented``,
+# same rule at six decimals), it is not allowed to change what a figure PROVES.
+# A proven bound of $0.00156 published as $0.00 stops being a number and starts
+# being "nothing at stake", which is a different claim about the entity than the
+# one that was measured — and on a ceiling it is the claim that reads as safety.
+# Below the rounding's own resolution the unrounded figure is therefore what
+# stands.
+_PUBLISHED_DECIMALS = 2
+
+
+def _round_published(value: float) -> float:
+    """Round to cents for publication, never onto zero."""
+    rounded = round(value, _PUBLISHED_DECIMALS)
+    return rounded if rounded != 0.0 or value == 0.0 else value
+
 
 # The token a figure carries where a sheet EXISTS, is determined, and still may
 # not bound a witness. One token, used at both trim sites and published on both
@@ -364,6 +385,23 @@ _DISPOSED_SHEET_DOES_NOT_BOUND = (
     "the holdings arrived and never about what they are worth — two of the tokens measured into "
     "that state on this corpus are real ones. So the $0 bounds what the entity HOLDS and not "
     "what is there to MOVE, the sheet does not trim this figure, and the witness stands alone"
+)
+
+# The other thing a trim owes, and the one the entry used to leave unsaid: the
+# sheet trimmed the figure and is NOT proven to cover everything the destination
+# holds. A priced sheet that does not cover its node is a floor over what was
+# priced, so ``min(witness, sheet)`` against it publishes a number SMALLER than
+# the witness on a bound nothing established — an under-report of what the call
+# reaches, dressed as a tighter ceiling. The figure still stands (it is the
+# honest min of what is known) and the entry stops calling it an at-most. The
+# sentence POINTS at the fields the direction is derived from rather than
+# restating the shortfall, which is derived once and published there.
+_TRIMMED_TO_AN_UNPROVEN_CEILING = (
+    "The sheet that capped this figure is NOT proven to cover everything observed at that "
+    "destination, so the cap is not a proven at-most and the published figure may sit below "
+    "what the call reaches: destination_sheet_bound_direction says which of the two it is, and "
+    "destination_sheet_bound_direction_basis enumerates, off the destination's own coverage, "
+    "the conjunct(s) of that proof this sheet fails"
 )
 
 # --- the two ceilings, kept apart ------------------------------------------
@@ -633,6 +671,17 @@ class _ComposedMagnitude:
     # and "there is a number and it does not answer this question" are different
     # facts, and ``sheet_not_determined`` may only ever spell the first.
     sheet_bound_refused: str | None = None
+    # What the destination sheet's OWN asset coverage proves about the cap it
+    # applied — read at the trim site from the same :func:`_asset_coverage` the
+    # sheet-ceiling records publish their ``bound_direction`` from, so the two
+    # surfaces answer "is this sheet an at-most" the same way. ``None`` is the
+    # third state and the only one available to an entry built without a plane:
+    # nobody read the coverage. It publishes ``not_determined``, never
+    # ``ceiling`` — the absence of a completeness proof is not a completeness
+    # proof, and a trim onto an unproven ceiling is how a witnessed magnitude
+    # gets quietly reduced to a floor over what somebody happened to price.
+    sheet_is_proven_complete: bool | None = None
+    sheet_bound_direction_basis: str | None = None
     tied_with: tuple[_ComposedMagnitude, ...] = ()
     # Which arm of the composition rule this entry took, and the two witnesses
     # the arm was taken from. All three are set by :func:`_admit_composed` after
@@ -643,6 +692,31 @@ class _ComposedMagnitude:
     arm_taken: str = ARM_NOT_DETERMINED
     deletability: P.DeletabilityVerdict | None = None
     route: P.RouteClassification | None = None
+
+    def __post_init__(self) -> None:
+        # The two coverage fields are one answer read at one place, so they are
+        # present together or absent together. Split, an entry could publish a
+        # direction with no basis — the shape this fix exists to remove.
+        if (self.sheet_is_proven_complete is None) != (self.sheet_bound_direction_basis is None):
+            raise ValueError("sheet coverage and its basis are read together and publish together")
+
+    @property
+    def sheet_bound_direction(self) -> str | None:
+        """Whether the destination sheet PROVES an at-most on this entry's figure.
+
+        ``None`` where no sheet bounded anything — the entry says that under
+        ``sheet_not_determined`` and ``sheet_bound_refused`` and does not need a
+        direction for it. Otherwise the same two-valued answer the per-entity
+        sheet-ceiling records publish, off the same conjunction: a priced sheet
+        that does not cover everything observed at the node is a floor over what
+        was priced, and ``min(witness, sheet)`` against such a figure hands back
+        a NUMBER SMALLER than the witness on the strength of a bound nothing
+        proved. The figure stands — it is the honest min of what is known — and
+        the entry stops calling it a ceiling.
+        """
+        if self.sheet_usd is None:
+            return None
+        return BOUND_DIRECTION_CEILING if self.sheet_is_proven_complete else BOUND_DIRECTION_NOT_DETERMINED
 
     def _chain_identity_gloss(self) -> str:
         """What the order's last component actually ranges over, read off the steps.
@@ -728,13 +802,13 @@ class _ComposedMagnitude:
         if not self.tied_with:
             return None
         return {
-            "tied_at_usd": round(self.usd, 2),
+            "tied_at_usd": _round_published(self.usd),
             "candidates": [
                 {
                     "selector": entry.selector,
                     "destination_function": entry.function,
                     "witness_state": entry.witness_state,
-                    "witnessed_usd": round(entry.witnessed_usd, 2),
+                    "witnessed_usd": _round_published(entry.witnessed_usd),
                     "chosen": entry is self,
                 }
                 for entry in sorted((self, *self.tied_with), key=_composed_order)
@@ -763,9 +837,7 @@ class _ComposedMagnitude:
         computing the answer twice is how the two drift apart.
         """
         return (
-            "flow.out witness"
-            if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd
-            else "destination sheet"
+            _BOUNDED_BY_WITNESS if self.sheet_usd is None or self.witnessed_usd <= self.sheet_usd else _BOUNDED_BY_SHEET
         )
 
     def _predicates_json(self) -> dict[str, Any]:
@@ -841,7 +913,7 @@ class _ComposedMagnitude:
             "route_classification": (None if self.route is None else self.route.as_json()),
             "flow_out_witness": {
                 "state": self.witness_state,
-                "usd": round(self.witnessed_usd, 2),
+                "usd": _round_published(self.witnessed_usd),
                 "function": self.function,
                 "entity": self.entity,
             },
@@ -850,8 +922,18 @@ class _ComposedMagnitude:
             # vault on the reference corpus carries the identical number. Named
             # so the pair is not read as a per-function decomposition.
             "witness_granularity": "entity",
-            "destination_sheet_usd": (round(self.sheet_usd, 2) if self.sheet_usd is not None else None),
-            "published_usd": round(self.usd, 2),
+            # EVERY dollar figure on this record takes the same rounding, and the
+            # reason is not tidiness: the record publishes ORDERING and EQUALITY
+            # claims across these fields. ``published_usd`` is the min of
+            # ``flow_out_witness.usd`` and ``destination_sheet_usd``, ``bounded_by``
+            # names which of the two it equals, and ``composed_selector_tie`` says
+            # the candidates tie AT the published figure. Round one of them onto
+            # zero and not its neighbours and the record breaks its own
+            # invariants — a $0.00 witness above a $0.00156 published bound — so
+            # the sub-cent case is exactly where a mixed convention publishes a
+            # contradiction instead of a rounding.
+            "destination_sheet_usd": (_round_published(self.sheet_usd) if self.sheet_usd is not None else None),
+            "published_usd": _round_published(self.usd),
             # Which of the two ceilings was the binding one. Not
             # flow_out_witness.state, which says whether the destination's own
             # dollar figure for one call is exact or a priced floor.
@@ -861,6 +943,16 @@ class _ComposedMagnitude:
             # below, so this one never has to stand for two facts.
             "sheet_not_determined": self.sheet_usd is None and self.sheet_bound_refused is None,
             "sheet_bound_refused": self.sheet_bound_refused,
+            # Whether the sheet that capped this figure is proven to be an
+            # at-most, and — where it is not — WHICH conjunct of that proof is
+            # missing, enumerated off the destination's own coverage by the same
+            # derivation the per-entity ceiling records use. ``null`` on an entry
+            # no sheet bounded: there is no direction to publish and
+            # ``sheet_not_determined`` beside it already says so.
+            "destination_sheet_bound_direction": self.sheet_bound_direction,
+            "destination_sheet_bound_direction_basis": (
+                None if self.sheet_usd is None else self.sheet_bound_direction_basis
+            ),
             "act_as_chain": [step.as_json() for step in self.chain],
             "act_as_chain_length": len(self.chain),
             "destination_predicates": self._predicates_json(),
@@ -870,6 +962,21 @@ class _ComposedMagnitude:
             "reading": (
                 _COMPOSED_SOURCE_READINGS[self.bounded_by]
                 + (f". {_DISPOSED_SHEET_DOES_NOT_BOUND}" if self.sheet_bound_refused else "")
+                # Gated on the BASIS being present, not on the direction alone.
+                # The sentence's job is to point a reader at two fields, and the
+                # basis is null in the third state — a sheet exists and nobody
+                # read its coverage — so emitting it there would send a reader
+                # to a field that says nothing, which is the defect one level up
+                # from the one it was written to fix. The typed direction still
+                # publishes not_determined in that state and carries the refusal
+                # on its own.
+                + (
+                    f". {_TRIMMED_TO_AN_UNPROVEN_CEILING}"
+                    if self.bounded_by == _BOUNDED_BY_SHEET
+                    and self.sheet_bound_direction != BOUND_DIRECTION_CEILING
+                    and self.sheet_bound_direction_basis is not None
+                    else ""
+                )
                 + ". "
                 "Every hop from the seized node to it carries "
                 "its own act-as witness, in one of two admissible shapes named per step under "
@@ -2297,9 +2404,44 @@ def _aggregate(
                 "principal_kind": weakest[1],
                 "capability": row.capability,
                 "chain": row.unit.split("::", 1)[0],
-                "value_at_stake_usd": (round(value_usd, 2) if value_usd is not None else None),
+                # The row's total and its per-entity breakdown are the SAME
+                # floats the per-entity ceiling records publish — one derivation,
+                # three keys, one finding object — so they take one rounding
+                # (``_round_published``). Measured: five live upgrade.implementation
+                # rows carry a sub-cent entity, and at cents the header said
+                # "$0.00 at stake" and the breakdown said 0.0 while the record
+                # beside them published the bound that was proven. The total is
+                # included DELIBERATELY and not only the breakdown: on a row whose
+                # one entity is that sheet, the header IS the row's claim, and
+                # "$0.00 at stake" is the false-safety reading this whole change
+                # exists to remove. It is immaterial today only because those five
+                # sit inside a $4.2B row — a fact about this corpus, not a
+                # property of the rule.
+                #
+                # Nothing GRADED moves with either key: ``value_band``,
+                # ``value_at_stake_bound_direction`` and ``value_at_stake_is_floor``
+                # are derived above from the UNROUNDED ``value_usd``, and the
+                # weakness axis reads the unrounded ``per_entity``. But
+                # ``value_by_entity`` is NOT inert — do not read this rounding as
+                # a presentation-only key. ``_grade`` takes the exposure
+                # numerator from it (``held = finding["value_by_entity"][key]``,
+                # then ``mine += take * held`` into ``exposure_usd`` and so into
+                # ``grade_exposure``), and the subsumed-exclusive selection
+                # compares candidates on ``held * fraction`` and charges the
+                # winner through the same loop.
+                #
+                # What keeps THIS change out of the numerator is §6.4, not an
+                # absence of readers: a sheet ceiling is held out of exposure
+                # entirely (``held = None`` there), and every sub-cent entity on
+                # this corpus is a sheet ceiling. That is a rule with its own
+                # lifetime and it may be revisited. Where a sub-cent entity is
+                # NOT a sheet ceiling the charge can only GROW — the unrounded
+                # figure is larger than the 0.00 it replaced — so exposure rises
+                # and ``grade_exposure`` falls, and this rounding can never
+                # manufacture an improvement.
+                "value_at_stake_usd": (_round_published(value_usd) if value_usd is not None else None),
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
-                "value_by_entity": {k: round(v, 2) for k, v in sorted(per_entity.items())},
+                "value_by_entity": {k: _round_published(v) for k, v in sorted(per_entity.items())},
                 "value_at_stake_basis": value_basis,
                 # Which direction the total bounds the principal in, and the
                 # reason the flag below is no longer the whole answer: a sum of
@@ -2689,7 +2831,15 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     )
     return {
         "per_asset": [
-            {"asset": name, "usd": (round(values[name], 2) if name in values else None), "state": states.get(name)}
+            # The evidence a sheet-ceiling record's figure is checked against, so
+            # it carries the same rounding the figure does: per-asset rows that
+            # all read $0.00 under a published $0.00156 would contradict the sum
+            # they are published to support.
+            {
+                "asset": name,
+                "usd": (_round_published(values[name]) if name in values else None),
+                "state": states.get(name),
+            }
             for name in names
         ],
         "assets_observed": len(names),
@@ -2725,7 +2875,16 @@ def _reconcile_sheet_ceilings(
     corpus.
 
     Checked at the published resolution rather than exactly, because that is the
-    resolution the claim is made at. Reconciled rather than raised: an
+    resolution the claim is made at — and the check therefore goes through
+    ``_round_published``, the function that DEFINES that resolution, rather than
+    through a hand-written ``round(x, 2)`` that used to agree with it. The two
+    stopped agreeing in the sub-cent band, where the published resolution is the
+    unrounded figure: at cents a standing $0.004 and a sheet of $0.001 both read
+    0.00, the gate passed, and a figure that is not this node's sheet was
+    labelled its ceiling. The comparison is strictly tighter than the old one and
+    admits nothing it did not admit before.
+
+    Reconciled rather than raised: an
     unreachable-by-construction mismatch is still a claim this fold cannot
     support, and the honest response is to withhold the LABEL from that one key —
     the figure stands, ungraded for direction, and charges the exposure budget
@@ -2738,14 +2897,18 @@ def _reconcile_sheet_ceilings(
         if ceiling_kinds[entity] != CEILING_KIND_SHEET:
             continue
         usd, reason = P.ceiling_for(value_plane, entity)
-        if usd is not None and round(per_entity[entity], 2) == round(usd, 2):
+        if usd is not None and _round_published(per_entity[entity]) == _round_published(usd):
             continue
         del ceiling_kinds[entity]
         withheld.append(
             {
                 "entity": entity,
-                "standing_usd": round(per_entity[entity], 2),
-                "sheet_usd": (round(usd, 2) if usd is not None else None),
+                # The two figures the gate above just found unequal, published at
+                # the resolution it compared them at. At cents a pair that
+                # differs only below one would print here as two identical
+                # numbers under a record whose whole claim is that they differ.
+                "standing_usd": _round_published(per_entity[entity]),
+                "sheet_usd": (_round_published(usd) if usd is not None else None),
                 "ceiling_reason": reason,
                 "why": "standing_figure_is_not_this_nodes_sheet(ceiling_label_withheld)",
                 "reading": (
@@ -3021,11 +3184,21 @@ def _sheet_ceiling_records(
             {
                 "entity": entity,
                 "capability": capability,
-                "published_usd": round(per_entity[entity], 2),
+                # Both figures, and the per-asset evidence below them, take the
+                # SAME rounding — see ``_round_published``. The two keys are equal
+                # by construction and the ``per_asset`` block is what the sum is
+                # checked against, so a convention that rounded one of them onto
+                # zero would publish a record contradicting itself at exactly the
+                # sub-cent sheets this rounding was hiding.
+                "published_usd": _round_published(per_entity[entity]),
                 # What the plane answers now, beside the figure the fold took.
                 # Equal by construction and RECONCILED before this runs, so an
-                # entry reaching here has been checked rather than asserted.
-                "sheet_usd": (round(usd, 2) if usd is not None else None),
+                # entry reaching here has been checked rather than asserted —
+                # and checked through the SAME ``_round_published`` these two
+                # keys are printed with, so the equality a reader sees is the
+                # equality the gate tested. They drifted once and the gap was
+                # exactly the sub-cent band.
+                "sheet_usd": (_round_published(usd) if usd is not None else None),
                 "sheet_state": value_plane.sheet_state(entity),
                 "ceiling_reason": reason,
                 "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
@@ -4658,6 +4831,16 @@ def _compose(
                     )
                     # R4: the witness bounds the call, the sheet bounds what is
                     # there to move. Neither alone, and never their sum.
+                    #
+                    # And the sheet's COMPLETENESS is read here, with the sheet,
+                    # rather than left for the entry to imply: a sheet that does
+                    # not cover its node is a floor over what was priced, and a
+                    # min against a floor hands back a smaller number than the
+                    # witness on a bound nothing proved. Read for every sheet
+                    # that exists, not only the ones that end up binding, so the
+                    # entry can publish the direction whichever ceiling wins.
+                    coverage = _asset_coverage(value_plane, key) if sheet is not None else None
+                    complete = None if coverage is None else bool(coverage["complete"])
                     usd = min(magnitude.usd, sheet) if sheet is not None else magnitude.usd
                     # Every candidate is kept. Collapsing here on a running MAX
                     # would decide the selector, destination function, witness
@@ -4680,6 +4863,12 @@ def _compose(
                             usd=usd,
                             sheet_usd=sheet,
                             sheet_bound_refused=refused,
+                            sheet_is_proven_complete=complete,
+                            sheet_bound_direction_basis=(
+                                None
+                                if coverage is None or complete is None
+                                else _sheet_ceiling_direction_basis(coverage, complete)
+                            ),
                             chain=chain,
                             predicates=conditions.predicates(hop.destination, licensed.selector),
                             # The destination witness's OWN execution, carried
