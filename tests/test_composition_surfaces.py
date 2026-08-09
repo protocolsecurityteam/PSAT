@@ -328,7 +328,14 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # the same run. Checked against the scored document's
     # ``sheet_ceilings.entities_by_ceiling_reason``, which reads
     # ``airdrop_determined: 1``.
-    assert len(registered) == 8
+    #
+    # The run's ONE surviving zero-carrier arm is
+    # ``sheet_bound_refused:sheet_determined_by_disposition_does_not_bound`` —
+    # the trim sites' answer where a sheet exists, is determined, and still may
+    # not bound a witness. The 13 determined sheets carry no witnessed magnitude
+    # for it to refuse a bound for, so it has no carrier on this corpus and is
+    # disclosed like its siblings rather than left as a bare flag. Ninth entry.
+    assert len(registered) == 9
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]
@@ -579,7 +586,7 @@ def test_the_current_migration_record_states_its_invariant_6_exception():
     discovery growing moves a token INTO the universe and WITHDRAWS a
     determination. The ruling is that withdrawal is the safe direction — and the
     consequence a reader has to carry is that the document is not stable across
-    discovery growth. Both single points of failure the measurement found are
+    discovery growth. Every single point of failure the measurement found is
     named on the record itself, not left in a spec no consumer can see."""
     record = _migration("1.3.0-provisional")
     exception = record["the_invariant_6_exception_this_bump_takes"]
@@ -587,20 +594,31 @@ def test_the_current_migration_record_states_its_invariant_6_exception():
     assert "invariant 6" in exception
     assert "ANTI-MONOTONE" in exception
     assert "NOT STABLE ACROSS DISCOVERY GROWTH" in exception
-    # The two named tokens, and the reason the condemnation of a REAL one is not
-    # a lie: the published state is a delivery-shape claim.
+    # The named tokens, and the reason the condemnation of a REAL one is not a
+    # lie: the published state is a delivery-shape claim. The class the rule
+    # touches is FIVE real tokens, not the two the pre-run analysis named.
+    assert "FIVE demonstrably real tokens" in exception
     assert "HEX" in exception and "SINGLE effect_verdicts row" in exception
+    # The second single point of failure, measured after the pre-run census: one
+    # source, one real token, and the source with no chain column at all.
+    assert "base USDC is spared by dapp_interactions ALONE" in exception
     assert "uniETH" in exception and "delivery-shape claim" in exception
     # What the bump does not close travels with it, on its own key.
     open_items = record["what_this_bump_does_not_close"]
     assert "INERT ON BASE" in open_items
     assert "1,175 of 1,175" in open_items
     assert "NOT proven whole" in open_items
-    # And the measured no-move, which is what makes this a rule change with no
-    # data behind it yet.
+    # And what the live one-shot behind this bump did and did not move. The four
+    # dollar surfaces held byte-for-byte; confidence is the one figure that
+    # moved, and the record states both halves rather than either alone.
     unmoved = record["what_did_not_move_and_why_that_was_a_ruling"]
     assert "grade_lambda stays 71.7053" in unmoved
-    assert "confidence_pct stays 42.5" in unmoved
+    assert "ceiling_usd_over_distinct_entities stays $4,218,743,833.16" in unmoved
+    assert "confidence_pct 42.5 -> 43.2" in unmoved
+    assert record["confidence_pct"] == [42.5, 43.2]
+    # The measurement is real data, not a rule shipped ahead of any: the record
+    # counts the readings the one-shot disposed.
+    assert "1,973 readings over 1,264 tokens" in record["what_moved"]
 
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():

@@ -1738,6 +1738,17 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
     which corrects SHEET_OBSERVATION_SPEC.md §10.3's premise that omitting it
     fails open. It is kept because a token a contract's own source names is a
     token the protocol refers to, and that is the claim P4 makes.
+
+    OPEN PERF ITEM, registered rather than fixed: that arm reads every source
+    body of every job the protocol owns out of object storage on EVERY score —
+    measured at **26.5 s per score** on the reference corpus (4,131 bodies), and
+    it is the dominant cost of assembling this universe. Not cached here because
+    a cache is a correctness surface, not a speed one: the shape it would take is
+    a per-``(job_id, artifact digest)`` memo of the extracted ADDRESS LITERALS
+    (a few hundred bytes) rather than of the bodies, keyed on something that
+    changes when the artifact changes, so a stale entry cannot silently shorten
+    the universe — and a short universe condemns MORE, which is why an
+    invalidation bug here is a correctness bug and has to be designed as one.
     """
     # ``func`` is a local name throughout this module (an effective_function
     # row), so SQLAlchemy's is imported under its own.
@@ -1762,7 +1773,6 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
         RestakingPosition,
     )
     from db.queue import get_source_files
-    from db.storage import StorageContentAbsent, StorageContentNotDetermined
     from utils.chains import UnknownChainError, chain_by_name
 
     # The contract population: the protocol's OWN rows, plus every contract
@@ -1927,9 +1937,19 @@ def load_protocol_universe(session: Session, protocol_id: int) -> ProtocolUniver
     for job_id in source_jobs:
         try:
             bodies = get_source_files(session, job_id)
-        except (StorageContentAbsent, StorageContentNotDetermined):
+        except RuntimeError:
             # Fail closed, whole-universe. A partial read would build a SHORT
             # universe, and a short universe condemns MORE.
+            #
+            # Caught at ``RuntimeError`` because that is the widest thing this
+            # call answers an unread body with, and every narrower one is a
+            # subclass: the content-incomplete pair (``StorageContentAbsent`` /
+            # ``StorageContentNotDetermined``, both ``db.storage.StorageError``)
+            # AND the bare ``RuntimeError`` a row with a storage key raises when
+            # object storage is not configured at all. The last one used to
+            # escape and abort the score, which is the one direction this
+            # function may not take: an unconfigured deployment must condemn
+            # nothing, not fail the fold.
             return None
         for body in bodies.values():
             literals |= _literal_addresses(body)

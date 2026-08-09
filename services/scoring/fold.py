@@ -357,8 +357,9 @@ SHEET_BOUND_REFUSED_BY_DISPOSITION = "sheet_determined_by_disposition_does_not_b
 # word a reader would otherwise act on.
 _DISPOSED_SHEET_DOES_NOT_BOUND = (
     "a witnessed magnitude charged against an entity whose sheet IS determined, at $0, by "
-    "delivery-shape disposition: every reading on it arrived only in transactions distributing "
-    "the same token to at least the published fan-out threshold. That determination is over the "
+    "delivery-shape disposition: every reading on it arrived only in transactions carrying at "
+    "least the published fan-out threshold of same-token transfer LOGS. That determination is "
+    "over the "
     "readings observed, on an asset list that is NOT proven whole, and it is a claim about how "
     "the holdings arrived and never about what they are worth — two of the tokens measured into "
     "that state on this corpus are real ones. So the $0 bounds what the entity HOLDS and not "
@@ -432,11 +433,11 @@ _CEILING_SOURCE_READINGS = {
     ),
     (P.CEILING_ADMITTED, False): (
         "the dollars are THIS entity's own priced holdings and they DO NOT bound the move: the "
-        "assets under assets_not_priced were observed at this entity and never priced, so the "
-        "total is a floor over what was priced and the entity holds more than it. What the figure "
-        "bounds from above is the PRICED PORTION — replacing this node's code can move no more of "
-        "those assets than the sum of them — and what the unpriced ones add is not_determined "
-        "here, which is why bound_direction is not a ceiling on this entry"
+        "sheet does not cover everything observed here, so the total is a floor over what was "
+        "priced and the entity holds more than it. What the figure bounds from above is the "
+        "COVERED PORTION — replacing this node's code can move no more of those assets than the "
+        "sum of them — and what the part it does not cover adds is not_determined here, which is "
+        "why bound_direction is not a ceiling on this entry"
     ),
     (P.CEILING_PROVEN_EMPTY, True): (
         "the ceiling is a PROVEN ZERO and not a missing number: every asset observed at this "
@@ -447,18 +448,20 @@ _CEILING_SOURCE_READINGS = {
     (P.CEILING_AIRDROP_DETERMINED, True): (
         "the ceiling is a DETERMINED ZERO of a different kind: every asset observed at this "
         "entity either carries a quantity witnessed zero or arrived ONLY in transactions "
-        "distributing the same token to at least the published fan-out threshold, so this "
+        "carrying at least the published fan-out threshold of same-token transfer LOGS, so this "
         "sheet's determined content is nil and replacing the node's code moves nothing the "
         "document can price. The claim is DELIVERY SHAPE and never worth — real tokens have "
         "been measured arriving this way — and the asset list it covers is the one the index "
         "returned, refused only where that list was read AT the page cap"
     ),
     (P.CEILING_AIRDROP_DETERMINED, False): (
-        "the ceiling is a determined zero over the assets this entity's dispositions and "
-        "witnessed zeros cover, and the coverage is NOT whole: the assets under "
-        "assets_not_priced were observed here and are neither priced nor disposed, so what "
-        "they add is not_determined and this figure bounds only the covered portion. The "
-        "disposed part of that portion is a DELIVERY-SHAPE claim and never a claim about worth"
+        "the ceiling is a determined zero of what this sheet PRICES: nothing observed at this "
+        "entity carries a determined dollar reading above zero, and every reading that is not a "
+        "witnessed zero arrived only in transactions carrying at least the published fan-out "
+        "threshold of same-token transfer LOGS. It is NOT a figure over the disposed assets "
+        "themselves — the claim admitting it is DELIVERY SHAPE, which says how they arrived and "
+        "never what they are worth — and the coverage is not whole either, so what the part it "
+        "does not cover adds is not_determined"
     ),
     # ``(PROVEN_EMPTY, False)`` is ABSENT, and its absence is a rule rather than
     # an omission. It described a proven-empty priced sheet at a node the
@@ -495,11 +498,79 @@ _SHEET_CEILING_DIRECTION_BASIS = {
         "an absent USD column, so the total covers the holdings and bounds the move from above"
     ),
     False: (
-        "the priced sheet does not cover everything observed at this entity (assets_not_priced, "
-        "unpriced_positions), so the total is a floor over what was priced and bounds the "
-        "holdings in neither direction"
+        "the priced sheet does not cover everything observed at this entity, so the total is a "
+        "floor over what was priced and bounds the holdings in neither direction. What it does "
+        "not cover, on this entity: "
     ),
 }
+
+# The conjuncts of ``_asset_coverage["complete"]``, each with the field the row
+# publishes it under, so a refused direction names the cause that actually
+# fired. Written as a table rather than as one sentence listing all three
+# because two of them read EMPTY on live carriers — the $575M stETH proxy
+# refuses on the third alone — and a sentence naming causes that did not fire
+# is a sentence a reader cannot check against the row beside it.
+#
+# ONE table, and :func:`_coverage_shortfall` is its one reader, because the row
+# publishes the same shortfall twice: once as the reason its direction is not a
+# ceiling and once inside the reading that explains its figure. Two hand-written
+# sentences over one fact is how they came to disagree — the direction basis was
+# corrected and the reading's stem was left asserting the same false premise.
+# Each entry is (published field, the value that FAILS the conjunct, the clause).
+_SHEET_CEILING_INCOMPLETE_CAUSES: tuple[tuple[str, bool, str], ...] = (
+    (
+        "assets_not_priced",
+        True,
+        "assets observed here that no price lookup answered for (assets_not_priced)",
+    ),
+    (
+        "unpriced_positions",
+        True,
+        "positions the restaking plane carries at this node with no USD column at all (unpriced_positions)",
+    ),
+    (
+        "asset_list_proven_whole",
+        False,
+        "the asset LIST itself is not proven whole (asset_list_proven_whole, "
+        "asset_set_completeness): the rows are what an index returned, and a disposition covers "
+        "the readings observed and never the holdings, so nothing here establishes that these "
+        "assets are all the entity has",
+    ),
+)
+
+
+def _coverage_shortfall(coverage: dict[str, Any]) -> str:
+    """Which conjuncts of ``complete`` this entity FAILED, off its own fields.
+
+    The single derivation behind both surfaces that publish the shortfall. Every
+    caller is on the ``complete is False`` arm, where at least one conjunct
+    failed by construction, so the result is never empty.
+    """
+    return "; ".join(
+        clause for field, fails_when, clause in _SHEET_CEILING_INCOMPLETE_CAUSES if bool(coverage[field]) is fails_when
+    )
+
+
+# The reading's own lead-in to the same derived clause the direction basis ends
+# with. Only the framing differs — one sentence answers "why is this not a
+# ceiling", the other "what does this figure leave out" — and the fact itself is
+# derived once.
+_CEILING_COVERAGE_SHORTFALL_PREFIX = ". What it does not cover, on this entity: "
+
+
+def _sheet_ceiling_direction_basis(coverage: dict[str, Any], complete: bool) -> str:
+    """Why this entity's own figure is or is not an at-most on the move.
+
+    The refusing arm ENUMERATES the conjuncts that failed, off the row's own
+    published fields, because the sentence has to explain its own carrier: two
+    entities on the reference corpus refuse with ``assets_not_priced`` empty and
+    ``unpriced_positions`` zero, and a constant naming only those two told a
+    reader to look at fields that say nothing.
+    """
+    if complete:
+        return _SHEET_CEILING_DIRECTION_BASIS[True]
+    return _SHEET_CEILING_DIRECTION_BASIS[False] + _coverage_shortfall(coverage)
+
 
 # One name per component of :func:`_composed_order`'s key, positionally. The
 # published ``chosen_by`` reads the component that ACTUALLY separated this
@@ -2190,6 +2261,7 @@ def _aggregate(
                 valued.hops_not_determined,
                 valued.withheld_behind_hops,
                 valued.composed_magnitudes,
+                value_plane,
             )
         is_floor = direction == BOUND_DIRECTION_FLOOR
         weakness_by_entity, weakness, weakest = _member_weakness(
@@ -2621,9 +2693,20 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
             for name in names
         ],
         "assets_observed": len(names),
-        "assets_priced": len(names) - len(not_priced),
+        # Assets carrying a determined DOLLAR reading — a price, or a quantity
+        # witnessed zero. The three populations partition ``assets_observed``:
+        # a disposed asset carries no dollar figure at all (its ``usd`` is null
+        # in ``per_asset``), so it is counted under ``assets_disposed`` and
+        # under neither of the other two. Folding it in here published a sheet
+        # whose every asset arrived by mass distribution as fully priced.
+        "assets_priced": len(names) - len(not_priced) - len(disposed),
         "assets_not_priced": not_priced,
         "assets_disposed": disposed,
+        # The LIST conjunct of ``complete``, published rather than left inside
+        # it: a reader who sees the direction refused with both asset lists
+        # empty has no other field to read the cause off, and an unpublished
+        # conjunct is one the sentence beside it cannot name.
+        "asset_list_proven_whole": list_is_whole,
         "unpriced_positions": len(positions),
         "complete": bool(names) and not not_priced and not positions and list_is_whole,
     }
@@ -2824,6 +2907,74 @@ def _asset_set_completeness(value_plane: P.ValuePlane, entity: str) -> dict[str,
     return dict(record) if record is not None else None
 
 
+def _disposition_carrier(value_plane: P.ValuePlane, entity: str, disposed: list[str]) -> dict[str, Any] | None:
+    """The delivery evidence this entity's disposed readings actually stand on.
+
+    Read off ``ValuePlane.asset_disposition`` — the records the plane copied from
+    the producer's own rows — and never re-derived here. ``None`` where nothing
+    at this entity is disposed, which is the third state: a row with no disposed
+    reading has no delivery evidence to publish, and an empty block would read
+    as evidence that came back empty.
+
+    The aggregate takes the WEAKEST end of each field across the readings it
+    folds, for the same reason the plane takes it across accounts: the sentence
+    published beside it is one claim over the whole set, and it holds only where
+    every member holds. So the smallest fan-out any reading measured, the latest
+    block any scan started from, and the earliest block any of them ran through.
+    """
+    carriers = [
+        record
+        for asset in disposed
+        if (record := (value_plane.asset_disposition.get(value_plane.canonical(entity)) or {}).get(asset)) is not None
+    ]
+    if not carriers:
+        return None
+    fan_outs = [record["min_fan_out"] for record in carriers if record["min_fan_out"] is not None]
+    return {
+        "assets": len(carriers),
+        "shapes": sorted({record["shape"] for record in carriers}),
+        "fan_out_threshold_k": max(record["fan_out_threshold_k"] for record in carriers),
+        # ``null`` is the honest answer where no reading recorded a fan-out, and
+        # is never read as zero: a delivery nobody measured is not a delivery
+        # that reached nobody.
+        "min_fan_out": (min(fan_outs) if fan_outs else None),
+        "delivery_count": sum(record["delivery_count"] for record in carriers),
+        "scanned_from_block": max(record["scanned_from_block"] for record in carriers),
+        "measured_through_block": min(record["measured_through_block"] for record in carriers),
+        "accounts": sorted({account for record in carriers for account in record["accounts"]}),
+        # The producers' own basis strings, deduplicated and otherwise verbatim.
+        "basis": sorted({line for record in carriers for line in record["basis"]}),
+    }
+
+
+def _disposition_scope(coverage: dict[str, Any], carrier: dict[str, Any]) -> str:
+    """What this entity's figure covers, and what it deliberately does not.
+
+    Derived from the row's own counts and the carrier's own fields (#171), so
+    the scope a reader checks is the scope the evidence supports rather than a
+    sentence authored beside it. It is written for the figure and not for one of
+    its values: on a sheet whose every reading is disposed the total is $0 and
+    the count it totals over is ZERO, which is the honest way to publish that
+    figure — the difference between "this sheet prices nothing" and "this entity
+    holds nothing", of which only the first is witnessed here.
+    """
+    fan_out = carrier["min_fan_out"]
+    return (
+        f". The figure is SCOPED, and the scope is this row's own counts: it totals the "
+        f"{coverage['assets_priced']} asset(s) here that carry a determined dollar reading, and "
+        f"the {len(coverage['assets_disposed'])} asset(s) under assets_disposed are STILL HELD at "
+        f"{len(carrier['accounts'])} account(s) and carry no valuation anywhere in this document. "
+        f"What was measured of those is how they ARRIVED — {carrier['delivery_count']} recorded "
+        f"delivery(ies), the smallest of them carrying "
+        f"{fan_out if fan_out is not None else NOT_DETERMINED} same-token transfer log(s) in one "
+        f"transaction against a published threshold of {carrier['fan_out_threshold_k']}, read over "
+        f"blocks {carrier['scanned_from_block']}-{carrier['measured_through_block']} (see "
+        "asset_disposition) — and never what they are worth, which is not_determined here. So "
+        "this figure is a total over what the document PRICES at this node, and nothing on the "
+        "entry says the held assets are worth nothing or that the entity holds nothing"
+    )
+
+
 def _sheet_ceiling_records(
     sheet_ceilings: frozenset[str],
     per_entity: dict[str, float],
@@ -2865,6 +3016,7 @@ def _sheet_ceiling_records(
         usd, reason = P.ceiling_for(value_plane, entity)
         coverage = _asset_coverage(value_plane, entity)
         complete = coverage.pop("complete")
+        carrier = _disposition_carrier(value_plane, entity, coverage["assets_disposed"])
         records.append(
             {
                 "entity": entity,
@@ -2877,7 +3029,7 @@ def _sheet_ceiling_records(
                 "sheet_state": value_plane.sheet_state(entity),
                 "ceiling_reason": reason,
                 "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
-                "bound_direction_basis": _SHEET_CEILING_DIRECTION_BASIS[complete],
+                "bound_direction_basis": _sheet_ceiling_direction_basis(coverage, complete),
                 # What proves the asset list this figure is summed over is the
                 # WHOLE list, carried from the observation record rather than
                 # restated here: the source token, the block range the chain's
@@ -2886,9 +3038,25 @@ def _sheet_ceiling_records(
                 # — which is every ADMITTED entry on this corpus and is why they
                 # bound the priced portion and not the move.
                 "asset_set_completeness": _asset_set_completeness(value_plane, entity),
+                # The delivery evidence a disposed reading stands on, carried
+                # from the plane's own records rather than restated: the
+                # sentence below quotes these fields, so a reader checks the
+                # claim against the evidence and not against the prose.
+                # ``null`` where no reading here is disposed.
+                "asset_disposition": carrier,
                 **coverage,
                 PROVING_EXECUTION_KEY: EX.not_determined(EX.REASON_NOT_PROVEN_BY_A_CALL).as_json(),
-                "reading": _CEILING_SOURCE_READINGS[(reason, complete)] + _CEILING_CLOSING,
+                "reading": (
+                    _CEILING_SOURCE_READINGS[(reason, complete)]
+                    # The shortfall, from the SAME derivation the direction
+                    # basis publishes it from. The stems above may not name a
+                    # cause: on a live carrier two of the three read empty, so a
+                    # stem that presupposed one pointed a reader at fields that
+                    # said nothing while the conjunct that failed went unnamed.
+                    + (_CEILING_COVERAGE_SHORTFALL_PREFIX + _coverage_shortfall(coverage) if not complete else "")
+                    + (_disposition_scope(coverage, carrier) if carrier is not None else "")
+                    + _CEILING_CLOSING
+                ),
             }
         )
     return records
@@ -2969,6 +3137,32 @@ def _ceiling_untightened(
     return "and nothing here tightens it: " + "; ".join(parts)
 
 
+def _disposed_ceiling_clause(value_plane: P.ValuePlane, sheet_ceilings: frozenset[str]) -> str:
+    """The row-header's scoping clause for a sheet ceiling determined at $0.
+
+    Empty on every row that carries none, so a row nothing moved on keeps its
+    prose. Where one does, the header may not leave the reader with "$0 at a
+    node this principal controls" and nothing else: the assets that sheet holds
+    are still held, and what was proven of them is the shape they arrived in.
+    Counted off the plane's own disposition records, never re-derived.
+    """
+    scoped = [
+        entity
+        for entity in sorted(sheet_ceilings)
+        if P.ceiling_for(value_plane, entity)[1] == P.CEILING_AIRDROP_DETERMINED
+    ]
+    if not scoped:
+        return ""
+    assets = sum(len(value_plane.asset_disposition.get(value_plane.canonical(entity)) or {}) for entity in scoped)
+    return (
+        f"; {len(scoped)} of those sheet figure(s) is a DETERMINED ZERO of a scoped kind — "
+        f"{assets} asset(s) at those node(s) are STILL HELD and this document values none of "
+        "them, so the zero totals what it prices there and is never a claim that the holdings "
+        "are worth nothing (reach_sheet_ceiling_magnitudes[].asset_disposition carries the "
+        "delivery evidence, and their worth is not_determined)"
+    )
+
+
 def _ceiling_bearing_basis(
     direction: str,
     per_entity: dict[str, float],
@@ -2981,6 +3175,7 @@ def _ceiling_bearing_basis(
     hops_not_determined: list[dict[str, Any]],
     withheld_behind_hops: dict[str, Any],
     composed: dict[str, _ComposedMagnitude],
+    value_plane: P.ValuePlane,
 ) -> str:
     """The basis for a row some of whose figures bound the principal from above.
 
@@ -3016,15 +3211,20 @@ def _ceiling_bearing_basis(
     ceiling_entities = composed_ceilings | sheet_ceilings
     n_entities = len(per_entity)
     counted = f"{len(ceiling_entities)} of {n_entities} entity(ies)"
+    scoped = _disposed_ceiling_clause(value_plane, sheet_ceilings)
     if direction == BOUND_DIRECTION_CEILING:
         return (
-            f"<= the sum over {n_entities} entity(ies), "
-            + _ceiling_source_phrase(composed_ceilings, sheet_ceilings, all_of_them=True)
-            + "; no instance is not_determined, no entity holds assets the priced sheet does not "
-            "cover, and no hop of this row was left undetermined or withheld behind one — so "
-            "nothing this row reaches is missing from the sum and the total bounds this "
-            "principal from ABOVE. " + _ceiling_bound_phrase(composed_ceilings, sheet_ceilings)
-        ) + (f"; {len(proven_no_reach)} instance(s) proven_no_reach" if proven_no_reach else "")
+            (
+                f"<= the sum over {n_entities} entity(ies), "
+                + _ceiling_source_phrase(composed_ceilings, sheet_ceilings, all_of_them=True)
+                + "; no instance is not_determined, no entity holds assets the priced sheet does not "
+                "cover, and no hop of this row was left undetermined or withheld behind one — so "
+                "nothing this row reaches is missing from the sum and the total bounds this "
+                "principal from ABOVE. " + _ceiling_bound_phrase(composed_ceilings, sheet_ceilings)
+            )
+            + (f"; {len(proven_no_reach)} instance(s) proven_no_reach" if proven_no_reach else "")
+            + scoped
+        )
 
     # Why it is not a ceiling either, counted rather than asserted: value this
     # row reaches that the sum does not carry, plus contributions that are not
@@ -3054,7 +3254,7 @@ def _ceiling_bearing_basis(
     )
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
-    return basis
+    return basis + scoped
 
 
 def _row_value(

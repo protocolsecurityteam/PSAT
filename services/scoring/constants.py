@@ -281,6 +281,16 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # implementation before any magnitude branch reads a sheet, so no row can
     # carry it and only a direct call to the resolver reaches it.
     "code_control_ceiling_refused:alias_ambiguous",
+    # The disposition run's own zero-carrier arm, and the SIBLING of the two
+    # tokens above: it is the trim sites' answer where a sheet exists, IS
+    # determined, and still may not bound a witness. The state fired nowhere on
+    # this corpus — the 13 determined sheets carry no witnessed magnitude to
+    # refuse a bound for — while the states it sits beside on those same two
+    # surfaces (``sheet_not_determined``, and the composed arms) are calibrated.
+    # Disclosed rather than left flagged, because a consumer branching on
+    # ``sheet_bound_refused`` cannot otherwise tell an unfired rule from one the
+    # model was fitted to.
+    "sheet_bound_refused:sheet_determined_by_disposition_does_not_bound",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -424,6 +434,32 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "so the double guard holds and this token is answerable only where the resolver is "
             "called on its own. Registered so the redundancy is a stated fact — a reader who "
             "removed either guard would otherwise find no record that the other was relied on"
+        ),
+    },
+    {
+        "arm": "sheet_bound_refused:sheet_determined_by_disposition_does_not_bound",
+        "state": "sheet_determined_by_disposition_does_not_bound",
+        # The composed surface publishes the TOKEN under its own key; the
+        # entity-holdings surface publishes the same refusal's sentence on an
+        # unbounded-floor entry. Both are named, because a consumer joining one
+        # of them would otherwise find no record of the other.
+        "published_at": (
+            "findings[].reach_composed_magnitudes[].sheet_bound_refused, and the same refusal's "
+            "sentence at findings[].unbounded_floor_magnitudes[].reading"
+        ),
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_asset_disposition.py::test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why",
+        ),
+        "note": (
+            "the one refusal here that fires where a sheet EXISTS and is determined. A sheet "
+            "determined at $0 by delivery shape may not trim a witnessed magnitude — the disposed "
+            "assets are still held and delivery shape is not a claim about worth — so the witness "
+            "stands alone and the bar is published rather than folded into sheet_not_determined, "
+            "which would be false. It has no carrier on this corpus for a measured reason and not "
+            "a structural one: the 13 sheets the disposition determined carry no witnessed "
+            "magnitude for it to refuse a bound for, so the state is earnable, a constructed fold "
+            "earns it, and no row here does"
         ),
     },
 )
@@ -976,14 +1012,16 @@ def model_parameters() -> dict[str, Any]:
                 # interpolated record.
                 "to": MODEL_VERSION,
                 "reference_corpus": "protocol 1 (etherfi), the only corpus this bump was measured on",
-                # One point repeated, and that is the measurement rather than a
-                # placeholder: at this bump's own tip nothing has written a
-                # delivery-evidence row, so the rule ships with zero carriers and
-                # every figure it can move is unmoved. The letter is quoted twice
-                # for the same reason.
+                # The pair is [last 1.3.0 document, first 1.4.0 document], both
+                # real folds of protocol 1 — not a projection and not a repeat.
+                # The rule shipped with a live one-shot behind it: 1,973 readings
+                # over 1,264 tokens carry delivery evidence, 13 sheets are
+                # determined by it, and confidence is the one published figure
+                # that moved. Frozen at the bump: this record states what was
+                # measured HERE and is not re-measured afterwards.
                 "grade_lambda": [71.7053, 71.7053],
                 "letter": ["B", "B"],
-                "confidence_pct": [42.5, 42.5],
+                "confidence_pct": [42.5, 43.2],
                 "exposure_usd": [18061300.76, 18061300.76],
                 "measured_at": (
                     "every figure in this record is a measurement on protocol 1 (etherfi) taken at "
@@ -999,8 +1037,10 @@ def model_parameters() -> dict[str, Any]:
                     "reading is unpriced or below the storage column's resolution (a PRICED "
                     "reading is never disposed), the token address is absent from that universe "
                     "tested CHAIN-BLIND, and EVERY observed account contributing to the reading "
-                    "carries stored delivery evidence whose every incoming delivery fanned out to "
-                    "at least K = 25 recipients of the same token in one transaction. Such a "
+                    "carries stored delivery evidence whose every incoming delivery arrived in a "
+                    "transaction carrying at least K = 25 same-token transfer LOGS. The log count "
+                    "is the meter K is calibrated in, and it is an UPPER BOUND on that "
+                    "transaction's distinct recipients rather than a count of them. Such a "
                     "sheet answers a sixth state, airdrop_determined, and an eighth ceiling "
                     "reason of the same name in the ADMITTING set. WHAT THE STATE CLAIMS IS "
                     "DELIVERY SHAPE AND NEVER WORTH. It is BARRED from the two min(witness, "
@@ -1010,9 +1050,19 @@ def model_parameters() -> dict[str, Any]:
                     "says one asset's contribution is nil and says nothing about whether the "
                     "LIST is whole, so a disposed sheet clears the full-coverage conjunct only "
                     "where the chain's own transfer history proves its list - which closes "
-                    "SHEET_OBSERVATION_SPEC.md 9.3-addendum item 2. Measured at this bump: zero "
-                    "delivery-evidence rows exist, so entities_determined is 0, readings_disposed "
-                    "is 0, and the arm ships uncalibrated and registered as such"
+                    "SHEET_OBSERVATION_SPEC.md 9.3-addendum item 2. MEASURED AT THIS BUMP, on a "
+                    "live one-shot that ran before it shipped: 1,973 readings over 1,264 tokens "
+                    "carry delivery evidence and are disposed, 13 sheets are determined by it "
+                    "(sheet_states unpriced 19 -> 8 and priced_below_resolution 19 -> 17, "
+                    "airdrop_determined 13), one of them publishes a sheet ceiling under the new "
+                    "reason (entities_by_ceiling_reason airdrop_determined 1), "
+                    "entities_priced_from_a_sheet_ceiling 24 -> 25, "
+                    "signals_credited_in_confidence 46 -> 47 and calls_refused_by_reason.unpriced "
+                    "6 -> 5. A further 484 readings are disposed by their evidence and REFUSED "
+                    "their sheet's determination because one folded account of the sheet was "
+                    "never scanned - a named, closable gap, counted rather than absorbed. The arm "
+                    "therefore does not ship uncalibrated: it gained carriers inside this run, "
+                    "and the register's own rule took the entry back off"
                 ),
                 "the_invariant_6_exception_this_bump_takes": (
                     "invariant 6 says the model is monotone in resolution work, and the "
@@ -1023,12 +1073,20 @@ def model_parameters() -> dict[str, Any]:
                     "that token, and un-condemning it is the correction - so the exception is "
                     "taken deliberately and in one direction only. The consequence a reader must "
                     "carry: THIS DOCUMENT IS NOT STABLE ACROSS DISCOVERY GROWTH, and a "
-                    "disposition withdrawn between two folds is not a regression. Two named "
-                    "single points of failure follow from it, both measured on this corpus. "
+                    "disposition withdrawn between two folds is not a regression. The class this "
+                    "matters for is measured and it is FIVE demonstrably real tokens with a "
+                    "fan_out_all delivery shape on this corpus - HEX, WETH and base USDC, which "
+                    "the universe spares, and uniETH and USDtb, which it does not. Three named "
+                    "single points of failure follow from it, all measured on this corpus. "
                     "(1) HEX (0x2b591e99afe9f32eaa6214f7b7629768c40eeb39), a REAL token whose "
-                    "deliveries are genuine mass distributions at fan-out 199/399/399, is spared "
+                    "deliveries are genuine mass distributions (fan-out census 199 x13, 399 x14, "
+                    "400 x1, 500 x6), is spared "
                     "ONLY by its presence in the universe, and its presence rests on a SINGLE "
-                    "effect_verdicts row: if that row moves, a real token is condemned. (2) "
+                    "effect_verdicts row: if that row moves, a real token is condemned. (1b) THE "
+                    "SAME SHAPE A SECOND TIME, which the pre-run analysis did not name: base "
+                    "USDC is spared by dapp_interactions ALONE. One source, one anti-monotone "
+                    "arm, one real token - and dapp_interactions is the source with no chain "
+                    "column at all, which is part of why the universe is read chain-blind. (2) "
                     "uniETH (0xf1376bcef0f78459c0ed0ba5ddce976f1ddf51f4) is a measured, "
                     "unavoidable condemnation of a real token - one delivery, fan-out 101, absent "
                     "from the universe under every variant - and no K spares it without losing "
@@ -1038,8 +1096,8 @@ def model_parameters() -> dict[str, Any]:
                     "spam/worthless naming, and no consumer may rename it so. (3) THE LIVE RUN "
                     "FOUND A SECOND MEMBER OF uniETH's CLASS that the pre-run census did not "
                     "predict: USDtb (0xc139190f447e929f090edeb554d95abb8b18ac1c), a real token "
-                    "held at three accounts, each by a single delivery that fanned out to 175 "
-                    "recipients. It is the same true claim under the same naming, and it is "
+                    "held at three accounts, each by a single delivery carrying 175 same-token "
+                    "transfer logs. It is the same true claim under the same naming, and it is "
                     "recorded here because the class is evidently larger than the two tokens the "
                     "pre-run analysis named - a reader must expect real tokens in it, not treat "
                     "each one as a defect. Neither uniETH nor USDtb sits on a sheet this run "
@@ -1062,15 +1120,20 @@ def model_parameters() -> dict[str, Any]:
                     "the readings observed and never over the holdings"
                 ),
                 "what_did_not_move_and_why_that_was_a_ruling": (
-                    "grade_lambda stays 71.7053, grade_exposure stays 99.582 and exposure_usd "
-                    "stays $18,061,300.76 - byte-unchanged, and checked field by field rather "
-                    "than assumed. confidence_pct stays 42.5, with value_priced_pct 42.5 and "
-                    "reach_magnitude_witnessed_pct 43.1 unmoved. Nothing moved because nothing "
-                    "has yet MEASURED a delivery: the evidence table exists and is empty, so "
-                    "every conjunct of the rule fails closed on every reading and the bump is a "
-                    "rule change with no data behind it yet. The band table carries 1.3.0's cut "
-                    "points forward unchanged: no letter moved, so nothing here was recut to "
-                    "hold one"
+                    "grade_lambda stays 71.7053, grade_exposure stays 99.582, exposure_usd stays "
+                    "$18,061,300.76 and ceiling_usd_over_distinct_entities stays "
+                    "$4,218,743,833.16 - byte-unchanged, and checked field by field rather than "
+                    "assumed. What DID move is confidence and only confidence: confidence_pct "
+                    "42.5 -> 43.2, on value_priced_pct 42.5 -> 45.0 and "
+                    "reach_magnitude_witnessed_pct 43.1 -> 43.2, with capability_scored_pct 45.4, "
+                    "reachability_answered_pct 59.6 and reach_magnitude_ceiling_pct 62.7 all "
+                    "unmoved. The dollar surfaces cannot move on this rule and that is structural "
+                    "rather than lucky: a sheet ceiling charges no exposure, the one ceiling this "
+                    "rule admitted is $0 so it adds nothing to the ceiling dollars, and the state "
+                    "is BARRED from both min(witness, sheet) trim sites, which is the only path "
+                    "by which it could have lowered a published magnitude. The band table carries "
+                    "1.3.0's cut points forward unchanged: no letter moved, so nothing here was "
+                    "recut to hold one"
                 ),
             },
         ],

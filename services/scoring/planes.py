@@ -106,14 +106,19 @@ ASSET_BELOW_RESOLUTION = "priced_below_resolution"
 ASSET_PROVEN_ZERO = "proven_zero"
 ASSET_UNPRICED = "unpriced"
 # Every incoming delivery of this asset to this entity's accounts arrived in a
-# transaction that delivered the same token to at least K recipients. The claim
-# is DELIVERY SHAPE and nothing else — never worth, never "spam", never "scam",
-# never "worthless". Two REAL tokens are in this state on the reference corpus —
-# uniETH, whose one delivery fanned out to 101 recipients, and USDtb, whose one
-# delivery fanned out to 175 — and a third, HEX (199/399/399), carries the same
-# delivery shape and is held out only by the protocol-reference conjunct. Any
-# worth-naming of this state would be a lie about all three; "arrived by mass
-# distribution" is true of every member.
+# transaction carrying at least K same-token transfer LOGS. The log count is the
+# meter — it is what the calibration corpus was measured in — and it is an UPPER
+# BOUND on the distinct recipients of that transaction, never a count of them:
+# one recipient credited twice raises the meter and lowers nothing.
+#
+# The claim is DELIVERY SHAPE and nothing else — never worth, never "spam",
+# never "scam", never "worthless". The reference corpus carries a class of FIVE
+# demonstrably real tokens with this delivery shape, of which the
+# protocol-reference conjunct spares three and condemns two: HEX (fan-out 199
+# x13, 399 x14, 400 x1, 500 x6), WETH and base USDC are spared; uniETH (one
+# delivery, 101) and USDtb (one delivery, 175) are in this state. Any
+# worth-naming would be a lie about all five; "arrived by mass distribution" is
+# true of every member, spared or not.
 ASSET_AIRDROP_DELIVERED = "airdrop_delivered"
 
 # --- what a whole balance sheet proves ---------------------------------------
@@ -427,9 +432,9 @@ class ValuePlane:
         never collapse: "nothing ever arrived" is not "what arrived arrived as a
         mass distribution", and only the first says the accounts are bare. The
         disposition arm is asked AFTER ``priced_below_resolution`` and
-        ``unpriced``, so a sheet holding junk beside one real unpriced asset
-        stays ``unpriced`` — the disposition covers the readings it names and
-        nothing else.
+        ``unpriced``, so a sheet holding disposed readings beside one asset
+        nobody priced stays ``unpriced`` — the disposition covers the readings it
+        names and nothing else.
 
         The empty claim is the only one with a SET conjunct, and it is fail-
         closed: zeros over a list nobody established say nothing about the
@@ -1378,10 +1383,13 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
             "reading": (
                 "what is published here is DELIVERY SHAPE and never worth. A disposed reading "
                 "says every incoming delivery of that token to that account arrived in a "
-                "transaction distributing the same token to at least fan_out_threshold_k "
-                "recipients; it does not say the token is worthless, and two of the tokens in "
-                "this state on the reference corpus are real (uniETH at fan-out 101, USDtb at "
-                "175). The two conjuncts do NOT carry equal weight on every "
+                "transaction carrying at least fan_out_threshold_k same-token transfer LOGS — the "
+                "meter the threshold is calibrated in, and an upper bound on that transaction's "
+                "distinct recipients rather than a count of them. It does not say the token is "
+                "worthless: the reference corpus carries a class of FIVE demonstrably real tokens "
+                "with this delivery shape (HEX, WETH and base USDC, which the protocol-reference "
+                "conjunct spares, plus uniETH at fan-out 101 and USDtb at 175, which are in this "
+                "state). The two conjuncts do NOT carry equal weight on every "
                 "chain: the protocol-reference conjunct is near-vacuous on base, where it "
                 "condemns 1,175 of 1,175 unpriced tokens and so partitions nothing, which means "
                 "delivery shape CARRIES THE CLAIM ALONE on base over 1,745 readings. The asset "

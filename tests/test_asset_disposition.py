@@ -1,17 +1,19 @@
 """The disposition determination: what delivery shape may and may not decide.
 
 A reading is DISPOSED where every incoming delivery of that token to every
-account contributing to it arrived in a transaction distributing the same token
-to at least K recipients, and where the token is absent from the protocol's own
-discovered address universe. The published state is a claim about DELIVERY SHAPE
-and never about worth — two real tokens were measured into it on the reference
-corpus — so every test here is about what the claim covers and what it must
-refuse.
+account contributing to it arrived in a transaction carrying at least K
+same-token transfer LOGS — the meter K is calibrated in, and an upper bound on
+that transaction's distinct recipients — and where the token is absent from the
+protocol's own discovered address universe. The published state is a claim about
+DELIVERY SHAPE and never about worth: five demonstrably real tokens on the
+reference corpus carry this delivery shape and two of them are IN the state, so
+every test here is about what the claim covers and what it must refuse.
 
-The corpus cannot exercise any of it: nothing has yet measured a delivery, so
-the evidence table is empty and the plane disposes nothing. Every state below is
-therefore built by hand, which is also what keeps these tests about the rule
-rather than about one protocol's data.
+The corpus DOES exercise the rule now — the live one-shot disposed 1,973
+readings and determined 13 sheets — but every state below is still built by
+hand, which is what keeps these tests about the rule rather than about one
+protocol's data, and is the only way to reach the arms the corpus does not
+carry.
 """
 
 from __future__ import annotations
@@ -20,6 +22,17 @@ import pytest
 
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
+from services.scoring.schema import PrincipalRef
+from tests.conftest import requires_postgres
+from tests.test_scoring_redteam import (
+    EOA,
+    facts,
+    fold,  # noqa: F401  — the fold fixture, reused rather than forked
+    magnitude,
+    proven,
+    reaches,
+    sig,
+)
 
 KEY = "ethereum::0x" + "a" * 40
 JUNK = "0x" + "1" * 40
@@ -243,6 +256,41 @@ def test_a_disposed_sheet_holds_a_determined_zero_and_still_trims_nothing():
         assert other.trimming_total(KEY) == other.total(KEY)
 
 
+def test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why(fold):  # noqa: F811
+    """The refusal walked through a real fold, to its published surface.
+
+    ``SHEET_BOUND_REFUSED_BY_DISPOSITION`` is the token for the one case where a
+    sheet EXISTS, is determined, and still may not bound a witness. It is the
+    arm the register discloses as having no carrier on the reference corpus —
+    the 13 determined sheets there carry no witnessed magnitude for it to refuse
+    a bound for — so this is the fixture that proves the state is earnable and
+    that its disclosure names something real.
+    """
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=magnitude(1_000.0),
+        **proven(1.0),
+        **reaches(KEY),
+    )
+    document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=_disposed_sheet())
+    finding = document.findings[0]
+
+    # The witness stands ALONE and untrimmed: a $0 sheet that may not bound it
+    # must not silently zero it either.
+    assert finding["value_at_stake_usd"] == 1_000.0
+    entries = finding["unbounded_floor_magnitudes"]
+    assert [entry["entity"] for entry in entries] == [KEY]
+    assert entries[0]["reading"] == FOLD._DISPOSED_SHEET_DOES_NOT_BOUND
+
+    # The sentence says what the sheet DOES determine as well as what it does
+    # not: "the sheet is not determined" is false here and is the word a reader
+    # would otherwise act on.
+    assert "IS determined" in entries[0]["reading"]
+    assert "never about what they are worth" in entries[0]["reading"]
+
+
 def test_neither_trim_site_bounds_a_witness_against_a_disposed_sheet():
     """Both ``min(witness, sheet)`` sites read ``trimming_total``, so a disposed
     sheet cannot trim at either. Asserted on the accessor the sites call rather
@@ -455,3 +503,35 @@ def test_an_account_with_no_recorded_identity_refuses(monkeypatch):
         buckets={(KEY, JUNK): {("ethereum", "")}},
     )
     assert disposition == {}
+
+
+# --- the universe the conjunct reads, and how it fails ------------------------
+
+
+@requires_postgres
+def test_an_unconfigured_object_store_builds_no_universe_and_condemns_nothing(db_session, monkeypatch):
+    """The universe loader fails CLOSED on every unreadable source body, and
+    "object storage is not configured" is one of them.
+
+    ``get_source_files`` raises the content-incomplete pair where a body could
+    not be read, and a BARE ``RuntimeError`` where a row carries a storage key
+    and no storage client exists at all — a deployment fact rather than a data
+    one. That last one escaped the loader and took the whole score down with it.
+    ``None`` is the only safe answer either way: the predicate this universe
+    feeds condemns what is ABSENT from it, so a short universe condemns MORE and
+    an empty one condemns everything.
+    """
+    from db import queue as Q
+    from db.models import Job
+    from services.scoring import distill as D
+    from tests.test_effects_selection import _protocol
+
+    protocol = _protocol(db_session, "dispo-universe-failclosed")
+    db_session.add(Job(protocol_id=protocol.id))
+    db_session.flush()
+
+    def _unconfigured(session, job_id):
+        raise RuntimeError("SourceFile x on job y has storage_key but storage is not configured")
+
+    monkeypatch.setattr(Q, "get_source_files", _unconfigured)
+    assert D.load_protocol_universe(db_session, protocol.id) is None

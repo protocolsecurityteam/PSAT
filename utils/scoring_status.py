@@ -339,19 +339,21 @@ NO_SELECTOR = ""
 # coin, the reading is unpriced or below the storage column's resolution (a
 # PRICED reading is never disposed), the token address is absent from that
 # universe tested CHAIN-BLIND, and EVERY observed account contributing to the
-# reading carries stored delivery evidence whose every incoming delivery fanned
-# out to at least K = 25 same-token recipients in one transaction. Such a sheet
+# reading carries stored delivery evidence whose every incoming delivery arrived
+# in a transaction carrying at least K = 25 same-token transfer LOGS. The log
+# count is the meter K is calibrated in, and it is an upper bound on that
+# transaction's distinct recipients rather than a count of them. Such a sheet
 # answers a sixth state (``airdrop_determined``, distinct from ``proven_empty``
 # — "what arrived arrived as a mass distribution" is not "nothing ever arrived")
 # and an eighth ``ceiling_for`` reason of the same name, in the ADMITTING set.
 #
 # WHAT IT CLAIMS IS DELIVERY SHAPE AND NEVER WORTH, and that is load-bearing
-# rather than decorative: the live run put two REAL tokens into this state on
-# this corpus — uniETH (one delivery, fan-out 101) and USDtb (one delivery,
-# fan-out 175) — and a third, HEX (199/399/399), carries the same delivery shape
-# and is held out of the state only by the protocol-reference conjunct. No
-# consumer may rename it spam, scam or worthless: under any such name the
-# published claim would be false of all three.
+# rather than decorative: this corpus carries a class of FIVE demonstrably real
+# tokens with this delivery shape. The protocol-reference conjunct spares three
+# — HEX (fan-out census 199 ×13, 399 ×14, 400 ×1, 500 ×6), WETH and base USDC —
+# and condemns two, which are IN the state: uniETH (one delivery, 101) and USDtb
+# (one delivery, 175). No consumer may rename any of it spam, scam or worthless:
+# under any such name the published claim would be false of all five.
 #
 # What this bump does NOT close, stated because the version stamp is what a
 # reader joins on:
@@ -369,11 +371,22 @@ NO_SELECTOR = ""
 #   * the rule is ANTI-MONOTONE in discovery (see the migration record's
 #     invariant-6 exception): growing the universe withdraws determinations,
 #     which is the safe direction, but this document is NOT stable across
-#     discovery growth. HEX is spared by a single effect_verdicts row.
-# Measured on protocol 1 at this bump: the delivery-evidence table is EMPTY, so
-# entities_determined 0, readings_disposed 0, and every published figure is
-# unchanged — confidence_pct 42.5, lambda 71.7053, grade_exposure 99.582,
-# exposure_usd $18,061,300.76, letter B. The gradeBands.js obligation is live
-# for this bump too: it carries a 1.4.0-provisional entry reasoning 1.3.0's cut
-# points forward.
+#     discovery growth. TWO of the three spared real tokens hang on a single
+#     row each — HEX on one ``effect_verdicts`` row, and base USDC on
+#     ``dapp_interactions`` ALONE — so each is one discovery change away from
+#     being condemned.
+# Measured on protocol 1 at this bump, against a live one-shot that ran before
+# it shipped: 1,973 readings over 1,264 tokens carry delivery evidence and are
+# disposed, 13 sheets are determined by it (sheet_states unpriced 19 → 8,
+# priced_below_resolution 19 → 17, airdrop_determined 13), one of those sheets
+# publishes a ceiling under the new reason, entities_priced_from_a_sheet_ceiling
+# 24 → 25 and signals_credited_in_confidence 46 → 47. A further 484 disposed
+# readings are REFUSED their sheet's determination because one folded account of
+# the sheet was never scanned — a named, closable gap. Confidence is the one
+# published figure that moved: confidence_pct 42.5 → 43.2 on value_priced_pct
+# 42.5 → 45.0 and reach_magnitude_witnessed_pct 43.1 → 43.2. lambda 71.7053,
+# grade_exposure 99.582, exposure_usd $18,061,300.76,
+# ceiling_usd_over_distinct_entities $4,218,743,833.16 and letter B are
+# byte-unchanged. The gradeBands.js obligation is live for this bump too: it
+# carries a 1.4.0-provisional entry reasoning 1.3.0's cut points forward.
 MODEL_VERSION = "1.4.0-provisional"

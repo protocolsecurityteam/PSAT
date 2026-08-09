@@ -346,6 +346,10 @@ def _basis(
     ``sheet`` is the writer's OTHER kind and is empty here on purpose: these
     cases pin the composed clause's counting, and a sheet ceiling counts a
     different population against a different question.
+
+    The plane is a bare one: the writer reads it only to ask whether any sheet
+    ceiling on the row was admitted by a DISPOSITION, and an empty plane answers
+    no — which is the arm every case here is on.
     """
     return FOLD._ceiling_bearing_basis(
         FOLD.BOUND_DIRECTION_NOT_DETERMINED,
@@ -359,6 +363,7 @@ def _basis(
         [],
         {},
         composed,
+        P.ValuePlane(),
     )
 
 
@@ -1036,9 +1041,9 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     # the partial arm rather than claiming a bound over the holdings.
     complete = entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
     assert complete is False
-    assert (
-        entry["reading"] == FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, False)] + FOLD._CEILING_CLOSING
-    )
+    stem = FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, False)]
+    assert entry["reading"].startswith(stem)
+    assert entry["reading"].endswith(FOLD._CEILING_CLOSING)
     assert entry["asset_set_completeness"] is None
 
     # Every figure the carrier proves, published beside the sentence so a reader
@@ -1050,6 +1055,37 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     assert carrier["basis"] == DELIVERED["basis"]
     assert plane.asset_is_disposed(KEY_C, "junk")
 
+    # …and the row REPUBLISHES them, folded over the readings it covers, so the
+    # sentence quotes a field a reader can join to rather than a figure only the
+    # plane holds. This is the half that shipped missing: the carrier was
+    # assembled and no narration read it.
+    published_carrier = entry["asset_disposition"]
+    assert published_carrier["assets"] == 1
+    assert published_carrier["fan_out_threshold_k"] == carrier["fan_out_threshold_k"]
+    assert published_carrier["min_fan_out"] == carrier["min_fan_out"]
+    assert published_carrier["delivery_count"] == carrier["delivery_count"]
+    assert published_carrier["accounts"] == carrier["accounts"]
+    assert published_carrier["basis"] == sorted(carrier["basis"])
+    assert (published_carrier["scanned_from_block"], published_carrier["measured_through_block"]) == (0, 21_000_000)
+
+    # And the sentence's numbers are THOSE numbers. A published claim about a
+    # disposition may not be authored beside the evidence (#171).
+    for figure in (
+        str(carrier["delivery_count"]),
+        str(carrier["min_fan_out"]),
+        str(carrier["fan_out_threshold_k"]),
+        f"{carrier['scanned_from_block']}-{carrier['measured_through_block']}",
+    ):
+        assert figure in entry["reading"], figure
+
+    # The scope the $0 is published under: it totals the readings that carry a
+    # dollar figure — none, here — and says the disposed ones are STILL HELD.
+    assert entry["assets_priced"] == 0
+    assert "STILL HELD" in entry["reading"]
+    # Worth is the thing this row does NOT answer, and it says so in the third
+    # state's own word rather than by leaving a $0 to be read as one.
+    assert "never what they are worth, which is not_determined here" in entry["reading"]
+
     # The per-asset evidence the sentence stands on says airdrop_delivered, so
     # the row's own data carries the claim.
     assert entry["per_asset"] == [{"asset": "junk", "usd": None, "state": P.ASSET_AIRDROP_DELIVERED}]
@@ -1059,11 +1095,154 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     # worth. "spam"/"worthless" would be false of the real tokens measured into
     # this state.
     published = set(entry)
-    for concept in ("assets_not_priced", "assets_disposed", "unpriced_positions", "per_asset"):
+    for concept in ("assets_not_priced", "assets_disposed", "unpriced_positions", "per_asset", "asset_disposition"):
         if concept in entry["reading"]:
             assert concept in published, concept
-    for banned in ("spam", "scam", "worthless"):
+    for banned in ("spam", "scam", "worthless", "junk token"):
         assert banned not in entry["reading"].lower()
+
+
+def _priced_but_partly_unpriced_ceiling_row(fold):  # noqa: F811
+    """A sheet ceiling refused for the ORDINARY reason: a row nobody priced."""
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane(
+        {KEY_C: {"usdc": 5.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "other": P.ASSET_UNPRICED}},
+    )
+    return _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane))["reach_sheet_ceiling_magnitudes"][
+        0
+    ]
+
+
+def _priced_sheet_with_a_disposed_row(fold):  # noqa: F811
+    """The live $575M proxy's shape: an ADMITTED ceiling whose coverage fails on
+    the LIST conjunct alone — every reading priced or disposed, nothing unpriced,
+    and no scan proving the list whole."""
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    plane = value_plane(
+        {KEY_C: {"usdc": 5.0}},
+        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "junk": P.ASSET_AIRDROP_DELIVERED}},
+    )
+    plane.asset_disposition = {KEY_C: {"junk": dict(DELIVERED)}}
+    return _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane))["reach_sheet_ceiling_magnitudes"][
+        0
+    ]
+
+
+def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):  # noqa: F811
+    """Two surfaces, one fact, one derivation — which is what stops them drifting.
+
+    The row publishes its coverage shortfall twice: as the reason its direction
+    is not a ceiling, and inside the reading that explains its figure. Written
+    by hand twice, they diverged — the direction basis was corrected off the
+    row's fields while the reading's stem went on asserting "the assets under
+    assets_not_priced were observed at this entity and never priced" on a
+    carrier whose list is EMPTY. The premise is derived now; only the framing
+    differs.
+    """
+    admitted = _priced_sheet_with_a_disposed_row(fold)
+    assert admitted["ceiling_reason"] == P.CEILING_ADMITTED
+    assert admitted["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # The live shape: the two causes the old stem named both read empty.
+    assert admitted["assets_not_priced"] == [] and admitted["unpriced_positions"] == 0
+    assert admitted["asset_list_proven_whole"] is False
+
+    shortfall = FOLD._coverage_shortfall(admitted)
+    assert shortfall and "asset_list_proven_whole" in shortfall
+    # ONE derivation reaches both surfaces, so a fix to either reaches both.
+    assert admitted["bound_direction_basis"].endswith(shortfall)
+    assert FOLD._CEILING_COVERAGE_SHORTFALL_PREFIX + shortfall in admitted["reading"]
+    # The premise the stem used to presuppose is gone from BOTH.
+    assert "assets_not_priced" not in admitted["reading"]
+    assert "assets_not_priced" not in admitted["bound_direction_basis"]
+    # …and the conclusion it carried is still published: the entity holds more
+    # than the figure, which is true whichever conjunct failed.
+    assert "the entity holds more than it" in admitted["reading"]
+
+    # A carrier that DOES fail on pricing names that instead, on both surfaces.
+    unpriced = _priced_but_partly_unpriced_ceiling_row(fold)
+    assert "assets_not_priced" in unpriced["reading"]
+    assert "asset_list_proven_whole" not in unpriced["reading"]
+    assert unpriced["reading"] != admitted["reading"]
+
+    # A COMPLETE row carries no shortfall clause at all — the derivation is not
+    # a sentence that fires everywhere with an empty list inside it.
+    priced = value_plane({KEY_C: {"usdc": 5.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}})
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        **proven(1.0),
+        **reaches(KEY_C),
+    )
+    whole = _cc_row(fold([signal], principals={1: facts(1, EOA, "eoa")}, value=priced))[
+        "reach_sheet_ceiling_magnitudes"
+    ][0]
+    assert whole["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
+    assert FOLD._CEILING_COVERAGE_SHORTFALL_PREFIX not in whole["reading"]
+
+
+def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):  # noqa: F811
+    """The direction basis is derived, because a constant was false of its carrier.
+
+    ``complete`` is a conjunction of three, and the shipped sentence named two
+    of them. Two live entities — one of them a $575M proxy — refuse on the
+    THIRD, so they published a sentence pointing a reader at two fields that
+    both read empty. Two carriers failing different conjuncts must publish
+    different sentences, which is the property the constant could not have.
+    """
+    disposed, _ = _airdrop_determined_ceiling_row(fold)
+    assert disposed["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    # Exactly the shape that was mis-narrated: both named causes read empty.
+    assert disposed["assets_not_priced"] == [] and disposed["unpriced_positions"] == 0
+    assert disposed["asset_list_proven_whole"] is False
+    assert "asset_list_proven_whole" in disposed["bound_direction_basis"]
+    assert "assets_not_priced" not in disposed["bound_direction_basis"]
+    assert "unpriced_positions" not in disposed["bound_direction_basis"]
+
+    unpriced = _priced_but_partly_unpriced_ceiling_row(fold)
+    assert unpriced["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
+    assert unpriced["assets_not_priced"] == ["other"] and unpriced["asset_list_proven_whole"] is True
+    assert "assets_not_priced" in unpriced["bound_direction_basis"]
+    assert "asset_list_proven_whole" not in unpriced["bound_direction_basis"]
+
+    assert disposed["bound_direction_basis"] != unpriced["bound_direction_basis"]
+    # Neither may name a field the row does not publish.
+    for entry in (disposed, unpriced):
+        for concept in ("assets_not_priced", "unpriced_positions", "asset_list_proven_whole"):
+            if concept in entry["bound_direction_basis"]:
+                assert concept in entry, concept
+
+
+def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):  # noqa: F811
+    """``assets_priced`` was ``observed - not_priced``, and a disposed reading is
+    in neither term — so a sheet whose every asset arrived by mass distribution
+    published 140 of 140 priced beside $0. The three counts partition the
+    observed set, which is what makes the record readable."""
+    disposed, _ = _airdrop_determined_ceiling_row(fold)
+    assert disposed["assets_observed"] == 1
+    assert disposed["assets_disposed"] == ["junk"]
+    assert disposed["assets_priced"] == 0
+    assert disposed["assets_observed"] == disposed["assets_priced"] + len(disposed["assets_not_priced"]) + len(
+        disposed["assets_disposed"]
+    )
+
+    # A row with nothing disposed is untouched: the counter still reports every
+    # determined reading, so the fix cannot be read as a general de-crediting.
+    unpriced = _priced_but_partly_unpriced_ceiling_row(fold)
+    assert unpriced["assets_disposed"] == [] and unpriced["assets_priced"] == 1
 
 
 def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):  # noqa: F811
