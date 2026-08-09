@@ -730,6 +730,10 @@ class ResolutionWorker(BaseWorker):
                     discovered=[discovered] if discovered is not None else [],
                 ),
                 rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+                # Refreshes the protocol-reference verdict for this contract's
+                # tokens alongside the delivery scan; the universe it is measured
+                # against is assembled once here, never on a read path.
+                protocol_id=contract.protocol_id,
             )
             if disposition_cost.total:
                 # Logged, deliberately NOT folded into the fetch's ``cost_note``:

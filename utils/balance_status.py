@@ -133,21 +133,31 @@ BALANCE_WRITERS = (BALANCE_WRITER_TVL, BALANCE_WRITER_RESOLUTION)
 # --- delivery shape (the disposition evidence plane) -------------------------
 # What the chain's own log history says about HOW a (holder, token) balance
 # arrived. This is a claim about DELIVERY, never about worth: a token delivered
-# in a 400-recipient batch is an airdrop whatever it is worth, and a real token
-# can be airdrop-delivered (measured: HEX, uniETH). Nothing in this vocabulary
+# by a transaction emitting 400 same-token transfer logs arrived in a mass
+# distribution whatever it is worth, and a real token can be airdrop-delivered
+# (measured: HEX, uniETH). Nothing in this vocabulary
 # may be read, published or renamed as "spam", "scam" or "worthless" — those are
 # judgments about value that no receipt witnesses.
 #
+# THE METER IS LOGS, NOT RECIPIENTS. A fan-out is the number of same-token
+# ``Transfer`` LOGS the delivering transaction emitted, counted off its own
+# receipt. That is an UPPER BOUND on the distinct recipients it paid — one
+# recipient paid twice in one transaction counts twice — and every sentence
+# published from this vocabulary says logs for that reason. K is calibrated on
+# the log meter (``FAN_OUT_CALIBRATION_CORPUS`` is metered in same-token
+# ``Transfer`` logs), so switching the meter to distinct recipients would
+# invalidate the calibration rather than refine it.
+#
 # ``fan_out_all`` is the ALL-QUANTIFIER over every delivery on record: every
 # incoming Transfer of that token to that holder arrived in a transaction that
-# moved the SAME token to at least ``fan_out_threshold_k`` recipients. It is the
+# emitted at least ``fan_out_threshold_k`` same-token transfer logs. It is the
 # only positive verdict, and it is earned per delivery.
 #
-# ``has_direct_delivery`` is the EARNED NEGATIVE: at least one delivery moved the
-# token to fewer than K recipients, so the all-quantifier is false and the pair
-# is not an airdrop-only holding. Kept apart from ``not_determined`` because they
-# are closed by different work — nothing closes the first (it is settled), and a
-# readable receipt closes the second.
+# ``has_direct_delivery`` is the EARNED NEGATIVE: at least one delivery arrived
+# in a transaction emitting fewer than K same-token transfer logs, so the
+# all-quantifier is false and the pair is not an airdrop-only holding. Kept apart
+# from ``not_determined`` because they are closed by different work — nothing
+# closes the first (it is settled), and a readable receipt closes the second.
 #
 # ``not_determined`` is everything else and is FAIL-CLOSED by construction: a
 # receipt that could not be read, a scan that aborted, or a balance with no
@@ -165,6 +175,41 @@ DELIVERY_SHAPES = (
 
 # How a delivery's fan-out was counted. Stored per delivery so a published
 # figure names the mechanism that produced it rather than being trusted.
+#
+# ``receipt_same_token_transfer_logs`` is the whole claim, and the literal is
+# exact: the number is a COUNT OF LOGS in the delivering transaction's receipt
+# whose emitter is the same token and whose shape is a 3-topic ``Transfer``.
+# It is not a count of distinct recipient addresses — it never was — and the
+# name is what a consumer must quote when it publishes the figure.
 DELIVERY_FAN_OUT_BASIS_RECEIPT = "receipt_same_token_transfer_logs"
 DELIVERY_FAN_OUT_BASIS_UNREADABLE = "receipt_unreadable"
 DELIVERY_FAN_OUT_BASES = (DELIVERY_FAN_OUT_BASIS_RECEIPT, DELIVERY_FAN_OUT_BASIS_UNREADABLE)
+
+
+# --- token / protocol reference (the disposition reference plane) ------------
+# Whether a token address is one the protocol's OWN discovery names. Measured by
+# the producer against ``services.scoring.distill.load_protocol_universe`` and
+# stored so a presentation surface can read the verdict without the 26.5-second
+# object-storage assembly that produced it.
+#
+# ``in_universe`` is the SPARING positive: discovery names this address, so the
+# holding is a reference of the protocol's own and no delivery-shape verdict may
+# pull it from a sheet.
+#
+# ``absent_from_universe`` is earned only against a universe that was built
+# WHOLE. It is anti-monotone by construction — discovery growing can only turn
+# it back into ``in_universe`` — and withdrawal is the safe direction.
+#
+# ``not_determined`` is the fail-closed answer and it covers a universe that
+# could not be assembled at all (a short universe would condemn MORE, never
+# less) as well as a token no producer has reached yet. ABSENCE OF A ROW READS
+# AS ``not_determined`` at every consumer: nothing may be pulled from a sheet
+# because no verdict was stored for it.
+TOKEN_REFERENCE_IN_UNIVERSE = "in_universe"
+TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE = "absent_from_universe"
+TOKEN_REFERENCE_NOT_DETERMINED = "not_determined"
+TOKEN_REFERENCE_SHAPES = (
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
+)

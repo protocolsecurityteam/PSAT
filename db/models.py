@@ -44,6 +44,9 @@ from utils.balance_status import (
     DELIVERY_SHAPE_NOT_DETERMINED,
     NATIVE_STATUS_PROVEN_ZERO,
     SWEEP_STATUS_COMPLETED,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
+    TOKEN_REFERENCE_SHAPES,
 )
 from utils.chains import UnknownChainError, chain_by_name
 from utils.restaking_status import (
@@ -3249,20 +3252,41 @@ class TokenDeliveryEvidence(Base):
       the protocol whose producer happened to measure it, and nothing here is
       protocol-scoped.
 
-    **Rows accrete; they are never rewritten.** A recorded delivery is a receipt
-    that was read at a named block and stays on the row forever. A later cycle
-    may only (a) append deliveries newly found above ``measured_through_block``
-    and (b) advance ``measured_through_block`` itself. Nothing removes a
-    delivery, lowers the cursor, or turns ``has_direct_delivery`` back into
-    ``fan_out_all`` — that verdict is an earned negative and it is settled.
+    **The EVIDENCE accretes.** ``delivery_count`` and ``unreadable_deliveries``
+    only rise, ``min_fan_out`` only falls, ``measured_through_block`` only
+    advances, and ``scanned_from_block`` is written once at insert and never
+    again. So the set the all-quantifier ranges over only ever grows: a later
+    cycle can withdraw a positive, and can never manufacture one.
+    ``has_direct_delivery`` never turns back into ``fan_out_all`` — that verdict
+    is an earned negative and it is settled.
+
+    **``basis`` is the exception, and it is re-derived on every pass** — never
+    carried, never appended to. It is composed from ``scanned_from_block`` and
+    ``measured_through_block`` as they stand on this row
+    (``delivery_evidence.compose_basis``), so the extent it names is the union of
+    every pass rather than the window of the last one. A pass that finds nothing
+    new still rewrites it; that costs no chain request and is how a row authored
+    under an older rule is repaired.
+
+    **``deliveries`` is a bounded SAMPLE, not the record.** The scalars above are
+    the record and they count every delivery ever seen; the JSONB retains
+    ``delivery_evidence.DELIVERY_ENTRIES_RETAINED`` entries, chosen so whichever
+    delivery decides the verdict is in it. A pair too heavy to meter stores a
+    compact marker — the sample plus the count of the rest, all declared
+    unmetered — rather than one entry per delivery.
 
     ``measured_through_block`` is BOTH the extent of the claim and the cursor
     that keeps this a once-per-pair cost: the all-quantifier is over deliveries
     from ``scanned_from_block`` through it, and a consumer must read the pair to
     know what the verdict covers. Without the cursor the one-shot repeats hourly.
+    It is also what makes the bounded sample safe: a later pass resumes strictly
+    above it, so a delivery at or below it is already counted and needs no stored
+    entry to be recognised as a repeat.
 
     The published claim is delivery SHAPE and nothing else — see
     ``utils.balance_status.DELIVERY_SHAPES``. It never says a token is worthless.
+    Every fan-out on this row is a count of same-token transfer LOGS, an upper
+    bound on distinct recipients.
     """
 
     __tablename__ = "token_delivery_evidence"
@@ -3281,14 +3305,16 @@ class TokenDeliveryEvidence(Base):
     # else would claim completeness over blocks nobody scanned.
     scanned_from_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
     measured_through_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # ``[{tx, block, log_index, fan_out, fan_out_basis}]`` — one entry per
-    # delivering transaction, with the SAME-token recipient count measured from
-    # that transaction's own receipt. ``fan_out`` is null exactly where
-    # ``fan_out_basis`` is ``receipt_unreadable``, which forces the verdict to
-    # ``not_determined``: an unread receipt is not a small fan-out.
+    # ``[{tx, block, log_index, fan_out, fan_out_basis}]`` — a BOUNDED sample of
+    # the delivering transactions, each carrying the count of same-token transfer
+    # LOGS measured from that transaction's own receipt. ``fan_out`` is null
+    # exactly where ``fan_out_basis`` is ``receipt_unreadable``, which forces the
+    # verdict to ``not_determined``: an unread receipt is not a small fan-out.
+    # The counts below, not this list, are the record.
     deliveries: Mapped[list] = mapped_column(JSONB(none_as_null=True), nullable=False)
+    # Every delivery ever seen for the pair, sample or not.
     delivery_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    unreadable_deliveries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unreadable_deliveries: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     # The weakest delivery on record, which is what the all-quantifier turns on.
     # NULL where any delivery is unreadable or none is on record.
     min_fan_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -3337,6 +3363,66 @@ class TokenDeliveryEvidence(Base):
         ),
         CheckConstraint("jsonb_typeof(deliveries) = 'array'", name="ck_tde_deliveries_is_array"),
         CheckConstraint("measured_through_block >= scanned_from_block", name="ck_tde_range_is_ordered"),
+    )
+
+
+class TokenProtocolReference(Base):
+    """Whether a token address is one THIS protocol's own discovery names.
+
+    Written by the producers' disposition phase against
+    ``services.scoring.distill.load_protocol_universe``, and read by the
+    presentation layer, which cannot build the universe itself: that assembly is
+    a measured 26.5-second object-storage read, unusable on an API path. The
+    verdict is stored here so a surface can consult it in one indexed lookup.
+
+    **THIS TABLE IS REFRESHED EVERY CYCLE. IT IS NOT IMMUTABLE, AND THAT IS THE
+    POINT** — the exact opposite discipline from ``TokenDeliveryEvidence``, whose
+    evidence accretes and is never taken back. The predicate behind
+    ``absent_from_universe`` is ANTI-MONOTONE: discovery growing can only turn an
+    absence into a presence, so a verdict taken against a smaller universe must be
+    able to WITHDRAW. A row here is the answer as of ``measured_at`` against a
+    universe of ``universe_addresses`` addresses, and a later cycle overwrites it.
+    Read the two tables with that contrast in mind; assuming this one accretes
+    would pin a condemnation that discovery has already dissolved.
+
+    **Absence of a row reads as ``not_determined`` at every consumer**, which is
+    to say the holding is presented. Nothing may be pulled from a sheet because
+    no verdict was stored for it.
+    """
+
+    __tablename__ = "token_protocol_reference"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Protocol-scoped, unlike delivery evidence: "the protocol refers to this
+    # address" is a claim about one protocol's discovery and about nothing else.
+    protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False)
+    chain_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Lowercased at the write point, as everywhere else in the balance planes.
+    token_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    reference_shape: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=TOKEN_REFERENCE_NOT_DETERMINED
+    )
+    # The size of the universe the verdict was taken against. A withdrawal is
+    # readable as a number here growing, so a reader can tell "discovery found
+    # it" from "the predicate changed" without re-running either.
+    universe_addresses: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    basis: Mapped[str] = mapped_column(Text, nullable=False)
+    measured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("protocol_id", "chain_id", "token_address", name="uq_tpr_protocol_chain_token"),
+        Index("ix_tpr_protocol_chain", "protocol_id", "chain_id"),
+        CheckConstraint(
+            "reference_shape IN ('" + "', '".join(TOKEN_REFERENCE_SHAPES) + "')",
+            name="ck_tpr_reference_shape_vocabulary",
+        ),
+        # A universe of no addresses cannot witness an absence — it would condemn
+        # everything. The fail-closed answer under an unbuildable universe is
+        # ``not_determined``, and the constraint keeps that from being edited away.
+        CheckConstraint(
+            f"reference_shape <> '{TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE}' OR universe_addresses > 0",
+            name="ck_tpr_absence_needs_a_universe",
+        ),
     )
 
 

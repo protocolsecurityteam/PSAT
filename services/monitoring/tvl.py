@@ -448,6 +448,10 @@ def refresh_contract_balances(
         session,
         disposition_requests(session, protocol_id=protocol_id, contract_ids=contract_ids, discovered=discovered),
         rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
+        # Also refreshes the protocol-reference verdict for every token in the
+        # population, once per cycle: the universe assembly behind it is an
+        # object-storage read no presentation path can afford to repeat.
+        protocol_id=protocol_id,
     )
     if disposition_cost.total:
         # Logged, deliberately NOT folded into ``cost_note``: that string is the
