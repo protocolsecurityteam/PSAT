@@ -577,6 +577,7 @@ def value_out(
     native_payout: bool = False,
     inputs_vacuous: bool = False,
     contract_holdings: Sequence[str] = (),
+    sentinel_param: str | None = None,
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination?
 
@@ -600,7 +601,16 @@ def value_out(
       overridden before the payout executed. The verdict then means "would move
       value IF THE CONTRACT WERE FUNDED" — a capability of the code — not "moves
       value in current state". Its absence means no override was needed, never
-      that the treasury is funded."""
+      that the treasury is funded.
+
+    ``sentinel_param`` names the PARAMETER the sentinel address was substituted
+    into (:func:`calldata._value_probe_inputs`). A ``caller_arbitrary`` verdict is
+    a proof about that one parameter and about no other — an executor-shaped
+    function takes the sentinel in its payload slot while its call target keeps
+    the base probe's value — so a consumer joining the proof onto a destination
+    (``distill._fork_caller_arbitrary_param``) has to be told the subject. It is
+    published only where a sentinel probe was actually issued; absent means no
+    subject was named, which such a consumer must refuse rather than assume."""
     tr = new_transcript(ctx, feature="value_out", tier=TIER_CALL, effect_class=EFFECT_CLASS_VALUE_OUT)
     if not simulate_supported:
         tr["fallback"] = "tier2"
@@ -685,6 +695,12 @@ def value_out(
         "destination_shape": shape,
         "shape_proved_by": proved_by,
     }
+    # Code-plane, and keyed on whether a sentinel probe RAN rather than on
+    # whether it landed: a sentinel that moved nothing is still a probe of that
+    # parameter, and its subject is the same fact about the synthesized calldata
+    # either way. Absent = no sentinel was issued = no subject to name.
+    if sentinel_param and sentinel_transfers is not None:
+        details["sentinel_param"] = sentinel_param
     if used is not None:
         # Code-plane: the function could only be exercised once the caller held
         # the input asset it pulls. Which token / how much is state-plane residue

@@ -181,6 +181,12 @@ class ValueOutPlanInputs:
     # verdict proven under it is a CAPABILITY claim (would move IF funded) and
     # carries the same weaker ``contract_balance_seeded`` qualifier.
     contract_holdings: tuple[str, ...] = ()
+    # The DECLARED NAME of the parameter ``sentinel_calldata`` substituted the
+    # sentinel address into (see :func:`_sentinel_param_name`). ``None`` when no
+    # sentinel variant was built, or when the slot's name is not recorded on the
+    # static plane — an unnamed subject is not a weaker proof, it is a proof
+    # about a parameter nothing can join on.
+    sentinel_param: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +212,11 @@ class SupplyPlanInputs:
     inputs_vacuous: bool = False
     # See :class:`ValueOutPlanInputs`.
     contract_holdings: tuple[str, ...] = ()
+    # NO ``sentinel_param``, for the same reason there is no ``static_shape``: the
+    # supply recipe discards the destination shape it resolves, so it publishes no
+    # ``caller_arbitrary`` for the parameter name to be the subject OF. A name
+    # beside no claim is a field a consumer could only misread.
+    #
     # NO ``static_shape``. The supply recipe reads a destination shape only to
     # collect a discrepancy and discards the shape itself, and the supply
     # DIRECTIONS (``mint``/``burn``) are a legacy ``semantic_control`` vocabulary
@@ -1344,6 +1355,24 @@ class _ProbeInputs:
     sentinel_calldata: str | None
     token_param_indexes: tuple[int, ...]
     inputs_vacuous: bool
+    sentinel_param: str | None = None
+
+
+def _sentinel_param_name(fn: "FunctionFacts", types: Sequence[str], index: int) -> str | None:
+    """The declared name of slot ``index``, or ``None`` when it has none.
+
+    The sentinel proof is a proof about ONE parameter, and the prober is the only
+    thing that can state WHICH — a consumer joining on it (``distill
+    ._fork_caller_arbitrary_param``) has no other way to tell a sentinel that rode
+    the call target from one that rode an executor payload. A slot the static
+    plane never named is published as nothing rather than as a positional token:
+    ``arg3`` is not a name anything else in the pipeline speaks, so a join on it
+    would be a join on this function's own invention.
+    """
+    names = _declared_param_names(fn, len(types))
+    if not (0 <= index < len(names)):
+        return None
+    return names[index] or None
 
 
 def _value_probe_inputs(
@@ -1362,6 +1391,7 @@ def _value_probe_inputs(
         return None
     taint_idx = _taint_index(fn, types, directions)
     sentinel_calldata = None
+    sentinel_param = None
     if executor is not None and executor.values:
         # The executor owns its own sentinel variant, and it supersedes the taint
         # slot: what the caller redirects here is the DESTINATION INSIDE the
@@ -1374,10 +1404,17 @@ def _value_probe_inputs(
                 types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=sentinel_exec
             ).substitutions
             sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
+            # The PAYLOAD slot, and saying so is the whole point of the field: an
+            # executor's sentinel rides the inner call inside the payload while
+            # the outer target keeps whatever the base probe passed, so a
+            # consumer that read this proof as being about the call target would
+            # be reading it about a parameter the sentinel never touched.
+            sentinel_param = _sentinel_param_name(fn, types, sentinel_exec.slots[1])
     elif taint_idx is not None:
         sentinel_subs = dict(base.substitutions)
         sentinel_subs[taint_idx] = SENTINEL_ADDRESS
         sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
+        sentinel_param = _sentinel_param_name(fn, types, taint_idx)
     tokens = tuple(sorted(idx for idx, role in addr_roles.items() if role == ROLE_TOKEN))
     return _ProbeInputs(
         calldata=calldata,
@@ -1385,6 +1422,10 @@ def _value_probe_inputs(
         sentinel_calldata=sentinel_calldata,
         token_param_indexes=tokens,
         inputs_vacuous=bool(base.vacuous),
+        # Never survives a calldata that failed to encode: the field names the
+        # subject of a sentinel probe, so it is only set beside the calldata that
+        # actually carries the sentinel.
+        sentinel_param=sentinel_param if sentinel_calldata else None,
     )
 
 
@@ -1431,6 +1472,7 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         # Measured holdings only — the seed derives its token from what
         # the deployment provably holds, never a hardcoded asset.
         contract_holdings=tuple(candidate.input_token_addresses),
+        sentinel_param=built.sentinel_param,
     )
 
 

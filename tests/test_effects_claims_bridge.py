@@ -194,6 +194,28 @@ def test_the_observed_destination_answer_reaches_the_claim(a6=True):
     assert proven_claim["witness"]["observed"]["shape_proved_by"] == "simulation"
 
 
+def test_the_sentinel_subject_travels_with_the_answer():
+    """A shape with no stated subject is a proof about an unnamed parameter. The
+    scorer's exec join (``distill._fork_caller_arbitrary_param``) refuses one, so
+    dropping the name here is what left 15 already-proven fork witnesses unread."""
+    witness = {
+        "value_moved": True,
+        "destination_shape": "caller_arbitrary",
+        "shape_proved_by": "simulation",
+        "sentinel_param": "data",
+    }
+    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
+    assert claim is not None
+    assert claim["witness"]["observed"]["sentinel_param"] == "data"
+
+    # Absent stays absent — never a null, never a default.
+    bare = claims_bridge.verdict_to_claim(
+        _verdict(EFFECT_CLASS_VALUE_OUT, witness={k: v for k, v in witness.items() if k != "sentinel_param"})
+    )
+    assert bare is not None
+    assert "sentinel_param" not in bare["witness"]["observed"]
+
+
 def test_reach_is_never_read_off_the_cacheable_witness():
     # The plane leak this fix closes: while reach sat on ``witness`` it was
     # written to the CROSS-DEPLOYMENT behavioral cache and re-published as another

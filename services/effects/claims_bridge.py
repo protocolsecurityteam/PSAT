@@ -259,6 +259,15 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "supply_delta_sign",
         "destination_shape",
         "shape_proved_by",
+        # The SUBJECT of a ``caller_arbitrary`` proof — the parameter the sentinel
+        # was substituted into. Code-plane and cache-safe (it names a slot of the
+        # synthesized calldata, not an address or a height). Without it the shape
+        # travels as a proof with no stated subject, and the scorer's exec join
+        # (``distill._fork_caller_arbitrary_param``) cannot tell a sentinel that
+        # rode the call target from one that rode an executor payload — so it
+        # refuses every such verdict rather than guess, which is where the 15
+        # already-proven witnesses of this corpus sit today.
+        "sentinel_param",
         "gate_mutation",
         "historical",
         "current_capability",
