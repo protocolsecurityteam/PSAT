@@ -486,6 +486,16 @@ def disposed_from_holdings(*, delivery_shape: str, reference_shape: str, usd_val
        ``not_determined`` and keeps the row presented — the producer not having
        measured a pair is never read as the pair having been measured absent.
 
+    **THE DECLARED DIVERGENCE, so a diff of the two surfaces is not read as a
+    defect.** This plane's conjunct 1 tests ``usd_value is None``; the scorer's
+    (``services.scoring.planes._resolve_asset_disposition``, conjunct 3, over
+    ``_DISPOSABLE_ASSET_STATES``) also disposes ``priced_below_resolution`` — a
+    reading whose every price landed on the numeric(20,2) floor. So PRESENTATION IS
+    DELIBERATELY WEAKER: it spares 30 below-resolution rows on this corpus that the
+    scorer disposes, and never the reverse. That is the safe direction — the page
+    shows a holding the score has already stopped counting, rather than hiding one
+    the score still counts.
+
     Two consequences of reading a stored verdict, stated because they are real and
     not because they are harmless:
 
@@ -793,14 +803,9 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     rows = session.execute(
         select(
             Contract.id,
-            Contract.chain,
             ContractBalanceLatest.token_address,
-            ContractBalanceLatest.usd_value,
-            ContractBalanceLatest.observed_address,
-            ContractBalanceFetch.chain_id,
         )
         .join(ContractBalanceLatest, ContractBalanceLatest.contract_id == Contract.id)
-        .outerjoin(ContractBalanceFetch, ContractBalanceFetch.id == ContractBalanceLatest.fetch_id)
         .where(
             Contract.protocol_id == protocol_id,
             ContractBalanceLatest.token_address.isnot(None),
@@ -820,7 +825,7 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
         )
     ).all()
     out: dict[int, list[str]] = {}
-    for contract_id, _chain, token, _usd, _observed, _fetch_chain_id in rows:
+    for contract_id, token in rows:
         addr = _addr(token)
         if addr is None:
             continue

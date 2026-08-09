@@ -26,6 +26,7 @@ from services.scoring.schema import PrincipalRef
 from tests.conftest import requires_postgres
 from tests.test_scoring_redteam import (
     EOA,
+    bounded_by_sheet,
     facts,
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
     magnitude,
@@ -289,6 +290,40 @@ def test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why(fold):  #
     # would otherwise act on.
     assert "IS determined" in entries[0]["reading"]
     assert "never about what they are worth" in entries[0]["reading"]
+
+
+def test_an_exact_witness_names_the_same_refusal_a_floor_one_does(fold):  # noqa: F811
+    """The symmetry, closed: the refusal is the SHEET's, so the witness state
+    cannot decide whether it is named.
+
+    An exact witness against a disposed sheet publishes the same untrimmed
+    dollars a floor one does, and used to publish them under
+    ``witnessed_reach(exact) x entity_holdings`` — a basis naming the sheet as
+    having bounded a figure it refused to bound. What legitimately differs is
+    the DISCLOSURE's own key: ``exact`` carries no direction, so the figure lands
+    under ``witnessed_usd`` rather than under a floor's or a ceiling's name.
+    """
+    signal = sig(
+        authority_openness="restricted",
+        principal_state="enumerated",
+        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
+        gates=bounded_by_sheet(1_000.0),
+        **proven(1.0),
+        **reaches(KEY),
+    )
+    document = fold([signal], principals={1: facts(1, EOA, "eoa")}, value=_disposed_sheet())
+    finding = document.findings[0]
+
+    assert finding["value_at_stake_usd"] == 1_000.0
+    entries = finding["unbounded_floor_magnitudes"]
+    assert [entry["entity"] for entry in entries] == [KEY]
+    assert entries[0]["witness_state"] == "proven_exact"
+    assert entries[0]["reading"] == FOLD._DISPOSED_SHEET_DOES_NOT_BOUND
+    # Neither a floor nor a ceiling: an exact figure is published under the key
+    # that claims no direction at all.
+    assert entries[0]["witnessed_usd"] == 1_000.0
+    assert "witnessed_floor_usd" not in entries[0]
+    assert "witnessed_upper_bound_usd" not in entries[0]
 
 
 def test_neither_trim_site_bounds_a_witness_against_a_disposed_sheet():

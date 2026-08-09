@@ -450,6 +450,7 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
         "population_census": None,
         "exercised_by": (
             "tests/test_asset_disposition.py::test_a_disposed_sheet_refuses_to_bound_a_witness_and_publishes_why",
+            "tests/test_asset_disposition.py::test_an_exact_witness_names_the_same_refusal_a_floor_one_does",
         ),
         "note": (
             "the one refusal here that fires where a sheet EXISTS and is determined. A sheet "

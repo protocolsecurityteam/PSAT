@@ -5026,6 +5026,32 @@ def _entity_contribution(
     if magnitude is not None:
         state = instance.magnitude.state
         if state == MAGNITUDE_STATE_PROVEN_EXACT:
+            if trim is None and held is not None:
+                # SYMMETRY WITH THE FLOOR BRANCH BELOW, and for the same reason:
+                # the sheet IS determined, at $0, by delivery-shape disposition,
+                # and may not trim. What differs is only the disclosure this
+                # state OWES — an exact witness publishes the dollars the call
+                # moves, not a figure the sheet failed to bound — so the refusal
+                # is named in the basis and carried as a reading, while the
+                # unbounded-figure keys stay off it. Without this the basis said
+                # "x entity_holdings" over a sheet that bounded nothing.
+                return (
+                    magnitude,
+                    f"witnessed_reach(exact)+{SHEET_BOUND_REFUSED_BY_DISPOSITION}",
+                    {
+                        "function": instance.signal.function_name,
+                        "capability": instance.signal.claim_id,
+                        "entity": key,
+                        "witness_state": state,
+                        # ``exact`` has no registered direction, so the figure
+                        # lands under the key that claims neither — the same
+                        # registry the siblings read, never a hand-written key.
+                        **_unbounded_figure(state, magnitude),
+                        "reading": _DISPOSED_SHEET_DOES_NOT_BOUND,
+                    },
+                    False,
+                    state,
+                )
             # The witness bounds what this call moves; the entity's sheet bounds
             # what is there to move. Neither alone is the answer, and the sheet
             # alone is the balance-sheet-as-a-reach error.

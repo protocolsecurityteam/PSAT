@@ -1571,6 +1571,16 @@ def build_governance_view(
                 # two counts are published side by side because they answer different
                 # questions: how many rows arrived in a batch, and how many rows that
                 # is enough to stop presenting as a position.
+                #
+                # THIS PAGE AND THE SCORE DIVERGE BY DESIGN, and the gap is not a
+                # defect: ``disposed_from_holdings`` disposes only an UNPRICED reading,
+                # while the scorer's arm
+                # (``services.scoring.planes._resolve_asset_disposition``) also disposes
+                # a ``priced_below_resolution`` one — so presentation is WEAKER and
+                # spares 30 rows here that the score has already stopped counting,
+                # never the reverse. Showing a holding the score dropped is the safe
+                # direction; hiding one it still counts is not. Both rules are stated
+                # in full on ``disposed_from_holdings``.
                 disposed = disposed_from_holdings(
                     delivery_shape=delivery_shape, reference_shape=reference_shape, usd_value=usd
                 )
