@@ -615,7 +615,32 @@ def scan_delivery_shape(
 #
 # TTL for the reuse window. Bounded rather than unbounded because the extent key
 # below cannot see every row the assembly reads (see ``_protocol_universe``).
-_UNIVERSE_MEMO_TTL_SECONDS = float(os.getenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS", "900"))
+#
+# CAPPED, and the cap is the same argument the fan-out threshold's is: this
+# window bounds how long a verdict may rest on a universe that has since grown,
+# and a stale universe is SHORT, which makes the predicate condemn MORE. A
+# deployment that could widen it freely could widen the condemning-direction
+# staleness of a published claim, which is not a deployment's call to make. The
+# env may only NARROW the window; anything above the cap clamps to it, and a
+# value that is not a positive number is ignored rather than being allowed to
+# disable the bound.
+_UNIVERSE_MEMO_TTL_CEILING_SECONDS = 900.0
+
+
+def _memo_ttl_seconds() -> float:
+    raw = os.getenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS")
+    if raw is None:
+        return _UNIVERSE_MEMO_TTL_CEILING_SECONDS
+    try:
+        requested = float(raw)
+    except (TypeError, ValueError):
+        return _UNIVERSE_MEMO_TTL_CEILING_SECONDS
+    if requested <= 0:
+        return _UNIVERSE_MEMO_TTL_CEILING_SECONDS
+    return min(requested, _UNIVERSE_MEMO_TTL_CEILING_SECONDS)
+
+
+_UNIVERSE_MEMO_TTL_SECONDS = _memo_ttl_seconds()
 
 _UNIVERSE_MEMO_LOCK = threading.Lock()
 

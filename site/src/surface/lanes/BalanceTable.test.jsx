@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -246,10 +246,19 @@ describe("BalanceTable — the withholding rule is the backend's, not the page's
     for (const symbol of ["HEX", "WETH", "USDC"]) {
       expect(screen.getByText(symbol)).toBeInTheDocument();
     }
-    // Presented, so they raise the unpriced-holdings disclosure and no row is
-    // filed under the withheld heading.
-    expect(screen.queryByRole("note", { name: /mass distribution/i })).toBeNull();
-    expect(screen.queryByText(/Delivered by mass distribution/i)).toBeNull();
+    // The LIST half of the regression, and it has to be asserted on text
+    // content: role="note" takes no accessible name from its content, so a
+    // `queryByRole("note", { name: ... })` matches nothing whatever the page
+    // renders and would pass over the very bug this pins.
+    const withheldNote = screen.queryAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
+    expect(withheldNote).toBeUndefined();
+    // And they are in the holdings list rather than under a withheld heading:
+    // one list is rendered, and all three rows are in it.
+    const lists = document.querySelectorAll(".ps-balance-list");
+    expect(lists).toHaveLength(1);
+    for (const symbol of ["HEX", "WETH", "USDC"]) {
+      expect(within(lists[0]).getByText(symbol)).toBeInTheDocument();
+    }
   });
 
   it("treats a missing verdict as PRESENTED, never as disposed", () => {
@@ -260,6 +269,10 @@ describe("BalanceTable — the withholding rule is the backend's, not the page's
       <BalanceTable machine={machine([row({ token_symbol: "NOVERDICT", delivery_shape: "fan_out_all" })])} />,
     );
     expect(screen.getByText("NOVERDICT")).toBeInTheDocument();
-    expect(screen.queryByText(/Delivered by mass distribution/i)).toBeNull();
+    const note = screen.queryAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
+    expect(note).toBeUndefined();
+    const lists = document.querySelectorAll(".ps-balance-list");
+    expect(lists).toHaveLength(1);
+    expect(within(lists[0]).getByText("NOVERDICT")).toBeInTheDocument();
   });
 });

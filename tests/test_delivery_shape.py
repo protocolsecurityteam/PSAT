@@ -1268,3 +1268,27 @@ def test_the_memo_is_per_protocol_and_the_clear_hook_empties_it(db_session, monk
     delivery_shape.clear_protocol_universe_memo()
     delivery_shape.record_protocol_reference(db_session, protocol_id=first.id, requests=[_request()])
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        (None, delivery_shape._UNIVERSE_MEMO_TTL_CEILING_SECONDS),
+        ("60", 60.0),
+        # Above the ceiling clamps DOWN. The window bounds how long a verdict
+        # may rest on a universe that has since grown, and a stale universe is
+        # SHORT, which condemns more — so widening it is not a deployment's
+        # call.
+        ("86400", delivery_shape._UNIVERSE_MEMO_TTL_CEILING_SECONDS),
+        # Neither of these may disable the bound.
+        ("0", delivery_shape._UNIVERSE_MEMO_TTL_CEILING_SECONDS),
+        ("-1", delivery_shape._UNIVERSE_MEMO_TTL_CEILING_SECONDS),
+        ("not-a-number", delivery_shape._UNIVERSE_MEMO_TTL_CEILING_SECONDS),
+    ],
+)
+def test_the_universe_memo_ttl_can_only_be_narrowed(monkeypatch, env, expected):
+    if env is None:
+        monkeypatch.delenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("PSAT_UNIVERSE_MEMO_TTL_SECONDS", env)
+    assert delivery_shape._memo_ttl_seconds() == expected

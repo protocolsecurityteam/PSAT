@@ -612,7 +612,18 @@ describe("derive — sheet disposition (1.4.0 airdrop_determined)", () => {
     expect(d.usd).toBe(0);
     expect(d.usdText).toBe("$0");
     expect(d.label).toBe("airdrop-delivered");
+    // The SUBSTANCE of the sentence, not just that it mentions a distribution.
+    // The superseded note said these holdings are "not presented as positions
+    // this protocol holds", which describes what the page does and lets a
+    // reader assume the $0 covers them. It does not, and the two clauses that
+    // say so are the ones worth pinning: the holdings are still held, and this
+    // document does not value them.
+    expect(d.reason).toMatch(/STILL HELD/);
+    expect(d.reason).toMatch(/not_determined/);
+    expect(d.reason).toMatch(/PRICES/);
     expect(d.reason).toMatch(/mass distribution/i);
+    // And it must NOT revert to describing the page's own behaviour.
+    expect(d.reason).not.toMatch(/not presented as positions/i);
     // A DELIVERY claim. Real tokens arrive this way, so none of these words may
     // appear beside the figure.
     for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {

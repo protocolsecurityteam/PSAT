@@ -156,11 +156,22 @@ export function BalanceTable({ machine }) {
       </div>
       {airdropped.length > 0 ? (
         <>
+          {/*
+            States the THRESHOLD, not a size. The superseded wording said every
+            delivery "went to hundreds of recipients at once", which is false of
+            42 of its own carriers on the reference corpus — the smallest
+            disposed fan-out measured is 27 — and it used the recipient meter,
+            which is not what the threshold is calibrated on. The meter is
+            same-token transfer LOGS in one transaction, and a log count is an
+            upper bound on distinct recipients; the only claim the evidence
+            carries is that every delivery cleared the published threshold.
+          */}
           <div className="ps-balance-coverage" role="note">
             {airdropped.length} {airdropped.length === 1 ? "balance" : "balances"} below arrived only by mass
-            distribution — every delivery on record went to hundreds of recipients at once. They are listed because
-            the contract does hold them, and kept out of the holdings above because arriving in an airdrop is not
-            taking a position. This is a statement about how the balance arrived and not about what it is worth.
+            distribution — every delivery on record carried at least the published fan-out threshold of same-token
+            transfer logs in one transaction. They are listed because the contract does hold them, and kept out of
+            the holdings above because arriving in a distribution is not taking a position. This is a statement
+            about how the balance arrived and not about what it is worth.
           </div>
           <div className="ps-balance-list">
             {airdropped.map((b, i) => (
