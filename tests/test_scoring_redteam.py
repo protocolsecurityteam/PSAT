@@ -2009,8 +2009,8 @@ def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
 
 
 def test_a_rounding_floor_reading_is_not_a_proven_zero():
-    """``usd_value`` is a scaled decimal column: a holding below its last digit
-    stores as 0.00.
+    """``usd_value`` is a scaled decimal column: a holding below its last digit —
+    the eighteenth decimal — stores as zero.
 
     Publishing that as a determined 0.0 mints a proven-empty balance sheet out of
     a price lookup that answered "below the column's resolution".

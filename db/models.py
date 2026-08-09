@@ -1706,7 +1706,11 @@ class ContractBalance(Base):
     # 0.00, which no reader can tell from a holding of nothing. The column stores
     # what the producer computed and rounds nothing.
     usd_value: Mapped[float | None] = mapped_column(Numeric(38, 18), nullable=True)
-    price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+    # Same 18 digits, and for a sharper reason than symmetry with the column
+    # above: 0 is the literal the writers use for "no price known", so a quote
+    # finer than the column can hold would be stored as that same 0 and read as
+    # a price that never answered. The column holds the quote it was given.
+    price_usd: Mapped[float | None] = mapped_column(Numeric(38, 18), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     # The address this quantity was read at, verbatim from the write-point
     # local. NULL = not_determined (every row written before this column
@@ -1810,7 +1814,7 @@ class ContractBalanceLatest(Base):
     decimals: Mapped[int] = mapped_column(Integer)
     raw_balance: Mapped[str] = mapped_column(String)
     usd_value: Mapped[float | None] = mapped_column(Numeric(38, 18))
-    price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8))
+    price_usd: Mapped[float | None] = mapped_column(Numeric(38, 18))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     observed_address: Mapped[str | None] = mapped_column(String(42))
     block_number: Mapped[int | None] = mapped_column(BigInteger)

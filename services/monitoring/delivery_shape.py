@@ -52,6 +52,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func as _sql_func
@@ -84,6 +85,7 @@ from utils.balance_status import (
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
+    USD_CRUMB_THRESHOLD,
 )
 from utils.rpc import get_transaction_receipt
 
@@ -318,21 +320,43 @@ def clear_creation_block_cache() -> None:
 
 
 def is_unpriced(usd_value: Any, raw_balance: Any) -> bool:
-    """Whether a holding reading carries no USD figure that stands up.
+    """Whether a holding reading carries no USD figure this population acts on.
 
-    ``None`` is the plain not-priced state. A stored 0 alongside a non-zero
-    quantity is the same state wearing a number: the writers store 0 where no
-    quote resolved, and a zero dollar figure over a non-zero balance is an
-    absent price rather than a holding worth nothing.
+    Three ways to land here, and the third is a rule rather than an absence:
+
+    * ``None`` — the plain not-priced state, and an unparseable cell with it.
+    * a stored 0 alongside a non-zero quantity — the same state wearing a
+      number: the writers store 0 where no quote resolved, and a zero dollar
+      figure over a non-zero balance is an absent price rather than a holding
+      worth nothing. A 0 over a ZERO quantity is not that; it is a holding of
+      nothing, priced, and it is kept.
+    * a figure below :data:`~utils.balance_status.USD_CRUMB_THRESHOLD` — a
+      crumb. Priced, real, and too small for this population to tell from the
+      dust an address is sent unasked. Strictly below: $0.009 is a crumb,
+      $0.01 is a position.
+
+    The crumb arm is explicit because it used to be an accident. Until
+    ``usd_value`` widened to ``numeric(38,18)`` a small figure was stored rounded
+    to the nearest cent and a resulting 0.00 arrived at the second arm; the
+    column, not this predicate, was what excluded it, and the cut it drew sat at
+    half a cent rather than at one. The population is now defined by a rule that
+    can be changed rather than by a column's scale — see
+    :data:`~utils.balance_status.USD_CRUMB_THRESHOLD` for which readings that
+    moves.
+
+    :func:`disposition_requests` filters the same rule in SQL before the rows
+    reach here; that predicate must stay a superset of this one.
     """
     if usd_value is None:
         return True
     try:
-        priced = float(usd_value)
-    except (TypeError, ValueError):
+        priced = Decimal(str(usd_value))
+    except (ArithmeticError, TypeError, ValueError):
         return True
-    if priced != 0.0:
+    if priced >= USD_CRUMB_THRESHOLD:
         return False
+    if priced != 0:
+        return True
     try:
         return int(raw_balance or 0) != 0
     except (TypeError, ValueError):
@@ -409,7 +433,16 @@ def disposition_requests(
         .filter(
             Contract.protocol_id == protocol_id,
             ContractBalanceLatest.token_address.isnot(None),
-            or_(ContractBalanceLatest.usd_value.is_(None), ContractBalanceLatest.usd_value == 0),
+            # The SQL half of :func:`is_unpriced`, and deliberately a SUPERSET of
+            # it: everything the predicate can answer True for must survive to
+            # reach it. Crumbs are in the set because the crumb rule is a rule
+            # now — before the column widened, a figure under half a cent arrived
+            # here as a stored 0.00 and this clause could test equality with zero
+            # and be right by luck.
+            or_(
+                ContractBalanceLatest.usd_value.is_(None),
+                ContractBalanceLatest.usd_value < USD_CRUMB_THRESHOLD,
+            ),
         )
     )
     if contract_ids is not None:

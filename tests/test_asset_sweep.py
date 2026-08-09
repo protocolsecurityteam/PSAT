@@ -1927,6 +1927,70 @@ class TestEscalationAndRecording:
         )
         assert scales == {"contract_balances": 18, "contract_balances_latest": 18}
 
+    def test_the_price_column_holds_eighteen_fractional_digits_too(self, db_session):
+        """The quote is a fact of the same fineness as the figure computed from it.
+
+        ``price_usd`` was ``numeric(20,8)``, and 0 is the literal the writers use
+        for "no price known" — so a token quoted below ``1e-8`` had its real quote
+        stored as that same 0 and became indistinguishable from a price that never
+        answered. Asserted against ``information_schema`` rather than the model,
+        for the reason above: the ORM declaration and the migrated column can
+        disagree, and the view can be left rebuilt on the old type.
+        """
+        scales = dict(
+            db_session.execute(
+                text(
+                    "SELECT table_name, numeric_scale FROM information_schema.columns "
+                    "WHERE table_name IN ('contract_balances', 'contract_balances_latest') "
+                    "AND column_name = 'price_usd'"
+                )
+            ).all()
+        )
+        assert scales == {"contract_balances": 18, "contract_balances_latest": 18}
+
+    def test_a_quote_below_the_eighth_decimal_reaches_the_column_intact(self, db_session):
+        """The ambiguity the widening closes, pinned on a stored row.
+
+        ``2.5e-12`` is an ordinary quote for a token with a supply in the
+        trillions. The narrow column stored it as ``0.00000000`` — the same value
+        the producer writes for "no price known" — so the row could no longer say
+        which of the two it was. Re-read from Postgres, never off the ORM object.
+        """
+        _proto, contract = self._fixture(db_session, address="0x" + "c2" * 20)
+        recorded = record_observation(
+            db_session,
+            subject=ObservationSubject.of_contract(contract),
+            chain_id=1,
+            native=NativeReading(wei=None, block_number=None, failed=True, price_usd=None, symbol="ETH", name="Ether"),
+            page=page(
+                [
+                    {
+                        "token_address": TOKEN,
+                        "token_name": "T",
+                        "token_symbol": "T",
+                        "decimals": 18,
+                        "balance": 10**24,
+                        "price_usd": 2.5e-12,
+                        "usd_value": (10**24 / 10**18) * 2.5e-12,
+                    }
+                ]
+            ),
+            writer=BALANCE_WRITER_TVL,
+        )
+        db_session.flush()
+        db_session.expire_all()
+        stored = (
+            db_session.query(ContractBalance)
+            .filter(ContractBalance.fetch_id == recorded.fetch.id, ContractBalance.token_address == TOKEN)
+            .one()
+        )
+
+        assert stored.price_usd == Decimal("0.000000000002500000")
+        # The point of the widening: the quote is no longer the literal that
+        # means "nobody priced this".
+        assert stored.price_usd != Decimal(0)
+        assert round(float(stored.price_usd), 8) == 0.0
+
     def test_the_fetch_row_is_filed_against_the_contract_whose_address_was_read(self, db_session):
         proto, impl = self._fixture(db_session, address="0x" + "a7" * 20)
         proxy = Contract(protocol_id=proto.id, address="0x" + "a8" * 20, chain="ethereum", contract_name="Proxy")

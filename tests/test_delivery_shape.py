@@ -14,6 +14,8 @@ request SEQUENCE these tests count is the one production issues.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from db.models import (
@@ -30,6 +32,7 @@ from services.monitoring.delivery_evidence import DELIVERY_ENTRIES_RETAINED, loa
 from services.monitoring.delivery_shape import (
     DispositionRequest,
     disposition_requests,
+    is_unpriced,
     scan_delivery_shape,
 )
 from tests.conftest import requires_postgres
@@ -47,6 +50,7 @@ from utils.balance_status import (
     TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
     TOKEN_REFERENCE_IN_UNIVERSE,
     TOKEN_REFERENCE_NOT_DETERMINED,
+    USD_CRUMB_THRESHOLD,
 )
 
 pytestmark = requires_postgres
@@ -564,6 +568,110 @@ def test_population_is_uniform_over_unpriced_readings_on_priced_sheets(db_sessio
     # one are both in — a $0 figure beside a non-zero quantity is an absent
     # price, not a holding worth nothing.
     assert set(requests[0].tokens) == {OTHER_TOKEN, _addr("70ce6")}
+
+
+class TestTheCrumbRule:
+    """A sub-cent holding leaves the population by RULE, not by rounding.
+
+    Both arms of the filter are covered here — the SQL predicate that selects the
+    rows and the Python predicate that decides them — because they answer the same
+    question about the same column from two sides, and a divergence between them
+    is invisible from either.
+    """
+
+    def test_the_boundary_is_a_cent_and_it_falls_on_the_keep_side(self):
+        assert USD_CRUMB_THRESHOLD == Decimal("0.01")
+        # A cent is a position and is not in the unpriced population.
+        assert is_unpriced(Decimal("0.01"), "1000") is False
+        # A tenth of a cent under it is a crumb and is.
+        assert is_unpriced(Decimal("0.009"), "1000") is True
+        # Both sides of the boundary at full column resolution, so the
+        # comparison is pinned exactly and not to within a rounding.
+        assert is_unpriced(Decimal("0.009999999999999999"), "1000") is True
+        assert is_unpriced(Decimal("0.010000000000000001"), "1000") is False
+
+    def test_a_crumb_is_filtered_where_the_storage_column_no_longer_hides_it(self, db_session):
+        """The semantics change this rule exists to absorb, stated as a test.
+
+        $0.004 is a real price on a real quantity. Under ``numeric(20,2)`` the
+        column stored it as 0.00 and the filter — which tested equality with zero
+        — excluded it as an absent price, correctly by accident. The column now
+        holds ``0.004000000000000000``, so nothing about the STORAGE excludes it
+        any more and the row would have walked back into the population. It is
+        excluded here because the threshold says so, and the assertion below is on
+        the value re-read from Postgres, so what is under test is a stored crumb
+        and not a Python literal.
+        """
+        proto = _protocol(db_session, "crumb")
+        holder = _contract(db_session, proto.id, _addr("ce"))
+        crumb, cent, rich = _addr("c1"), _addr("c2"), _addr("c3")
+        _readings(
+            db_session,
+            holder,
+            observed_address=holder.address,
+            rows=[(crumb, Decimal("0.004")), (cent, Decimal("0.01")), (rich, Decimal("575000000"))],
+        )
+        db_session.expire_all()
+        stored = {r.token_address: r.usd_value for r in db_session.query(ContractBalance).all()}
+        assert stored[crumb] == Decimal("0.004000000000000000")
+        assert stored[crumb] != Decimal(0)
+
+        requests = disposition_requests(db_session, protocol_id=proto.id)
+
+        assert len(requests) == 1
+        assert set(requests[0].tokens) == {crumb}
+
+    def test_the_band_the_rounding_used_to_round_UP_is_now_a_crumb(self):
+        """The one place the rule is not the old behaviour, pinned deliberately.
+
+        ``numeric(20,2)`` rounded half away from zero, so its effective cut sat at
+        HALF a cent: $0.004 stored as 0.00 and was excluded, but $0.009 stored as
+        0.01 and was kept as a position. The rule is a cent, so ``[$0.005, $0.01)``
+        changes side. This test exists so that change is a recorded decision and
+        not something a later reader discovers in a population diff.
+        """
+        assert is_unpriced(Decimal("0.005"), "1000") is True
+        assert is_unpriced(Decimal("0.009"), "1000") is True
+        # Unmoved at either end of the band: below it was a crumb then and is one
+        # now; a cent exactly was a position then and is one now.
+        assert is_unpriced(Decimal("0.004"), "1000") is True
+        assert is_unpriced(Decimal("0.01"), "1000") is False
+
+    def test_a_zero_figure_over_a_zero_quantity_is_a_priced_nothing_and_stays(self):
+        """The crumb arm does not swallow the earned negative beside it.
+
+        A zero over a zero quantity is a holding of nothing that was PRICED —
+        the one reading below the threshold that is a fact rather than a gap.
+        """
+        assert is_unpriced(Decimal(0), "0") is False
+        assert is_unpriced(Decimal(0), "1000") is True
+
+    def test_an_absent_or_unreadable_figure_is_still_unpriced(self):
+        assert is_unpriced(None, "1000") is True
+        assert is_unpriced("not a number", "1000") is True
+        # An unreadable QUANTITY beside a zero figure cannot clear the row
+        # either: the second arm needs the quantity to decide, and fails closed.
+        assert is_unpriced(Decimal(0), "not a number") is True
+
+    def test_the_sql_arm_admits_everything_the_python_arm_can_answer_for(self, db_session):
+        """The pre-filter must be a SUPERSET, or the predicate never sees the row.
+
+        Driven from the predicate itself rather than from a second copy of the
+        threshold: every value the Python arm calls unpriced must survive the
+        query, and the crumb is the one that only started needing to once the
+        column stopped rounding it away.
+        """
+        proto = _protocol(db_session, "superset")
+        holder = _contract(db_session, proto.id, _addr("5e"))
+        values = [Decimal("0.004"), Decimal("0.009999999999999999"), Decimal(0), None]
+        rows = [(_addr(f"5{i}"), v) for i, v in enumerate(values)]
+        _readings(db_session, holder, observed_address=holder.address, rows=rows)
+
+        requests = disposition_requests(db_session, protocol_id=proto.id)
+
+        expected = {token for token, v in rows if is_unpriced(v, "1000")}
+        assert expected == {token for token, _ in rows}
+        assert set(requests[0].tokens) == expected
 
 
 def test_population_refuses_a_holder_whose_asset_list_is_a_prefix(db_session):
