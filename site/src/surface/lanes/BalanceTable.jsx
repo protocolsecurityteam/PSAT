@@ -100,6 +100,7 @@ function BalanceRow({ row }) {
 
 export function BalanceTable({ machine }) {
   const [hideDust, setHideDust] = useState(true);
+  const [showWithheld, setShowWithheld] = useState(false);
 
   const note = coverageNote(machine);
 
@@ -155,30 +156,47 @@ export function BalanceTable({ machine }) {
         {filtered.length === 0 && <div className="ps-lane-empty">No holdings priced above $10</div>}
       </div>
       {airdropped.length > 0 ? (
-        <>
-          {/*
-            States the THRESHOLD, not a size. The superseded wording said every
-            delivery "went to hundreds of recipients at once", which is false of
-            42 of its own carriers on the reference corpus — the smallest
-            disposed fan-out measured is 27 — and it used the recipient meter,
-            which is not what the threshold is calibrated on. The meter is
-            same-token transfer LOGS in one transaction, and a log count is an
-            upper bound on distinct recipients; the only claim the evidence
-            carries is that every delivery cleared the published threshold.
-          */}
-          <div className="ps-balance-coverage" role="note">
-            {airdropped.length} {airdropped.length === 1 ? "balance" : "balances"} below arrived only by mass
-            distribution — every delivery on record carried at least the published fan-out threshold of same-token
-            transfer logs in one transaction. They are listed because the contract does hold them, and kept out of
-            the holdings above because arriving in a distribution is not taking a position. This is a statement
-            about how the balance arrived and not about what it is worth.
-          </div>
-          <div className="ps-balance-list">
-            {airdropped.map((b, i) => (
-              <BalanceRow key={i} row={b} />
-            ))}
-          </div>
-        </>
+        // COLLAPSED, NOT SUPPRESSED. The rows stay reachable in one click and
+        // keep their label; only the default density changes.
+        <div className="ps-balance-withheld">
+          <button
+            type="button"
+            className="ps-balance-withheld-toggle"
+            aria-expanded={showWithheld}
+            onClick={() => setShowWithheld((v) => !v)}
+          >
+            <span>
+              {airdropped.length} {airdropped.length === 1 ? "token" : "tokens"} arrived by mass distribution and{" "}
+              {airdropped.length === 1 ? "is not a position" : "are not positions"}
+            </span>
+            <span className="ps-balance-caret">{showWithheld ? "▾" : "▸"}</span>
+          </button>
+          {showWithheld ? (
+            <>
+              {/*
+                States the THRESHOLD, not a size. The superseded wording said
+                every delivery "went to hundreds of recipients at once", which is
+                false of 42 of its own carriers on the reference corpus — the
+                smallest disposed fan-out measured is 27 — and it used the
+                recipient meter, which is not what the threshold is calibrated
+                on. The meter is same-token transfer LOGS in one transaction, and
+                a log count is an upper bound on distinct recipients; the only
+                claim the evidence carries is that every delivery cleared the
+                published threshold.
+              */}
+              <div className="ps-balance-coverage" role="note">
+                Every delivery on record carried at least the published fan-out threshold of same-token transfer
+                logs in one transaction, so the contract holds these but did not take them as positions — a
+                statement about how the balance arrived, not about what it is worth.
+              </div>
+              <div className="ps-balance-list">
+                {airdropped.map((b, i) => (
+                  <BalanceRow key={i} row={b} />
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );

@@ -1022,6 +1022,46 @@
   padding: 2px 0;
 }
 
+/* Withheld (mass-distributed) balances: one summary line by default, the rows
+   one click away. */
+.ps-balance-withheld {
+  margin-top: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  padding-top: 4px;
+}
+
+.ps-balance-withheld-toggle {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px 0;
+  text-align: left;
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: color 120ms;
+}
+
+.ps-balance-withheld-toggle:hover {
+  color: #94a3b8;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+.ps-balance-caret {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: #475569;
+}
+
 /* Clickable principal cards */
 .ps-principal-clickable {
   cursor: pointer;

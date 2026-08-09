@@ -24,6 +24,13 @@ const machine = (balances, over = {}) => ({
   ...over,
 });
 
+// Two buttons can be on screen at once (dust filter + withheld disclosure), so
+// every selector here picks by text content rather than by "the button".
+const dustButton = () =>
+  screen.getAllByRole("button").find((b) => /Hide priced|Show all/i.test(b.textContent));
+const withheldToggle = () =>
+  screen.getAllByRole("button").find((b) => /mass distribution/i.test(b.textContent));
+
 describe("BalanceTable — a measured zero is not an unknown value", () => {
   it("renders a MEASURED $0 holding as a measured zero", async () => {
     render(
@@ -164,7 +171,7 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
       delivery_shape_basis: "own-history scan 0..25710573",
     });
 
-  it("still renders the row — a suppressed row is a deletion nobody can see", () => {
+  it("still renders the row — a suppressed row is a deletion nobody can see", async () => {
     render(
       <BalanceTable
         machine={machine([row(), junk()], {
@@ -178,17 +185,32 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
         })}
       />,
     );
+    // Collapsed is not suppressed: the row is one click away and nothing else
+    // stands between the reader and it.
+    await userEvent.click(withheldToggle());
     expect(screen.getByText("JUNK")).toBeInTheDocument();
   });
 
-  it("labels it by DELIVERY SHAPE and never calls it worthless", () => {
+  it("labels it by DELIVERY SHAPE and never calls it worthless", async () => {
     render(<BalanceTable machine={machine([row(), junk()])} />);
-    const note = screen.getAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
+    // Real tokens arrive this way (uniETH at fan-out 101, HEX at 199/399/399),
+    // so any of these words would be a claim the evidence does not carry — of
+    // the collapsed summary as much as of the expanded note.
+    const forbidden = [/spam/i, /scam/i, /junk/i, /worthless/i];
+    const summary = withheldToggle();
+    expect(summary).toBeDefined();
+    for (const word of forbidden) {
+      expect(summary.textContent).not.toMatch(word);
+    }
+
+    await userEvent.click(summary);
+    const note = screen.getAllByRole("note").find((n) => /mass distribution|transfer logs/i.test(n.textContent));
     expect(note).toBeDefined();
     expect(note).toHaveTextContent(/not about what it is worth/i);
-    // Real tokens arrive this way (uniETH at fan-out 101, HEX at 199/399/399),
-    // so any of these words would be a claim the evidence does not carry.
-    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+    // The threshold, not a size: the claim is a log count in one transaction,
+    // never a recipient count.
+    expect(note).toHaveTextContent(/published fan-out threshold of same-token transfer logs/i);
+    for (const word of [...forbidden, /hundreds of recipients/i]) {
       expect(note.textContent).not.toMatch(word);
     }
   });
@@ -197,12 +219,48 @@ describe("BalanceTable — airdrop-delivered rows are labelled, never suppressed
     render(<BalanceTable machine={machine([row(), junk()])} />);
     // The dust button counts only the presented holdings: one priced $1,234 row
     // is above $10, so nothing is hidden by the filter.
-    expect(screen.getByRole("button")).toHaveTextContent("Hide priced <$10 (0)");
+    expect(dustButton()).toHaveTextContent("Hide priced <$10 (0)");
     // And the unpriced-shown note is about presented holdings too, so an
     // airdrop-delivered unpriced row must not raise it.
     expect(screen.queryByText(/unpriced holding is still listed/i)).toBeNull();
-    await userEvent.click(screen.getByRole("button"));
+    await userEvent.click(dustButton());
+    // Showing all PRESENTED holdings does not expand the withheld disclosure:
+    // the two controls are independent.
+    expect(screen.queryByText("JUNK")).toBeNull();
+    await userEvent.click(withheldToggle());
     expect(screen.getByText("JUNK")).toBeInTheDocument();
+  });
+
+  it("is collapsed to one counted line by default, and expands to the rows", async () => {
+    render(<BalanceTable machine={machine([row(), junk(), junk()])} />);
+    // The count is what the collapsed line carries.
+    expect(withheldToggle()).toHaveTextContent("2 tokens arrived by mass distribution and are not positions");
+    expect(withheldToggle()).toHaveAttribute("aria-expanded", "false");
+    // Collapsed: no withheld rows, and only the holdings list is rendered.
+    expect(screen.queryByText("JUNK")).toBeNull();
+    expect(document.querySelectorAll(".ps-balance-list")).toHaveLength(1);
+
+    await userEvent.click(withheldToggle());
+    expect(withheldToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByText("JUNK")).toHaveLength(2);
+    expect(document.querySelectorAll(".ps-balance-list")).toHaveLength(2);
+
+    await userEvent.click(withheldToggle());
+    expect(screen.queryByText("JUNK")).toBeNull();
+  });
+
+  it("says one token in the singular", () => {
+    render(<BalanceTable machine={machine([row(), junk()])} />);
+    expect(withheldToggle()).toHaveTextContent("1 token arrived by mass distribution and is not a position");
+  });
+
+  it("renders no withheld section at all when nothing is disposed", () => {
+    // NEGATIVE CONTROL: a permanent empty disclosure would be noise on every
+    // contract that holds only real positions.
+    render(<BalanceTable machine={machine([row(), row({ token_symbol: "TWO" })])} />);
+    expect(withheldToggle()).toBeUndefined();
+    expect(document.querySelector(".ps-balance-withheld")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/mass distribution/i);
   });
 
   it("presents a has_direct_delivery and a not_determined row normally", () => {
@@ -249,9 +307,11 @@ describe("BalanceTable — the withholding rule is the backend's, not the page's
     // The LIST half of the regression, and it has to be asserted on text
     // content: role="note" takes no accessible name from its content, so a
     // `queryByRole("note", { name: ... })` matches nothing whatever the page
-    // renders and would pass over the very bug this pins.
-    const withheldNote = screen.queryAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
-    expect(withheldNote).toBeUndefined();
+    // renders and would pass over the very bug this pins. The withheld section
+    // is collapsed by default, so its COLLAPSED line is what a regression would
+    // show — assert on the whole render, not just the notes it expands to.
+    expect(withheldToggle()).toBeUndefined();
+    expect(document.body.textContent).not.toMatch(/mass distribution/i);
     // And they are in the holdings list rather than under a withheld heading:
     // one list is rendered, and all three rows are in it.
     const lists = document.querySelectorAll(".ps-balance-list");
@@ -269,8 +329,8 @@ describe("BalanceTable — the withholding rule is the backend's, not the page's
       <BalanceTable machine={machine([row({ token_symbol: "NOVERDICT", delivery_shape: "fan_out_all" })])} />,
     );
     expect(screen.getByText("NOVERDICT")).toBeInTheDocument();
-    const note = screen.queryAllByRole("note").find((n) => /mass distribution/i.test(n.textContent));
-    expect(note).toBeUndefined();
+    expect(withheldToggle()).toBeUndefined();
+    expect(document.body.textContent).not.toMatch(/mass distribution/i);
     const lists = document.querySelectorAll(".ps-balance-list");
     expect(lists).toHaveLength(1);
     expect(within(lists[0]).getByText("NOVERDICT")).toBeInTheDocument();
