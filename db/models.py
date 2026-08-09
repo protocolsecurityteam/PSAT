@@ -1669,7 +1669,11 @@ class ContractBalance(Base):
     token_symbol: Mapped[str | None] = mapped_column(String(50), nullable=True)
     decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
     raw_balance: Mapped[str] = mapped_column(String, nullable=False)  # stored as string to avoid overflow
-    usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
+    # 18 fractional digits because that is the resolution the QUANTITY is quoted
+    # at: a cent-scaled column silently republished every sub-cent holding as
+    # 0.00, which no reader can tell from a holding of nothing. The column stores
+    # what the producer computed and rounds nothing.
+    usd_value: Mapped[float | None] = mapped_column(Numeric(38, 18), nullable=True)
     price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     # The address this quantity was read at, verbatim from the write-point
@@ -1757,7 +1761,7 @@ class ContractBalanceLatest(Base):
     token_symbol: Mapped[str | None] = mapped_column(String(50))
     decimals: Mapped[int] = mapped_column(Integer)
     raw_balance: Mapped[str] = mapped_column(String)
-    usd_value: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    usd_value: Mapped[float | None] = mapped_column(Numeric(38, 18))
     price_usd: Mapped[float | None] = mapped_column(Numeric(20, 8))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     observed_address: Mapped[str | None] = mapped_column(String(42))

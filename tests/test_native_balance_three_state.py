@@ -15,6 +15,7 @@ downstream.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, cast
 
 import pytest
@@ -639,9 +640,12 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
         assert _view_ids(db_session, c.id) == {proxy_row.id}
         assert self_row.id not in _view_ids(db_session, c.id)
 
-        # And the per-contract sum is that one row, never 10 + 999.
+        # And the per-contract sum is that one row, never 10 + 999. Compared as a
+        # NUMBER: the sum stays exact Decimal all the way through, but its scale
+        # is the storage column's and carries no claim, so pinning the rendering
+        # would pin the column width rather than the arithmetic under test.
         graph = build_authority_graph(db_session, proto.id)
-        assert str(graph.balance[c.address.lower()]) == "999.00"
+        assert graph.balance[c.address.lower()] == Decimal("999.00")
 
 
 @requires_postgres

@@ -2009,10 +2009,11 @@ def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
 
 
 def test_a_rounding_floor_reading_is_not_a_proven_zero():
-    """``usd_value`` is numeric(20,2): $0.0035 stores as 0.00.
+    """``usd_value`` is a scaled decimal column: a holding below its last digit
+    stores as 0.00.
 
     Publishing that as a determined 0.0 mints a proven-empty balance sheet out of
-    a price lookup that answered "below half a cent".
+    a price lookup that answered "below the column's resolution".
     """
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="12345")]})
@@ -2020,6 +2021,51 @@ def test_a_rounding_floor_reading_is_not_a_proven_zero():
     assert "asset" not in plane.per_asset.get("k", {})
     assert plane.sheet_state("k") == P.SHEET_BELOW_RESOLUTION
     assert plane.total("k") is None
+
+
+def test_a_sub_resolution_priced_reading_keeps_its_magnitude_through_the_reduction():
+    """Pins the ROUNDING guard, and only it.
+
+    A holding worth $2e-9 is a determined NON-ZERO reading — the price answered
+    and the quantity is not zero — and the plane's presentation rounding is six
+    decimals. A rounding that ran to completion would replace the measured figure
+    with 0.0: a bound tighter than anything witnessed, and (with the asset list
+    proven whole) the input from which ``sheet_state``'s magnitude arm would read
+    an empty sheet. What is asserted here is that the figure SURVIVES; the state
+    arm is asserted separately below, because with the magnitude preserved this
+    case cannot tell the two guards apart.
+    """
+    plane = P.ValuePlane()
+    plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(2e-9, rid=1, raw="1")]})
+    plane.asset_set_proven_complete["k"] = SCANNED
+    assert plane.per_asset_state["k"]["asset"] == P.ASSET_PRICED
+    assert plane.per_asset["k"]["asset"] == 2e-9
+    assert plane.sheet_state("k") != P.SHEET_PROVEN_EMPTY
+    assert plane.sheet_state("k") == P.SHEET_PRICED
+    assert plane.total("k") == 2e-9
+    assert plane.proven_empty_refusal("k") is None  # the completeness conjunct is SATISFIED here
+
+
+def test_a_priced_reading_whose_magnitude_is_zero_is_still_never_a_proven_empty_sheet():
+    """Pins the STATE arm, and only it.
+
+    The magnitude is 0.0 here and the asset list is proven whole, so every input
+    the magnitude arm can see says "empty" — the exact shape any future rounding,
+    truncation or unit change could hand ``sheet_state``. The reading's STATE
+    says a price answered on a non-zero quantity, and that is the witness the
+    branch is required to read: publishing ``proven_empty`` from this plane would
+    assert "every asset's quantity is proven zero" of a sheet whose quantity was
+    proven otherwise. The two guards are independent and each closes the hazard
+    on its own; this case is what fails if the state arm is dropped.
+    """
+    plane = value_plane(
+        per_asset={"k": {"asset": 0.0}},
+        per_asset_state={"k": {"asset": P.ASSET_PRICED}},
+        asset_set_proven_complete={"k": SCANNED},
+    )
+    assert plane.proven_empty_refusal("k") is None  # nothing refuses the empty; only the state stands in its way
+    assert plane.sheet_state("k") != P.SHEET_PROVEN_EMPTY
+    assert plane.sheet_state("k") == P.SHEET_PRICED
 
 
 def test_a_proven_zero_QUANTITY_is_the_only_witness_of_an_empty_sheet():

@@ -96,11 +96,14 @@ UNCONSUMED_REASON_UNCLASSIFIED = (
 )
 
 # --- what one (entity, asset) reading proves ---------------------------------
-# ``usd_value`` is numeric(20,2), so 0.00 is the STORAGE FLOOR and not a number:
-# a $0.0035 holding stores as 0.00 indistinguishably from a $0.00 one. The
-# quantity is what separates them — a proven-zero raw balance is worth zero at
-# any price — so a 0.00 reading is only ever a determined zero when the quantity
-# proves it, and is otherwise below the column's resolution.
+# ``usd_value`` is a scaled decimal column, so a 0.00 reading may be its STORAGE
+# FLOOR rather than a number — a holding below the column's last digit stores
+# indistinguishably from a holding of nothing. The column is numeric(38,18)
+# today, which puts that floor below any dollar figure a price feed can produce,
+# but the discrimination stays: the QUANTITY is what separates the two cases — a
+# proven-zero raw balance is worth zero at any price — so a 0.00 reading is only
+# ever a determined zero when the quantity proves it, and is otherwise below the
+# column's resolution.
 ASSET_PRICED = "priced"
 ASSET_BELOW_RESOLUTION = "priced_below_resolution"
 ASSET_PROVEN_ZERO = "proven_zero"
@@ -222,6 +225,21 @@ def _float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# The presentation rounding this plane applies to dollar figures. Six decimals
+# tames float-sum noise on figures a consumer reads, and that is all it is for —
+# so it is not allowed to change what the figure PROVES. A determined non-zero
+# holding rounded to 0.0 stops being a number and starts being an absence, which
+# is a different claim about the entity than the one that was measured; below the
+# rounding's own resolution the unrounded figure is therefore what stands.
+_PRESENTATION_DECIMALS = 6
+
+
+def _round_presented(value: float) -> float:
+    """Round for presentation, never onto zero."""
+    rounded = round(value, _PRESENTATION_DECIMALS)
+    return rounded if rounded != 0.0 or value == 0.0 else value
 
 
 @dataclass
@@ -419,14 +437,25 @@ class ValuePlane:
 
         ``priced`` — at least one determined non-zero reading, so ``total`` is a
         floor over what was priced. ``priced_below_resolution`` — every price
-        lookup that answered landed on the ``numeric(20,2)`` floor, which is a
-        holding of *at most* half a cent per row and never a proven zero.
+        lookup that answered landed on the storage column's floor, which is a
+        holding of *at most* that floor per row and never a proven zero.
         ``unpriced`` — rows exist and no lookup answered. ``proven_empty`` — every
         asset's QUANTITY is proven zero AND the asset list those quantities cover
         is proven whole, the only witness under which 0.00 is a number rather
         than a rounding artefact. ``airdrop_determined`` — every asset left on
         the sheet either arrived only in mass distributions or is a witnessed
         zero. ``no_rows`` — nothing observed.
+
+        The priced branch asks the reading's STATE first and its magnitude only
+        as a second carrier. A determined non-zero reading small enough for some
+        presentation rounding to render it 0.0 is still a determined non-zero
+        reading, and a branch that could only see the float would let it fall
+        through to the branches below — where, with the completeness conjunct
+        satisfied, it would publish ``proven_empty``: "every asset's quantity is
+        proven zero" asserted of a sheet whose quantity was proven NOT zero. The
+        magnitude may be rounded; the witness may not be. The magnitude arm stays
+        because a plane may carry values without the state map beside them, and a
+        determined non-zero dollar figure is itself a priced reading's witness.
 
         ``proven_empty`` and ``airdrop_determined`` are DIFFERENT witnesses and
         never collapse: "nothing ever arrived" is not "what arrived arrived as a
@@ -447,7 +476,7 @@ class ValuePlane:
         canonical = self.canonical(key)
         values = self.per_asset.get(canonical) or {}
         states = self.per_asset_state.get(canonical) or {}
-        if any(value != 0.0 for value in values.values()):
+        if any(state == ASSET_PRICED for state in states.values()) or any(value != 0.0 for value in values.values()):
             return SHEET_PRICED
         if any(state == ASSET_BELOW_RESOLUTION for state in states.values()):
             return SHEET_BELOW_RESOLUTION
@@ -489,7 +518,7 @@ class ValuePlane:
         if state in SHEET_NOT_DETERMINED:
             return None
         assets = self.per_asset.get(self.canonical(key)) or {}
-        return round(sum(sorted(assets.values())), 6)
+        return _round_presented(sum(sorted(assets.values())))
 
     def trimming_total(self, key: str) -> float | None:
         """:meth:`total`, except that a DISPOSED sheet trims nothing.
@@ -792,7 +821,7 @@ def _reduce_observations(
         counters[f"assets_{state}"] += 1
         per_asset_state[key][asset] = state
         if value is not None:
-            per_asset[key][asset] = round(value, 6)
+            per_asset[key][asset] = _round_presented(value)
 
     reduction: dict[str, Any] = dict(sorted(counters.items()))
     reduction["stale_high_water_usd_dropped"] = round(stale_usd, 2)
@@ -1320,10 +1349,10 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
                 "assets": reduction[f"assets_{ASSET_BELOW_RESOLUTION}"],
                 "entities": sheet_states[SHEET_BELOW_RESOLUTION],
                 "note": (
-                    "usd_value is numeric(20,2), so a $0.0035 holding stores as 0.00. Such a "
-                    "reading answers 'below half a cent', never 'holds nothing', and an entity "
-                    "whose every priced reading is one has NO determined total. Only a "
-                    "proven-zero QUANTITY witnesses an empty sheet"
+                    "usd_value is a scaled decimal column, so a holding below its last digit "
+                    "stores as 0.00. Such a reading answers 'below the column's resolution', "
+                    "never 'holds nothing', and an entity whose every priced reading is one has "
+                    "NO determined total. Only a proven-zero QUANTITY witnesses an empty sheet"
                 ),
                 "proven_zero_quantity_assets": reduction.get(f"assets_{ASSET_PROVEN_ZERO}", 0),
                 "proven_zero_arm_exercised": bool(reduction.get(f"assets_{ASSET_PROVEN_ZERO}")),
@@ -1355,8 +1384,8 @@ def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUn
         "sheet_states": dict(sorted(sheet_states.items())),
         "sheet_states_reading": (
             "priced = a determined non-zero reading, so the total is a floor; "
-            "priced_below_resolution = every price that answered landed on the numeric(20,2) "
-            "floor and the total is NOT a number; unpriced = no price answered; proven_empty = "
+            "priced_below_resolution = every price that answered landed on the storage column's "
+            "resolution floor and the total is NOT a number; unpriced = no price answered; proven_empty = "
             "every quantity proven zero, the only state in which 0.00 is a number; "
             "airdrop_determined = every reading left on the sheet arrived only in mass "
             "distributions or is a witnessed zero, which is a DIFFERENT witness from proven_empty "

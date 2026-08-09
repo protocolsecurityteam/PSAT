@@ -801,7 +801,10 @@ def record_observation(
                 decimals=18,
                 raw_balance=str(native.wei),
                 price_usd=native.price_usd,
-                usd_value=round(native_usd, 2) if native_usd is not None else None,
+                # Written at the precision it was computed at, like the token
+                # leg beside it: a quantity times a price is the whole fact, and
+                # rounding it here would republish a sub-cent holding as nothing.
+                usd_value=native_usd,
                 observed_address=observed_address,
                 block_number=native.block_number,
                 fetch_id=fetch.id,

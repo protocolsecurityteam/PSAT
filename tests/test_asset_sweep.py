@@ -11,7 +11,10 @@ nothing".
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
+from sqlalchemy import text
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol
 from services.monitoring import asset_sweep as A
@@ -1757,6 +1760,87 @@ class TestEscalationAndRecording:
         assert token_rows[0].usd_value is None and token_rows[0].price_usd is None
         assert token_rows[0].source == ASSET_SET_SOURCE_CHAIN_LOG_SWEEP
         assert token_rows[0].raw_balance == "500"
+
+    def test_a_sub_cent_holding_reaches_the_column_at_the_precision_it_was_computed_at(self, db_session):
+        """The write is where a priced fact used to die.
+
+        ``usd_value`` was ``numeric(20,2)`` and the native leg rounded to 2dp
+        before it, so $0.00156 — an integer quantity at a real price — arrived as
+        0.00, which no reader can tell from a holding of nothing. Both halves are
+        pinned: the producer writes what it computed, and the column keeps it.
+        Asserted off a row re-read from Postgres, never off the ORM object, so
+        what is under test is what was STORED.
+        """
+        _proto, contract = self._fixture(db_session, address="0x" + "c1" * 20)
+        # 7.8e-7 ETH at $2000 = $0.00156, and 1 wei at $2000 = $2e-15 — one
+        # figure the old 2dp column erased, one below even six decimals.
+        native = NativeReading(
+            wei=780_000_000_000, block_number=99, failed=False, price_usd=2000.0, symbol="ETH", name="Ether"
+        )
+        recorded = record_observation(
+            db_session,
+            contract=contract,
+            chain_id=1,
+            native=native,
+            page=page(
+                [
+                    {
+                        "token_address": TOKEN,
+                        "token_name": "T",
+                        "token_symbol": "T",
+                        "decimals": 18,
+                        "balance": 1,
+                        "price_usd": 1.9,
+                        "usd_value": 1.9e-9,
+                    }
+                ]
+            ),
+            writer=BALANCE_WRITER_TVL,
+        )
+        db_session.flush()
+        db_session.expire_all()
+        stored = {
+            r.token_address: r.usd_value
+            for r in db_session.query(ContractBalance).filter(ContractBalance.fetch_id == recorded.fetch.id).all()
+        }
+
+        native_usd = (780_000_000_000 / 1e18) * 2000.0
+        # The producer rounds nothing. The column's own last digit is the 18th
+        # fractional one, so the stored figure is the computed one quantized
+        # THERE and nowhere coarser — the assertion says which resolution is
+        # allowed to be lossy, rather than accepting whatever came back.
+        assert stored[None] == Decimal(str(native_usd)).quantize(Decimal("1e-18"))
+        assert stored[None] == Decimal("0.001560000000000000")
+        # And it is the case the old column destroyed — a figure that rounds to
+        # $0.00 at the cent yet is not zero.
+        assert round(float(stored[None]), 2) == 0.0
+        assert stored[None] != Decimal(0)
+
+        # The token leg carried full precision already; the column is what was
+        # throwing it away, including below the value plane's own six decimals.
+        assert stored[TOKEN] == Decimal(str(1.9e-9)).quantize(Decimal("1e-18"))
+        assert stored[TOKEN] == Decimal("0.000000001900000000")
+        assert round(float(stored[TOKEN]), 6) == 0.0
+        assert stored[TOKEN] != Decimal(0)
+
+    def test_the_columns_hold_eighteen_fractional_digits_and_the_view_projects_them(self, db_session):
+        """The storage claim, asserted against Postgres rather than the model.
+
+        The ORM declaration and the migrated column can disagree — an ALTER that
+        silently no-ops, or a view left rebuilt on the old type, would leave every
+        precision assertion above passing on a widened Python value that the
+        database still truncates.
+        """
+        scales = dict(
+            db_session.execute(
+                text(
+                    "SELECT table_name, numeric_scale FROM information_schema.columns "
+                    "WHERE table_name IN ('contract_balances', 'contract_balances_latest') "
+                    "AND column_name = 'usd_value'"
+                )
+            ).all()
+        )
+        assert scales == {"contract_balances": 18, "contract_balances_latest": 18}
 
     def test_the_fetch_row_is_filed_against_the_contract_whose_address_was_read(self, db_session):
         proto, impl = self._fixture(db_session, address="0x" + "a7" * 20)
