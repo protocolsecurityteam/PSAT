@@ -34,6 +34,7 @@ from db.models import (  # noqa: E402
     PrincipalLabel,
     Protocol,
     TokenDeliveryEvidence,
+    TokenProtocolReference,
     UpgradeEvent,
 )
 from services.aggregations.company_overview import (  # noqa: E402
@@ -57,6 +58,9 @@ from utils.balance_status import (  # noqa: E402
     DELIVERY_SHAPE_FAN_OUT_ALL,
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     DELIVERY_SHAPE_NOT_DETERMINED,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 
 pytestmark = requires_postgres
@@ -2413,18 +2417,19 @@ def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_s
 
 
 def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_holding(db_session):
-    """§10.6.9. The row stays, carries its delivery shape, and is counted out loud.
+    """§10.6.9. The row stays, carries both shapes, and the disposition is counted.
 
-    Three rows on one account: one whose every recorded delivery was a mass
-    distribution, one with a direct delivery on record, and one nobody measured. Only
-    the first is disposed, and it is disposed by LABEL — never by removal, and never
-    by a claim about what it is worth.
+    Four rows on one account: one that meets every disposition conjunct, one with a
+    direct delivery on record, one nobody measured, and one that is airdrop-delivered
+    but named by the protocol's OWN discovery — the HEX / WETH / base USDC shape.
+    Only the first is disposed, and it is disposed by LABEL — never by removal, and
+    never by a claim about what it is worth.
     """
     p = _add_protocol(db_session, f"e2e-airdrop-{uuid.uuid4().hex[:8]}")
     addr = _addr("air1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Holder")
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Holder")
-    junk, real, unknown = _addr("airjunk"), _addr("airreal"), _addr("airunk")
+    junk, real, unknown, spared = _addr("airjunk"), _addr("airreal"), _addr("airunk"), _addr("airspared")
     fetch = ContractBalanceFetch(
         contract_id=c.id,
         chain_id=1,
@@ -2448,7 +2453,12 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
                 price_usd=usd,
                 observed_address=addr,
             )
-            for token, symbol, usd in ((junk, "JUNK", None), (real, "REAL", 700), (unknown, "UNK", None))
+            for token, symbol, usd in (
+                (junk, "JUNK", None),
+                (real, "REAL", 700),
+                (unknown, "UNK", None),
+                (spared, "SPARED", None),
+            )
         ]
     )
     db_session.add_all(
@@ -2481,6 +2491,36 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
                 delivery_shape=DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
                 basis="scan 0..100",
             ),
+            TokenDeliveryEvidence(
+                chain_id=1,
+                holder_address=addr.lower(),
+                token_address=spared.lower(),
+                scanned_from_block=0,
+                measured_through_block=100,
+                deliveries=[{"tx": "0x04", "log_index": 1, "fan_out": 399, "fan_out_basis": "receipt"}],
+                delivery_count=1,
+                unreadable_deliveries=0,
+                min_fan_out=399,
+                fan_out_threshold_k=25,
+                delivery_shape=DELIVERY_SHAPE_FAN_OUT_ALL,
+                basis="scan 0..100",
+            ),
+        ]
+    )
+    db_session.add_all(
+        [
+            TokenProtocolReference(
+                protocol_id=p.id,
+                chain_id=1,
+                token_address=token.lower(),
+                reference_shape=shape,
+                universe_addresses=4,
+                basis="universe of 4 addresses, chain-blind",
+            )
+            for token, shape in (
+                (junk, TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE),
+                (spared, TOKEN_REFERENCE_IN_UNIVERSE),
+            )
         ]
     )
     db_session.commit()
@@ -2490,25 +2530,38 @@ def test_an_airdrop_delivered_row_is_published_labelled_and_not_presented_as_a_h
     by_symbol = {b["token_symbol"]: b for b in entry["balances"]}
 
     # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
-    assert set(by_symbol) == {"JUNK", "REAL", "UNK"}
-    # (b) LABELLED, and by delivery shape — with the evidence row's own basis.
+    assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
+    # (b) LABELLED on both planes — with the evidence row's own basis.
     assert by_symbol["JUNK"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
     assert by_symbol["JUNK"]["delivery_shape_basis"] == "scan 0..100"
-    # The two fail-closed directions: an earned negative and an unmeasured pair are
-    # kept apart, and NEITHER is disposed.
+    assert by_symbol["JUNK"]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert by_symbol["JUNK"]["disposition_state"] == "disposed"
+    # The three fail-closed directions: an earned negative, an unmeasured pair, and a
+    # mass-distributed token the protocol's own discovery names. NONE is disposed.
     assert by_symbol["REAL"]["delivery_shape"] == DELIVERY_SHAPE_HAS_DIRECT_DELIVERY
     assert by_symbol["UNK"]["delivery_shape"] == DELIVERY_SHAPE_NOT_DETERMINED
     assert by_symbol["UNK"]["delivery_shape_basis"] is None
-    # (c) COUNTED, as a named number rather than an inference from the rows.
+    assert by_symbol["UNK"]["reference_shape"] == TOKEN_REFERENCE_NOT_DETERMINED
+    assert by_symbol["SPARED"]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert by_symbol["SPARED"]["reference_shape"] == TOKEN_REFERENCE_IN_UNIVERSE
+    assert [by_symbol[s]["disposition_state"] for s in ("REAL", "UNK", "SPARED")] == ["presented"] * 3
+    # (c) COUNTED, as named numbers rather than an inference from the rows — and the
+    # two counts are DIFFERENT, which is the whole point: two rows arrived as mass
+    # distributions and only one of them is withheld.
     cov = entry["holdings_coverage"]
-    assert cov["airdrop_delivered_rows"] == 1
+    assert cov["airdrop_delivered_rows"] == 2
+    assert cov["disposed_rows"] == 1
     assert "worth" in cov["delivery_shape_reading"]
     # The priced row's dollars are untouched: delivery shape is not a price.
     assert entry["total_usd"] == 700.0
 
 
-def test_a_priced_airdrop_delivered_row_still_counts_toward_the_total(db_session):
+def test_a_priced_airdrop_delivered_row_is_presented_and_counts_toward_the_total(db_session):
     """A priced holding is a real dollar figure whatever the shape of its arrival.
+
+    Both other conjuncts hold here — mass-distributed AND absent from the protocol's
+    universe — and the price alone keeps the row a presented holding, because a
+    number was determined for it and delivery evidence cannot unmake that number.
 
     The census's ``fan_out_all`` readings are all unpriced today, so this shape does
     not occur on the corpus — which is exactly why it is pinned here rather than left
@@ -2558,12 +2611,25 @@ def test_a_priced_airdrop_delivered_row_still_counts_toward_the_total(db_session
             basis="scan 0..100",
         )
     )
+    db_session.add(
+        TokenProtocolReference(
+            protocol_id=p.id,
+            chain_id=1,
+            token_address=token.lower(),
+            reference_shape=TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+            universe_addresses=4,
+            basis="universe of 4 addresses, chain-blind",
+        )
+    )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     assert entry["balances"][0]["delivery_shape"] == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert entry["balances"][0]["reference_shape"] == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert entry["balances"][0]["disposition_state"] == "presented"
     assert entry["holdings_coverage"]["airdrop_delivered_rows"] == 1
+    assert entry["holdings_coverage"]["disposed_rows"] == 0
     assert entry["total_usd"] == 1234.0
 
 

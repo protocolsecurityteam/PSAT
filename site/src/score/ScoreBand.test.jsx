@@ -149,12 +149,53 @@ describe("ScoreBand — computed grade", () => {
     expect(badge.textContent.trim()).not.toBe("");
   });
 
-  it("puts no disposition badge on the shipped document", async () => {
-    // NEGATIVE CONTROL: 1.3.0 disposes nothing, so no row may grow the badge.
+  it("renders the disposition the shipped document actually carries, on that row alone", async () => {
+    // The 1.3.0 negative control ("nothing disposes, so no row may grow a
+    // badge") is stale: the shipped 1.4.0 document determines 13 sheets and
+    // exactly ONE of them publishes a ceiling under `airdrop_determined`. So the
+    // claim worth pinning is the positive — the page renders the state the
+    // document carries — and the negative that still has teeth is every other
+    // row, whose document names no disposition and must therefore show none.
+    const carriers = ETHERFI.findings
+      .map((f, i) => [
+        i,
+        (f.reach_sheet_ceiling_magnitudes || []).filter(
+          (m) => m?.ceiling_reason === "airdrop_determined" || m?.sheet_state === "airdrop_determined",
+        ),
+      ])
+      .filter(([, records]) => records.length > 0);
+    expect(carriers).toHaveLength(1);
+    const [carrierIndex] = carriers[0];
+
     const { container } = renderBand({ score: ETHERFI });
     await openBreakdown();
+    // The carrier sits in the tail, so the badge is only reachable once the
+    // summary is expanded — which is itself part of the claim.
+    await userEvent.setup().click(screen.getByRole("button", { name: /19 more/ }));
     const cells = [...container.querySelectorAll(".sc-val")];
-    expect(cells.some((c) => /airdrop/i.test(c.textContent))).toBe(false);
+    expect(cells).toHaveLength(ETHERFI.findings.length);
+    const badges = cells.map((c) =>
+      [...c.querySelectorAll(".sc-fl")].find((b) => /airdrop-delivered/i.test(b.textContent)),
+    );
+    // POSITIVE: the one row the document names, and it is that row.
+    expect(badges.filter(Boolean)).toHaveLength(1);
+    expect(badges.findIndex(Boolean)).toBe(carrierIndex);
+    const badge = badges[carrierIndex];
+    expect(badge.getAttribute("title")).toMatch(/mass distribution/i);
+    // Never a claim about worth: real tokens arrive this way too.
+    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
+      expect(badge.getAttribute("title")).not.toMatch(word);
+    }
+    // NEGATIVE, and still a real one: a row with no disposition in the document
+    // grows no badge, so the badge tracks published state rather than appearing
+    // wherever a value happens to be small or missing.
+    for (const [i, cell] of cells.entries()) {
+      if (i === carrierIndex) continue;
+      expect(ETHERFI.findings[i].reach_sheet_ceiling_magnitudes || []).not.toContainEqual(
+        expect.objectContaining({ ceiling_reason: "airdrop_determined" }),
+      );
+      expect(cell.textContent).not.toMatch(/airdrop/i);
+    }
   });
 
   it("tags a bound the producer proved and italicises an undetermined one — never $0", async () => {

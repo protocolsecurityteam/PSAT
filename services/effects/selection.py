@@ -50,6 +50,7 @@ from db.models import (
     Job,
     JobStage,
     JobStatus,
+    TokenProtocolReference,
     TvlSnapshot,
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
@@ -60,6 +61,9 @@ from utils.balance_status import (
     DELIVERY_SHAPE_FAN_OUT_ALL,
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     DELIVERY_SHAPE_NOT_DETERMINED,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
 from utils.logging import record_degraded
@@ -446,10 +450,109 @@ class AssetHolding(NamedTuple):
     #
     # The record is KEPT under every shape — a vanished row is an unwitnessed deletion,
     # and this record's EXISTENCE is what downstream reads as "this deployment holds
-    # this asset". ``fan_out_all`` is the one shape not presented as a holding, and it
+    # this asset". Delivery shape alone withholds nothing; a row leaves the holdings
+    # claim only under the full conjunction in :func:`disposed_from_holdings`, and it
     # is excluded at the consumption points rather than dropped here, so the exclusion
     # is visible in a labelled record rather than silent in a missing one.
     delivery_shape: str = DELIVERY_SHAPE_NOT_DETERMINED
+    # Whether this asset's address was found in the protocol's own discovered
+    # universe, as one of :data:`~utils.balance_status.TOKEN_REFERENCE_SHAPES`, read off the
+    # last ``token_protocol_reference`` row the producer measured. The second required
+    # conjunct — see :func:`disposed_from_holdings` for why this plane reads a stored
+    # verdict rather than assembling the universe itself, and what that costs.
+    reference_shape: str = TOKEN_REFERENCE_NOT_DETERMINED
+
+
+def disposed_from_holdings(*, delivery_shape: str, reference_shape: str, usd_value: float | None) -> bool:
+    """Does this holding leave the holdings CLAIM? The one definition, three conjuncts.
+
+    The predicate the scorer applies (``services.scoring.planes``
+    ``_resolve_asset_disposition``), landed here so the two planes cannot drift: a
+    row the score spares must not be pulled out of the page under it. Applying the
+    delivery conjunct alone was measured pulling 39 rows of HEX, WETH and base USDC
+    — real assets, airdrop-DELIVERED and in the protocol's own universe — out of the
+    presented holdings while the score kept every one of them.
+
+    1. ``usd_value is None``. A PRICED reading is never disposed: a dollar figure was
+       determined for it, and withdrawing it on evidence about how the token ARRIVED
+       would delete a measured number from the page. Deliberately weaker than the
+       scorer's arm, which also disposes a priced-below-resolution reading — this
+       plane keeps that row presented, which is the direction that shows a real
+       holding rather than hides one.
+    2. ``delivery_shape == fan_out_all``: every delivery on record was a mass
+       distribution. An earned negative and an unmeasured pair both keep the row.
+    3. ``reference_shape == absent_from_universe``: the address is not in the
+       protocol's discovered universe. A MISSING protocol-reference row is
+       ``not_determined`` and keeps the row presented — the producer not having
+       measured a pair is never read as the pair having been measured absent.
+
+    Two consequences of reading a stored verdict, stated because they are real and
+    not because they are harmless:
+
+    * **The verdict is up to one producer cycle STALE relative to the score.** The
+      scorer re-reads the live universe on every fold; this plane reads the last row
+      the producer's disposition phase wrote, because assembling the universe is a
+      measured 26.5 s object-storage read and cannot sit on an API path.
+    * **The reference conjunct is ANTI-MONOTONE** — discovery growing un-condemns.
+      So when the universe grows, this plane goes on excluding a token the score has
+      already spared until the next producer cycle refreshes the row: for at most one
+      cycle a REAL holding the protocol owns is not shown on the page. That is the
+      safe direction for the acceptance test, and it is still a real holding hidden.
+
+    The row itself is stored, labelled and published under every combination of these
+    states, so nothing vanishes from the record while the claim is withheld.
+    """
+    return (
+        usd_value is None
+        and delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
+        and reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    )
+
+
+def load_protocol_reference_shapes(session: Session, protocol_ids: Iterable[int]) -> dict[tuple[int, int, str], str]:
+    """``(protocol id, chain id, token address) -> reference shape``, as stored.
+
+    One batched read of the producer's own verdicts. The protocol stays IN the key
+    rather than being merged out: "is this address in the universe" is a question
+    about one protocol's discovery, and two protocols on one page answer it
+    independently.
+
+    Every key absent from the result is ``not_determined`` at the call sites, never
+    ``absent_from_universe``: this table says what the producer MEASURED, and a pair
+    it never measured is a pair nobody answered for.
+    """
+    ids = sorted({int(pid) for pid in protocol_ids if pid is not None})
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(
+            TokenProtocolReference.protocol_id,
+            TokenProtocolReference.chain_id,
+            TokenProtocolReference.token_address,
+            TokenProtocolReference.reference_shape,
+        ).where(TokenProtocolReference.protocol_id.in_(ids))
+    ).all()
+    return {
+        (int(protocol_id), int(chain_id), str(token or "").lower()): str(shape)
+        for protocol_id, chain_id, token, shape in rows
+    }
+
+
+def _merged_reference_shape(shapes: Iterable[str]) -> str:
+    """One reference shape for a (holder, asset) several accounts' rows contributed to.
+
+    Mirrors :func:`_merged_delivery_shape` and fails closed the same way. Any account
+    whose chain's reference row says ``in_universe`` SPARES the holding outright —
+    the scorer tests universe membership chain-blind, and an address discovered on
+    one chain is an address the protocol references. ``absent_from_universe`` needs
+    unanimity, and an empty contribution set is never vacuously unanimous.
+    """
+    seen = list(shapes)
+    if any(shape == TOKEN_REFERENCE_IN_UNIVERSE for shape in seen):
+        return TOKEN_REFERENCE_IN_UNIVERSE
+    if seen and all(shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE for shape in seen):
+        return TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    return TOKEN_REFERENCE_NOT_DETERMINED
 
 
 def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[str, tuple[AssetHolding, ...]]:
@@ -527,6 +630,7 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     # deployment are two holders here, and merging them would let one account's
     # evidence answer for the other's holding.
     facts = load_delivery_evidence(session, accounts)
+    references = load_protocol_reference_shapes(session, (protocol_id,))
     # (holder, asset) -> usd. ``None`` (unpriced) NEVER overwrites a priced value and
     # is never treated as 0 in the max: a copy of the same holding that happened to be
     # priced is strictly more informative.
@@ -538,6 +642,10 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
     holder_capped: dict[str, bool] = {}
     # (holder, asset) -> the shapes every contributing account's evidence answered.
     shapes: dict[tuple[str, str], list[str]] = {}
+    # (holder, asset) -> the reference verdict stored for every contributing account's
+    # CHAIN. Collected per row rather than per asset because one holding can be read on
+    # two chains, and the producer measures the universe question per chain.
+    reference_shapes: dict[tuple[str, str], list[str]] = {}
     for holder, asset, value, evidence_key, asset_set_status in kept:
         key = (holder, asset)
         if key not in best:
@@ -550,6 +658,11 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
                 best[key] = max(current, value)
         fact = None if evidence_key is None else facts.get(evidence_key)
         shapes.setdefault(key, []).append(fact.shape if fact is not None else DELIVERY_SHAPE_NOT_DETERMINED)
+        reference_shapes.setdefault(key, []).append(
+            TOKEN_REFERENCE_NOT_DETERMINED
+            if evidence_key is None
+            else references.get((protocol_id, evidence_key[0], evidence_key[2]), TOKEN_REFERENCE_NOT_DETERMINED)
+        )
         if _completeness_from_fetch(asset_set_status) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP:
             holder_capped[holder] = True
     out: dict[str, list[AssetHolding]] = {}
@@ -564,6 +677,7 @@ def _asset_holdings_by_deployment(session: Session, protocol_id: int) -> dict[st
                 usd_value=usd_value,
                 completeness=completeness,
                 delivery_shape=_merged_delivery_shape(shapes.get((holder, asset), ())),
+                reference_shape=_merged_reference_shape(reference_shapes.get((holder, asset), ())),
             )
         )
     return {holder: tuple(items) for holder, items in out.items()}
@@ -669,12 +783,13 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
     real deposit. Native balance (``token_address IS NULL``) is excluded — it is
     not an argument any token parameter can take.
 
-    An asset whose every recorded delivery into this account was a mass distribution
-    is not presented here either. This list is consumed as "tokens this contract
-    holds a position in", and delivery shape is the second, independent reason a row
-    fails that reading — the price filter above answers a different question and
-    cannot answer this one. The balance row is untouched and keeps its label; only
-    the presentation of it as a held position is withheld."""
+    Delivery shape does NOT filter this list, and the reason is the disposition
+    predicate's own first conjunct (:func:`disposed_from_holdings`): a PRICED reading
+    is never disposed. Every row here is priced above zero by the query itself, so a
+    holding on this list is a real dollar figure however it arrived — withdrawing one
+    because the token reached the account in a batch would delete a measured position
+    from the probe's input on evidence about delivery, which answers a different
+    question."""
     rows = session.execute(
         select(
             Contract.id,
@@ -704,20 +819,10 @@ def _token_holdings_by_contract(session: Session, protocol_id: int, limit: int) 
             ContractBalanceLatest.id.asc(),
         )
     ).all()
-    accounts = {
-        account
-        for _cid, chain, _token, _usd, observed, fetch_chain_id in rows
-        if (account := _delivery_account(fetch_chain_id, chain, observed)) is not None
-    }
-    facts = load_delivery_evidence(session, accounts)
     out: dict[int, list[str]] = {}
-    for contract_id, chain, token, _usd, observed, fetch_chain_id in rows:
+    for contract_id, _chain, token, _usd, _observed, _fetch_chain_id in rows:
         addr = _addr(token)
         if addr is None:
-            continue
-        account = _delivery_account(fetch_chain_id, chain, observed)
-        fact = None if account is None else facts.get((*account, addr))
-        if fact is not None and fact.is_airdrop_only:
             continue
         holdings = out.setdefault(contract_id, [])
         if addr not in holdings and len(holdings) < limit:
@@ -1432,18 +1537,23 @@ def select_candidates(
     # unpriced asset silently equivalent to no movement at all. A holding priced at
     # exactly 0 is likewise kept — a measured zero is evidence.
     #
-    # A holding whose delivery shape is ``fan_out_all`` is NOT presented here. Every
-    # delivery of that asset into that account on record was a mass distribution, and
-    # a mass distribution is not evidence the protocol took a position — so the row's
-    # existence must not be read as "this deployment holds this asset", which is
-    # exactly what membership of this tuple means downstream. The record itself is
-    # kept and labelled by ``_asset_holdings_by_deployment``, so the exclusion is
-    # readable off the labelled row rather than inferred from a row that vanished.
+    # A DISPOSED holding is not presented here — unpriced, every delivery on record a
+    # mass distribution, AND the address absent from the protocol's own universe. All
+    # three, because membership of this tuple is read downstream as "this deployment
+    # holds this asset" and that reading has to be wrong before the row comes out. The
+    # record itself is kept and labelled by ``_asset_holdings_by_deployment``, so the
+    # exclusion is readable off the labelled row rather than inferred from a row that
+    # vanished. See :func:`disposed_from_holdings` for the conjuncts and for what
+    # reading a stored universe verdict costs.
     value_holders = tuple(
         holding
         for holdings_for_deployment in _asset_holdings_by_deployment(session, protocol_id).values()
         for holding in holdings_for_deployment
-        if holding.delivery_shape != DELIVERY_SHAPE_FAN_OUT_ALL
+        if not disposed_from_holdings(
+            delivery_shape=holding.delivery_shape,
+            reference_shape=holding.reference_shape,
+            usd_value=holding.usd_value,
+        )
     )
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
     protocol_tvl = _protocol_tvl_usd(session, protocol_id)

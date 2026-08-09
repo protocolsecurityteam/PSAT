@@ -55,6 +55,7 @@ from db.models import (
     UpgradeEvent,
     derive_job_chain_id,
 )
+from services.effects.selection import disposed_from_holdings, load_protocol_reference_shapes
 from services.governance.primary_controller import assign_co_controllers, assign_primary_controllers
 from services.governance.principals import _build_company_function_entry
 from services.monitoring.delivery_evidence import load_delivery_evidence
@@ -63,6 +64,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     DELIVERY_SHAPE_FAN_OUT_ALL,
     DELIVERY_SHAPE_NOT_DETERMINED,
+    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name
 from utils.etherscan import TOKEN_BALANCE_PAGE_SIZE
@@ -1338,6 +1340,15 @@ def build_governance_view(
             if (account := _delivery_account(row)) is not None
         },
     )
+    # The second disposition conjunct, read as the producer last MEASURED it. This
+    # plane cannot assemble the protocol's universe itself — that is a 26.5 s
+    # object-storage read and this is an API path — so it reads the stored verdict and
+    # inherits its staleness; :func:`services.effects.selection.disposed_from_holdings`
+    # states what that costs.
+    reference_shapes = load_protocol_reference_shapes(
+        session,
+        {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None},
+    )
 
     # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
     # contract_id buckets. The flow/principal passes key on the primary impl
@@ -1530,6 +1541,7 @@ def build_governance_view(
         total_usd = 0.0
         unvalued_rows = 0
         airdrop_delivered_rows = 0
+        disposed_rows = 0
         at_page_cap = False
         if balance_contract:
             for b in balances_by_cid.get(balance_contract.id, []):
@@ -1545,8 +1557,25 @@ def build_governance_view(
                 token = (b.token_address or "").lower()
                 fact = delivery_facts.get((*account, token)) if account and token else None
                 delivery_shape = fact.shape if fact is not None else DELIVERY_SHAPE_NOT_DETERMINED
+                reference_shape = (
+                    reference_shapes.get(
+                        (balance_contract.protocol_id, account[0], token), TOKEN_REFERENCE_NOT_DETERMINED
+                    )
+                    if account and token and balance_contract.protocol_id is not None
+                    else TOKEN_REFERENCE_NOT_DETERMINED
+                )
                 if delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL:
                     airdrop_delivered_rows += 1
+                # The DISPOSITION, which is the delivery shape AND the universe verdict
+                # AND the reading being unpriced — never the delivery shape alone. The
+                # two counts are published side by side because they answer different
+                # questions: how many rows arrived in a batch, and how many rows that
+                # is enough to stop presenting as a position.
+                disposed = disposed_from_holdings(
+                    delivery_shape=delivery_shape, reference_shape=reference_shape, usd_value=usd
+                )
+                if disposed:
+                    disposed_rows += 1
                 balances_list.append(
                     {
                         "token_symbol": b.token_symbol,
@@ -1584,16 +1613,28 @@ def build_governance_view(
                         # every delivery on record was a mass distribution and says
                         # nothing at all about what the holding is worth.
                         #
-                        # The row is PUBLISHED under every shape. A consumer that
-                        # declines to present a ``fan_out_all`` row as a holding has
-                        # the label to say so with; a suppressed row would be an
-                        # unwitnessed deletion nobody downstream could see.
+                        # The row is PUBLISHED under every shape, and this shape ALONE
+                        # withholds nothing: HEX, WETH and base USDC are all
+                        # airdrop-delivered on this corpus and all real holdings. The
+                        # withholding predicate is ``disposition_state`` below.
                         "delivery_shape": delivery_shape,
                         # The evidence row's own basis string, carried verbatim so a
                         # consumer quoting the scope quotes the carrier. ``None``
                         # where no evidence row exists, which is what
                         # ``not_determined`` means here.
                         "delivery_shape_basis": (fact.basis if fact is not None else None),
+                        # Whether this token was found in the protocol's own discovered
+                        # universe, one of ``utils.balance_status.TOKEN_REFERENCE_SHAPES``,
+                        # read off the last verdict the producer measured. A pair with
+                        # no stored row is ``not_determined`` and therefore stays a
+                        # presented holding.
+                        "reference_shape": reference_shape,
+                        # The published verdict, so no consumer has to re-derive the
+                        # conjunction (and get it wrong): ``disposed`` only where all
+                        # three conjuncts hold, ``presented`` otherwise. The row is
+                        # here either way — a disposed row is withheld from the
+                        # holdings CLAIM, never from the record.
+                        "disposition_state": ("disposed" if disposed else "presented"),
                     }
                 )
                 # Delivery shape does NOT gate this sum. A priced holding is a real
@@ -1622,15 +1663,23 @@ def build_governance_view(
             # whenever this is non-zero — independently of truncation.
             "unvalued_rows": unvalued_rows,
             # Rows every recorded delivery of which was a mass distribution. A NAMED
-            # count, published as a zero when there are none, so a consumer reads the
+            # count, published as a zero when there are none. It is a DELIVERY count
+            # and not an exclusion count — the two differ by every real token the
+            # protocol was airdropped, which on this corpus is 39 rows of HEX, WETH
+            # and base USDC.
+            "airdrop_delivered_rows": airdrop_delivered_rows,
+            # Rows actually withheld from the holdings claim: airdrop-delivered AND
+            # absent from the protocol's own universe AND unpriced. Always
+            # ``<= airdrop_delivered_rows``. Published so a consumer reads the
             # exclusion off the payload instead of inferring it from rows that are
             # present but not presented.
-            "airdrop_delivered_rows": airdrop_delivered_rows,
+            "disposed_rows": disposed_rows,
             "delivery_shape_reading": (
-                "delivery_shape states how a balance ARRIVED and never what it is worth; "
-                "fan_out_all means every delivery on record was a mass distribution, which is "
-                "why the row is not presented as a position — real tokens are airdropped too, "
-                "and the rows are kept and labelled rather than removed"
+                "delivery_shape states how a balance ARRIVED and never what it is worth, and it "
+                "withholds nothing on its own — real tokens are airdropped too (HEX, WETH, USDC "
+                "on this corpus). A row is withheld from the holdings claim only when it is "
+                "fan_out_all AND absent from the protocol's discovered universe AND unpriced; "
+                "read disposition_state per row. Withheld rows are kept and labelled, never removed"
             ),
         }
 
