@@ -16,9 +16,17 @@ from __future__ import annotations
 
 import pytest
 
-from db.models import Contract, ContractBalance, ContractBalanceFetch, Protocol, TokenDeliveryEvidence
+from db.models import (
+    Contract,
+    ContractBalance,
+    ContractBalanceFetch,
+    Protocol,
+    TokenDeliveryEvidence,
+    TokenProtocolReference,
+)
 from services.monitoring import delivery_shape
 from services.monitoring.asset_sweep import TRANSFER_BATCH_TOPIC0, TRANSFER_SINGLE_TOPIC0, TRANSFER_TOPIC0
+from services.monitoring.delivery_evidence import DELIVERY_ENTRIES_RETAINED, load_delivery_evidence
 from services.monitoring.delivery_shape import (
     DispositionRequest,
     disposition_requests,
@@ -36,6 +44,9 @@ from utils.balance_status import (
     DELIVERY_SHAPE_HAS_DIRECT_DELIVERY,
     DELIVERY_SHAPE_NOT_DETERMINED,
     NATIVE_STATUS_PROVEN_NONZERO,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 
 pytestmark = requires_postgres
@@ -699,3 +710,343 @@ def test_a_pair_at_the_cap_is_still_metered(db_session, wire):
     assert row.delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
     assert row.unreadable_deliveries == 0
     assert len(wire.receipt_calls) == at
+
+
+# --- the basis names the row's own extent -----------------------------------
+
+
+def test_the_basis_names_the_union_extent_and_never_the_passs_window(db_session, wire):
+    """A stored claim and the extent it names cannot disagree.
+
+    The steady-state pass covers a few hundred blocks; the claim covers
+    millions. A basis quoting the pass would narrate a scope inside which the
+    deciding delivery of the stored positive does not even lie — the
+    all-quantifier's own scope, wrong on the row that publishes it. The basis is
+    composed from ``scanned_from_block`` and ``measured_through_block`` at every
+    write for exactly that reason.
+    """
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+    assert f"blocks {CREATION}..{HEAD}" in _facts(db_session)[(HOLDER, TOKEN)].basis
+
+    # A second pass reads a 200-block window at the far end of the chain. Its
+    # window is not the claim; the union is.
+    wire.head = HEAD + 200
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert int(wire.get_logs_calls[-1]["fromBlock"], 16) == HEAD + 1
+    assert f"blocks {CREATION}..{HEAD + 200}" in row.basis
+    assert f"blocks {HEAD + 1}.." not in row.basis
+    assert row.scanned_from_block == CREATION
+    assert row.measured_through_block == HEAD + 200
+
+
+def test_a_cycle_that_finds_nothing_still_repairs_the_stored_basis(db_session, wire):
+    """The repair path, and it costs no chain request.
+
+    A row whose sentence was authored under an older rule is rewritten by a
+    normal cycle rather than by hand: the writer re-derives the basis from the
+    row's own extent columns even when the pass adds no delivery and moves no
+    cursor.
+    """
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    row.basis = "delivery shape over blocks 999999..1000000 on chain 1; a window, not a claim"
+    db_session.flush()
+    measured_at = row.measured_at
+
+    second = scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    repaired = _facts(db_session)[(HOLDER, TOKEN)]
+    assert f"blocks {CREATION}..{HEAD}" in repaired.basis
+    assert second.get_logs == 0 and second.receipts == 0
+    # Re-deriving a sentence is not a new observation, so the row is not re-dated.
+    assert repaired.measured_at == measured_at
+
+
+def test_the_basis_carries_no_per_pass_cost_note(db_session, wire):
+    """A cost is a fact about a pass; the basis is a fact about a claim.
+
+    Accreting one into the other made the string grow per cycle and describe a
+    scan that is not the one the claim rests on. Cost is logged instead.
+    """
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    basis = _facts(db_session)[(HOLDER, TOKEN)].basis
+    assert "getLogs" not in basis
+    assert "scan cost" not in basis
+    assert "K=25" in basis
+    # The meter is named for what it counts.
+    assert "LOGS" in basis
+
+
+# --- the stored blob is bounded ---------------------------------------------
+
+
+def test_an_abandoned_pair_records_a_compact_marker_not_every_delivery(db_session, wire):
+    """A pair too heavy to meter is a COUNT plus a sample, never a blob.
+
+    One entry per delivery put 518,723 of them and 40 MB of JSONB into a single
+    optimism row on the reference corpus — none of it metered, so none of it
+    said anything the count and the marker do not. The row must still carry how
+    many deliveries were seen and that zero were metered, which is what holds
+    the verdict at ``not_determined``.
+    """
+    many = 200
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=n, block=900_000 + n, log_index=n) for n in range(1, many + 1)]
+
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.delivery_shape == DELIVERY_SHAPE_NOT_DETERMINED
+    assert row.delivery_count == many
+    assert row.unreadable_deliveries == many
+    assert len(row.deliveries) == DELIVERY_ENTRIES_RETAINED
+    assert all(entry["fan_out"] is None for entry in row.deliveries)
+    assert all(entry["fan_out_basis"] == DELIVERY_FAN_OUT_BASIS_UNREADABLE for entry in row.deliveries)
+    assert wire.receipt_calls == []
+
+
+def test_a_fat_stored_row_is_shrunk_by_the_next_ordinary_cycle(db_session, wire):
+    """The migration path for rows an unbounded writer left behind.
+
+    Through the producer, on the cycle's own budget: the writer rewrites a
+    stored list that predates the retention bound, and the scalars — which are
+    the record — are carried, never recounted from the truncated list.
+    """
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    fat = _facts(db_session)[(HOLDER, TOKEN)]
+    fat.deliveries = [
+        {"tx": _tx(n), "block": 905_000 + n, "log_index": n, "fan_out": None, "fan_out_basis": "receipt_unreadable"}
+        for n in range(1, 5_001)
+    ]
+    fat.delivery_count = 5_000
+    fat.unreadable_deliveries = 5_000
+    fat.min_fan_out = None
+    fat.delivery_shape = DELIVERY_SHAPE_NOT_DETERMINED
+    db_session.flush()
+
+    wire.head = HEAD + 200
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert len(row.deliveries) == DELIVERY_ENTRIES_RETAINED
+    # The counts are the record and they are carried, not recounted.
+    assert row.delivery_count == 5_000
+    assert row.unreadable_deliveries == 5_000
+    assert row.delivery_shape == DELIVERY_SHAPE_NOT_DETERMINED
+
+
+def test_the_reader_never_selects_the_delivery_blob(db_session, wire):
+    """``DeliveryFact`` carries no delivery list, so the API path must not read one.
+
+    Deserialising the JSONB for rows nothing reads it from measured 0.86 s on
+    the reference corpus, all of it spent on a column the caller never sees.
+    """
+    from sqlalchemy import event
+
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.commit()
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        facts = load_delivery_evidence(db_session.expire_all() or db_session, [(CHAIN, HOLDER)])
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    assert facts[(CHAIN, HOLDER, TOKEN)].shape == DELIVERY_SHAPE_FAN_OUT_ALL
+    selects = [s for s in statements if "token_delivery_evidence" in s]
+    assert selects, "the loader issued no query against the evidence table"
+    # The exact column reference: ``unreadable_deliveries`` is a scalar the
+    # fact does carry, and a bare substring test would match it.
+    assert all("token_delivery_evidence.deliveries" not in s for s in selects)
+
+
+# --- a window that cannot be proven whole -----------------------------------
+
+
+def test_a_truncated_window_writes_no_evidence_for_the_pairs_it_covered(db_session, wire, monkeypatch):
+    """The fail-closed abort, and it is total.
+
+    A page that reaches the result cap is indistinguishable from one the upstream
+    cut short, so the fetcher bisects and — at the floor — refuses. Every pair
+    that window covered is abandoned: no row, not a shorter delivery set, not a
+    partial all-quantifier. The logs that DID come back cannot be given a
+    completeness they lack, and the delivery a truncated page dropped is exactly
+    the one that would have refuted the positive.
+    """
+    # Two deliveries in ONE block, at a cap of two: no bisect can separate them,
+    # so every window containing them returns a page at the cap and the scan
+    # reaches the bisect floor still unable to prove the window whole.
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_RESULT_CAP", 2)
+    wire.logs = [
+        _log(token=TOKEN, holder=HOLDER, tx=1, block=950_000, log_index=1),
+        _log(token=TOKEN, holder=HOLDER, tx=2, block=950_000, log_index=2),
+    ]
+    wire.receipts = {_tx(n): _receipt(token=TOKEN, same_token_transfers=1) for n in (1, 2)}
+
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    assert _facts(db_session) == {}
+    assert wire.receipt_calls == []
+
+
+def test_a_truncated_window_never_advances_an_existing_pairs_cursor(db_session, wire, monkeypatch):
+    """An abort leaves the earlier claim exactly as it was earned.
+
+    Advancing the cursor over a window nobody proved whole would widen a
+    published extent by blocks that were never read.
+    """
+    wire.logs = [_log(token=TOKEN, holder=HOLDER, tx=1, block=910_000, log_index=1)]
+    wire.receipts = {_tx(1): _receipt(token=TOKEN, same_token_transfers=700)}
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+    before = _facts(db_session)[(HOLDER, TOKEN)]
+    assert before.delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
+
+    monkeypatch.setattr(delivery_shape, "DISPOSITION_RESULT_CAP", 2)
+    wire.head = HEAD + 100_000
+    wire.logs += [
+        _log(token=TOKEN, holder=HOLDER, tx=3, block=HEAD + 50_000, log_index=1),
+        _log(token=TOKEN, holder=HOLDER, tx=4, block=HEAD + 50_000, log_index=2),
+    ]
+    wire.receipts[_tx(3)] = _receipt(token=TOKEN, same_token_transfers=1)
+    wire.receipts[_tx(4)] = _receipt(token=TOKEN, same_token_transfers=1)
+
+    scan_delivery_shape(db_session, [_request()], rpc_url_for=_rpc_url_for)
+    db_session.flush()
+
+    row = _facts(db_session)[(HOLDER, TOKEN)]
+    assert row.measured_through_block == HEAD
+    assert row.delivery_count == 1
+    assert row.delivery_shape == DELIVERY_SHAPE_FAN_OUT_ALL
+    assert f"blocks {CREATION}..{HEAD}" in row.basis
+
+
+# --- the protocol-reference verdict -----------------------------------------
+
+
+def _references(session) -> dict[tuple[int, str], TokenProtocolReference]:
+    return {(row.chain_id, row.token_address): row for row in session.query(TokenProtocolReference).all()}
+
+
+class _Universe:
+    """A stand-in for ``distill.ProtocolUniverse`` — the three fields read here."""
+
+    def __init__(self, addresses: set[str]) -> None:
+        self.addresses = frozenset(addresses)
+        self.sources = {"test": len(addresses)}
+        self.basis = "test universe"
+
+
+def test_an_unbuildable_universe_condemns_nothing(db_session, monkeypatch):
+    """``None`` from the universe loader is fail-closed, and it is honoured.
+
+    A universe that could not be assembled whole is a SHORT one, and the
+    predicate it feeds condemns what is ABSENT — so a short universe condemns
+    MORE. Every token lands ``not_determined``; nothing may be pulled from a
+    sheet on the strength of an absence from a universe nobody built.
+    """
+    import services.scoring.distill as distill
+
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: None)
+    proto = _protocol(db_session, "unbuildable")
+
+    written = delivery_shape.record_protocol_reference(
+        db_session,
+        protocol_id=proto.id,
+        requests=[_request(tokens=(TOKEN, OTHER_TOKEN))],
+    )
+    db_session.flush()
+
+    assert written == 2
+    rows = _references(db_session)
+    assert {row.reference_shape for row in rows.values()} == {TOKEN_REFERENCE_NOT_DETERMINED}
+    assert all(row.universe_addresses == 0 for row in rows.values())
+    assert not [row for row in rows.values() if row.reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE]
+    assert all("could not be assembled whole" in row.basis for row in rows.values())
+
+
+def test_a_universe_loader_that_raises_reads_the_same_as_one_that_refuses(db_session, monkeypatch):
+    """An assembly that raised is an assembly that did not happen."""
+    import services.scoring.distill as distill
+
+    def _boom(session, protocol_id):
+        raise RuntimeError("object storage unreachable")
+
+    monkeypatch.setattr(distill, "load_protocol_universe", _boom)
+    proto = _protocol(db_session, "raising")
+
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_NOT_DETERMINED
+
+
+def test_a_named_token_is_in_the_universe_and_an_unnamed_one_is_absent(db_session, monkeypatch):
+    import services.scoring.distill as distill
+
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe({TOKEN}))
+    proto = _protocol(db_session, "named")
+
+    delivery_shape.record_protocol_reference(
+        db_session, protocol_id=proto.id, requests=[_request(tokens=(TOKEN, OTHER_TOKEN))]
+    )
+    db_session.flush()
+
+    rows = _references(db_session)
+    assert rows[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert rows[(CHAIN, OTHER_TOKEN)].reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+    assert rows[(CHAIN, OTHER_TOKEN)].universe_addresses == 1
+
+
+def test_discovery_growth_withdraws_an_absence(db_session, monkeypatch):
+    """The anti-monotone direction, and it is why this table is refreshed.
+
+    ``absent_from_universe`` is a verdict against the universe of the day. A
+    later cycle whose discovery names the address must be able to take it back —
+    the opposite discipline from the delivery-evidence plane, whose rows accrete.
+    """
+    import services.scoring.distill as distill
+
+    proto = _protocol(db_session, "growth")
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe({OTHER_TOKEN}))
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+    assert _references(db_session)[(CHAIN, TOKEN)].reference_shape == TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE
+
+    monkeypatch.setattr(distill, "load_protocol_universe", lambda session, protocol_id: _Universe({OTHER_TOKEN, TOKEN}))
+    delivery_shape.record_protocol_reference(db_session, protocol_id=proto.id, requests=[_request()])
+    db_session.flush()
+
+    row = _references(db_session)[(CHAIN, TOKEN)]
+    assert row.reference_shape == TOKEN_REFERENCE_IN_UNIVERSE
+    assert row.universe_addresses == 2
+    assert db_session.query(TokenProtocolReference).count() == 1

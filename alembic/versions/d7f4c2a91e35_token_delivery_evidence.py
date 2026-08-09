@@ -38,7 +38,12 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "token_delivery_evidence",
-        sa.Column("id", sa.BigInteger(), sa.Identity(always=False), primary_key=True),
+        # BIGSERIAL, matching the seven other BigInteger primary keys in this
+        # schema. An IDENTITY column here would read back as a default the ORM
+        # model does not declare, which is exactly what ``alembic check``
+        # compares — and a check that fails on the schema's own shape is a
+        # check nobody can use to catch a real drift.
+        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
         sa.Column("chain_id", sa.Integer(), nullable=False),
         sa.Column("holder_address", sa.String(length=42), nullable=False),
         sa.Column("token_address", sa.String(length=42), nullable=False),

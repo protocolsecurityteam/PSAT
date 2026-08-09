@@ -9,10 +9,18 @@ existence and the row's evidence the same event.
 
 WHAT IS MEASURED. For a (chain, holder, token) pair: every ``Transfer`` that
 named the holder as recipient inside a stated block range, and for each such
-delivering transaction, how many recipients of the SAME token it paid at once
-(the fan-out). The verdict over that set is the all-quantifier in
+delivering transaction, how many same-token ``Transfer`` LOGS its receipt
+carried (the fan-out). The verdict over that set is the all-quantifier in
 :func:`services.monitoring.delivery_evidence.verdict_for`, evaluated there and
 nowhere else.
+
+THE FAN-OUT METER IS LOGS, NOT DISTINCT RECIPIENTS, and every sentence this
+module publishes says so. A log count is an UPPER BOUND on the recipients a
+transaction paid — one recipient paid twice in a single transaction contributes
+two logs — and K
+(:data:`services.monitoring.delivery_evidence.FAN_OUT_THRESHOLD_K`) is
+calibrated on the log meter, so re-metering to distinct recipients would
+invalidate the calibration rather than sharpen it.
 
 WHAT IS NOT MEASURED, and is therefore never published. A fan-out is a fact
 about a transaction, not about a token's worth: a real token can be delivered by
@@ -45,6 +53,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import func as _sql_func
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -60,6 +69,7 @@ from services.monitoring.asset_sweep import (
 )
 from services.monitoring.chain_rpc import chain_id_for
 from services.monitoring.delivery_evidence import (
+    DELIVERY_ENTRIES_RETAINED,
     FAN_OUT_THRESHOLD_K,
     load_delivery_evidence,
     record_delivery_evidence,
@@ -70,6 +80,9 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     DELIVERY_FAN_OUT_BASIS_RECEIPT,
     DELIVERY_FAN_OUT_BASIS_UNREADABLE,
+    TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE,
+    TOKEN_REFERENCE_IN_UNIVERSE,
+    TOKEN_REFERENCE_NOT_DETERMINED,
 )
 from utils.rpc import get_transaction_receipt
 
@@ -123,6 +136,13 @@ DISPOSITION_RESULT_CAP = 40_000
 # reached, because it read every delivery of every heavily-accumulated real
 # position. This is the abort SHEET_OBSERVATION_SPEC.md §10.3 requires ("a token
 # too heavy to scan ABORTS ... fail-closed in the right direction").
+#
+# What an abandoned pair STORES is a compact marker — a sample of
+# ``DELIVERY_ENTRIES_RETAINED`` entries plus the count of the rest, every one of
+# them declared unmetered — never one entry per delivery. The record still says
+# how many deliveries were seen and that none was metered, which is what holds
+# the verdict at not_determined; what it no longer does is put 518,723 entries
+# and 40 MB of JSONB into one row, as measured on the reference corpus.
 DISPOSITION_MAX_DELIVERIES_PER_PAIR = 8
 
 # Per-chain (max_block_range, min_bisect_span).
@@ -585,11 +605,106 @@ def scan_delivery_shape(
     return cost
 
 
+def record_protocol_reference(session: Session, *, protocol_id: int, requests: Sequence[DispositionRequest]) -> int:
+    """Store, per token in the population, whether THIS protocol's discovery names it.
+
+    The producer's half of the reference verdict, and the reason it is a producer's
+    job at all: the universe comes from
+    :func:`services.scoring.distill.load_protocol_universe`, a measured
+    26.5-second object-storage assembly that no API path may perform. It is built
+    ONCE per cycle here and the answer is written per token, so a presentation
+    surface reads a stored verdict instead of re-deriving one it cannot afford.
+
+    ``None`` from the universe loader is FAIL-CLOSED and it is honoured as such:
+    every token lands ``not_determined``, never ``absent_from_universe``. A
+    universe that could not be built whole is a SHORT universe, and the predicate
+    it feeds condemns what is absent — so a short one condemns MORE. Nothing
+    downstream may dispose a pair on the strength of an absence from a universe
+    nobody assembled.
+
+    Rows are REFRESHED, not accreted (see ``db.models.TokenProtocolReference``):
+    the predicate is anti-monotone, so a verdict must be able to withdraw when
+    discovery grows.
+
+    Returns the number of tokens written.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from db.models import TokenProtocolReference
+
+    pairs = sorted({(int(request.chain_id), token.lower()) for request in requests for token in request.tokens})
+    if not pairs:
+        return 0
+
+    from services.scoring.distill import load_protocol_universe
+
+    try:
+        universe = load_protocol_universe(session, protocol_id)
+    except Exception as exc:
+        # Same reading as the loader's own ``None``: an assembly that raised is
+        # an assembly that did not happen.
+        logger.warning("disposition: protocol universe for %s could not be assembled: %s", protocol_id, exc)
+        universe = None
+
+    if universe is None:
+        addresses: frozenset[str] = frozenset()
+        universe_size = 0
+        basis = (
+            "protocol reference not determined: the protocol universe could not be assembled whole "
+            "(services.scoring.distill.load_protocol_universe returned no universe), and an absence "
+            "measured against a short universe condemns more rather than less"
+        )
+    else:
+        addresses = universe.addresses
+        universe_size = len(addresses)
+        basis = (
+            f"protocol reference measured against {universe_size} discovered address(es), chain-blind; {universe.basis}"
+        )
+
+    now = _sql_func.now()
+    rows = [
+        {
+            "protocol_id": int(protocol_id),
+            "chain_id": chain_id,
+            "token_address": token,
+            "reference_shape": (
+                TOKEN_REFERENCE_NOT_DETERMINED
+                if universe is None
+                else (TOKEN_REFERENCE_IN_UNIVERSE if token in addresses else TOKEN_REFERENCE_ABSENT_FROM_UNIVERSE)
+            ),
+            "universe_addresses": universe_size,
+            "basis": basis,
+            "measured_at": now,
+        }
+        for chain_id, token in pairs
+    ]
+    for start in range(0, len(rows), 500):
+        chunk = rows[start : start + 500]
+        statement = pg_insert(TokenProtocolReference).values(chunk)
+        session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[
+                    TokenProtocolReference.protocol_id,
+                    TokenProtocolReference.chain_id,
+                    TokenProtocolReference.token_address,
+                ],
+                set_={
+                    "reference_shape": statement.excluded.reference_shape,
+                    "universe_addresses": statement.excluded.universe_addresses,
+                    "basis": statement.excluded.basis,
+                    "measured_at": statement.excluded.measured_at,
+                },
+            )
+        )
+    return len(rows)
+
+
 def run_disposition(
     session: Session,
     requests: Sequence[DispositionRequest],
     *,
     rpc_url_for: Callable[[int], str | None],
+    protocol_id: int | None = None,
 ) -> DispositionCost:
     """The phase as a PRODUCER calls it: it can never fail the cycle.
 
@@ -598,10 +713,26 @@ def run_disposition(
     table is additive — the absence of a row means only that delivery shape is
     not determined for that pair, which is exactly what a scan that did not run
     established.
+
+    ``protocol_id`` enables the reference pass
+    (:func:`record_protocol_reference`). It is optional so a caller with no
+    protocol in hand still gets the delivery scan; omitting it writes no
+    reference row, which every consumer reads as ``not_determined``.
     """
     cost = DispositionCost()
     if not requests:
         return cost
+    if protocol_id is not None:
+        try:
+            written = record_protocol_reference(session, protocol_id=protocol_id, requests=requests)
+        except Exception as exc:
+            logger.warning(
+                "disposition: protocol reference pass failed for protocol %s; every token stays not_determined: %s",
+                protocol_id,
+                exc,
+            )
+        else:
+            logger.info("disposition: protocol reference recorded for %d token(s)", written)
     try:
         scan_delivery_shape(session, requests, rpc_url_for=rpc_url_for, cost=cost)
     except Exception as exc:
@@ -646,6 +777,11 @@ def _scan_chain(
 ) -> None:
     fresh: list[_Pair] = []
     forward: list[_Pair] = []
+    # Pairs whose cursor already covers everything there is to read. They are
+    # scanned by nothing and cost no request, and they are still PRESENTED to the
+    # writer: the basis is re-derived from the row's own extent columns on every
+    # pass, so a row is repaired by an ordinary cycle rather than by hand.
+    carried: list[_Pair] = []
     for request in requests:
         typed_set = {t.lower() for t in request.typed_tokens}
         for token in {t.lower() for t in request.tokens}:
@@ -661,14 +797,11 @@ def _scan_chain(
                 )
                 continue
             resume = int(fact.measured_through_block) + 1
-            # A cursor already at or above head means the stored row's extent
-            # already covers everything there is to read. Skipping the pair
-            # entirely is what makes a second cycle cost nothing.
+            pair = _Pair(holder=request.holder_address, token=token, from_block=resume, typed=token in typed_set)
             if resume > head:
+                carried.append(pair)
                 continue
-            forward.append(
-                _Pair(holder=request.holder_address, token=token, from_block=resume, typed=token in typed_set)
-            )
+            forward.append(pair)
 
     max_block_range, min_bisect_span = _CHAIN_SCAN_WINDOW.get(chain_id, _DEFAULT_SCAN_WINDOW)
     fetcher = _DispositionFetcher(
@@ -684,6 +817,12 @@ def _scan_chain(
     for group in (fresh, forward):
         if group:
             _discover(fetcher, group, chain_id=chain_id, head=head, measured=measured)
+    for pair in carried:
+        fact = stored.get((chain_id, pair.holder, pair.token))
+        measured.setdefault(
+            (pair.holder, pair.token),
+            _Measured(scanned_from_block=int(fact.scanned_from_block) if fact is not None else pair.from_block),
+        )
 
     _resolve_fan_out(
         session,
@@ -691,6 +830,7 @@ def _scan_chain(
         rpc_url=rpc_url,
         head=head,
         measured=measured,
+        stored=stored,
         max_block_range=max_block_range,
         cost=cost,
     )
@@ -822,8 +962,8 @@ def _attribute(
     topic0 = log.topics[0].lower()
     # ERC-20 and ERC-721 share this topic0 and are told apart by topic COUNT: a
     # 721 indexes the token id as a fourth topic. The fan-out meter counts
-    # same-token 3-topic transfers, so a 4-topic delivery is outside what it can
-    # measure and is carried as an unreadable delivery rather than dropped.
+    # same-token 3-topic transfer LOGS, so a 4-topic delivery is outside what it
+    # can measure and is carried as an unreadable delivery rather than dropped.
     meterable = topic0 == TRANSFER_TOPIC0 and len(log.topics) == 3
     entry.deliveries[("0x" + log.tx_hash.hex(), log.log_index)] = {
         "tx": "0x" + log.tx_hash.hex(),
@@ -840,13 +980,15 @@ def _resolve_fan_out(
     rpc_url: str,
     head: int,
     measured: Mapping[tuple[str, str], _Measured],
+    stored: Mapping[tuple[int, str, str], Any],
     max_block_range: int,
     cost: DispositionCost,
 ) -> None:
     """Meter each delivery, then record the pairs that were measured END TO END.
 
-    Receipts are cached by transaction hash across pairs: one distribution that
-    paid 200 recipients is read once, not once per recipient.
+    Receipts are cached by transaction hash across pairs: one distribution
+    emitting 200 same-token transfer logs is read once, not once per recipient
+    slot.
 
     A pair is recorded only when every one of its deliveries was ATTEMPTED. A
     delivery the budget never reached is not an unreadable delivery — the
@@ -855,11 +997,19 @@ def _resolve_fan_out(
     leave the pair unwritten so a later cycle repeats the whole scan.
 
     A pair carrying more than :data:`DISPOSITION_MAX_DELIVERIES_PER_PAIR`
-    deliveries is ABANDONED before any receipt is read: it is recorded with every
-    delivery marked unreadable, which is the truth (none was metered) and which
+    deliveries is ABANDONED before any receipt is read, and it is recorded as a
+    COMPACT marker: a bounded sample of entries plus the count of the rest, all
+    of them declared unmetered. That is the truth (none was metered) and it
     forces ``not_determined``. Recording rather than skipping is deliberate — it
     stores the fact that the pair was looked at and found too heavy to meter, so
     the next cycle does not re-derive it, and the pair can never be disposed.
+    Materialising one entry per delivery instead put 518,723 of them and 40 MB of
+    JSONB into a single row on the reference corpus, none of which said anything
+    the count and the marker do not.
+
+    Deliveries at or below a stored row's cursor are dropped before any of this:
+    a previous pass proved that extent whole, so they are already in the row's
+    tally, and re-metering them would spend receipts to double-count evidence.
     """
     receipts: dict[str, dict | None] = {}
     exhausted = False
@@ -867,8 +1017,23 @@ def _resolve_fan_out(
         if entry.aborted:
             continue
         deliveries: list[dict[str, Any]] = []
-        ordered = sorted(entry.deliveries.values(), key=lambda d: (d["block"], d["log_index"] or 0))
+        fact = stored.get((chain_id, holder, token))
+        cursor = None if fact is None else int(fact.measured_through_block)
+        ordered = [
+            record
+            for record in sorted(entry.deliveries.values(), key=lambda d: (d["block"], d["log_index"] or 0))
+            if cursor is None or int(record["block"]) > cursor
+        ]
+        elided = 0
         too_heavy = len(ordered) > DISPOSITION_MAX_DELIVERIES_PER_PAIR
+        if too_heavy:
+            # The pair is abandoned. Keep a bounded sample so the row still shows
+            # what an abandoned delivery looks like, and carry the rest as a
+            # count — the row must still say how many were seen and that none was
+            # metered, which is what keeps the verdict not_determined.
+            keep = min(DELIVERY_ENTRIES_RETAINED, len(ordered))
+            elided = len(ordered) - keep
+            ordered = ordered[:keep]
         for record in ordered:
             if too_heavy:
                 deliveries.append(_delivery_entry(record, fan_out=None, basis=DELIVERY_FAN_OUT_BASIS_UNREADABLE))
@@ -903,13 +1068,8 @@ def _resolve_fan_out(
             scanned_from_block=entry.scanned_from_block,
             measured_through_block=head,
             deliveries=deliveries,
-            basis=_basis(
-                from_block=entry.scanned_from_block,
-                to_block=head,
-                chain_id=chain_id,
-                max_block_range=max_block_range,
-                cost=cost,
-            ),
+            unmetered_elided=elided,
+            scan_basis=_scan_basis(chain_id=chain_id, max_block_range=max_block_range),
         )
     if exhausted:
         raise DispositionBudgetExceeded(f"disposition request budget of {DISPOSITION_REQUEST_BUDGET} reached")
@@ -926,12 +1086,17 @@ def _delivery_entry(record: Mapping[str, Any], *, fan_out: int | None, basis: st
 
 
 def _fan_out(receipt: dict | None, *, token: str) -> int | None:
-    """Same-token recipients paid by one transaction, or ``None``.
+    """Same-token 3-topic ``Transfer`` LOGS in one transaction's receipt, or ``None``.
+
+    A count of LOGS. It is an upper bound on the distinct recipients the
+    transaction paid — the same address paid twice contributes two logs — and it
+    is deliberately not de-duplicated by recipient: K is calibrated on this
+    meter, so a different meter would need a different K.
 
     ``None`` is returned for a receipt that could not be read or whose ``logs``
     are not a list. It is NOT zero: an unread receipt tells nothing about how
-    many recipients the transaction paid, and zero is a number the caller would
-    compare against the threshold.
+    many transfers the transaction emitted, and zero is a number the caller
+    would compare against the threshold.
     """
     if not isinstance(receipt, dict):
         return None
@@ -954,15 +1119,23 @@ def _fan_out(receipt: dict | None, *, token: str) -> int | None:
     return count
 
 
-def _basis(*, from_block: int, to_block: int, chain_id: int, max_block_range: int, cost: DispositionCost) -> str:
-    """What the claim is a claim ABOUT: the range, the filter, K, and the cost."""
+def _scan_basis(*, chain_id: int, max_block_range: int) -> str:
+    """The METHOD, and only the method: the filter, the windowing, the meter, K.
+
+    Pass-invariant on purpose. It carries no block range — the extent belongs to
+    the row and :func:`services.monitoring.delivery_evidence.compose_basis`
+    reads it off the row's own columns — and it carries no request count: a cost
+    is a fact about one pass while the stored basis is a fact about a claim built
+    from many, so cost is logged through :func:`disposition_cost_note` and never
+    accreted into the sentence.
+    """
     return (
         f"delivery shape per Transfer scan (recipient topic {_RECIPIENT_TOPIC_ERC20} for ERC-20/721, topic "
-        f"{_RECIPIENT_TOPIC_ERC1155} for ERC-1155) over blocks {from_block}..{to_block} on chain {chain_id} "
+        f"{_RECIPIENT_TOPIC_ERC1155} for ERC-1155) on chain {chain_id} "
         f"in windows of at most {max_block_range} block(s) at a {DISPOSITION_RESULT_CAP}-log result cap; "
-        f"fan-out measured from each delivering transaction's own receipt (same-token 3-topic Transfer logs); "
-        f"K={FAN_OUT_THRESHOLD_K}; scan cost {cost.get_logs} getLogs + {cost.receipts} receipts + "
-        f"{cost.head_reads} head + {cost.creation_lookups} creation lookup(s)"
+        f"fan-out metered from each delivering transaction's own receipt as same-token 3-topic Transfer LOGS "
+        f"(an upper bound on distinct recipients: one recipient paid twice in a transaction counts twice); "
+        f"K={FAN_OUT_THRESHOLD_K}"
     )
 
 
@@ -986,5 +1159,7 @@ __all__ = [
     "disposition_cost_note",
     "disposition_requests",
     "is_unpriced",
+    "record_protocol_reference",
+    "run_disposition",
     "scan_delivery_shape",
 ]
