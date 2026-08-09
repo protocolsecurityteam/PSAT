@@ -335,7 +335,18 @@ def test_every_arm_this_run_added_is_flagged_uncalibrated_and_disclosed():
     # not bound a witness. The 13 determined sheets carry no witnessed magnitude
     # for it to refuse a bound for, so it has no carrier on this corpus and is
     # disclosed like its siblings rather than left as a bare flag. Ninth entry.
-    assert len(registered) == 9
+    #
+    # The destination run added two more. ``fork:simulation+destination_param``
+    # is the register's paradigm case — the exec arm's consuming branch requires
+    # the verdict to NAME the parameter its sentinel was substituted into, no
+    # verdict in any measured corpus names one, and where a caller_arbitrary
+    # verdict does sit beside an exec destination the two parameters differ, so
+    # the branch is fixture-only. ``constrained:token_owner+restricted_caller``
+    # is the "0 or tiny" clause, registered per KIND like ``fixed_target_kind:*``
+    # because the ``msg_sender`` half of the same arm is calibrated; checked
+    # against the scored document, whose only carriers are one entity's pair of
+    # subsumed rows. Tenth and eleventh entries.
+    assert len(registered) == 11
     for entry in registered:
         assert entry["arm"] in flagged, entry["arm"]
         assert entry["state"] and entry["note"]

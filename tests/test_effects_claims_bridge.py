@@ -845,3 +845,82 @@ def test_no_static_donor_stamps_no_provenance():
     witness = next(c for c in merged if c["claim_id"] == "flow.out")["witness"]
     assert "flows" not in witness
     assert "static_tier" not in witness
+
+
+@requires_postgres
+def test_destination_shape_survives_the_writer_onto_the_function_row(db_session):
+    """End of the forwarding chain. ``destination_shape`` / ``shape_proved_by`` are
+    the fork's answer to "where can this outflow go", and the scorer reads them off
+    ``EffectiveFunction.claims`` — so the projection reaching ``verdict_to_claim``
+    is only half the trip. This pins the other half: the policy rewrite re-merges
+    the proven verdict and both fields land on the persisted row, for the adverse
+    answer and for the ``('unknown', 'none')`` non-observation alike (they are
+    different facts and the consumer must keep telling them apart)."""
+    for shape, proved_by, address in (
+        ("caller_arbitrary", "simulation", "0x" + "d1" * 20),
+        ("unknown", "none", "0x" + "d2" * 20),
+    ):
+        contract = Contract(address=address, chain="ethereum", is_proxy=False)
+        db_session.add(contract)
+        db_session.flush()
+        ef = EffectiveFunction(
+            contract_id=contract.id,
+            deployment_address=address,
+            function_name="manage",
+            selector="0xf6e715d0",
+            abi_signature="manage(address,bytes,uint256)",
+            effect_labels=[],
+            claims=[],
+            authority_public=False,
+        )
+        db_session.add(ef)
+        db_session.flush()
+        db_session.add(
+            EffectVerdict(
+                function_id=ef.id,
+                chain_id=1,
+                contract_address=address,
+                selector="0xf6e715d0",
+                effect_class=EFFECT_CLASS_VALUE_OUT,
+                behavior_hash="bh",
+                verdict=VERDICT_PROVEN,
+                tier=TIER_CALL,
+                witness={
+                    "value_moved": True,
+                    "observation": "executed",
+                    "destination_shape": shape,
+                    "shape_proved_by": proved_by,
+                },
+            )
+        )
+        db_session.commit()
+
+        write_effective_function_rows(
+            db_session,
+            contract_id=contract.id,
+            function_records=[
+                {
+                    "function": "manage(address,bytes,uint256)",
+                    "abi_signature": "manage(address,bytes,uint256)",
+                    "selector": "0xf6e715d0",
+                    "effect_labels": [],
+                    "effect_targets": [],
+                    "action_summary": "stub",
+                    "authority_public": False,
+                    "authority_roles": [],
+                    "claims": [],
+                }
+            ],
+            capability_by_function=None,
+            deployment_address=address,
+        )
+        db_session.commit()
+        db_session.expire_all()
+
+        row = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).one()
+        flow_out = next(c for c in (row.claims or []) if c["claim_id"] == "flow.out")
+        observed = flow_out["witness"]["observed"]
+        assert observed["destination_shape"] == shape
+        assert observed["shape_proved_by"] == proved_by
+        _purge_verdicts(db_session)
+        _cleanup(db_session, contract.id)

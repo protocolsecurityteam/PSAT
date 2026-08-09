@@ -16,12 +16,13 @@ from typing import Any
 
 import pytest
 
-from db.models import Contract, EffectiveFunction, FunctionPrincipal, Job, Protocol, RoleHolderPlane
+from db.models import Contract, EffectiveFunction, EffectVerdict, FunctionPrincipal, Job, Protocol, RoleHolderPlane
 from services.scoring.cli import distill_protocol_in_memory
 from services.scoring.constants import (
     DEST_SEVERITY_CONSTRAINED_OTHER,
     DEST_SEVERITY_DELEGATECALL_SELF,
     DEST_SEVERITY_EXEC_SELF,
+    DEST_SEVERITY_UNCONSTRAINED,
     FLOW_SEVERITY_CALLER_ARBITRARY,
     ROLE_BREADTH_MULTI_HOLDER_WEAKNESS,
     WEAKNESS_SAFE_SUPERMAJORITY,
@@ -260,6 +261,262 @@ def test_unread_exec_destination_scores_nothing(corpus):
         openness="open",
     )
     signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+
+
+# --------------------------------------------------------------------------
+# The fork's caller_arbitrary answer, consumed only on the SAME parameter
+# --------------------------------------------------------------------------
+
+
+def _exec_param_claim(param: str) -> dict[str, Any]:
+    return {
+        "claim_id": "exec.arbitrary",
+        "tier": "idiom_structural",
+        "witness": {
+            "kind": "param_taint",
+            "destination_kind": "param",
+            "destination_param": param,
+            "destination_constraint": {"state": "not_determined"},
+        },
+    }
+
+
+def _caller_arbitrary_verdict(function: EffectiveFunction, *, sentinel_param: str | None) -> EffectVerdict:
+    witness: dict[str, Any] = {
+        "value_moved": True,
+        "observation": "executed",
+        "destination_shape": "caller_arbitrary",
+        "shape_proved_by": "simulation",
+    }
+    if sentinel_param is not None:
+        witness["sentinel_param"] = sentinel_param
+    return EffectVerdict(
+        function_id=function.id,
+        chain_id=1,
+        contract_address=function.deployment_address,
+        selector=function.selector,
+        effect_class="value_out",
+        behavior_hash="bh",
+        verdict="proven",
+        tier="tier1",
+        witness=witness,
+    )
+
+
+def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
+    """The 15 already-proven verdicts the exec arm never read: a sentinel that
+    landed in the SAME parameter this sink calls through proves the destination is
+    the caller's to choose."""
+    contract = corpus.contract("0x" + "1a" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="target"))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.severity.state == SEVERITY_STATE_PROVEN
+    assert signal.severity.value == DEST_SEVERITY_UNCONSTRAINED
+    assert "fork:simulation+destination_param" in signal.severity_basis
+
+
+def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
+    """The refusal that keeps the arm honest, and the ordinary shape on this corpus:
+    an arbitrary-call executor takes the sentinel in its PAYLOAD slot while the call
+    target keeps the value the base probe passed, so the verdict proves the payload
+    recipient is caller-chosen and says nothing about the destination parameter."""
+    contract = corpus.contract("0x" + "1b" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="data"))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "fork_caller_arbitrary_witness_is_about_another_parameter" in signal.witness_notes
+
+
+def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
+    """A verdict whose subject is unnamed is not a weaker proof — it is a proof
+    about an unidentified parameter, and there is no join to make."""
+    contract = corpus.contract("0x" + "1c" * 20)
+    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
+    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param=None))
+    corpus.session.commit()
+
+    signal = corpus.only(contract, "exec.arbitrary")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+
+
+def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
+    """Two proven verdicts naming different sentinel parameters is not a menu."""
+    from types import SimpleNamespace
+
+    from services.scoring import distill as D
+
+    def verdict(param: str):
+        return SimpleNamespace(
+            verdict="proven",
+            witness={
+                "destination_shape": "caller_arbitrary",
+                "shape_proved_by": "simulation",
+                "sentinel_param": param,
+            },
+        )
+
+    assert D._fork_caller_arbitrary_param([verdict("target")]) == "target"
+    assert D._fork_caller_arbitrary_param([verdict("target"), verdict("data")]) is None
+    # Neither an unproven verdict nor a shape proved by something other than the
+    # landed sentinel is a caller_arbitrary proof.
+    unknown = SimpleNamespace(
+        verdict="unknown",
+        witness={
+            "destination_shape": "caller_arbitrary",
+            "shape_proved_by": "simulation",
+            "sentinel_param": "target",
+        },
+    )
+    static = SimpleNamespace(
+        verdict="proven",
+        witness={"destination_shape": "immutable_fixed", "shape_proved_by": "static", "sentinel_param": "target"},
+    )
+    assert D._fork_caller_arbitrary_param([unknown, static]) is None
+
+
+# --------------------------------------------------------------------------
+# The caller-relative static destinations (msg_sender / token_owner)
+# --------------------------------------------------------------------------
+
+
+def _caller_relative_flow(kind: str) -> dict[str, Any]:
+    return _flow_out(
+        None,
+        [{"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": kind}}],
+        "idiom_structural",
+    )
+
+
+def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
+    """Anyone can be ``msg.sender``: with a proven-open caller gate the caller names
+    the destination by choosing which address calls, and it takes the unconstrained
+    convention."""
+    contract = corpus.contract("0x" + "2a" * 20)
+    corpus.function(contract, name="redeem", claims=[_caller_relative_flow("msg_sender")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
+    assert signal.destination.value == "caller_arbitrary"
+    assert signal.severity.value == FLOW_SEVERITY_CALLER_ARBITRARY
+    assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
+
+
+def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):
+    """``token_owner`` is not ``msg_sender``. The caller picks the token id; the
+    token's transfer history picks the address — so an open gate is the canonical
+    SAFE shape here ("anyone may settle, the funds go to the rightful owner"), not
+    evidence the destination is the attacker's. The escalation is withheld rather
+    than taken; whether the open-caller ruling reaches this kind is the owner's
+    call, and until it is made the row publishes no positive destination."""
+    contract = corpus.contract("0x" + "2b" * 20)
+    corpus.function(contract, name="claimWithdraw", claims=[_caller_relative_flow("token_owner")], openness="open")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "destination_token_owner_open_gate_licenses_no_escalation" in signal.witness_notes
+
+
+@pytest.mark.parametrize(
+    ("kind", "note"),
+    [
+        ("msg_sender", "constraint_only_as_strong_as_the_caller_gate"),
+        ("token_owner", "destination_is_the_current_owner_of_a_caller_chosen_token_id"),
+    ],
+    ids=["msg_sender", "token_owner"],
+)
+def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention(corpus, kind, note):
+    """Both kinds take the pipeline's existing constrained-destination severity, and
+    each names the constraint that actually holds it: for ``msg_sender`` that IS the
+    caller gate; for ``token_owner`` the gate bounds who may trigger the settlement
+    and the payee is fixed by token ownership instead."""
+    contract = corpus.contract("0x" + ("2c" if kind == "msg_sender" else "2d") * 20)
+    corpus.function(contract, name="rescueTokens", claims=[_caller_relative_flow(kind)], openness="restricted")
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
+    assert signal.destination.value == f"constrained:{kind}"
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+    assert note in signal.witness_notes
+    if kind == "token_owner":
+        # The claim the caller gate cannot support: it bounds who triggers, never who is paid.
+        assert "constraint_only_as_strong_as_the_caller_gate" not in signal.witness_notes
+
+
+def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corpus):
+    """An unread caller gate is neither open nor restricted, and either arm would
+    price an unread witness."""
+    contract = corpus.contract("0x" + "2e" * 20)
+    corpus.function(
+        contract, name="unwrapForEEthAndBurn", claims=[_caller_relative_flow("msg_sender")], openness="not_determined"
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
+    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
+    assert not signal.enters_grade
+    assert "destination_msg_sender_caller_gate_unread" in signal.witness_notes
+
+
+def test_caller_relative_conjunction_takes_the_worst_member(corpus):
+    """A flow set mixing a fixed payee with a caller-relative one reduces to the
+    caller-relative one — the meet, not whichever entry was read last."""
+    contract = corpus.contract("0x" + "2f" * 20)
+    corpus.function(
+        contract,
+        name="claimWithdraw",
+        claims=[
+            _flow_out(
+                None,
+                [
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "immutable"}},
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "token_owner"}},
+                ],
+                "idiom_structural",
+            )
+        ],
+        openness="restricted",
+    )
+
+    signal = corpus.only(contract, "flow.out")
+    assert signal.destination.value == "constrained:token_owner"
+    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
+
+
+def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corpus):
+    """The new arms widen what the lattice can PROVE; they do not weaken what it
+    refuses. One unreadable member and the destination stays unread."""
+    contract = corpus.contract("0x" + "3a" * 20)
+    corpus.function(
+        contract,
+        name="withdraw",
+        claims=[
+            _flow_out(
+                None,
+                [
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "msg_sender"}},
+                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "indeterminate"}},
+                ],
+                "idiom_structural",
+            )
+        ],
+        openness="open",
+    )
+
+    signal = corpus.only(contract, "flow.out")
     assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert not signal.enters_grade
 

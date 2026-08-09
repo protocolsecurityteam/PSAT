@@ -202,6 +202,12 @@ UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_po
 # --- static destination lattice --------------------------------------------
 FIXED_TARGET_KINDS = frozenset({"immutable", "constant", "storage_no_setter"})
 ADMIN_TARGET_KIND = "storage_setter"
+# Target kinds the lattice PROVES outright and which are neither fixed nor a
+# gap: the destination is a known function of who calls (``msg_sender``) or of
+# who owns the token (``token_owner``). How constrained that is depends on the
+# caller gate, so these are priced from the authority witness, never from the
+# kind alone (``distill._caller_relative_destination``).
+CALLER_RELATIVE_TARGET_KINDS = frozenset({"msg_sender", "token_owner"})
 TARGET_KIND_RANK: dict[str, int] = {
     "indeterminate": 0,
     "param": 1,
@@ -291,6 +297,21 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
     # ``sheet_bound_refused`` cannot otherwise tell an unfired rule from one the
     # model was fitted to.
     "sheet_bound_refused:sheet_determined_by_disposition_does_not_bound",
+    # The destination run's two. The first is the register's paradigm case: the
+    # exec arm's PROVEN branch cannot fire on any stored row, because the join
+    # key it requires (the parameter the sentinel was substituted into) is not
+    # recorded on any verdict — and where a caller_arbitrary verdict does sit
+    # beside an exec destination, the two are different parameters. A fixture is
+    # the only thing that reaches it.
+    #
+    # The second is the "0 or tiny" clause. Measured at registration: the
+    # caller-relative constrained arm's ``token_owner`` side carries 2 signals at
+    # 1 entity, both subsumed, so no published number was fitted to it.
+    # Registered per KIND rather than for the arm as a whole, following
+    # ``fixed_target_kind:*`` — the ``msg_sender`` side of the same arm carried
+    # 15 and is calibrated.
+    "fork:simulation+destination_param",
+    "constrained:token_owner+restricted_caller",
 )
 
 # What each of the run's arms IS, beside the bare token. §8 of
@@ -461,6 +482,52 @@ UNCALIBRATED_ARM_DISCLOSURES: tuple[dict[str, object], ...] = (
             "a structural one: the 13 sheets the disposition determined carry no witnessed "
             "magnitude for it to refuse a bound for, so the state is earnable, a constructed fold "
             "earns it, and no row here does"
+        ),
+    },
+    {
+        "arm": "fork:simulation+destination_param",
+        "state": "unconstrained_proven",
+        "published_at": (
+            "signals' severity_basis and gate_inputs.destination_basis, and findings[].severity_basis "
+            "where such a row enters the grade"
+        ),
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter",
+        ),
+        "note": (
+            "the exec arm's consuming branch. It requires the parameter the sentinel was "
+            "substituted into to be NAMED on the verdict and to be the parameter the sink calls "
+            "through, and no verdict in any measured corpus names one — so the branch cannot fire "
+            "on a stored row and only the fixture reaches it. Where a caller_arbitrary verdict does "
+            "sit beside an exec destination the join REFUSES: those are arbitrary-call executors "
+            "whose sentinel rides the payload parameter while the call target keeps the base "
+            "probe's value. The refusing branch is the calibrated one; this one has never fired"
+        ),
+    },
+    {
+        "arm": "constrained:token_owner+restricted_caller",
+        "state": "constrained_proven",
+        "published_at": (
+            "signals' destination_shape (constrained:token_owner) and severity_basis, and "
+            "findings[].subsumed_capabilities[] where such a row is subsumed"
+        ),
+        "population_census": None,
+        "exercised_by": (
+            "tests/test_scoring_distill_fold.py::"
+            "test_caller_relative_destination_behind_a_gate_is_the_constrained_convention[token_owner]",
+            "tests/test_scoring_distill_fold.py::test_caller_relative_conjunction_takes_the_worst_member",
+        ),
+        "note": (
+            "the tiny-population half of the caller-relative constrained arm. Measured at "
+            "registration and not a claim about this document: 2 signals at 1 entity, both "
+            "subsumed, so no published number was fitted to it. Registered per KIND, following "
+            "fixed_target_kind:* — the msg_sender half of the same arm was not tiny and is "
+            "calibrated. "
+            "The severity is the model's existing constrained-destination rung, applied to a "
+            "constraint of a different kind: the payee is the current owner of a caller-chosen "
+            "token id, which the caller gate does not bound. Its open-caller sibling publishes "
+            "nothing at all and so is not an arm to register"
         ),
     },
 )
