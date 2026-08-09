@@ -20,14 +20,41 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+@pytest.fixture(autouse=True)
+def _pristine_db_models():
+    """Restore the ORIGINAL db.models after every test here.
+
+    A reloaded db.models left in sys.modules poisons the rest of a serial
+    suite run: modules that bound classes at import time keep the old
+    declarative registry while any deferred `from db.models import ...`
+    resolves to the new one — two mappers over the same table in one
+    session, and stale identity-map reads for whoever mixes them.
+    """
+    original = sys.modules.get("db.models")
+    yield
+    for mod in _RELOADED:
+        if mod is not original:
+            mod.engine.dispose()
+    _RELOADED.clear()
+    if original is not None:
+        sys.modules["db.models"] = original
+
+
+_RELOADED: list = []
 
 
 def _reload_models():
     """Re-import db.models so module-level engine picks up current env."""
     if "db.models" in sys.modules:
         del sys.modules["db.models"]
-    return importlib.import_module("db.models")
+    mod = importlib.import_module("db.models")
+    _RELOADED.append(mod)
+    return mod
 
 
 def test_default_pool_size_matches_sqlalchemy_baseline(monkeypatch):
